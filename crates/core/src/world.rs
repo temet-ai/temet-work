@@ -114,6 +114,7 @@ impl World {
                         deploy: None,
                         verify: None,
                         run_in: None,
+                        ci: true,
                     });
                 p.tracker = tracker.clone();
                 p.name = name.clone();
@@ -125,11 +126,13 @@ impl World {
                 deploy,
                 verify,
                 run_in,
+                ci,
             } => {
                 if let Some(p) = self.projects.get_mut(project) {
                     p.deploy = deploy.clone();
                     p.verify = verify.clone();
                     p.run_in = run_in.clone();
+                    p.ci = ci.unwrap_or(true);
                 }
             }
             Event::GroupCreated {
@@ -175,6 +178,8 @@ impl World {
                     pull: None,
                     fix: Vec::new(),
                     told: false,
+                    fix_keeps_round: false,
+                    round: 0,
                     closed_by_loop: false,
                 });
                 entry.title = title.clone();
@@ -191,7 +196,13 @@ impl World {
                     entry.pull = None;
                     entry.fix.clear();
                 }
-                if *closed && entry.stage != Stage::Done {
+                // A pull request that closes its issue on merge must not skip deploy
+                // and verify: the loop closes it itself when they pass.
+                let finishing = matches!(
+                    entry.stage,
+                    Stage::Merging | Stage::Deploying | Stage::Verifying
+                );
+                if *closed && entry.stage != Stage::Done && !finishing {
                     entry.stage = Stage::Done;
                     let folder = entry.folder.take();
                     // Closed in the tracker while agents worked on it: stop them
@@ -253,11 +264,14 @@ impl World {
                 }
             }
             Event::PlanWritten { issue, plan } => {
+                // The refiner's work is done once its plan is in.
+                let done = self.stop(issue, &[Role::Refiner]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Refining
                 {
                     i.plan = Some(plan.clone());
                     i.stage = Stage::Ready;
+                    out.extend(done);
                 }
             }
             Event::PullRequestReady { issue, pull } => {
@@ -267,15 +281,18 @@ impl World {
                     }
                     let round = match i.stage {
                         Stage::Working => Some(1),
+                        Stage::Fixing { round } if i.fix_keeps_round => Some(round),
                         Stage::Fixing { round } => Some(round.saturating_add(1)),
                         _ => None,
                     };
                     if let Some(round) = round {
                         i.stage = Stage::InReview { round };
+                        i.round = round;
                         i.review_ok = false;
                         i.checks_ok = None;
                         i.fix.clear();
                         i.told = false;
+                        i.fix_keeps_round = false;
                         out.push(Effect::StartReview {
                             issue: issue.clone(),
                             round,
@@ -297,7 +314,7 @@ impl World {
                             Self::try_merge(i, &mut out);
                         }
                         Verdict::Block { points } if *round < REVIEW_ROUNDS => {
-                            Self::send_back(i, *round, points.clone(), &mut out);
+                            Self::send_back(i, *round, points.clone(), false, &mut out);
                         }
                         Verdict::Block { .. } => {
                             // An issue in review was taken by a group, so it has one.
@@ -335,7 +352,7 @@ impl World {
                                         .map(|c| format!("CI check {c} failed"))
                                         .collect()
                                 };
-                                Self::send_back(i, round, points, &mut out);
+                                Self::send_back(i, round, points, true, &mut out);
                             }
                         }
                         _ => {}
@@ -352,7 +369,7 @@ impl World {
                         i.review_ok = true;
                         Self::try_merge(i, &mut out);
                     } else {
-                        Self::send_back(i, round, vec![decision.reason.clone()], &mut out);
+                        Self::send_back(i, round, vec![decision.reason.clone()], false, &mut out);
                     }
                 }
             }
@@ -370,6 +387,8 @@ impl World {
                 }
             }
             Event::Merged { issue } => {
+                // Merged: the author, reviewer and arbiter are done.
+                let done = self.stop(issue, &[Role::Author, Role::Reviewer, Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Merging
                 {
@@ -377,8 +396,18 @@ impl World {
                     out.push(Effect::Deploy {
                         issue: issue.clone(),
                     });
+                    out.extend(done);
                     let folder = i.folder.take();
                     self.release(folder, &mut out);
+                }
+            }
+            Event::MergeRefused { issue, reason } => {
+                if let Some(i) = self.issues.get_mut(issue)
+                    && i.stage == Stage::Merging
+                {
+                    let round = i.round.max(1);
+                    let points = vec![format!("the pull request cannot merge: {reason}")];
+                    Self::send_back(i, round, points, true, &mut out);
                 }
             }
             Event::Deployed { issue } => {
@@ -391,7 +420,11 @@ impl World {
                     });
                 }
             }
-            Event::Verified { issue, passed } => {
+            Event::Verified {
+                issue,
+                passed,
+                output,
+            } => {
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Verifying
                 {
@@ -402,15 +435,36 @@ impl World {
                             issue: issue.clone(),
                         });
                     } else {
+                        // Back to work, with what failed; the merged pull request is history.
                         i.stage = Stage::Ready;
                         i.review_ok = false;
                         i.checks_ok = None;
+                        i.pull = None;
+                        i.fix = vec![format!(
+                            "after the last change merged and deployed, the verify check failed: {output}"
+                        )];
                     }
                 }
             }
         }
         out.extend(self.place());
         out
+    }
+
+    /// Whether `agent`'s issue is waiting on it to finish its step: a refiner while
+    /// its issue is refining, an author while it is worked on, a reviewer that has
+    /// heard its round, an arbiter while the issue is with the arbiter.
+    pub fn waiting_on(&self, agent: &Agent) -> bool {
+        let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
+            return false;
+        };
+        match (i.stage, agent.role) {
+            (Stage::Refining, Role::Refiner)
+            | (Stage::Working | Stage::Fixing { .. }, Role::Author)
+            | (Stage::Arbitration { .. }, Role::Arbiter) => true,
+            (Stage::InReview { .. }, Role::Reviewer) => i.told,
+            _ => false,
+        }
     }
 
     /// The agent of `role` working on `issue` whose session has not ended; the
@@ -434,6 +488,19 @@ impl World {
     pub fn missing(&self) -> Missing {
         let mut out = Missing::default();
         for i in self.issues.values() {
+            // A merge, deploy or verify lost to a restart or a failure is asked for
+            // again; the parts that do them do not repeat work already done or running.
+            let id = i.id.clone();
+            let finishing = match i.stage {
+                Stage::Merging => Some(Effect::Merge { issue: id }),
+                Stage::Deploying => Some(Effect::Deploy { issue: id }),
+                Stage::Verifying => Some(Effect::Verify { issue: id }),
+                _ => None,
+            };
+            if let Some(effect) = finishing {
+                out.start.push(effect);
+                continue;
+            }
             let Some(group) = i.group.clone() else {
                 continue;
             };
@@ -526,11 +593,18 @@ impl World {
     ) -> Option<Launch> {
         let i = self.issues.get(issue)?;
         let n = self.agents.values().filter(|a| a.role == role).count() + 1;
+        // An agent without a folder of its own reads in a free one when it can,
+        // so it does not work in a folder an author is changing.
         let place = match folder {
             Some(f) => self.folders.get(f),
-            None => self.folders.values().find(|f| f.project == issue.project),
+            None => self
+                .folders
+                .values()
+                .find(|f| f.project == issue.project && f.holder.is_none())
+                .or_else(|| self.folders.values().find(|f| f.project == issue.project)),
         };
         let path = place.map(|f| std::path::PathBuf::from(&f.path));
+        let shared = folder.is_none() && place.is_some_and(|f| f.holder.is_some());
         Some(Launch {
             agent: AgentId::new(format!("{}-{n}", role.name())),
             group: group.clone(),
@@ -538,16 +612,38 @@ impl World {
             folder: folder.cloned(),
             brief: crate::launch::Brief {
                 model: self.groups.get(group).and_then(|g| g.model.clone()),
-                ..brief::write(role, i, self.projects.get(&issue.project), path)
+                ..brief::write(role, i, self.projects.get(&issue.project), path, shared)
             },
         })
     }
 
+    /// Stops the running agents of `roles` on `issue`.
+    fn stop(&self, issue: &IssueId, roles: &[Role]) -> Vec<Effect> {
+        self.agents
+            .values()
+            .filter(|a| {
+                a.issue.as_ref() == Some(issue)
+                    && roles.contains(&a.role)
+                    && a.state != AgentState::Ended
+            })
+            .map(|a| Effect::StopAgent {
+                agent: a.id.clone(),
+            })
+            .collect()
+    }
+
     /// Sends an issue back to its author with what to fix.
-    fn send_back(i: &mut Issue, round: u8, points: Vec<String>, out: &mut Vec<Effect>) {
+    fn send_back(
+        i: &mut Issue,
+        round: u8,
+        points: Vec<String>,
+        keeps_round: bool,
+        out: &mut Vec<Effect>,
+    ) {
         i.stage = Stage::Fixing { round };
         i.fix.clone_from(&points);
         i.told = false;
+        i.fix_keeps_round = keeps_round;
         out.push(Effect::RequestFix {
             issue: i.id.clone(),
             points,

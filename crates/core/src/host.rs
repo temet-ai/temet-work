@@ -151,6 +151,7 @@ impl Host {
                 }
                 Work::Effect(effect) => match self.offer(&effect) {
                     Outcome::Done { events, effects } => {
+                        self.problems.remove(&effect.describe());
                         stack.extend(effects.into_iter().rev().map(Work::Effect));
                         stack.extend(events.into_iter().rev().map(Work::Event));
                     }

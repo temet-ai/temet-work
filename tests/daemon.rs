@@ -37,7 +37,25 @@ name = "Night watch"
 projects = ["ankh"]
 "#;
 
+/// A journal the test reads after the host has taken it.
+#[derive(Clone, Default)]
+struct Kept(std::sync::Arc<std::sync::Mutex<Vec<temet_work_core::Event>>>);
+
+impl temet_work_core::Journal for Kept {
+    fn append(&mut self, _at_ms: u64, event: &temet_work_core::Event) -> Result<(), String> {
+        self.0
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(event.clone());
+        Ok(())
+    }
+}
+
 fn host() -> Host {
+    host_with(Box::new(Memory::default()))
+}
+
+fn host_with(journal: Box<dyn temet_work_core::Journal>) -> Host {
     let mut trackers = temet_work_tracker::Trackers::default();
     trackers.add(Box::new(FakeTracker {
         issues: vec![(
@@ -66,6 +84,7 @@ fn host() -> Host {
                 number: "57".into(),
                 state: PullState::Open,
                 checks: Checks::Passed,
+                conflicting: false,
             },
         )],
     }));
@@ -81,7 +100,7 @@ fn host() -> Host {
             Box::new(code_hosts),
             Box::new(deploys),
         ],
-        Box::new(Memory::default()),
+        journal,
     );
     for event in Config::parse(CONFIG).expect("config").events(host.world()) {
         host.handle(0, event).expect("config event");
@@ -169,7 +188,8 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     use temet_work_core::model::{Check, Plan};
     use temet_work_core::{Command, Request, Verdict};
 
-    let mut host = host();
+    let kept = Kept::default();
+    let mut host = host_with(Box::new(kept.clone()));
     host.tick(0).expect("sync");
     let issue = IssueId::new("ankh", "1");
     let run = |host: &mut Host, by: &str, command: Command| {
@@ -236,6 +256,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         ["reviewer-1"],
         "the running reviewer takes round 2"
     );
+    assert!(host.world().issues[&issue].told, "and it heard of round 2");
     assert!(host.problems().is_empty(), "{:?}", host.problems());
 
     let approve = Command::Review {
@@ -264,4 +285,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         "deployed, verified, closed"
     );
     assert!(host.problems().is_empty(), "{:?}", host.problems());
+    // The log of a live run, with parts carrying out effects, replays to the same state.
+    let logged = kept.0.lock().expect("journal").clone();
+    assert_eq!(&World::replay(&logged).0, host.world());
 }

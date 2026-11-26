@@ -9,11 +9,14 @@ use crate::launch::Brief;
 use crate::model::{Issue, Project, Role};
 
 /// Writes the brief for an agent of `role` on `issue`, run in `folder`.
+/// `shared` says the folder is held by another issue's author, so the agent must
+/// not change it.
 pub fn write(
     role: Role,
     issue: &Issue,
     project: Option<&Project>,
     folder: Option<PathBuf>,
+    shared: bool,
 ) -> Brief {
     let id = &issue.id;
     let source = project.map_or_else(
@@ -26,21 +29,23 @@ pub fn write(
             .map(|c| format!("- {} (shown by: {})\n", c.done_when, c.proven_by))
             .collect()
     });
-    // An author started on an issue sent back to it hears what to fix first.
-    let fixes = if matches!(issue.stage, crate::model::Stage::Fixing { .. })
-        && !issue.fix.is_empty()
-    {
-        let list: String = issue.fix.iter().map(|p| format!("- {p}\n")).collect();
-        format!(
-            "The pull request is open; the review or the checks found these to fix first:\n{list}"
-        )
-    } else {
+    // An author started on an issue that came back hears what to fix first.
+    let fixes = if issue.fix.is_empty() {
         String::new()
+    } else {
+        let list: String = issue.fix.iter().map(|p| format!("- {p}\n")).collect();
+        format!("Earlier work on it came back with these to fix first:\n{list}")
+    };
+    let folder_note = if shared {
+        "Another issue's author is changing files in this folder: do not switch its branch or change \
+         anything here; read the pull request's changes from its code host.\n"
+    } else {
+        ""
     };
     let task = match role {
         Role::Refiner => format!(
             "Refine {id}: {title}. It is {source}.\n\
-             Read the issue and the code it touches in this folder. Change no file here.\n\
+             {folder_note}Read the issue and the code it touches in this folder. Change no file here.\n\
              Then send the plan, one entry per check, as YAML on standard input:\n\
              temet-work plan {id} - <<'PLAN'\n\
              checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\
@@ -58,7 +63,7 @@ pub fn write(
         Role::Reviewer => format!(
             "Review the pull request for {id}: {title}. It is {source}.\n\
              The plan's checks:\n{checks}\
-             Read the whole change, not only the last commit. Run the checks yourself.\n\
+             {folder_note}Read the whole change, not only the last commit. Run the checks yourself where you can.\n\
              Then run: temet-work review {id} approve\n\
              or: temet-work review {id} block \"<what to fix>\" [\"<what else>\" ...]",
             title = issue.title,
@@ -98,5 +103,20 @@ pub fn next_round(issue: &IssueId, round: u8) -> String {
         "The author pushed fixes for {issue}; this is review round {round}. Review the whole change again, \
          not only the new commits. Then run: temet-work review {issue} approve\n\
          or: temet-work review {issue} block \"<what is still wrong>\" [\"<what else>\" ...]"
+    )
+}
+
+/// What an agent its issue is waiting on hears when it has been idle a while.
+pub fn nudge(role: Role, issue: &IssueId) -> String {
+    let command = match role {
+        Role::Refiner => format!("temet-work plan {issue} - with the plan as YAML"),
+        Role::Author => format!("temet-work ready {issue} <pull request number>"),
+        Role::Reviewer => format!("temet-work review {issue} approve, or block with what to fix"),
+        Role::Arbiter => format!("temet-work rule {issue} approve or fix, with the reason"),
+        Role::Investigator => return format!("{issue} is still waiting on your answer."),
+    };
+    format!(
+        "{issue} is still waiting on you. If your step is done, run: {command}. \
+         If a choice stops you, take the default you would defend, say so, and finish."
     )
 }

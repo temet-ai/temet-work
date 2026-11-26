@@ -133,6 +133,15 @@ impl World {
                 let Stage::InReview { round } = at(issue)? else {
                     return refuse(issue, at(issue)?, "in review");
                 };
+                // A reviewer that has not heard of this round started its review on
+                // the one before: its verdict is about code that has since changed.
+                let heard = self.issues.get(issue).is_some_and(|i| i.told);
+                if by.is_some() && !heard {
+                    return Err(format!(
+                        "review round {round} of {issue} started after your review began; \
+                         review the whole change again once its message reaches you"
+                    ));
+                }
                 if matches!(verdict, Verdict::Block { points } if points.iter().all(|p| p.trim().is_empty()))
                 {
                     return Err("a block needs at least one point to fix".into());
@@ -331,6 +340,40 @@ mod tests {
         };
         run(&mut w, block).expect("block");
         run(&mut w, bare).expect("the pull request is on record");
+    }
+
+    #[test]
+    fn a_reviewer_that_has_not_heard_the_new_round_is_refused() {
+        let mut w = refining();
+        run(
+            &mut w,
+            Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        )
+        .expect("plan");
+        run(
+            &mut w,
+            Command::Ready {
+                issue: issue(),
+                pull: Some("57".into()),
+            },
+        )
+        .expect("ready");
+        // Round 1 is up and no reviewer has heard of it yet.
+        let approve = Command::Review {
+            issue: issue(),
+            verdict: Verdict::Approve,
+        };
+        let reviewer = AgentId::new("reviewer-1");
+        assert!(
+            w.check(Some(&reviewer), &approve)
+                .is_err_and(|e| e.contains("round 1 of ankh#1 started after your review began"))
+        );
+        assert!(w.check(None, &approve).is_ok(), "a person may still review");
+        w.apply(&Event::Told { issue: issue() });
+        assert!(w.check(Some(&reviewer), &approve).is_ok());
     }
 
     #[test]

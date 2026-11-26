@@ -126,6 +126,7 @@ fn parse_pull(json: &str) -> Result<Pull, CodeHostError> {
         number: number.to_string(),
         state,
         checks: checks_of(rollup),
+        conflicting: v.get("mergeable").and_then(Value::as_str) == Some("CONFLICTING"),
     })
 }
 
@@ -142,7 +143,7 @@ impl CodeHost for GitHub {
             "-R",
             repo,
             "--json",
-            "number,state,statusCheckRollup",
+            "number,state,statusCheckRollup,mergeable",
         ])?;
         parse_pull(&out)
     }

@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use temet_work_core::ids::IssueId;
 use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
@@ -62,6 +63,19 @@ impl Step {
     }
 }
 
+/// How long after a failed deploy it is run again.
+pub const RETRY_AFTER: Duration = Duration::from_secs(600);
+
+/// How many times a deploy is run before it is left for a person.
+pub const TRIES: u32 = 3;
+
+/// A deploy that failed: why, how many times, and when last.
+struct Failure {
+    why: String,
+    tries: u32,
+    at: Instant,
+}
+
 /// A command running for an issue, and where its result arrives.
 struct Job {
     issue: IssueId,
@@ -73,7 +87,7 @@ struct Job {
 pub struct Deploys {
     shell: Arc<Shell>,
     running: Vec<Job>,
-    failed: BTreeMap<IssueId, String>,
+    failed: BTreeMap<IssueId, Failure>,
 }
 
 impl Default for Deploys {
@@ -117,38 +131,40 @@ impl Part for Deploys {
             };
             let Job { issue, step, .. } = job;
             match (step, result) {
-                (Step::Deploy, Ok(())) => events.push(Event::Deployed { issue }),
-                // A failed deploy stays a problem for a person: nothing retries it.
-                (Step::Deploy, Err(e)) => {
-                    self.failed.insert(issue, e);
+                (Step::Deploy, Ok(())) => {
+                    self.failed.remove(&issue);
+                    events.push(Event::Deployed { issue });
                 }
-                (Step::Verify, result) => {
-                    if let Err(e) = &result {
-                        self.failed.insert(issue.clone(), e.clone());
-                    }
-                    events.push(Event::Verified {
+                (Step::Deploy, Err(why)) => {
+                    let tries = self.failed.get(&issue).map_or(0, |f| f.tries) + 1;
+                    self.failed.insert(
                         issue,
-                        passed: result.is_ok(),
-                    });
+                        Failure {
+                            why,
+                            tries,
+                            at: Instant::now(),
+                        },
+                    );
                 }
+                (Step::Verify, result) => events.push(Event::Verified {
+                    issue,
+                    passed: result.is_ok(),
+                    output: result.err().unwrap_or_default(),
+                }),
             }
         }
         self.running = still;
-        // Keep a failure listed while its issue is still where it failed.
+        // Forget a failure once its issue has moved on.
         self.failed.retain(|issue, _| {
             world
                 .issues
                 .get(issue)
                 .is_some_and(|i| i.stage == temet_work_core::model::Stage::Deploying)
         });
-        let problem = (!self.failed.is_empty()).then(|| {
-            self.failed
-                .iter()
-                .map(|(issue, e)| format!("deploy of {issue} failed: {e}"))
-                .collect::<Vec<_>>()
-                .join("; ")
-        });
-        Polled { events, problem }
+        Polled {
+            events,
+            problem: None,
+        }
     }
 
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
@@ -157,6 +173,31 @@ impl Part for Deploys {
             Effect::Verify { issue } => (issue, Step::Verify),
             _ => return Outcome::NotMine,
         };
+        // Asked again while it runs: it is already being done.
+        if self
+            .running
+            .iter()
+            .any(|j| &j.issue == issue && j.step == step)
+        {
+            return Outcome::done();
+        }
+        if step == Step::Deploy
+            && let Some(f) = self.failed.get(issue)
+        {
+            if f.tries >= TRIES {
+                return Outcome::Failed(format!(
+                    "failed {} times, last: {}; a person has to look at it",
+                    f.tries, f.why
+                ));
+            }
+            if f.at.elapsed() < RETRY_AFTER {
+                return Outcome::Failed(format!(
+                    "failed: {}; runs again {} minutes after it failed",
+                    f.why,
+                    RETRY_AFTER.as_secs() / 60
+                ));
+            }
+        }
         let Some(project) = world.projects.get(&issue.project) else {
             return Outcome::Failed(format!("project {} is not configured", issue.project));
         };
@@ -172,6 +213,7 @@ impl Part for Deploys {
                 Step::Verify => Event::Verified {
                     issue: issue.clone(),
                     passed: true,
+                    output: String::new(),
                 },
             };
             return Outcome::Done {
@@ -230,6 +272,7 @@ mod tests {
             deploy: deploy.map(String::from),
             verify: verify.map(String::from),
             run_in: Some("/srv/ankh".into()),
+            ci: None,
         });
         w
     }
@@ -278,7 +321,7 @@ mod tests {
         let verify = Effect::Verify { issue: issue() };
         assert!(matches!(
             part.carry_out(&verify, &w),
-            Outcome::Done { events, .. } if events == [Event::Verified { issue: issue(), passed: true }]
+            Outcome::Done { events, .. } if events == [Event::Verified { issue: issue(), passed: true ,    output: String::new(),}]
         ));
     }
 
@@ -302,13 +345,14 @@ mod tests {
             settle(&mut part, &w).events,
             [Event::Verified {
                 issue: issue(),
-                passed: false
+                passed: false,
+                output: "exit status: 1".into(),
             }]
         );
     }
 
     #[test]
-    fn a_failed_deploy_is_a_problem_while_the_issue_waits_on_it() {
+    fn a_failed_deploy_is_not_run_again_at_once_and_a_running_one_not_twice() {
         let mut w = world(Some("make fail"), None);
         w.apply(&Event::IssueSynced {
             issue: issue(),
@@ -321,15 +365,21 @@ mod tests {
         if let Some(i) = w.issues.get_mut(&issue()) {
             i.stage = temet_work_core::model::Stage::Deploying;
         }
+        let deploy = Effect::Deploy { issue: issue() };
         let mut part = Deploys::with(shell());
-        part.carry_out(&Effect::Deploy { issue: issue() }, &w);
-        let polled = settle(&mut part, &w);
-        assert_eq!(polled.events, []);
-        assert!(
-            polled
-                .problem
-                .is_some_and(|p| p.contains("deploy of ankh#1 failed"))
+        part.carry_out(&deploy, &w);
+        assert_eq!(
+            part.carry_out(&deploy, &w),
+            Outcome::done(),
+            "already running"
         );
+        assert_eq!(part.running(), 1);
+        assert_eq!(settle(&mut part, &w).events, []);
+        assert!(
+            matches!(part.carry_out(&deploy, &w), Outcome::Failed(why) if why.contains("runs again 10 minutes")),
+            "asked again at once, it says why and waits"
+        );
+        assert_eq!(part.running(), 0);
     }
 
     #[test]

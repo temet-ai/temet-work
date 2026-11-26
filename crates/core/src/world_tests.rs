@@ -312,7 +312,8 @@ fn merged_deployed_and_checked_closes_the_issue_and_frees_the_folder_for_the_nex
     assert_eq!(
         w.apply(&Event::Verified {
             issue: issue("1"),
-            passed: true
+            passed: true,
+            output: String::new(),
         }),
         vec![Effect::Close { issue: issue("1") }]
     );
@@ -640,6 +641,7 @@ fn an_issue_reopened_in_the_tracker_is_worked_again_but_one_the_loop_closed_is_n
     w.apply(&Event::Verified {
         issue: issue("1"),
         passed: true,
+        output: String::new(),
     });
     w.apply(&reopen(false));
     assert_eq!(
@@ -647,4 +649,117 @@ fn an_issue_reopened_in_the_tracker_is_worked_again_but_one_the_loop_closed_is_n
         Stage::Done,
         "the loop closed it; its close is retried instead"
     );
+}
+
+/// World `working_on_one` with issue 1's pull request 57 in review round 1.
+fn in_review() -> World {
+    let mut w = working_on_one();
+    w.apply(&started("author-1", Role::Author, "1"));
+    w.apply(&Event::PullRequestReady {
+        issue: issue("1"),
+        pull: Some("57".into()),
+    });
+    w.apply(&started("reviewer-1", Role::Reviewer, "1"));
+    w
+}
+
+#[test]
+fn a_ci_failure_or_a_refused_merge_does_not_use_up_a_review_round() {
+    let mut w = in_review();
+    w.apply(&Event::ChecksFinished {
+        issue: issue("1"),
+        passed: false,
+        failing: vec!["tests".into()],
+    });
+    assert_eq!(w.issues[&issue("1")].fix, ["CI check tests failed"]);
+    w.apply(&Event::PullRequestReady {
+        issue: issue("1"),
+        pull: None,
+    });
+    assert_eq!(
+        stage(&w, "1"),
+        Stage::InReview { round: 1 },
+        "still round 1"
+    );
+    w.apply(&Event::ReviewFinished {
+        issue: issue("1"),
+        round: 1,
+        verdict: Verdict::Approve,
+    });
+    w.apply(&Event::ChecksFinished {
+        issue: issue("1"),
+        passed: true,
+        failing: vec![],
+    });
+    assert_eq!(stage(&w, "1"), Stage::Merging);
+    w.apply(&Event::MergeRefused {
+        issue: issue("1"),
+        reason: "it conflicts with main".into(),
+    });
+    assert_eq!(stage(&w, "1"), Stage::Fixing { round: 1 });
+    assert_eq!(
+        w.issues[&issue("1")].fix,
+        ["the pull request cannot merge: it conflicts with main"]
+    );
+}
+
+#[test]
+fn a_lost_merge_deploy_or_verify_is_asked_for_again() {
+    let mut w = in_review();
+    for (s, want) in [
+        (Stage::Merging, Effect::Merge { issue: issue("1") }),
+        (Stage::Deploying, Effect::Deploy { issue: issue("1") }),
+        (Stage::Verifying, Effect::Verify { issue: issue("1") }),
+    ] {
+        if let Some(i) = w.issues.get_mut(&issue("1")) {
+            i.stage = s;
+        }
+        assert_eq!(w.missing().start, vec![want]);
+    }
+}
+
+#[test]
+fn a_tracker_close_while_finishing_does_not_skip_verify() {
+    let mut w = in_review();
+    if let Some(i) = w.issues.get_mut(&issue("1")) {
+        i.stage = Stage::Deploying;
+    }
+    w.apply(&Event::IssueSynced {
+        issue: issue("1"),
+        title: "issue 1".into(),
+        milestone: Some(MilestoneId::new("m1")),
+        depends_on: vec![],
+        order: 1,
+        closed: true,
+    });
+    assert_eq!(
+        stage(&w, "1"),
+        Stage::Deploying,
+        "closed on merge; still deploys and verifies"
+    );
+}
+
+#[test]
+fn a_failed_verify_sends_the_issue_back_with_why_and_without_the_merged_pull_request() {
+    let mut w = in_review();
+    if let Some(i) = w.issues.get_mut(&issue("1")) {
+        i.stage = Stage::Verifying;
+    }
+    w.apply(&Event::Verified {
+        issue: issue("1"),
+        passed: false,
+        output: "the clock struck twelve".into(),
+    });
+    let i = &w.issues[&issue("1")];
+    assert_eq!(i.pull, None);
+    assert!(i.fix[0].ends_with("the clock struck twelve"), "{:?}", i.fix);
+    let launch = w
+        .launch(
+            &GroupId::new("watch"),
+            Role::Author,
+            &issue("1"),
+            Some(&FolderId::new("f1")),
+        )
+        .expect("launch");
+    assert!(launch.brief.task.contains("the clock struck twelve"));
 }

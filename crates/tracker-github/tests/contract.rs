@@ -3,7 +3,7 @@
 //! feature and the sandbox off:
 //!
 //! ```sh
-//! TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-tracker-github --features live
+//! TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-tracker-github --features live --run-ignored only
 //! ```
 
 #![cfg(feature = "live")]
@@ -24,13 +24,8 @@ impl Harness for ReadOnly {
 }
 
 #[test]
+#[ignore = "reaches GitHub: run with --run-ignored only and TEMET_WORK_SANDBOX unset"]
 fn passes_the_tracker_contract_against_github() {
-    if std::env::var_os("TEMET_WORK_SANDBOX").is_some_and(|v| !v.is_empty()) {
-        eprintln!(
-            "skipped: TEMET_WORK_SANDBOX is set; run with TEMET_WORK_SANDBOX= to reach GitHub"
-        );
-        return;
-    }
     let mut gh = GitHub::default();
     assert_eq!(contract::check(&mut gh, &ReadOnly), Ok(()));
 }

@@ -3,7 +3,7 @@
 //! the `live` feature and with the sandbox off:
 //!
 //! ```sh
-//! TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live
+//! TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only
 //! ```
 
 #![cfg(feature = "live")]
@@ -38,14 +38,8 @@ impl Harness for Live {
 }
 
 #[test]
+#[ignore = "reaches herdr-core: run with --run-ignored only and TEMET_WORK_SANDBOX unset"]
 fn passes_the_runner_contract_against_the_local_core() {
-    // `--all-features` turns `live` on in ordinary runs too, which keep the sandbox on.
-    if std::env::var_os("TEMET_WORK_SANDBOX").is_some_and(|v| !v.is_empty()) {
-        eprintln!(
-            "skipped: TEMET_WORK_SANDBOX is set; run with TEMET_WORK_SANDBOX= to reach herdr-core"
-        );
-        return;
-    }
     let mut runner = Herdr::default();
     assert_eq!(contract::check(&mut runner, &mut Live), Ok(()));
 }

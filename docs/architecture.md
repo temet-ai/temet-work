@@ -61,7 +61,7 @@ What exists today:
 |---|---|
 | `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, and the state as text |
 | `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, and holds text for an agent until its turn ends |
-| `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live`) and opens nothing in other test runs |
+| `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
 | `temet-work-runtime-claude` | passes the runtime contract |
 | `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
 | `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
@@ -76,6 +76,9 @@ What does not work yet:
 
 - Any agent or person can run any command; a command is not yet limited to the agent
   whose step it is.
+- Overturning a decision: the loop records an overturn, but no command makes one and no
+  part applies it or proposes a rule from it.
+- A deploy that failed three times waits for a person, and no command retries it.
 
 ## Who coordinates
 
@@ -86,7 +89,12 @@ and starts an author on a ready issue when a work folder of its project is free 
 issues it depends on are done. Review runs for at most three rounds before an arbiter
 rules. Every round the daemon also starts any agent an issue needs and does not have: one
 whose session ended, or one it decided on and did not start before it stopped. After three
-agents of one role have ended on one issue it stops and lists the issue as a problem. A group has no coordinator agent: in the research fleet the standing seat waited 25
+agents of one role have ended on one issue it stops and lists the issue as a problem. It
+also asks again for a merge, deploy or verify that was lost; the parts that do them do not
+repeat work already done or running. An agent its issue waits on that sits idle is
+reminded after ten minutes and again after twenty, and its session is stopped after thirty
+so a fresh one takes over. A refiner stops once its plan is in; the author, reviewer and
+arbiter stop once the issue merges. A group has no coordinator agent: in the research fleet the standing seat waited 25
 of its 28 minutes, and in mike's larger runs such seats were where the token and turn costs
 came from (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
 

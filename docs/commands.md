@@ -32,8 +32,11 @@ command line exits 0 when the daemon did it, 1 when the daemon refused it, and 2
 command was not understood or no daemon answered.
 
 The daemon starts every agent with `TEMET_WORK_AGENT` set to the agent's id, so a command
-an agent runs is recorded as that agent's. A ruling is recorded as a decision a person
-can read and overturn.
+an agent runs is recorded as that agent's. A ruling is recorded as a decision, listed by
+`temet-work status`; overturning one is not built yet.
+
+A review from an agent that has not yet heard of the round under review is refused: it
+began on code that has since changed.
 
 The daemon listens at `$TEMET_WORK_SOCKET`, else `$XDG_RUNTIME_DIR/temet-work/daemon.sock`,
 one JSON request per line and one JSON reply per line.

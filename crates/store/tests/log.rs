@@ -57,6 +57,7 @@ fn appends_and_reads_back_in_order_with_numbers_from_one() {
         let entry = log.append(1_000 + i as u64, e).expect("append");
         assert_eq!(entry.seq, i as u64 + 1);
     }
+    drop(log);
     let (_, entries) = Log::open(&p).expect("reopen");
     assert_eq!(
         entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
@@ -75,6 +76,7 @@ fn replaying_the_log_gives_the_same_state_as_applying_the_events() {
     for e in events() {
         log.append(0, &e).expect("append");
     }
+    drop(log);
     let (_, entries) = Log::open(&p).expect("reopen");
     assert_eq!(replay(&entries), World::replay(&events()).0);
 }
@@ -118,4 +120,13 @@ fn a_damaged_line_in_the_middle_is_an_error() {
         Log::read(&p),
         Err(StoreError::Damaged { line: 1, .. })
     ));
+}
+
+#[test]
+fn a_second_writer_is_refused_while_the_first_has_the_log() {
+    let p = path("one-writer");
+    let (first, _) = Log::open(&p).expect("open");
+    assert!(matches!(Log::open(&p), Err(StoreError::Busy(_))));
+    drop(first);
+    assert!(Log::open(&p).is_ok(), "free again once the first closes it");
 }

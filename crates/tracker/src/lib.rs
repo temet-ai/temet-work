@@ -293,6 +293,7 @@ impl Default for Trackers {
 /// The events that bring the loop's view of `project` up to `open`, the issues
 /// its tracker lists as open now.
 pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec<Event> {
+    use temet_work_core::model::Stage;
     let id = |key: &str| IssueId::new(project.0.clone(), key);
     let mut out = Vec::new();
     let open_keys: BTreeSet<&str> = open.iter().map(|t| t.key.as_str()).collect();
@@ -306,7 +307,7 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
                 && i.milestone == milestone
                 && i.depends_on == depends_on
                 && i.order == t.order
-                && (i.stage != temet_work_core::model::Stage::Done || i.closed_by_loop)
+                && (i.stage != Stage::Done || i.closed_by_loop)
         });
         if !same {
             out.push(Event::IssueSynced {
@@ -320,8 +321,15 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
         }
     }
     for i in world.issues.values() {
+        // An issue merging, deploying or verifying may close on merge; the loop
+        // closes it itself once it passes, so its close here is not news.
+        let finishing = matches!(
+            i.stage,
+            Stage::Merging | Stage::Deploying | Stage::Verifying
+        );
         if &i.id.project == project
-            && i.stage != temet_work_core::model::Stage::Done
+            && i.stage != Stage::Done
+            && !finishing
             && !open_keys.contains(i.id.key.as_str())
         {
             out.push(Event::IssueSynced {

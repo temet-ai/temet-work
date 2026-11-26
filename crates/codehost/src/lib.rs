@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use temet_work_core::ids::IssueId;
 use temet_work_core::model::Stage;
@@ -49,6 +50,8 @@ pub struct Pull {
     pub state: PullState,
     /// Its CI.
     pub checks: Checks,
+    /// Whether it conflicts with the branch it merges into.
+    pub conflicting: bool,
 }
 
 /// Why a code-host call failed.
@@ -179,6 +182,9 @@ pub mod contract {
     }
 }
 
+/// How long after a failed merge it is tried again.
+pub const MERGE_RETRY_AFTER: Duration = Duration::from_secs(60);
+
 /// How often an issue's CI is read, by the daemon's clock.
 pub const POLL_EVERY_MS: u64 = 30_000;
 
@@ -192,6 +198,7 @@ pub struct CodeHosts {
     every_ms: u64,
     read_at: BTreeMap<IssueId, u64>,
     errors: BTreeMap<IssueId, String>,
+    merge_failed: BTreeMap<IssueId, (String, Instant)>,
 }
 
 impl Default for CodeHosts {
@@ -201,6 +208,7 @@ impl Default for CodeHosts {
             every_ms: POLL_EVERY_MS,
             read_at: BTreeMap::new(),
             errors: BTreeMap::new(),
+            merge_failed: BTreeMap::new(),
         }
     }
 }
@@ -281,9 +289,12 @@ impl Part for CodeHosts {
                     continue;
                 }
             };
+            // No checks yet usually means CI has not started on the new commit; only
+            // a project that runs no CI leaves the plan's checks to the reviewer.
+            let runs_ci = world.projects.get(&issue.project).is_none_or(|p| p.ci);
             let finished = match pull.checks {
                 Checks::Pending => None,
-                // A repository without CI leaves the plan's checks to the reviewer.
+                Checks::None if runs_ci => None,
                 Checks::Passed | Checks::None => Some((true, Vec::new())),
                 Checks::Failed { failing } => Some((false, failing)),
             };
@@ -307,24 +318,61 @@ impl Part for CodeHosts {
         let Some(number) = world.issues.get(issue).and_then(|i| i.pull.clone()) else {
             return Outcome::Failed(format!("{issue} has no pull request on record"));
         };
-        let merged = self.host_for(world, issue).and_then(|(host, repo)| {
-            match host.pull(&repo, &number).map_err(|e| e.to_string())?.state {
-                // Merged already, by a person or an earlier try.
-                PullState::Merged => Ok(()),
-                PullState::Closed => {
-                    Err(format!("pull request {number} was closed without merging"))
+        if let Some((why, at)) = self.merge_failed.get(issue)
+            && at.elapsed() < MERGE_RETRY_AFTER
+        {
+            return Outcome::Failed(format!("{why}; tried again a minute after it failed"));
+        }
+        let refused = |reason: String| Outcome::Done {
+            events: vec![Event::MergeRefused {
+                issue: issue.clone(),
+                reason,
+            }],
+            effects: Vec::new(),
+        };
+        let (host, repo) = match self.host_for(world, issue) {
+            Ok(found) => found,
+            Err(e) => return Outcome::Failed(e),
+        };
+        let tried = host
+            .pull(&repo, &number)
+            .map_err(|e| e.to_string())
+            .and_then(|pull| {
+                match pull.state {
+                    // Merged already, by a person or an earlier try.
+                    PullState::Merged => Ok(None),
+                    PullState::Closed => Ok(Some(format!(
+                        "pull request {number} was closed without merging"
+                    ))),
+                    PullState::Open if pull.conflicting => Ok(Some(format!(
+                        "pull request {number} conflicts with the branch it merges into"
+                    ))),
+                    PullState::Open => match host.merge(&repo, &number) {
+                        Ok(()) => Ok(None),
+                        Err(e) if e.to_string().to_lowercase().contains("not mergeable") => {
+                            Ok(Some(format!("pull request {number} is not mergeable: {e}")))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    },
                 }
-                PullState::Open => host.merge(&repo, &number).map_err(|e| e.to_string()),
+            });
+        match tried {
+            Ok(None) => {
+                self.merge_failed.remove(issue);
+                Outcome::Done {
+                    events: vec![Event::Merged {
+                        issue: issue.clone(),
+                    }],
+                    effects: Vec::new(),
+                }
             }
-        });
-        match merged {
-            Ok(()) => Outcome::Done {
-                events: vec![Event::Merged {
-                    issue: issue.clone(),
-                }],
-                effects: Vec::new(),
-            },
-            Err(e) => Outcome::Failed(e),
+            // Only its author can fix it: back to work.
+            Ok(Some(reason)) => refused(reason),
+            Err(e) => {
+                self.merge_failed
+                    .insert(issue.clone(), (e.clone(), Instant::now()));
+                Outcome::Failed(e)
+            }
         }
     }
 }
@@ -339,6 +387,7 @@ mod tests {
             number: number.into(),
             state: PullState::Open,
             checks,
+            conflicting: false,
         }
     }
 
@@ -452,6 +501,52 @@ mod tests {
         };
         assert_eq!(part.carry_out(&merge, &w), merged);
         assert_eq!(part.carry_out(&merge, &w), merged, "already merged");
+    }
+
+    #[test]
+    fn a_conflicting_pull_request_goes_back_to_its_author() {
+        let w = in_review();
+        let mut host = fake();
+        host.pulls[0].1.conflicting = true;
+        let mut part = CodeHosts::default();
+        part.add(Box::new(host));
+        let merge = Effect::Merge {
+            issue: IssueId::new("ankh", "1"),
+        };
+        assert!(matches!(
+            part.carry_out(&merge, &w),
+            Outcome::Done { events, .. } if matches!(events.as_slice(), [Event::MergeRefused { reason, .. }] if reason.contains("conflicts"))
+        ));
+    }
+
+    #[test]
+    fn no_ci_reading_waits_unless_the_project_runs_no_ci() {
+        let mut w = in_review();
+        let mut host = fake();
+        host.pulls[0].1.checks = Checks::None;
+        let mut part = CodeHosts::default().every(0);
+        part.add(Box::new(host));
+        let first = |events: Vec<Event>| {
+            events
+                .into_iter()
+                .find(|e| matches!(e, Event::ChecksFinished { issue, .. } if issue.key == "1"))
+        };
+        assert_eq!(
+            first(part.poll(&w, 0).events),
+            None,
+            "CI may not have started"
+        );
+        w.apply(&Event::ProjectCommandsSet {
+            project: ProjectId::new("ankh"),
+            deploy: None,
+            verify: None,
+            run_in: None,
+            ci: Some(false),
+        });
+        assert!(matches!(
+            first(part.poll(&w, 1).events),
+            Some(Event::ChecksFinished { passed: true, .. })
+        ));
     }
 
     #[test]

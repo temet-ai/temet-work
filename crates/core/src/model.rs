@@ -89,6 +89,11 @@ pub struct Issue {
     /// to fix, the reviewer that a new round is up. A new agent hears it in its
     /// brief.
     pub told: bool,
+    /// Whether it is being fixed for CI or a merge, not for a review: the next
+    /// review keeps its round, so CI failures do not use up review rounds.
+    pub fix_keeps_round: bool,
+    /// Its latest review round; 0 before its first review.
+    pub round: u8,
     /// Whether the loop closed it, after verifying it. One the tracker closed and
     /// later reopened is worked again; one the loop closed stays closed.
     pub closed_by_loop: bool,
@@ -216,6 +221,8 @@ pub struct Project {
     pub verify: Option<String>,
     /// The folder both run in.
     pub run_in: Option<String>,
+    /// Whether its pull requests run CI.
+    pub ci: bool,
 }
 
 /// What a decision settles.

@@ -143,13 +143,29 @@ pub trait Runner: Send {
     fn problem(&self) -> Option<String> {
         None
     }
+
+    /// The terminals it has listed in full since the last call, if it has: on
+    /// connecting, a runner lists every terminal it holds, and one that is not on
+    /// the list is gone. Its updates come with the list, in `updates`.
+    fn listed(&mut self) -> Option<Vec<TerminalId>> {
+        None
+    }
 }
+
+/// How long an agent its issue waits on may sit idle before it is reminded.
+pub const NUDGE_AFTER_MS: u64 = 600_000;
+
+/// Reminders before an idle agent is stopped, so a fresh one takes over.
+pub const NUDGES: u32 = 2;
 
 /// Text waiting for an agent to finish its turn.
 struct Message {
     agent: String,
     issue: temet_work_core::ids::IssueId,
     text: String,
+    /// Whether it is what the issue's stage needs the agent to hear, so its
+    /// arrival counts as told. A reminder does not.
+    tells: bool,
 }
 
 /// The runner part: the runners compiled into this build, in the order they were added.
@@ -162,8 +178,13 @@ pub struct Runners {
     adapters: Vec<Box<dyn Runner>>,
     /// Each agent's terminal: the runner that holds it and its id there.
     terminals: BTreeMap<String, (usize, TerminalId)>,
-    /// Text waiting for its agent to finish a turn, as (agent, text).
+    /// Text waiting for its agent to finish a turn.
     outbox: Vec<Message>,
+    /// Agents started since the runner last listed its terminals: a list taken
+    /// before they started does not have them.
+    started_here: std::collections::BTreeSet<String>,
+    /// Idle agents their issues wait on: since when, and how many reminders.
+    idle: BTreeMap<String, (u64, u32)>,
 }
 
 impl Runners {
@@ -195,6 +216,54 @@ impl Runners {
     }
 
     /// Sends what is waiting; keeps what the agent cannot take yet.
+    /// Reminds an idle agent its issue waits on, twice, ten minutes apart; ten
+    /// minutes after the second reminder it stops the agent's session, so the loop
+    /// starts a fresh one. Returns the agents it stopped, as ended.
+    fn remind(
+        &mut self,
+        world: &World,
+        seen: &BTreeMap<AgentId, AgentState>,
+        now_ms: u64,
+    ) -> Vec<Event> {
+        let mut events = Vec::new();
+        let waiting: Vec<(String, Role, temet_work_core::ids::IssueId)> = world
+            .agents
+            .values()
+            .filter(|a| {
+                let state = seen.get(&a.id).unwrap_or(&a.state);
+                *state == AgentState::Idle && world.waiting_on(a)
+            })
+            .filter_map(|a| a.issue.clone().map(|i| (a.id.0.clone(), a.role, i)))
+            .collect();
+        self.idle
+            .retain(|agent, _| waiting.iter().any(|(a, _, _)| a == agent));
+        for (agent, role, issue) in waiting {
+            let (since, nudges) = *self.idle.entry(agent.clone()).or_insert((now_ms, 0));
+            if now_ms < since + NUDGE_AFTER_MS {
+                continue;
+            }
+            if nudges < NUDGES {
+                self.idle.insert(agent.clone(), (now_ms, nudges + 1));
+                events.extend(self.queue(Message {
+                    agent,
+                    issue: issue.clone(),
+                    text: brief::nudge(role, &issue),
+                    tells: false,
+                }));
+                continue;
+            }
+            self.idle.remove(&agent);
+            if let Some((i, terminal)) = self.terminals.remove(&agent) {
+                let _ = self.adapters[i].stop(&terminal);
+            }
+            events.push(Event::AgentChanged {
+                agent: AgentId::new(agent),
+                state: AgentState::Ended,
+            });
+        }
+        events
+    }
+
     /// Queues a message unless the same one is already waiting, then sends what
     /// can be sent. Returns a `Told` event for each issue whose message arrived.
     fn queue(&mut self, message: Message) -> Vec<Event> {
@@ -219,10 +288,17 @@ impl Runners {
                 continue;
             };
             match self.adapters[i].send(&terminal, &m.text, true) {
-                Ok(()) => told.push(Event::Told { issue: m.issue }),
-                // The terminal is gone: its updates report the agent ended, and
-                // the loop tells the next one.
-                Err(RunnerError::Gone | RunnerError::Unknown(_)) => {}
+                Ok(()) if m.tells => told.push(Event::Told { issue: m.issue }),
+                Ok(()) => {}
+                // The terminal is gone, so its agent has ended; the loop starts and
+                // tells the next one.
+                Err(RunnerError::Gone | RunnerError::Unknown(_)) => {
+                    self.terminals.remove(&m.agent);
+                    told.push(Event::AgentChanged {
+                        agent: AgentId::new(m.agent),
+                        state: AgentState::Ended,
+                    });
+                }
                 // Busy, at a prompt, or the runner could not be reached: try again.
                 Err(_) => keep.push(m),
             }
@@ -272,9 +348,14 @@ impl Part for Runners {
         "runner"
     }
 
-    fn poll(&mut self, world: &World, _now_ms: u64) -> Polled {
+    fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
         let mut events = Vec::new();
+        // Each agent's state as this poll has seen it, so a quick turn (idle,
+        // working, idle) ends on idle and not on working.
+        let mut seen: BTreeMap<AgentId, AgentState> = BTreeMap::new();
         for (i, adapter) in self.adapters.iter_mut().enumerate() {
+            let listed = adapter.listed();
+            let mut alive = std::collections::BTreeSet::new();
             for u in adapter.updates() {
                 let Some(agent) = u.labels.get("agent").cloned() else {
                     continue;
@@ -288,17 +369,45 @@ impl Part for Runners {
                 if other_log || !world.agents.contains_key(&id) {
                     continue;
                 }
+                alive.insert(agent.clone());
                 self.terminals.insert(agent, (i, u.terminal.clone()));
                 let Some(state) = state_of(&u.status, u.doing.as_deref()) else {
                     continue;
                 };
-                if world.agents.get(&id).is_some_and(|a| a.state == state) {
+                let before = seen
+                    .get(&id)
+                    .or_else(|| world.agents.get(&id).map(|a| &a.state));
+                if before == Some(&state) {
                     continue;
                 }
+                seen.insert(id.clone(), state.clone());
                 events.push(Event::AgentChanged { agent: id, state });
+            }
+            // A full list from the runner that starts agents: an agent of this log
+            // whose terminal is not on it, and that was not started since, is gone.
+            if listed.is_some() && i == 0 {
+                for a in world.agents.values() {
+                    let name = &a.id.0;
+                    let elsewhere = self.terminals.get(name).is_some_and(|(r, _)| *r != 0);
+                    if a.state != AgentState::Ended
+                        && !alive.contains(name)
+                        && !self.started_here.contains(name)
+                        && !elsewhere
+                        && seen.get(&a.id) != Some(&AgentState::Ended)
+                    {
+                        self.terminals.remove(name);
+                        seen.insert(a.id.clone(), AgentState::Ended);
+                        events.push(Event::AgentChanged {
+                            agent: a.id.clone(),
+                            state: AgentState::Ended,
+                        });
+                    }
+                }
+                self.started_here.clear();
             }
         }
         events.extend(self.deliver());
+        events.extend(self.remind(world, &seen, now_ms));
         let problems: Vec<String> = self.adapters.iter().filter_map(|a| a.problem()).collect();
         Polled {
             events,
@@ -344,6 +453,7 @@ impl Part for Runners {
                 match runner.start(&start) {
                     Ok(terminal) => {
                         self.terminals.insert(launch.agent.0.clone(), (0, terminal));
+                        self.started_here.insert(launch.agent.0.clone());
                         Outcome::Done {
                             events: vec![Event::AgentStarted {
                                 agent: launch.agent.clone(),
@@ -367,6 +477,7 @@ impl Part for Runners {
                     agent: author.id.0.clone(),
                     issue: issue.clone(),
                     text: brief::fixes(issue, points),
+                    tells: true,
                 });
                 Outcome::Done {
                     events: told,
@@ -383,6 +494,7 @@ impl Part for Runners {
                     agent: reviewer.id.0.clone(),
                     issue: issue.clone(),
                     text: brief::next_round(issue, *round),
+                    tells: true,
                 });
                 Outcome::Done {
                     events: told,
@@ -614,6 +726,160 @@ mod tests {
                 effects: vec![]
             }
         );
+    }
+
+    /// The fake runner, shared with the test so it can stop terminals behind the
+    /// family's back and hand it a full list.
+    #[derive(Clone, Default)]
+    struct Shared {
+        fake: std::sync::Arc<std::sync::Mutex<FakeRunner>>,
+        list: std::sync::Arc<std::sync::Mutex<Option<Vec<TerminalId>>>>,
+    }
+
+    impl Runner for Shared {
+        fn id(&self) -> &'static str {
+            "shared"
+        }
+        fn start(&mut self, start: &Start) -> Result<TerminalId, RunnerError> {
+            self.fake.lock().expect("fake").start(start)
+        }
+        fn send(
+            &mut self,
+            t: &TerminalId,
+            text: &str,
+            only_if_idle: bool,
+        ) -> Result<(), RunnerError> {
+            self.fake.lock().expect("fake").send(t, text, only_if_idle)
+        }
+        fn screen(&mut self, t: &TerminalId) -> Result<String, RunnerError> {
+            self.fake.lock().expect("fake").screen(t)
+        }
+        fn stop(&mut self, t: &TerminalId) -> Result<(), RunnerError> {
+            self.fake.lock().expect("fake").stop(t)
+        }
+        fn updates(&mut self) -> Vec<Update> {
+            self.fake.lock().expect("fake").updates()
+        }
+        fn listed(&mut self) -> Option<Vec<TerminalId>> {
+            self.list.lock().expect("list").take()
+        }
+    }
+
+    fn shared() -> (Runners, Shared) {
+        let handle = Shared::default();
+        let mut part = Runners::default();
+        part.add(Box::new(handle.clone()));
+        (part, handle)
+    }
+
+    fn apply(w: &mut World, events: &[Event]) {
+        for e in events {
+            w.apply(e);
+        }
+    }
+
+    #[test]
+    fn after_a_restart_an_agent_missing_from_the_first_list_has_ended() {
+        let mut w = world();
+        // A daemon before this one started an author; its terminal is gone since.
+        let gone = run(&mut runners(), &mut w, &["cat"]);
+        // This daemon's runner lists what it holds on connecting: nothing. An agent
+        // it starts after that is not on the list, and has not ended.
+        let (mut part, handle) = shared();
+        *handle.list.lock().expect("list") = Some(vec![]);
+        let fresh = run(&mut part, &mut w, &["cat"]);
+        assert_eq!(
+            part.poll(&w, 0).events,
+            vec![Event::AgentChanged {
+                agent: gone,
+                state: AgentState::Ended
+            }],
+            "{fresh} started after the list was taken"
+        );
+    }
+
+    #[test]
+    fn sending_to_a_terminal_that_is_gone_ends_its_agent() {
+        let mut w = world();
+        let (mut part, handle) = shared();
+        let author = run(&mut part, &mut w, &["cat"]);
+        let first = part.poll(&w, 0).events;
+        apply(&mut w, &first);
+        let terminal = TerminalId("t1".into());
+        handle
+            .fake
+            .lock()
+            .expect("fake")
+            .stop(&terminal)
+            .expect("stop");
+        handle.fake.lock().expect("fake").updates();
+        let fix = Effect::RequestFix {
+            issue: IssueId::new("ankh", "1"),
+            points: vec!["no test".into()],
+        };
+        let Outcome::Done { events, .. } = part.carry_out(&fix, &w) else {
+            panic!("not done");
+        };
+        assert_eq!(
+            events,
+            vec![Event::AgentChanged {
+                agent: author,
+                state: AgentState::Ended
+            }]
+        );
+    }
+
+    #[test]
+    fn a_quick_turn_ends_on_idle() {
+        let mut w = world();
+        let mut part = runners();
+        let author = run(&mut part, &mut w, &["cat"]);
+        let first = part.poll(&w, 0).events;
+        apply(&mut w, &first);
+        let fix = Effect::RequestFix {
+            issue: IssueId::new("ankh", "1"),
+            points: vec!["no test".into()],
+        };
+        part.carry_out(&fix, &w);
+        // The fake takes the text in one quick turn: working, then idle.
+        let states: Vec<AgentState> = part
+            .poll(&w, 0)
+            .events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::AgentChanged { agent, state } if agent == author => Some(state),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states.last(), Some(&AgentState::Idle), "{states:?}");
+    }
+
+    #[test]
+    fn an_idle_agent_its_issue_waits_on_is_reminded_twice_then_stopped() {
+        let mut w = world();
+        let mut part = runners();
+        // ankh#1 is being worked on by its author, who sits idle.
+        if let Some(i) = w.issues.get_mut(&IssueId::new("ankh", "1")) {
+            i.stage = temet_work_core::model::Stage::Working;
+        }
+        let author = run(&mut part, &mut w, &["cat"]);
+        let first = part.poll(&w, 0).events;
+        apply(&mut w, &first);
+        let at = |n: u64| n * NUDGE_AFTER_MS;
+        let polled = part.poll(&w, at(1)).events;
+        apply(&mut w, &polled);
+        let screen = part.screen(&author.0).expect("screen");
+        assert!(
+            screen.contains("ankh#1 is still waiting on you"),
+            "{screen}"
+        );
+        let polled = part.poll(&w, at(2)).events;
+        apply(&mut w, &polled);
+        let ended = part.poll(&w, at(3)).events;
+        assert!(ended.contains(&Event::AgentChanged {
+            agent: author,
+            state: AgentState::Ended
+        }));
     }
 
     #[test]

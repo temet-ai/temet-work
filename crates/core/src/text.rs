@@ -96,6 +96,19 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             a.machine
         );
     }
+    let _ = writeln!(out, "Decisions");
+    for d in world.decisions.values() {
+        let chosen = d.options.get(d.chosen).map_or("?", String::as_str);
+        let overturned = d
+            .overturned_to
+            .and_then(|o| d.options.get(o))
+            .map_or_else(String::new, |o| format!("; overturned to {o}"));
+        let _ = writeln!(
+            out,
+            "  {} {}: {} {chosen}, by {}: {}{overturned}",
+            d.id.0, d.issue, d.question, d.by, d.reason
+        );
+    }
     let _ = writeln!(out, "Problems");
     for (from, what) in problems {
         let _ = writeln!(out, "  {from}: {what}");

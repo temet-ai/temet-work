@@ -64,6 +64,10 @@ pub enum Event {
         verify: Option<String>,
         /// The folder both run in.
         run_in: Option<String>,
+        /// Whether its pull requests run CI; with none, the plan's checks are left
+        /// to the reviewer. Runs CI when left out.
+        #[serde(default)]
+        ci: Option<bool>,
     },
     /// A group was made.
     GroupCreated {
@@ -185,5 +189,16 @@ pub enum Event {
         issue: IssueId,
         /// Whether it passed.
         passed: bool,
+        /// What the check said when it failed.
+        #[serde(default)]
+        output: String,
+    },
+    /// The code host would not merge the pull request as it stands, such as for a
+    /// conflict with the target branch.
+    MergeRefused {
+        /// The issue.
+        issue: IssueId,
+        /// Why, as the code host said it.
+        reason: String,
     },
 }

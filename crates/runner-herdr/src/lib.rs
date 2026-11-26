@@ -155,11 +155,45 @@ struct Shared {
     updates: Vec<Update>,
     labels: BTreeMap<String, BTreeMap<String, String>>,
     alive: bool,
+    /// The terminals of the last full list, until they are asked for.
+    listed: Option<Vec<TerminalId>>,
 }
 
 /// Turns a snapshot of terminals (from subscribing, or after a missed stretch)
 /// into one update each, so terminals started before the daemon are known again.
 fn take_snapshot(terminals: &Value, s: &mut Shared) {
+    // A terminal this client knew that the new list lacks is gone: the core
+    // restarted, or it was removed while the client was not listening.
+    let listed: std::collections::BTreeSet<&str> = terminals
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.get("address").and_then(Value::as_str))
+        .collect();
+    let vanished: Vec<String> = s
+        .labels
+        .keys()
+        .filter(|a| !listed.contains(a.as_str()))
+        .cloned()
+        .collect();
+    for addr in vanished {
+        let labels = s.labels.remove(&addr).unwrap_or_default();
+        s.updates.push(Update {
+            terminal: TerminalId(addr),
+            labels,
+            status: Status::Gone,
+            doing: None,
+        });
+    }
+    s.listed = Some(
+        terminals
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t.get("address").and_then(Value::as_str))
+            .map(|a| TerminalId(a.to_string()))
+            .collect(),
+    );
     for t in terminals.as_array().into_iter().flatten() {
         let Some(addr) = t.get("address").and_then(Value::as_str) else {
             continue;
@@ -431,6 +465,10 @@ impl Runner for Herdr {
         )))
     }
 
+    fn listed(&mut self) -> Option<Vec<TerminalId>> {
+        self.shared.lock().ok().and_then(|mut s| s.listed.take())
+    }
+
     fn problem(&self) -> Option<String> {
         self.unreachable
             .as_ref()
@@ -500,6 +538,19 @@ mod tests {
         assert_eq!(s.updates[0].doing.as_deref(), Some("running the tests"));
         assert_eq!(s.updates[1].status, Status::Between);
         assert_eq!(s.updates[2].status, Status::Gone, "finished, not removed");
+        // A later list without t3 reports it gone.
+        s.updates.clear();
+        take_snapshot(
+            &json!([{"address": "t4", "labels": {"agent": "refiner-1"}}]),
+            &mut s,
+        );
+        let gone: Vec<&str> = s
+            .updates
+            .iter()
+            .filter(|u| u.status == Status::Gone)
+            .map(|u| u.terminal.0.as_str())
+            .collect();
+        assert_eq!(gone, ["t3", "t5"]);
     }
 
     #[test]

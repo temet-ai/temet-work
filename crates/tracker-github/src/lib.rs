@@ -183,8 +183,11 @@ impl Tracker for GitHub {
     }
 
     fn close(&mut self, project: &str, key: &str) -> Result<(), TrackerError> {
-        self.run(&["issue", "close", key, "-R", project])
-            .map(|_| ())
+        match self.run(&["issue", "close", key, "-R", project]) {
+            // A pull request that said "Closes #N" closed it on merge.
+            Err(TrackerError::Other(e)) if e.to_lowercase().contains("already closed") => Ok(()),
+            other => other.map(|_| ()),
+        }
     }
 }
 

@@ -29,6 +29,7 @@ name = "temet-ai/radar"   # the tracker's name for it
 # deploy = "make deploy"  # run after a merge; merged counts as deployed when left out
 # verify = "make smoke"   # run after a deploy; deployed counts as verified when left out
 # run_in = "/home/me/src/radar-deploy"   # where both run; the home folder when left out
+# ci = false              # its pull requests run no CI; the plan's checks are left to the reviewer
 
 # A work folder: a checkout an author works in, one issue at a time.
 [[folder]]

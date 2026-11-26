@@ -50,6 +50,9 @@ pub struct ProjectConf {
     pub verify: Option<String>,
     /// The folder `deploy` and `verify` run in; the home folder when left out.
     pub run_in: Option<String>,
+    /// Whether its pull requests run CI; `false` leaves the plan's checks to the
+    /// reviewer. True when left out.
+    pub ci: Option<bool>,
 }
 
 /// One `[[folder]]`: a checkout agents work in.
@@ -168,15 +171,21 @@ impl Config {
             let now = world
                 .projects
                 .get(&id)
-                .map(|w| (w.deploy.clone(), w.verify.clone(), w.run_in.clone()))
-                .unwrap_or_default();
-            let want = (p.deploy.clone(), p.verify.clone(), p.run_in.clone());
+                .map(|w| (w.deploy.clone(), w.verify.clone(), w.run_in.clone(), w.ci))
+                .unwrap_or((None, None, None, true));
+            let want = (
+                p.deploy.clone(),
+                p.verify.clone(),
+                p.run_in.clone(),
+                p.ci.unwrap_or(true),
+            );
             if now != want {
                 out.push(Event::ProjectCommandsSet {
                     project: id,
                     deploy: want.0,
                     verify: want.1,
                     run_in: want.2,
+                    ci: Some(want.3),
                 });
             }
         }

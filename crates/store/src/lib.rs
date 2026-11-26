@@ -30,6 +30,8 @@ pub struct Entry {
 pub enum StoreError {
     /// The file system refused.
     Io(std::io::Error),
+    /// Another process has the log open for writing.
+    Busy(PathBuf),
     /// A line other than the last is not a valid entry; the log is damaged.
     Damaged {
         /// The line's number, from 1.
@@ -43,6 +45,11 @@ impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(e) => write!(f, "event log: {e}"),
+            Self::Busy(path) => write!(
+                f,
+                "another temet-workd is using the event log at {}",
+                path.display()
+            ),
             Self::Damaged { line, why } => write!(f, "event log line {line} is damaged: {why}"),
         }
     }
@@ -67,8 +74,14 @@ impl Log {
     /// Opens the log at `path`, making it if it does not exist, and returns it
     /// with the entries already in it.
     pub fn open(path: &Path) -> Result<(Self, Vec<Entry>), StoreError> {
-        let (entries, complete) = Self::scan(path)?;
         let file = OpenOptions::new().create(true).append(true).open(path)?;
+        // One writer at a time: two daemons on one log would each append events
+        // the other never applies.
+        file.try_lock().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => StoreError::Busy(path.to_path_buf()),
+            std::fs::TryLockError::Error(e) => StoreError::Io(e),
+        })?;
+        let (entries, complete) = Self::scan(path)?;
         if file.metadata()?.len() > complete {
             file.set_len(complete)?;
             file.sync_data()?;
