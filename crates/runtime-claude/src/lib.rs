@@ -1,14 +1,23 @@
 //! Claude Code sessions: `claude [--model M] TASK` starts an interactive session
 //! with the task as its first prompt.
 //!
-//! A terminal gets its terminal service's environment, not the daemon's, so the
-//! proxy variables a capturing proxy needs (`HTTPS_PROXY`, `NO_PROXY`,
-//! `NODE_EXTRA_CA_CERTS`) are passed on from the daemon when it has them.
+//! A terminal gets its terminal service's environment, not the daemon's, so what a
+//! session started from the person's own shell would have is passed on from the
+//! daemon when it has it: the proxy variables a capturing proxy needs
+//! (`HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`) and the code host's sign-in
+//! (`GITHUB_TOKEN`, `GH_TOKEN`), without which `gh` cannot read an issue or open a
+//! pull request.
 
 use temet_work_runtime::{Brief, Program, Runtime};
 
 /// Variables passed on to every session from the daemon's environment.
-pub const PASSED_ON: [&str; 3] = ["HTTPS_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS"];
+pub const PASSED_ON: [&str; 5] = [
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+];
 
 /// The Claude Code adapter.
 #[derive(Default)]
