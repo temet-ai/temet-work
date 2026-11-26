@@ -85,13 +85,16 @@ on each other, so what two parts do together shows up in the all-parts build.
 
 ## Extending from outside the repository
 
-Not decided. The question is how someone adds a Linear tracker or a new agent runtime
-without a pull request here, safely, versioned, and tested against the same contract as
-the adapters in the tree. A first survey points at WebAssembly components with declared
-permissions for trackers and checks, and subprocess plugins speaking JSON lines over
-stdio for runners and runtimes, all driven through the same family traits and the same
-contract tests. That survey read search summaries only; a deeper one comes before the
-decision.
+Decided on 26 November 2026; the research and the reasons are in `docs/extensions.md`.
+Trackers and the parsing half of checks are WebAssembly components with enforced limits;
+runners and agent runtimes are subprocesses speaking JSON-RPC lines over stdio. Each
+family has one contract, generated from its Rust types, and an outside extension runs the
+same contract tests as an adapter in this repository.
+
+In the crate layout each transport is an adapter of its family: a Wasm loader in the
+tracker family (and in the check family once it exists), and a subprocess bridge in the
+runner and runtime families. Wasmtime is compiled only into the Wasm loaders, behind their
+features.
 
 ## Tests
 

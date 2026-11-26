@@ -5,9 +5,22 @@ session_id:
 
 # Extending temet-work from outside the repository
 
-This document records how someone outside this repository could add a tracker, a runner,
-an agent runtime or a check, what other systems do, and the recommendation. The decision
-is not taken yet. Inside the repository an adapter is a crate (`docs/architecture.md`).
+This document records how someone outside this repository adds a tracker, a runner, an
+agent runtime or a check, what other systems do, the recommendation, and the decision.
+Inside the repository an adapter is a crate (`docs/architecture.md`).
+
+## Decision (26 November 2026)
+
+Both transports from the start, not the recommendation below: trackers and the parsing half
+of checks are WebAssembly components, with network hosts, paths, time and memory enforced
+by the runtime; runners and agent runtimes are subprocesses speaking JSON-RPC lines over
+stdio. One contract per family, the install preview, grants, `acts`, the conformance tests
+and discovery are as recommended below. What this costs:
+
+- two transports and two bridges to build and test now;
+- a Python author cannot write a tracker until componentize-py supports WASI 0.3;
+- Wasmtime is a heavy dependency, so it lives only in the crates that load Wasm
+  extensions, each behind its own feature.
 
 The sources were fetched on 26 November 2026. The page reader summarised each page through
 a small model, so quotes here are its extracts, not raw page text.
