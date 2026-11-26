@@ -117,7 +117,7 @@ fn serve(stream: UnixStream, tx: &Sender<Pending>) {
 pub fn send(path: &Path, request: &Request) -> Result<Reply, String> {
     let mut stream = UnixStream::connect(path).map_err(|e| {
         format!(
-            "no daemon at {}: {e}. Start it with temet-workd.",
+            "no temet-work daemon answers at {} ({e}); it may be restarting: run the command again in a minute",
             path.display()
         )
     })?;

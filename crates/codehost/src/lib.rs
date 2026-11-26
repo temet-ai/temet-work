@@ -349,7 +349,11 @@ impl Part for CodeHosts {
                     ))),
                     PullState::Open => match host.merge(&repo, &number) {
                         Ok(()) => Ok(None),
-                        Err(e) if e.to_string().to_lowercase().contains("not mergeable") => {
+                        Err(e)
+                            if ["not mergeable", "merge conflict", "conflicts"]
+                                .iter()
+                                .any(|w| e.to_string().to_lowercase().contains(w)) =>
+                        {
                             Ok(Some(format!("pull request {number} is not mergeable: {e}")))
                         }
                         Err(e) => Err(e.to_string()),

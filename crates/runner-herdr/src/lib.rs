@@ -155,8 +155,8 @@ struct Shared {
     updates: Vec<Update>,
     labels: BTreeMap<String, BTreeMap<String, String>>,
     alive: bool,
-    /// The terminals of the last full list, until they are asked for.
-    listed: Option<Vec<TerminalId>>,
+    /// The last full list of terminals, with their labels, until it is asked for.
+    listed: Option<Vec<Update>>,
 }
 
 /// Turns a snapshot of terminals (from subscribing, or after a missed stretch)
@@ -185,15 +185,7 @@ fn take_snapshot(terminals: &Value, s: &mut Shared) {
             doing: None,
         });
     }
-    s.listed = Some(
-        terminals
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|t| t.get("address").and_then(Value::as_str))
-            .map(|a| TerminalId(a.to_string()))
-            .collect(),
-    );
+    let first = s.updates.len();
     for t in terminals.as_array().into_iter().flatten() {
         let Some(addr) = t.get("address").and_then(Value::as_str) else {
             continue;
@@ -219,6 +211,7 @@ fn take_snapshot(terminals: &Value, s: &mut Shared) {
                 .map(String::from),
         });
     }
+    s.listed = Some(s.updates[first..].to_vec());
 }
 
 fn follow(mut conn: Conn, shared: Arc<Mutex<Shared>>) {
@@ -465,7 +458,7 @@ impl Runner for Herdr {
         )))
     }
 
-    fn listed(&mut self) -> Option<Vec<TerminalId>> {
+    fn listed(&mut self) -> Option<Vec<Update>> {
         self.shared.lock().ok().and_then(|mut s| s.listed.take())
     }
 

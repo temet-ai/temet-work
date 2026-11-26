@@ -144,10 +144,11 @@ pub trait Runner: Send {
         None
     }
 
-    /// The terminals it has listed in full since the last call, if it has: on
-    /// connecting, a runner lists every terminal it holds, and one that is not on
-    /// the list is gone. Its updates come with the list, in `updates`.
-    fn listed(&mut self) -> Option<Vec<TerminalId>> {
+    /// The terminals it has listed in full since the last call, each with its
+    /// labels, if it has: on connecting, a runner lists every terminal it holds,
+    /// and one that is not on the list is gone. The list stands on its own, so it
+    /// does not matter which call to `updates` its terminals' states arrive in.
+    fn listed(&mut self) -> Option<Vec<Update>> {
         None
     }
 }
@@ -359,9 +360,9 @@ impl Part for Runners {
         // working, idle) ends on idle and not on working.
         let mut seen: BTreeMap<AgentId, AgentState> = BTreeMap::new();
         for (i, adapter) in self.adapters.iter_mut().enumerate() {
+            let updates = adapter.updates();
             let listed = adapter.listed();
-            let mut alive = std::collections::BTreeSet::new();
-            for u in adapter.updates() {
+            for u in updates {
                 let Some(agent) = u.labels.get("agent").cloned() else {
                     continue;
                 };
@@ -378,7 +379,6 @@ impl Part for Runners {
                 if other_log || ended || !world.agents.contains_key(&id) {
                     continue;
                 }
-                alive.insert(agent.clone());
                 self.terminals.insert(agent, (i, u.terminal.clone()));
                 let Some(state) = state_of(&u.status, u.doing.as_deref()) else {
                     continue;
@@ -394,7 +394,17 @@ impl Part for Runners {
             }
             // A full list from the runner that starts agents: an agent of this log
             // whose terminal is not on it, and that was not started since, is gone.
-            if listed.is_some() && i == 0 {
+            if let Some(listed) = listed.filter(|_| i == 0) {
+                let alive: std::collections::BTreeSet<String> = listed
+                    .iter()
+                    .filter(|u| {
+                        world
+                            .log
+                            .as_ref()
+                            .is_none_or(|log| u.labels.get("log") == Some(log))
+                    })
+                    .filter_map(|u| u.labels.get("agent").cloned())
+                    .collect();
                 for a in world.agents.values() {
                     let name = &a.id.0;
                     let elsewhere = self.terminals.get(name).is_some_and(|(r, _)| *r != 0);
@@ -479,8 +489,10 @@ impl Part for Runners {
                 }
             }
             Effect::RequestFix { issue, points } => {
+                // With no author running there is nothing to send: the loop starts
+                // one, and it hears the fixes in its brief.
                 let Some(author) = world.running(issue, Role::Author) else {
-                    return Outcome::Failed(format!("no author is running for {issue}"));
+                    return Outcome::done();
                 };
                 let told = self.queue(Message {
                     agent: author.id.0.clone(),
@@ -742,7 +754,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct Shared {
         fake: std::sync::Arc<std::sync::Mutex<FakeRunner>>,
-        list: std::sync::Arc<std::sync::Mutex<Option<Vec<TerminalId>>>>,
+        list: std::sync::Arc<std::sync::Mutex<Option<Vec<Update>>>>,
     }
 
     impl Runner for Shared {
@@ -769,7 +781,7 @@ mod tests {
         fn updates(&mut self) -> Vec<Update> {
             self.fake.lock().expect("fake").updates()
         }
-        fn listed(&mut self) -> Option<Vec<TerminalId>> {
+        fn listed(&mut self) -> Option<Vec<Update>> {
             self.list.lock().expect("list").take()
         }
     }
@@ -805,6 +817,23 @@ mod tests {
             }],
             "{fresh} started after the list was taken"
         );
+    }
+
+    #[test]
+    fn after_a_restart_an_agent_on_the_list_stays_whatever_poll_its_updates_come_in() {
+        let mut w = world();
+        let live = run(&mut runners(), &mut w, &["cat"]);
+        let (mut part, handle) = shared();
+        // The list names the agent; no update for it comes in this poll.
+        let mut labels = BTreeMap::new();
+        labels.insert("agent".to_string(), live.0.clone());
+        *handle.list.lock().expect("list") = Some(vec![Update {
+            terminal: TerminalId("t9".into()),
+            labels,
+            status: Status::Between,
+            doing: None,
+        }]);
+        assert_eq!(part.poll(&w, 0).events, vec![], "{live} is on the list");
     }
 
     #[test]
@@ -892,15 +921,14 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_with_no_author_running_fails() {
+    fn a_fix_with_no_author_running_is_left_to_the_next_authors_brief() {
         let fix = Effect::RequestFix {
             issue: IssueId::new("ankh", "1"),
             points: vec![],
         };
-        assert!(matches!(
-            runners().carry_out(&fix, &world()),
-            Outcome::Failed(_)
-        ));
+        let mut part = runners();
+        assert_eq!(part.carry_out(&fix, &world()), Outcome::done());
+        assert_eq!(part.waiting(), 0);
     }
 
     #[test]
