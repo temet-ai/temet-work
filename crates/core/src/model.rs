@@ -178,6 +178,8 @@ pub struct Group {
     pub milestones: Vec<MilestoneId>,
     /// How many issues it refines at once.
     pub refining_at_once: usize,
+    /// The model its agents run, when it names one.
+    pub model: Option<String>,
 }
 
 /// A work folder: a checkout on one machine, held by one issue at a time.

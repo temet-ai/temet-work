@@ -16,6 +16,7 @@ fn group(milestones: &[&str], refining_at_once: usize) -> Event {
         projects: vec![ProjectId::new("ankh")],
         milestones: milestones.iter().map(|m| MilestoneId::new(*m)).collect(),
         refining_at_once,
+        model: None,
     }
 }
 

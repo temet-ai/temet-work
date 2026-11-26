@@ -77,6 +77,9 @@ pub enum Event {
         milestones: Vec<MilestoneId>,
         /// How many issues it refines at once.
         refining_at_once: usize,
+        /// The model its agents run, when it names one.
+        #[serde(default)]
+        model: Option<String>,
     },
     /// The tracker reported an issue, new or changed.
     IssueSynced {

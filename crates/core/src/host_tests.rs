@@ -109,6 +109,7 @@ fn setup(refining_at_once: usize) -> Vec<Event> {
             projects: vec![ProjectId::new("ankh")],
             milestones: vec![],
             refining_at_once,
+            model: None,
         },
     ]
 }

@@ -84,6 +84,9 @@ pub struct GroupConf {
     /// How many issues it refines at once; 1 when left out.
     #[serde(default = "one")]
     pub refining_at_once: usize,
+    /// The model its agents run (`haiku`, `sonnet`); the runtime's default when
+    /// left out.
+    pub model: Option<String>,
 }
 
 fn local() -> String {
@@ -202,6 +205,7 @@ impl Config {
                     && w.projects == projects
                     && w.milestones == milestones
                     && w.refining_at_once == refining_at_once
+                    && w.model == g.model
             });
             if !same {
                 out.push(Event::GroupCreated {
@@ -210,6 +214,7 @@ impl Config {
                     projects,
                     milestones,
                     refining_at_once,
+                    model: g.model.clone(),
                 });
             }
         }

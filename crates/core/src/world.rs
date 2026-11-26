@@ -138,6 +138,7 @@ impl World {
                 projects,
                 milestones,
                 refining_at_once,
+                model,
             } => {
                 self.groups.insert(
                     group.clone(),
@@ -147,6 +148,7 @@ impl World {
                         projects: projects.clone(),
                         milestones: milestones.clone(),
                         refining_at_once: (*refining_at_once).max(1),
+                        model: model.clone(),
                     },
                 );
             }
@@ -534,7 +536,10 @@ impl World {
             group: group.clone(),
             machine: place.map_or_else(|| MachineId::new(LOCAL), |f| f.machine.clone()),
             folder: folder.cloned(),
-            brief: brief::write(role, i, self.projects.get(&issue.project), path),
+            brief: crate::launch::Brief {
+                model: self.groups.get(group).and_then(|g| g.model.clone()),
+                ..brief::write(role, i, self.projects.get(&issue.project), path)
+            },
         })
     }
 

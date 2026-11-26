@@ -232,6 +232,27 @@ impl Runners {
     }
 }
 
+/// What an agent needs to reach the daemon that started it: the folder of the
+/// daemon's own programs first on `PATH`, so `temet-work` is the matching command
+/// line, and the daemon's socket when it was given one.
+fn daemon_env() -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from))
+    {
+        let path = std::env::var("PATH").unwrap_or_default();
+        env.push(("PATH".to_string(), format!("{}:{path}", dir.display())));
+    }
+    if let Some(socket) = std::env::var_os("TEMET_WORK_SOCKET").filter(|s| !s.is_empty()) {
+        env.push((
+            "TEMET_WORK_SOCKET".to_string(),
+            socket.to_string_lossy().into_owned(),
+        ));
+    }
+    env
+}
+
 fn state_of(status: &Status, doing: Option<&str>) -> Option<AgentState> {
     match status {
         Status::Between => Some(AgentState::Idle),
@@ -304,10 +325,12 @@ impl Part for Runners {
                     labels.insert("log".to_string(), log.clone());
                 }
                 let mut program = program.clone();
-                // Commands the agent runs are recorded as its own.
+                // Commands the agent runs are recorded as its own, and reach this
+                // daemon with this daemon's own command line.
                 program
                     .env
                     .push((AGENT_VAR.to_string(), launch.agent.0.clone()));
+                program.env.extend(daemon_env());
                 let start = Start {
                     program,
                     cwd: brief

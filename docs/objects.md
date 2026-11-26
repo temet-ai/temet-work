@@ -13,7 +13,7 @@ same commands.
 
 | Object | Belongs to | What it is |
 |---|---|---|
-| Project | the app | A repository and its tracker (GitHub, GitLab or Jira), its checkout, the milestones in focus, its work folders and its merge and deploy steps. Its settings live in the repository as `.temet-work/config.yaml`. |
+| Project | the app | A repository: the tracker its issues come from (GitHub, GitLab or Jira), the code host its pull requests are on, its work folders, and its deploy and verify commands. Its settings are in the daemon's configuration (`docs/configuration.md`). |
 | Group | the app | Sessions working together on a goal: its agents and the issues it has taken, from one or more projects, in the order of the milestones it works on. The daemon coordinates a group; no agent does. Groups run side by side and do not wait on each other. |
 | Agent | a group | One session: its role (refiner, author, reviewer, arbiter, investigator), runtime and model, machine, work folder, terminal and state. |
 | Machine | the app | Where agents run, with its build slots. |

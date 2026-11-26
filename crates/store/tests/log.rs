@@ -25,6 +25,7 @@ fn events() -> Vec<Event> {
             projects: vec![ProjectId::new("ankh")],
             milestones: vec![MilestoneId::new("m1")],
             refining_at_once: 1,
+            model: None,
         },
         Event::FolderAdded {
             folder: FolderId::new("f1"),

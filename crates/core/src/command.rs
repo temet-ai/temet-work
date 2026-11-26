@@ -208,6 +208,7 @@ mod tests {
                 projects: vec![ProjectId::new("ankh")],
                 milestones: vec![],
                 refining_at_once: 1,
+                model: None,
             },
             Event::IssueSynced {
                 issue: issue(),
