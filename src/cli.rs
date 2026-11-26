@@ -11,7 +11,7 @@ pub use temet_work_core::launch::AGENT_VAR;
 /// How to call `temet-work`.
 pub const USAGE: &str = "\
 temet-work status
-temet-work plan ISSUE FILE                  a refiner's plan, as YAML
+temet-work plan ISSUE FILE                  a refiner's plan, as YAML; FILE - reads it from standard input
 temet-work ready ISSUE PULL                 the pull request is open and the checks hold;
                                             PULL is its number, needed the first time
 temet-work review ISSUE approve
@@ -49,6 +49,7 @@ pub fn request(
         "status" => Command::Status,
         "plan" => Command::Plan {
             issue: issue()?,
+            // `-` is standard input, so an agent can send a plan without writing a file.
             plan: plan(&read(Path::new(arg(2, "FILE")?))?)?,
         },
         "ready" => Command::Ready {

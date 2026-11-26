@@ -12,7 +12,7 @@ reports its step done.
 | Command | Who runs it | Accepted when the issue is |
 |---|---|---|
 | `temet-work status` | anyone | any |
-| `temet-work plan ISSUE FILE` | the refiner, with the plan as YAML | refining |
+| `temet-work plan ISSUE FILE` | the refiner, with the plan as YAML; `-` reads it from standard input | refining |
 | `temet-work ready ISSUE PULL` | the author, once the pull request is open and the plan's checks hold; `PULL` is its number, needed the first time | working, or fixing |
 | `temet-work review ISSUE approve` | the reviewer | in review |
 | `temet-work review ISSUE block POINT...` | the reviewer, one argument per thing to fix | in review |

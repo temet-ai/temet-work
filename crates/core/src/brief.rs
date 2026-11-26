@@ -41,10 +41,11 @@ pub fn write(
         Role::Refiner => format!(
             "Refine {id}: {title}. It is {source}.\n\
              Read the issue and the code it touches in this folder. Change no file here.\n\
-             Write a plan as YAML to a file outside this folder, one entry per check:\n\
+             Then send the plan, one entry per check, as YAML on standard input:\n\
+             temet-work plan {id} - <<'PLAN'\n\
              checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\
-             Then run: temet-work plan {id} <file>\n\
-             Where the issue leaves a choice open, pick the default you would defend and say why in the plan.",
+             PLAN\n\
+             Where the issue leaves a choice open, pick the default you would defend and say why in done_when.",
             title = issue.title,
         ),
         Role::Author => format!(

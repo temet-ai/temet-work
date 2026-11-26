@@ -26,7 +26,14 @@ fn main() -> ExitCode {
         _ => {}
     }
     let by = std::env::var(temet_work::cli::AGENT_VAR).ok();
+    // `-` is standard input, so an agent can send a plan without writing a file.
     let read = |p: &std::path::Path| {
+        if p == std::path::Path::new("-") {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .map_err(|e| format!("standard input: {e}"))?;
+            return Ok(text);
+        }
         std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))
     };
     let request = match cli::request(&args, by, read) {
