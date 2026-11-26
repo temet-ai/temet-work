@@ -6,10 +6,10 @@ session_id:
 # Extending temet-work from outside the repository
 
 This document records how someone outside this repository adds a tracker, a runner, an
-agent runtime or a check, what other systems do, the recommendation, and the decision.
-Inside the repository an adapter is a crate (`docs/architecture.md`).
+agent runtime or a check, and why. Inside the repository an adapter is a crate
+(`docs/architecture.md`).
 
-## Decision (26 November 2026)
+## What was decided on 26 November 2026
 
 Both transports from the start, not the recommendation below: trackers and the parsing half
 of checks are WebAssembly components, with network hosts, paths, time and memory enforced
