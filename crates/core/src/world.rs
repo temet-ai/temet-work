@@ -8,11 +8,16 @@
 
 use std::collections::BTreeMap;
 
+use crate::brief;
 use crate::effect::Effect;
 use crate::event::{Event, Verdict};
-use crate::ids::{AgentId, DecisionId, FolderId, GroupId, IssueId};
+use crate::ids::{AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, ProjectId};
+use crate::launch::Launch;
 use crate::model::Decision;
-use crate::model::{Agent, AgentState, DecisionKind, Folder, Group, Issue, Role, Stage};
+use crate::model::{Agent, AgentState, DecisionKind, Folder, Group, Issue, Project, Role, Stage};
+
+/// The machine an agent runs on when its project has no work folder.
+pub const LOCAL: &str = "local";
 
 /// How many review rounds run before an arbiter rules.
 pub const REVIEW_ROUNDS: u8 = 3;
@@ -20,6 +25,8 @@ pub const REVIEW_ROUNDS: u8 = 3;
 /// Everything the loop knows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct World {
+    /// Projects by id.
+    pub projects: BTreeMap<ProjectId, Project>,
     /// Issues by id.
     pub issues: BTreeMap<IssueId, Issue>,
     /// Groups by id.
@@ -54,15 +61,35 @@ impl World {
                 folder,
                 project,
                 machine,
+                path,
             } => {
-                self.folders
+                let f = self
+                    .folders
                     .entry(folder.clone())
                     .or_insert_with(|| Folder {
                         id: folder.clone(),
                         project: project.clone(),
                         machine: machine.clone(),
+                        path: path.clone(),
                         holder: None,
                     });
+                // A folder that moved keeps the issue that holds it.
+                f.machine = machine.clone();
+                f.path = path.clone();
+            }
+            Event::ProjectAdded {
+                project,
+                tracker,
+                name,
+            } => {
+                self.projects.insert(
+                    project.clone(),
+                    Project {
+                        id: project.clone(),
+                        tracker: tracker.clone(),
+                        name: name.clone(),
+                    },
+                );
             }
             Event::GroupCreated {
                 group,
@@ -292,6 +319,34 @@ impl World {
         }
         out.extend(self.place());
         out
+    }
+
+    /// What starting an agent takes: its id, the machine and folder it runs in,
+    /// and its brief. The id is its role and a number, counting every agent of
+    /// that role this world has started (`author-3`). An agent with no work
+    /// folder of its own runs in any folder of its project without holding it.
+    /// `None` when the issue is unknown.
+    pub fn launch(
+        &self,
+        group: &GroupId,
+        role: Role,
+        issue: &IssueId,
+        folder: Option<&FolderId>,
+    ) -> Option<Launch> {
+        let i = self.issues.get(issue)?;
+        let n = self.agents.values().filter(|a| a.role == role).count() + 1;
+        let place = match folder {
+            Some(f) => self.folders.get(f),
+            None => self.folders.values().find(|f| f.project == issue.project),
+        };
+        let path = place.map(|f| std::path::PathBuf::from(&f.path));
+        Some(Launch {
+            agent: AgentId::new(format!("{}-{n}", role.name())),
+            group: group.clone(),
+            machine: place.map_or_else(|| MachineId::new(LOCAL), |f| f.machine.clone()),
+            folder: folder.cloned(),
+            brief: brief::write(role, i, self.projects.get(&issue.project), path),
+        })
     }
 
     /// Merges when the review and the checks have both passed.

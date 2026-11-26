@@ -5,9 +5,11 @@
 //! This crate holds the [`Tracker`] contract, a [`FakeTracker`] and the
 //! [`contract`] every tracker adapter runs. Adapter crates depend on this crate only.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use temet_work_core::Part;
+use temet_work_core::ids::{IssueId, MilestoneId, ProjectId};
+use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
 
 /// An issue as a tracker reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -241,10 +243,93 @@ pub mod contract {
     }
 }
 
+/// How often a project is synced, by the daemon's clock.
+pub const SYNC_EVERY_MS: u64 = 60_000;
+
 /// The tracker part: the trackers compiled into this build, in the order they were added.
-#[derive(Default)]
+///
+/// It syncs each project from the tracker its configuration names, once a
+/// minute, and reports only what changed. It closes an issue in its tracker when
+/// the loop has verified it.
 pub struct Trackers {
     adapters: Vec<Box<dyn Tracker>>,
+    every_ms: u64,
+    synced_at: BTreeMap<ProjectId, u64>,
+    errors: BTreeMap<ProjectId, String>,
+}
+
+impl Default for Trackers {
+    fn default() -> Self {
+        Self {
+            adapters: Vec::new(),
+            every_ms: SYNC_EVERY_MS,
+            synced_at: BTreeMap::new(),
+            errors: BTreeMap::new(),
+        }
+    }
+}
+
+/// The events that bring the loop's view of `project` up to `open`, the issues
+/// its tracker lists as open now.
+pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec<Event> {
+    let id = |key: &str| IssueId::new(project.0.clone(), key);
+    let mut out = Vec::new();
+    let open_keys: BTreeSet<&str> = open.iter().map(|t| t.key.as_str()).collect();
+    for t in open {
+        let issue = id(&t.key);
+        let milestone = t.milestone.clone().map(MilestoneId::new);
+        let depends_on: Vec<IssueId> = t.depends_on.iter().map(|k| id(k)).collect();
+        let same = world.issues.get(&issue).is_some_and(|i| {
+            i.title == t.title
+                && i.milestone == milestone
+                && i.depends_on == depends_on
+                && i.order == t.order
+        });
+        // A dependency that is neither open nor known was closed before syncing began.
+        for d in &depends_on {
+            if !open_keys.contains(d.key.as_str())
+                && !world.issues.contains_key(d)
+                && !out
+                    .iter()
+                    .any(|e| matches!(e, Event::IssueSynced { issue, .. } if issue == d))
+            {
+                out.push(Event::IssueSynced {
+                    issue: d.clone(),
+                    title: String::new(),
+                    milestone: None,
+                    depends_on: Vec::new(),
+                    order: 0,
+                    closed: true,
+                });
+            }
+        }
+        if !same {
+            out.push(Event::IssueSynced {
+                issue,
+                title: t.title.clone(),
+                milestone,
+                depends_on,
+                order: t.order,
+                closed: false,
+            });
+        }
+    }
+    for i in world.issues.values() {
+        if &i.id.project == project
+            && i.stage != temet_work_core::model::Stage::Done
+            && !open_keys.contains(i.id.key.as_str())
+        {
+            out.push(Event::IssueSynced {
+                issue: i.id.clone(),
+                title: i.title.clone(),
+                milestone: i.milestone.clone(),
+                depends_on: i.depends_on.clone(),
+                order: i.order,
+                closed: true,
+            });
+        }
+    }
+    out
 }
 
 impl Trackers {
@@ -257,11 +342,70 @@ impl Trackers {
     pub fn ids(&self) -> Vec<&'static str> {
         self.adapters.iter().map(|a| a.id()).collect()
     }
+
+    /// Syncs every `ms` instead of every minute.
+    pub fn every(mut self, ms: u64) -> Self {
+        self.every_ms = ms;
+        self
+    }
 }
 
 impl Part for Trackers {
     fn id(&self) -> &'static str {
         "tracker"
+    }
+
+    fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
+        let mut events = Vec::new();
+        for project in world.projects.values() {
+            let due = self
+                .synced_at
+                .get(&project.id)
+                .is_none_or(|at| now_ms >= at + self.every_ms);
+            if !due {
+                continue;
+            }
+            self.synced_at.insert(project.id.clone(), now_ms);
+            let Some(tracker) = self.adapters.iter_mut().find(|a| a.id() == project.tracker) else {
+                self.errors.insert(
+                    project.id.clone(),
+                    format!(
+                        "{}: no tracker \"{}\" in this build",
+                        project.id, project.tracker
+                    ),
+                );
+                continue;
+            };
+            match tracker.issues(&project.name) {
+                Ok(open) => {
+                    self.errors.remove(&project.id);
+                    events.extend(changes(world, &project.id, &open));
+                }
+                Err(e) => {
+                    self.errors
+                        .insert(project.id.clone(), format!("{}: {e}", project.name));
+                }
+            }
+        }
+        let problem = (!self.errors.is_empty())
+            .then(|| self.errors.values().cloned().collect::<Vec<_>>().join("; "));
+        Polled { events, problem }
+    }
+
+    fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
+        let Effect::Close { issue } = effect else {
+            return Outcome::NotMine;
+        };
+        let Some(project) = world.projects.get(&issue.project) else {
+            return Outcome::Failed(format!("project {} is not configured", issue.project));
+        };
+        let Some(tracker) = self.adapters.iter_mut().find(|a| a.id() == project.tracker) else {
+            return Outcome::Failed(format!("no tracker \"{}\" in this build", project.tracker));
+        };
+        match tracker.close(&project.name, &issue.key) {
+            Ok(()) => Outcome::done(),
+            Err(e) => Outcome::Failed(e.to_string()),
+        }
     }
 }
 
@@ -307,6 +451,112 @@ mod tests {
         fn writable_issue(&self) -> Option<String> {
             Some("2".into())
         }
+    }
+
+    fn configured() -> World {
+        let mut w = World::default();
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new("ankh"),
+            tracker: "fake".into(),
+            name: "ankh/morpork".into(),
+        });
+        w
+    }
+
+    fn apply(w: &mut World, events: &[Event]) {
+        for e in events {
+            w.apply(e);
+        }
+    }
+
+    #[test]
+    fn syncs_open_issues_once_then_only_changes() {
+        let mut w = configured();
+        let mut part = Trackers::default();
+        part.add(Box::new(fake()));
+        let first = part.poll(&w, 0);
+        assert_eq!(first.problem, None);
+        assert_eq!(first.events.len(), 2);
+        apply(&mut w, &first.events);
+        assert_eq!(
+            part.poll(&w, SYNC_EVERY_MS - 1).events,
+            vec![],
+            "not due yet"
+        );
+        assert_eq!(
+            part.poll(&w, SYNC_EVERY_MS).events,
+            vec![],
+            "nothing changed"
+        );
+    }
+
+    #[test]
+    fn an_issue_closed_in_the_tracker_is_synced_as_closed() {
+        let mut w = configured();
+        let mut part = Trackers::default().every(0);
+        part.add(Box::new(fake()));
+        let first = part.poll(&w, 0).events;
+        apply(&mut w, &first);
+        let mut gone = fake();
+        gone.issues.retain(|(_, i)| i.key != "2");
+        let mut part = Trackers::default().every(0);
+        part.add(Box::new(gone));
+        let events = part.poll(&w, 1).events;
+        assert!(
+            matches!(events.as_slice(), [Event::IssueSynced { issue, closed: true, .. }] if issue.key == "2"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_dependency_closed_before_syncing_began_counts_as_done() {
+        let mut tracker = fake();
+        tracker.issues[0].1.depends_on = vec!["40".into()];
+        let mut part = Trackers::default();
+        part.add(Box::new(tracker));
+        let events = part.poll(&configured(), 0).events;
+        assert!(events.iter().any(
+            |e| matches!(e, Event::IssueSynced { issue, closed: true, .. } if issue.key == "40")
+        ));
+    }
+
+    #[test]
+    fn a_failing_project_stays_a_problem_until_it_syncs() {
+        let mut w = configured();
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new("klatch"),
+            tracker: "fake".into(),
+            name: "no-such/project".into(),
+        });
+        let mut part = Trackers::default();
+        part.add(Box::new(fake()));
+        let first = part.poll(&w, 0);
+        assert_eq!(first.events.len(), 2, "the project that works still syncs");
+        assert!(
+            first
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("no-such/project"))
+        );
+        assert!(
+            part.poll(&w, 1).problem.is_some(),
+            "still shown between syncs"
+        );
+    }
+
+    #[test]
+    fn closes_a_verified_issue_in_its_tracker() {
+        let w = configured();
+        let mut part = Trackers::default();
+        part.add(Box::new(fake()));
+        let close = Effect::Close {
+            issue: IssueId::new("ankh", "2"),
+        };
+        assert_eq!(part.carry_out(&close, &w), Outcome::done());
+        let unknown = Effect::Close {
+            issue: IssueId::new("klatch", "1"),
+        };
+        assert!(matches!(part.carry_out(&unknown, &w), Outcome::Failed(_)));
     }
 
     #[test]

@@ -30,6 +30,7 @@ fn events() -> Vec<Event> {
             folder: FolderId::new("f1"),
             project: ProjectId::new("ankh"),
             machine: MachineId::new("morpork"),
+            path: "/srv/ankh/f1".into(),
         },
         Event::IssueSynced {
             issue: IssueId::new("ankh", "1"),

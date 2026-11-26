@@ -10,7 +10,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use temet_work_core::Part;
+use temet_work_core::ids::AgentId;
+use temet_work_core::model::{AgentState, Role};
+use temet_work_core::world::LOCAL;
+use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
 
 /// The core type this contract uses, re-exported so adapters need no other crate.
 pub use temet_work_core::launch::Program;
@@ -135,9 +138,17 @@ pub trait Runner: Send {
 }
 
 /// The runner part: the runners compiled into this build, in the order they were added.
+///
+/// It starts each agent's program in a labelled terminal with the first runner in
+/// this build, turns runner updates into agent events, and delivers text to an
+/// agent between its turns, holding it while the agent is working.
 #[derive(Default)]
 pub struct Runners {
     adapters: Vec<Box<dyn Runner>>,
+    /// Each agent's terminal: the runner that holds it and its id there.
+    terminals: BTreeMap<String, (usize, TerminalId)>,
+    /// Text waiting for its agent to finish a turn, as (agent, text).
+    outbox: Vec<(String, String)>,
 }
 
 impl Runners {
@@ -152,9 +163,150 @@ impl Runners {
     }
 }
 
+impl Runners {
+    /// What an agent's terminal shows now.
+    pub fn screen(&mut self, agent: &str) -> Result<String, RunnerError> {
+        let (i, terminal) = self
+            .terminals
+            .get(agent)
+            .cloned()
+            .ok_or_else(|| RunnerError::Unknown(TerminalId(agent.to_string())))?;
+        self.adapters[i].screen(&terminal)
+    }
+
+    /// How many messages are waiting for their agent to finish a turn.
+    pub fn waiting(&self) -> usize {
+        self.outbox.len()
+    }
+
+    /// Sends what is waiting; keeps what the agent cannot take yet.
+    fn deliver(&mut self) {
+        let mut keep = Vec::new();
+        for (agent, text) in std::mem::take(&mut self.outbox) {
+            let Some((i, terminal)) = self.terminals.get(&agent).cloned() else {
+                keep.push((agent, text));
+                continue;
+            };
+            match self.adapters[i].send(&terminal, &text, true) {
+                Ok(()) => {}
+                Err(RunnerError::Busy | RunnerError::Blocked) => keep.push((agent, text)),
+                // The terminal is gone: its updates report the agent ended.
+                Err(_) => {}
+            }
+        }
+        self.outbox = keep;
+    }
+}
+
+fn state_of(status: &Status, doing: Option<&str>) -> Option<AgentState> {
+    match status {
+        Status::Between => Some(AgentState::Idle),
+        Status::Working => Some(AgentState::Working {
+            doing: doing.unwrap_or_default().to_string(),
+        }),
+        Status::Blocked { kind } => Some(AgentState::Blocked {
+            reason: kind.clone(),
+        }),
+        Status::Gone => Some(AgentState::Ended),
+        Status::Unknown => None,
+    }
+}
+
 impl Part for Runners {
     fn id(&self) -> &'static str {
         "runner"
+    }
+
+    fn poll(&mut self, world: &World, _now_ms: u64) -> Polled {
+        let mut events = Vec::new();
+        for (i, adapter) in self.adapters.iter_mut().enumerate() {
+            for u in adapter.updates() {
+                let Some(agent) = u.labels.get("agent").cloned() else {
+                    continue;
+                };
+                self.terminals
+                    .insert(agent.clone(), (i, u.terminal.clone()));
+                let Some(state) = state_of(&u.status, u.doing.as_deref()) else {
+                    continue;
+                };
+                let id = AgentId::new(agent);
+                if world.agents.get(&id).is_some_and(|a| a.state == state) {
+                    continue;
+                }
+                events.push(Event::AgentChanged { agent: id, state });
+            }
+        }
+        self.deliver();
+        Polled {
+            events,
+            problem: None,
+        }
+    }
+
+    fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
+        match effect {
+            Effect::Run { launch, program } => {
+                let Some(runner) = self.adapters.first_mut() else {
+                    return Outcome::Failed(
+                        "no terminal runner is compiled into this build".into(),
+                    );
+                };
+                let brief = &launch.brief;
+                let labels = BTreeMap::from([
+                    ("agent".to_string(), launch.agent.0.clone()),
+                    ("group".to_string(), launch.group.0.clone()),
+                    ("issue".to_string(), brief.issue.to_string()),
+                    ("role".to_string(), brief.role.name().to_string()),
+                ]);
+                let start = Start {
+                    program: program.clone(),
+                    cwd: brief
+                        .folder
+                        .clone()
+                        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+                        .unwrap_or_else(|| PathBuf::from("/")),
+                    labels,
+                    machine: (launch.machine.0 != LOCAL).then(|| launch.machine.0.clone()),
+                };
+                match runner.start(&start) {
+                    Ok(terminal) => {
+                        self.terminals.insert(launch.agent.0.clone(), (0, terminal));
+                        Outcome::Done {
+                            events: vec![Event::AgentStarted {
+                                agent: launch.agent.clone(),
+                                group: launch.group.clone(),
+                                role: brief.role,
+                                issue: Some(brief.issue.clone()),
+                                machine: launch.machine.clone(),
+                                folder: launch.folder.clone(),
+                            }],
+                            effects: Vec::new(),
+                        }
+                    }
+                    Err(e) => Outcome::Failed(e.to_string()),
+                }
+            }
+            Effect::RequestFix { issue, points } => {
+                let author = world.agents.values().rev().find(|a| {
+                    a.issue.as_ref() == Some(issue)
+                        && a.role == Role::Author
+                        && a.state != AgentState::Ended
+                });
+                let Some(author) = author else {
+                    return Outcome::Failed(format!("no author is running for {issue}"));
+                };
+                let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
+                self.outbox.push((
+                    author.id.0.clone(),
+                    format!(
+                        "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready {issue}"
+                    ),
+                ));
+                self.deliver();
+                Outcome::done()
+            }
+            _ => Outcome::NotMine,
+        }
     }
 }
 
@@ -162,6 +314,129 @@ impl Part for Runners {
 mod tests {
     use super::*;
     use crate::fake::FakeRunner;
+
+    use temet_work_core::ids::{FolderId, GroupId, IssueId, MachineId, ProjectId};
+    use temet_work_core::launch::Program;
+
+    /// A world with issue ankh#1 and a work folder for it.
+    fn world() -> World {
+        let mut w = World::default();
+        w.apply(&Event::FolderAdded {
+            folder: FolderId::new("f1"),
+            project: ProjectId::new("ankh"),
+            machine: MachineId::new(LOCAL),
+            path: ".".into(),
+        });
+        w.apply(&Event::IssueSynced {
+            issue: IssueId::new("ankh", "1"),
+            title: "Mend the clock".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        w
+    }
+
+    /// Runs `argv` as an author on ankh#1 and applies what the part reports.
+    fn run(part: &mut Runners, w: &mut World, argv: &[&str]) -> AgentId {
+        let launch = w
+            .launch(
+                &GroupId::new("watch"),
+                Role::Author,
+                &IssueId::new("ankh", "1"),
+                Some(&FolderId::new("f1")),
+            )
+            .expect("launch");
+        let agent = launch.agent.clone();
+        let run = Effect::Run {
+            launch,
+            program: Program {
+                argv: argv.iter().map(|a| a.to_string()).collect(),
+                env: vec![],
+            },
+        };
+        let Outcome::Done { events, .. } = part.carry_out(&run, w) else {
+            panic!("not started");
+        };
+        for e in &events {
+            w.apply(e);
+        }
+        assert!(matches!(events.as_slice(), [Event::AgentStarted { .. }]));
+        agent
+    }
+
+    fn runners() -> Runners {
+        let mut part = Runners::default();
+        part.add(Box::new(FakeRunner::default()));
+        part
+    }
+
+    #[test]
+    fn starts_a_labelled_terminal_and_reports_only_changes() {
+        let mut w = world();
+        let mut part = runners();
+        let agent = run(&mut part, &mut w, &["cat"]);
+        assert_eq!(agent.0, "author-1");
+        assert_eq!(w.agents[&agent].state, AgentState::Idle);
+        // The terminal's first update says it is between turns: the agent already is.
+        assert_eq!(part.poll(&w, 0).events, vec![]);
+    }
+
+    #[test]
+    fn a_terminal_at_a_prompt_makes_its_agent_blocked() {
+        let mut w = world();
+        let mut part = runners();
+        let agent = run(&mut part, &mut w, &[fake::PROMPT_PROGRAM]);
+        assert_eq!(
+            part.poll(&w, 0).events,
+            vec![Event::AgentChanged {
+                agent,
+                state: AgentState::Blocked {
+                    reason: "question".into()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn fixes_reach_the_author_between_turns_and_wait_while_it_is_at_a_prompt() {
+        let fix = Effect::RequestFix {
+            issue: IssueId::new("ankh", "1"),
+            points: vec!["no test for a stopped clock".into()],
+        };
+        let mut w = world();
+        let mut part = runners();
+        let idle = run(&mut part, &mut w, &["cat"]);
+        assert_eq!(part.carry_out(&fix, &w), Outcome::done());
+        let screen = part.screen(&idle.0).expect("screen");
+        assert!(screen.contains("- no test for a stopped clock"), "{screen}");
+        assert!(screen.contains("temet-work ready ankh#1"));
+
+        let mut w = world();
+        let mut part = runners();
+        let asking = run(&mut part, &mut w, &[fake::PROMPT_PROGRAM]);
+        part.carry_out(&fix, &w);
+        assert_eq!(part.waiting(), 1);
+        assert!(
+            !part
+                .screen(&asking.0)
+                .expect("screen")
+                .contains("stopped clock")
+        );
+    }
+
+    #[test]
+    fn a_fix_with_no_author_running_fails() {
+        let fix = Effect::RequestFix {
+            issue: IssueId::new("ankh", "1"),
+            points: vec![],
+        };
+        assert!(matches!(
+            runners().carry_out(&fix, &world()),
+            Outcome::Failed(_)
+        ));
+    }
 
     #[test]
     fn keeps_adapters_in_the_order_added() {

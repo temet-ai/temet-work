@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use temet_work_core::{Event, Part, World};
+use temet_work_core::{Event, Journal, Part, World};
 
 /// One logged event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +127,14 @@ impl Log {
     /// The file the log is in.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl Journal for Log {
+    fn append(&mut self, at_ms: u64, event: &Event) -> Result<(), String> {
+        Log::append(self, at_ms, event)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 

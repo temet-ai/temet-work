@@ -2,7 +2,11 @@
 //! one optional dependency and one `#[cfg]` block here; an adapter adds itself
 //! to its family inside the family's block. `tests/parts.rs` checks all three.
 
-use temet_work_core::Part;
+pub mod config;
+
+use std::path::Path;
+
+use temet_work_core::{Journal, Part, World};
 
 /// The parts compiled into this build, in a fixed order: families first, then
 /// services.
@@ -40,4 +44,23 @@ pub fn parts() -> Vec<Box<dyn Part>> {
     #[cfg(feature = "mike")]
     parts.push(Box::new(temet_work_mike::Mike));
     parts
+}
+
+/// Opens the event log at `path` and rebuilds the state from it. A build
+/// without the store keeps events in memory, so nothing survives a restart.
+#[cfg(feature = "store")]
+pub fn journal(path: &Path) -> Result<(Box<dyn Journal>, World), String> {
+    let (log, entries) = temet_work_store::Log::open(path).map_err(|e| e.to_string())?;
+    Ok((Box::new(log), temet_work_store::replay(&entries)))
+}
+
+/// Opens the event log at `path` and rebuilds the state from it. A build
+/// without the store keeps events in memory, so nothing survives a restart.
+#[cfg(not(feature = "store"))]
+pub fn journal(path: &Path) -> Result<(Box<dyn Journal>, World), String> {
+    let _ = path;
+    Ok((
+        Box::new(temet_work_core::host::Memory::default()),
+        World::default(),
+    ))
 }

@@ -5,15 +5,19 @@
 //! tests in `tests/parts.rs` check all three. It changes only for something every
 //! part gains.
 
+pub mod brief;
 pub mod effect;
 pub mod event;
+pub mod host;
 pub mod ids;
 pub mod launch;
 pub mod model;
+pub mod text;
 pub mod world;
 
 pub use effect::Effect;
 pub use event::{Event, Verdict};
+pub use host::{Host, Journal, Outcome, Polled};
 pub use world::World;
 
 /// A part of temet-work: a family of adapters (trackers, runners, agent
@@ -22,4 +26,18 @@ pub use world::World;
 pub trait Part: Send {
     /// A short, stable id. It is also the part's feature name.
     fn id(&self) -> &'static str;
+
+    /// What the part has seen since it was last asked, as events: issues synced
+    /// from a tracker, an agent that went idle. `now_ms` is the daemon's clock,
+    /// so a part polls on its own schedule without reading one.
+    fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
+        let _ = (world, now_ms);
+        Polled::default()
+    }
+
+    /// Carries out `effect` if it is this part's to do.
+    fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
+        let _ = (effect, world);
+        Outcome::NotMine
+    }
 }

@@ -56,16 +56,25 @@ What exists today:
 
 | Crate | State |
 |---|---|
-| `temet-work-core` | the objects and the work loop, 14 tests |
-| `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model |
+| `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, and the state as text |
+| `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, and holds text for an agent until its turn ends |
 | `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live`) and opens nothing in other test runs |
 | `temet-work-runtime-claude` | passes the runtime contract |
-| `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines |
+| `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
 | `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |
 | style, mike | skeletons |
+| `temet-work`, the root package | the parts, the configuration (`docs/configuration.md`), and `temet-workd`, which syncs GitHub issues and starts refiners |
 
-No daemon runs yet.
+What does not work yet:
+
+- The commands agents are told to run when they finish (`temet-work plan`, `ready`,
+  `review`, `rule`) do not exist, so an issue never gets past refining. They come with the
+  daemon's socket.
+- Nothing starts reviewers, merges, deploys or verifies: no part carries out those effects,
+  and the daemon lists each as a problem.
+- An agent the loop decided to start, which the daemon did not start before it stopped,
+  is not started after a restart.
 
 ## Who coordinates
 
@@ -77,6 +86,24 @@ issues it depends on are done. Review runs for at most three rounds before an ar
 rules. A group has no coordinator agent: in the research fleet the standing seat waited 25
 of its 28 minutes, and in mike's larger runs such seats were where the token and turn costs
 came from (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
+
+## How parts meet
+
+A part never names another part. They meet through the core's events and effects, and
+the host in `temet-work-core` routes them: it logs each event before applying it, then
+offers each effect the event led to to every part in order until one carries it out. What
+an effect leads to is handled before the next effect.
+
+Starting an agent shows the path. The loop decides to start a refiner on an issue. The
+runtime family asks the loop for the agent's id, folder and brief (`World::launch`),
+makes the program with its runtime, and asks for it to run (`Effect::Run`). The runner
+family starts it in a terminal labelled with the agent, group, issue and role, and reports
+`AgentStarted`. From then on the runner family turns the terminal's updates into the
+agent's state. Neither family names the other.
+
+Each part is also polled every round: it returns what it has seen as events, and any
+problem it has now, such as a tracker that cannot be reached. A problem stays listed
+until a poll comes back without it.
 
 ## Rules the tests enforce
 

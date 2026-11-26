@@ -29,6 +29,17 @@ pub enum Event {
         project: ProjectId,
         /// Its machine.
         machine: MachineId,
+        /// Where it is on that machine.
+        path: String,
+    },
+    /// A project was added, or its tracker changed.
+    ProjectAdded {
+        /// The project.
+        project: ProjectId,
+        /// The id of the tracker adapter that holds its issues.
+        tracker: String,
+        /// The tracker's own name for it.
+        name: String,
     },
     /// A group was made.
     GroupCreated {

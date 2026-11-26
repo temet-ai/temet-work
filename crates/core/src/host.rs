@@ -1,0 +1,181 @@
+//! The daemon's loop, without its I/O: it logs each event, applies it, and
+//! offers each effect to the parts until one carries it out. Parts do the I/O;
+//! the journal keeps the log.
+//!
+//! Work runs depth first: what an effect leads to is handled before the next
+//! effect, so an agent started by one effect is known before the next one is
+//! numbered.
+
+use std::collections::BTreeMap;
+
+use crate::Part;
+use crate::effect::Effect;
+use crate::event::Event;
+use crate::world::World;
+
+/// Where the host writes every event before it applies it.
+pub trait Journal: Send {
+    /// Appends one event, stamped `at_ms`. An error stops the host: state that
+    /// is not logged would be lost on restart.
+    fn append(&mut self, at_ms: u64, event: &Event) -> Result<(), String>;
+}
+
+/// A journal in memory, for tests and builds without a store.
+#[derive(Default)]
+pub struct Memory {
+    /// The events, with their times, in order.
+    pub events: Vec<(u64, Event)>,
+}
+
+impl Journal for Memory {
+    fn append(&mut self, at_ms: u64, event: &Event) -> Result<(), String> {
+        self.events.push((at_ms, event.clone()));
+        Ok(())
+    }
+}
+
+/// What a part did with an effect it was offered.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum Outcome {
+    /// Not this part's to do.
+    #[default]
+    NotMine,
+    /// Done, with what it led to.
+    Done {
+        /// Events to log and apply.
+        events: Vec<Event>,
+        /// Effects to offer next.
+        effects: Vec<Effect>,
+    },
+    /// This part's to do, and it failed.
+    Failed(String),
+}
+
+impl Outcome {
+    /// Done, leading to nothing more.
+    pub fn done() -> Self {
+        Self::Done {
+            events: Vec::new(),
+            effects: Vec::new(),
+        }
+    }
+}
+
+/// What a part reports when it is polled.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Polled {
+    /// What it saw, as events.
+    pub events: Vec<Event>,
+    /// What is wrong for it now, if anything. It stays shown until a poll
+    /// reports none; a part reports it on every poll while it lasts.
+    pub problem: Option<String>,
+}
+
+/// The most events and effects one call handles before it stops, so a loop
+/// between parts cannot hang the daemon.
+pub const MAX_STEPS: usize = 10_000;
+
+enum Work {
+    Event(Event),
+    Effect(Effect),
+}
+
+/// The loop with its parts and journal.
+pub struct Host {
+    world: World,
+    parts: Vec<Box<dyn Part>>,
+    journal: Box<dyn Journal>,
+    problems: BTreeMap<String, String>,
+}
+
+impl Host {
+    /// A host over `world`, already built from the journal's events.
+    pub fn new(world: World, parts: Vec<Box<dyn Part>>, journal: Box<dyn Journal>) -> Self {
+        Self {
+            world,
+            parts,
+            journal,
+            problems: BTreeMap::new(),
+        }
+    }
+
+    /// The loop's state.
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
+    /// What is wrong now, by where it came from: a part whose last poll failed,
+    /// or an effect that no part carried out.
+    pub fn problems(&self) -> &BTreeMap<String, String> {
+        &self.problems
+    }
+
+    /// Logs and applies `event`, then carries out everything it leads to.
+    pub fn handle(&mut self, now_ms: u64, event: Event) -> Result<(), String> {
+        let mut stack = vec![Work::Event(event)];
+        let mut steps = 0;
+        while let Some(work) = stack.pop() {
+            steps += 1;
+            if steps > MAX_STEPS {
+                return Err(format!(
+                    "stopped after {MAX_STEPS} steps: the parts keep asking for more"
+                ));
+            }
+            match work {
+                Work::Event(e) => {
+                    self.journal.append(now_ms, &e)?;
+                    let effects = self.world.apply(&e);
+                    stack.extend(effects.into_iter().rev().map(Work::Effect));
+                }
+                Work::Effect(effect) => match self.offer(&effect) {
+                    Outcome::Done { events, effects } => {
+                        stack.extend(effects.into_iter().rev().map(Work::Effect));
+                        stack.extend(events.into_iter().rev().map(Work::Event));
+                    }
+                    Outcome::Failed(why) => {
+                        self.problems.insert(effect.describe(), why);
+                    }
+                    Outcome::NotMine if effect.needs_a_part() => {
+                        self.problems
+                            .insert(effect.describe(), "no part in this build does this".into());
+                    }
+                    Outcome::NotMine => {}
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// Asks each part what it has seen and handles the events it reports.
+    /// Returns how many there were.
+    pub fn tick(&mut self, now_ms: u64) -> Result<usize, String> {
+        let mut seen = Vec::new();
+        for part in &mut self.parts {
+            let polled = part.poll(&self.world, now_ms);
+            match polled.problem {
+                Some(why) => self.problems.insert(part.id().to_string(), why),
+                None => self.problems.remove(part.id()),
+            };
+            seen.extend(polled.events);
+        }
+        let n = seen.len();
+        for event in seen {
+            self.handle(now_ms, event)?;
+        }
+        Ok(n)
+    }
+
+    fn offer(&mut self, effect: &Effect) -> Outcome {
+        for part in &mut self.parts {
+            match part.carry_out(effect, &self.world) {
+                Outcome::NotMine => {}
+                outcome => return outcome,
+            }
+        }
+        Outcome::NotMine
+    }
+}
+
+#[cfg(test)]
+#[path = "host_tests.rs"]
+mod tests;

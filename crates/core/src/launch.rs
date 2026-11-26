@@ -31,3 +31,19 @@ pub struct Brief {
     /// The folder it works in.
     pub folder: Option<PathBuf>,
 }
+
+/// An agent about to start: who it is, where it runs, and its brief. The loop
+/// makes one from its decision to start an agent ([`crate::World::launch`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Launch {
+    /// Its id.
+    pub agent: crate::ids::AgentId,
+    /// Its group.
+    pub group: crate::ids::GroupId,
+    /// The machine it runs on.
+    pub machine: crate::ids::MachineId,
+    /// The work folder it holds, for an author.
+    pub folder: Option<crate::ids::FolderId>,
+    /// What it is told.
+    pub brief: Brief,
+}

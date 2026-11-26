@@ -100,6 +100,19 @@ pub enum Role {
     Investigator,
 }
 
+impl Role {
+    /// The role in one lower-case word, as agent ids and labels use it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Refiner => "refiner",
+            Self::Author => "author",
+            Self::Reviewer => "reviewer",
+            Self::Arbiter => "arbiter",
+            Self::Investigator => "investigator",
+        }
+    }
+}
+
 /// What an agent is doing, as its runner reports it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentState {
@@ -162,8 +175,21 @@ pub struct Folder {
     pub project: ProjectId,
     /// The machine it is on.
     pub machine: MachineId,
+    /// Where it is on that machine.
+    pub path: String,
     /// The issue that holds it, if any.
     pub holder: Option<IssueId>,
+}
+
+/// A project: one repository and the tracker its issues come from.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Project {
+    /// Its id.
+    pub id: ProjectId,
+    /// The id of the tracker adapter that holds its issues.
+    pub tracker: String,
+    /// The tracker's own name for it (`owner/repo`, a project key).
+    pub name: String,
 }
 
 /// What a decision settles.

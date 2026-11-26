@@ -152,6 +152,30 @@ struct Shared {
     alive: bool,
 }
 
+/// Turns a snapshot of terminals (from subscribing, or after a missed stretch)
+/// into one update each, so terminals started before the daemon are known again.
+fn take_snapshot(terminals: &Value, s: &mut Shared) {
+    for t in terminals.as_array().into_iter().flatten() {
+        let Some(addr) = t.get("address").and_then(Value::as_str) else {
+            continue;
+        };
+        let labels = labels_of(t.get("labels"));
+        s.labels.insert(addr.to_string(), labels.clone());
+        s.updates.push(Update {
+            terminal: TerminalId(addr.to_string()),
+            labels,
+            status: status_of(
+                t.pointer("/status/state").and_then(Value::as_str),
+                t.pointer("/status/kind").and_then(Value::as_str),
+            ),
+            doing: t
+                .pointer("/status/msg")
+                .and_then(Value::as_str)
+                .map(String::from),
+        });
+    }
+}
+
 fn follow(mut conn: Conn, shared: Arc<Mutex<Shared>>) {
     let mut buf = String::new();
     loop {
@@ -202,26 +226,8 @@ fn follow(mut conn: Conn, shared: Arc<Mutex<Shared>>) {
             }
             Some("missed") => {
                 // The reader fell behind: the core sends a fresh snapshot of terminals.
-                for t in msg
-                    .pointer("/params/terminals")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    let Some(addr) = t.get("address").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let labels = labels_of(t.get("labels"));
-                    s.labels.insert(addr.to_string(), labels.clone());
-                    s.updates.push(Update {
-                        terminal: TerminalId(addr.to_string()),
-                        labels,
-                        status: status_of(
-                            t.pointer("/status/state").and_then(Value::as_str),
-                            t.pointer("/status/kind").and_then(Value::as_str),
-                        ),
-                        doing: None,
-                    });
+                if let Some(terminals) = msg.pointer("/params/terminals") {
+                    take_snapshot(terminals, &mut s);
                 }
             }
             _ => {}
@@ -254,11 +260,14 @@ impl Herdr {
         let following = self.shared.lock().map(|s| s.alive).unwrap_or(false);
         if !following {
             let mut events = Conn::open(&path)?;
-            events
+            let snapshot = events
                 .call("events.subscribe", json!({"labels": {OWNER.0: OWNER.1}}))
                 .map_err(rpc)?;
             if let Ok(mut s) = self.shared.lock() {
                 s.alive = true;
+                if let Some(terminals) = snapshot.get("terminals") {
+                    take_snapshot(terminals, &mut s);
+                }
             }
             let shared = Arc::clone(&self.shared);
             std::thread::spawn(move || follow(events, shared));
@@ -416,6 +425,23 @@ mod tests {
         assert_eq!(mapped(&t, e("status_mismatch")), RunnerError::Busy);
         assert_eq!(mapped(&t, e("finished")), RunnerError::Gone);
         assert_eq!(mapped(&t, e("not_found")), RunnerError::Unknown(t.clone()));
+    }
+
+    #[test]
+    fn a_snapshot_becomes_one_update_per_terminal_with_its_labels() {
+        let mut s = Shared::default();
+        let snapshot = json!([
+            {"address": "t3", "labels": {"agent": "author-1", "owner": "temet-work"},
+             "status": {"state": "working", "msg": "running the tests"}},
+            {"address": "t4", "labels": {"agent": "refiner-1"}, "status": {"state": "done"}},
+            {"labels": {"agent": "no-address"}}
+        ]);
+        take_snapshot(&snapshot, &mut s);
+        assert_eq!(s.updates.len(), 2);
+        assert_eq!(s.updates[0].labels["agent"], "author-1");
+        assert_eq!(s.updates[0].status, Status::Working);
+        assert_eq!(s.updates[0].doing.as_deref(), Some("running the tests"));
+        assert_eq!(s.updates[1].status, Status::Between);
     }
 
     #[test]

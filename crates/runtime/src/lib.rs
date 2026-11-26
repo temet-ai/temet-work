@@ -4,7 +4,7 @@
 //! This crate holds the [`Runtime`] contract, a [`FakeRuntime`] and the
 //! [`contract`] every runtime adapter runs. Adapter crates depend on this crate only.
 
-use temet_work_core::Part;
+use temet_work_core::{Effect, Outcome, Part, World};
 
 /// The core types this contract uses, re-exported so adapters need no other crate.
 pub use temet_work_core::launch::{Brief, Program};
@@ -102,11 +102,75 @@ impl Part for Runtimes {
     fn id(&self) -> &'static str {
         "runtime"
     }
+
+    /// Turns the loop's decision to start an agent into a program to run, with
+    /// the first runtime in this build.
+    fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
+        let Effect::StartAgent {
+            group,
+            role,
+            issue,
+            folder,
+        } = effect
+        else {
+            return Outcome::NotMine;
+        };
+        let Some(runtime) = self.adapters.first() else {
+            return Outcome::Failed("no agent runtime is compiled into this build".into());
+        };
+        let Some(launch) = world.launch(group, *role, issue, folder.as_ref()) else {
+            return Outcome::Failed(format!("{issue} is not known"));
+        };
+        let program = runtime.program(&launch.brief);
+        Outcome::Done {
+            events: Vec::new(),
+            effects: vec![Effect::Run { launch, program }],
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turns_a_start_into_a_program_to_run() {
+        use temet_work_core::Event;
+        use temet_work_core::ids::{GroupId, IssueId};
+        use temet_work_core::model::Role;
+        let mut world = World::default();
+        world.apply(&Event::IssueSynced {
+            issue: IssueId::new("ankh", "1"),
+            title: "Mend the clock".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let start = Effect::StartAgent {
+            group: GroupId::new("watch"),
+            role: Role::Refiner,
+            issue: IssueId::new("ankh", "1"),
+            folder: None,
+        };
+        let mut part = Runtimes::default();
+        assert!(matches!(part.carry_out(&start, &world), Outcome::Failed(_)));
+        part.add(Box::new(FakeRuntime));
+        let Outcome::Done { effects, .. } = part.carry_out(&start, &world) else {
+            panic!("not done");
+        };
+        let [Effect::Run { launch, program }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(launch.agent.0, "refiner-1");
+        assert_eq!(program.argv[0], "fake-agent");
+        assert!(
+            program
+                .argv
+                .last()
+                .is_some_and(|t| t.contains("Mend the clock"))
+        );
+    }
 
     #[test]
     fn keeps_adapters_in_the_order_added() {

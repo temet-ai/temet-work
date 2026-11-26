@@ -24,6 +24,7 @@ fn folder(id: &str) -> Event {
         folder: FolderId::new(id),
         project: ProjectId::new("ankh"),
         machine: MachineId::new("morpork"),
+        path: format!("/srv/ankh/{id}"),
     }
 }
 

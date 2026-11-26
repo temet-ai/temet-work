@@ -2,6 +2,7 @@
 //! back with events.
 
 use crate::ids::{DecisionId, FolderId, GroupId, IssueId};
+use crate::launch::{Launch, Program};
 use crate::model::Role;
 
 /// One thing for the daemon to do.
@@ -67,4 +68,39 @@ pub enum Effect {
         /// The decision it comes from.
         from: DecisionId,
     },
+    /// Run an agent's program in a terminal. The part that turns a brief into
+    /// a program asks for this; the part that runs terminals carries it out.
+    Run {
+        /// The agent.
+        launch: Launch,
+        /// Its program.
+        program: Program,
+    },
+}
+
+impl Effect {
+    /// The effect in a few words, for a problem report.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::StartAgent { role, issue, .. } => format!("start a {} on {issue}", role.name()),
+            Self::RequestFix { issue, .. } => format!("send the fixes for {issue} to its author"),
+            Self::StartReview { issue, round } => format!("start review round {round} of {issue}"),
+            Self::Merge { issue } => format!("merge {issue}"),
+            Self::Deploy { issue } => format!("deploy {issue}"),
+            Self::Verify { issue } => format!("verify {issue} after deploy"),
+            Self::Close { issue } => format!("close {issue} in its tracker"),
+            Self::ReleaseFolder { folder } => format!("release folder {folder}"),
+            Self::ApplyOverturn { decision } => {
+                format!("apply the overturn of decision {}", decision.0)
+            }
+            Self::ProposeRule { from } => format!("propose a rule from decision {}", from.0),
+            Self::Run { launch, .. } => format!("run {}", launch.agent),
+        }
+    }
+
+    /// Whether a part has to do something. A released folder is already free
+    /// in the loop's state; nothing outside needs to hear of it.
+    pub fn needs_a_part(&self) -> bool {
+        !matches!(self, Self::ReleaseFolder { .. })
+    }
 }
