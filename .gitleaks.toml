@@ -1,0 +1,11 @@
+# gitleaks for temet-work (scripts/export-public runs it on the public tree): the
+# default rules, less the fakes the tests need. Add each fake literally, never a
+# broad pattern; this file ships in the public tree.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "fake tokens in tests"
+regexes = [
+  '''glpat-abcdefghijklmnopqrst''',
+]

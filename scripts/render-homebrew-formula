@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Render the tap formula for temet-work from a release's checksums.txt.
+
+usage: render-homebrew-formula VERSION OWNER/REPO checksums.txt > Formula/temet-work.rb
+
+The archives are named <name>-v<version>-<target>.tar.gz and hold the binary,
+LICENSE and THIRD-PARTY-NOTICES.md.
+"""
+
+import argparse
+import re
+from pathlib import Path
+
+NAME = "temet-work"
+DESC = "Runs groups of coding-agent sessions through tickets, from refining to merged and deployed code, across repos."
+TARGETS = {
+    "mac_arm": "aarch64-apple-darwin",
+    "mac_intel": "x86_64-apple-darwin",
+    "linux_arm": "aarch64-unknown-linux-gnu",
+    "linux_intel": "x86_64-unknown-linux-gnu",
+}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("version", help="SemVer without the leading v")
+    parser.add_argument("release_repo", help="public owner/repo holding the release assets")
+    parser.add_argument("checksums", type=Path)
+    args = parser.parse_args()
+    if not re.fullmatch(r"\d+\.\d+\.\d+(-(alpha|beta|rc)\.\d+)?", args.version):
+        parser.error("version must be SemVer, such as 0.1.0-alpha.1 or 1.2.0")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.release_repo):
+        parser.error("release_repo must be owner/repo")
+
+    tag = f"v{args.version}"
+    digests = {}
+    for line in args.checksums.read_text().splitlines():
+        match = re.fullmatch(r"([a-fA-F0-9]{64})\s+\*?(\S+)", line)
+        if not match:
+            parser.error(f"invalid checksum line: {line!r}")
+        digest, filename = match.groups()
+        digests[filename.removeprefix("./")] = digest.lower()
+
+    def block(target: str, indent: str) -> str:
+        filename = f"{NAME}-{tag}-{target}.tar.gz"
+        if filename not in digests:
+            parser.error(f"missing {filename} in checksums")
+        return (
+            f'{indent}url "https://github.com/{args.release_repo}/releases/download/{tag}/{filename}"\n'
+            f'{indent}sha256 "{digests[filename]}"'
+        )
+
+    klass = "".join(part.capitalize() for part in re.split(r"[-_]", NAME))
+    print(
+        f'''class {klass} < Formula
+  desc "{DESC}"
+  homepage "https://github.com/{args.release_repo}"
+  license "MIT"
+  version "{args.version}"
+
+  on_macos do
+    on_arm do
+{block(TARGETS["mac_arm"], "      ")}
+    end
+    on_intel do
+{block(TARGETS["mac_intel"], "      ")}
+    end
+  end
+
+  on_linux do
+    on_arm do
+{block(TARGETS["linux_arm"], "      ")}
+    end
+    on_intel do
+{block(TARGETS["linux_intel"], "      ")}
+    end
+  end
+
+  def install
+    bin.install "{NAME}"
+    prefix.install "LICENSE", "THIRD-PARTY-NOTICES.md"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{{bin}}/{NAME} --version")
+  end
+end'''
+    )
+
+
+if __name__ == "__main__":
+    main()

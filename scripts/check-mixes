@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Check the app in its mixes of parts and run tests/mix.rs in each.
+#
+#   scripts/check-mixes   no parts, each alone, all, each adapter with its
+#                         part and the shipped mix: checked, and their smoke
+#                         (`--quick` is the same run)
+#
+# Not the 2^n combinations: a guard test keeps parts from depending on each
+# other, so what two parts do together runs in the all-parts mix. Not a
+# crate's own suite: CI runs the workspace once. A mix whose check fails does
+# not run its tests.
+#
+# The parts are the features in the root Cargo.toml that name a part crate
+# (`dep:<app>-<name>`); a feature `<part>-<x>` is an adapter of that part and
+# is built with its part, not as a mix bit. Uses cargo-nextest when installed.
+# Works with bash 3.2 (macOS) and GNU or BSD tools.
+
+# Not -u: bash 3.2 calls an empty array unbound.
+set -e
+
+cd "$(dirname "$0")/.."
+
+case "${1:-}" in
+    --quick | "") ;;
+    *) echo "usage: $0 [--quick]" >&2; exit 2 ;;
+esac
+
+if cargo nextest --version >/dev/null 2>&1; then
+    test_cmd="cargo nextest run"
+else
+    test_cmd="cargo test --no-fail-fast"
+fi
+
+# The root package's name: the first `name = ` after `[package]`.
+app=$(awk '
+    /^\[package\]/ { on = 1; next }
+    /^\[/ { on = 0 }
+    on && /^name[ \t]*=/ { gsub(/.*=[ \t]*"|".*/, ""); print; exit }
+' Cargo.toml)
+[ -n "$app" ] || { echo "check-mixes: no [package] name in Cargo.toml" >&2; exit 1; }
+
+parts=()
+while IFS= read -r name; do
+    [ -n "$name" ] && parts+=("$name")
+done <<EOF
+$(awk -v dep="dep:$app-" '
+    /^\[features\]/ { on = 1; next }
+    /^\[/ { on = 0 }
+    on && /^[A-Za-z0-9_-]+[ \t]*=/ && index($0, dep) {
+        name = $0
+        sub(/[ \t]*=.*/, "", name)
+        print name
+    }
+' Cargo.toml)
+EOF
+
+is_part() {
+    for p in "${parts[@]}"; do
+        [ "$p" = "$1" ] && return 0
+    done
+    return 1
+}
+adapters=()
+plain=()
+for f in "${parts[@]}"; do
+    owner=${f%%-*}
+    if [ "$owner" != "$f" ] && is_part "$owner"; then
+        adapters+=("$f")
+    else
+        plain+=("$f")
+    fi
+done
+parts=("${plain[@]}")
+
+echo "app: $app"
+echo "parts: ${parts[*]:-none}"
+echo "adapters: ${adapters[*]:-none}"
+
+failed=()
+started=$(date +%s)
+
+build() {
+    echo
+    echo "== mix [${1:-no parts}]"
+    if ! cargo check --no-default-features --features "$1"; then
+        failed+=("cargo check --no-default-features --features \"$1\"")
+        return
+    fi
+    # shellcheck disable=SC2086
+    if ! $test_cmd -p "$app" --no-default-features --features "$1" --test mix; then
+        failed+=("$test_cmd -p $app --no-default-features --features \"$1\" --test mix")
+    fi
+}
+
+build ""
+all=""
+for p in "${parts[@]}"; do
+    build "$p"
+    all="${all:+$all,}$p"
+done
+[ "${#parts[@]}" -gt 1 ] && build "$all"
+if [ "${#adapters[@]}" -gt 0 ]; then
+    for a in "${adapters[@]}"; do
+        build "${a%%-*},$a"
+        all="${all:+$all,}$a"
+    done
+    build "$all"
+fi
+
+echo
+echo "took $(($(date +%s) - started))s"
+if [ "${#failed[@]}" -gt 0 ]; then
+    echo "FAILED:"
+    for f in "${failed[@]}"; do
+        echo "  $f"
+    done
+    exit 1
+fi
+echo "every mix builds and passes"

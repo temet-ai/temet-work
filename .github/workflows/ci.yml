@@ -1,0 +1,65 @@
+name: CI
+
+# Every pull request and push to main, Linux only: the full platform matrix runs
+# on release tags (release.yml), so a PR push costs minutes, not hours.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      # .cargo/config.toml links with mold on Linux; runners have none.
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Licences, advisories and sources
+        run: cargo deny check
+      - name: Clippy
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo nextest run --workspace --all-features --locked --profile ci
+      # A crate whose suite passes 10 s fails the build (docs/architecture.md, "Tests").
+      - name: Test time budget
+        run: scripts/test-budget target/nextest/ci/junit.xml --seconds 10
+      # No parts, each part alone, all parts, each adapter with its family.
+      - name: Mixes
+        run: scripts/check-mixes
+
+  # A Node package (renderer, sidecar, web UI): one job each, in its folder.
+  # node:
+  #   runs-on: ubuntu-22.04
+  #   defaults:
+  #     run:
+  #       working-directory: web
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '24'
+  #         cache: npm
+  #         cache-dependency-path: web/package-lock.json
+  #     - run: npm ci --no-audit --no-fund
+  #     - run: npm run typecheck
+  #     - run: npm test

@@ -1,0 +1,14 @@
+# Every cargo test (and `cargo run`) is sandboxed: temet-work starts no browser,
+# clipboard, notification, terminal, editor or third-party sign-in while
+# TEMET_WORK_SANDBOX is set. `TEMET_WORK_SANDBOX= cargo run` for a live run. The Mac has a
+# desktop in every test run; Linux CI does not, which hides a test that opens one.
+[env]
+TEMET_WORK_SANDBOX = "1"
+# Times are drawn in UTC under cargo, so a recorded screen or snapshot reads the
+# same on every machine and in CI. The installed program uses the user's zone.
+TZ = { value = "UTC", force = true }
+
+# Link with mold on Linux (needs `pacman -S mold` / `apt install mold`, and
+# rui314/setup-mold in CI). The Mac keeps its linker.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
