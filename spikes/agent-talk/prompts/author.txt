@@ -1,0 +1,6 @@
+The arbiter's {ADDRKIND} is {ARBITER}.
+Your steps:
+1. Now: reply READY and stop. Wait for message {P}1 from the reviewer.
+2. When {P}1 arrives: send {P}2 to the reviewer (the sender of {P}1): "{P}2 " followed by the argument in author-position.md.
+3. When {P}3 arrives: send {P}4 to the arbiter: "{P}4 DISPUTE on mike issue 516. Reviewer {ADDRKIND}: <the sender of {P}3>. Reviewer says: <their point>. Author says: <your point>."
+4. When {P}5 arrives: say the ruling and DONE. Do not argue.

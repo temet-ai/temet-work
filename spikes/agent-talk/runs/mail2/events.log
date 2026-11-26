@@ -1,0 +1,49 @@
+{"at": "2026-11-26T17:30:12.368+02:00", "type": "labels", "terminal": "t1t1", "role": "arbiter", "status": {"app": "claude-code", "state": "working"}, "state": "live"}
+{"at": "2026-11-26T17:30:15.402+02:00", "type": "status", "terminal": "t1t1", "role": null, "status": {"app": "claude-code", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:30:15.402+02:00", "type": "turn", "terminal": "t1t1", "role": null, "status": null, "state": "done"}
+{"at": "2026-11-26T17:30:17.319+02:00", "type": "labels", "terminal": "t1t2", "role": "author", "status": {"app": "claude-code", "state": "working"}, "state": "live"}
+{"at": "2026-11-26T17:30:18.808+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:30:18.809+02:00", "type": "turn", "terminal": "t1t2", "role": null, "status": null, "state": "done"}
+{"at": "2026-11-26T17:30:19.656+02:00", "type": "status", "terminal": "t1t1", "role": null, "status": {"app": "claude-code", "msg": "ready; reading mike's launch 2083 brief next", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:30:21.127+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "msg": "read mail; reading task brief 212bf9f8 before starting", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:30:23.207+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:30:23.583+02:00", "type": "labels", "terminal": "t1t3", "role": "reviewer", "status": {"app": "claude-code", "state": "working"}, "state": "live"}
+{"at": "2026-11-26T17:30:25.603+02:00", "type": "status", "terminal": "t1t3", "role": null, "status": {"app": "claude-code", "msg": "Reading spikes/agent-talk/fixture/review-comment.md", "state": "working"}, "state": null}
+{"at": "2026-11-26T17:30:30.513+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "state": "working"}, "state": null}
+{"at": "2026-11-26T17:30:31.471+02:00", "type": "status", "terminal": "t1t3", "role": null, "status": {"app": "claude-code", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:30:31.472+02:00", "type": "turn", "terminal": "t1t3", "role": null, "status": null, "state": "done"}
+{"at": "2026-11-26T17:30:34.094+02:00", "type": "status", "terminal": "t1t3", "role": null, "status": {"app": "claude-code", "msg": "M1 sent to author; awaiting their M2 reply, not polling", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:30:38.206+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:30:49.355+02:00", "type": "status", "terminal": "t1t3", "role": null, "status": {"app": "claude-code", "state": "working"}, "state": null}
+{"at": "2026-11-26T17:30:49.733+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:30:49.733+02:00", "type": "turn", "terminal": "t1t2", "role": null, "status": null, "state": "done"}
+{"at": "2026-11-26T17:30:52.318+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "msg": "M2 sent to reviewer; waiting on reviewer's M3", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:30:53.207+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:30:54.541+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "state": "working"}, "state": null}
+{"at": "2026-11-26T17:30:55.399+02:00", "type": "status", "terminal": "t1t3", "role": null, "status": {"app": "claude-code", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:30:55.399+02:00", "type": "turn", "terminal": "t1t3", "role": null, "status": null, "state": "done"}
+{"at": "2026-11-26T17:30:57.686+02:00", "type": "status", "terminal": "t1t3", "role": null, "status": {"app": "claude-code", "msg": "waiting on arbiter's M6 after sending M3 to hold block", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:31:02.005+02:00", "type": "status", "terminal": "t1t1", "role": null, "status": {"app": "claude-code", "state": "working"}, "state": null}
+{"at": "2026-11-26T17:31:03.334+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:31:03.334+02:00", "type": "turn", "terminal": "t1t2", "role": null, "status": null, "state": "done"}
+{"at": "2026-11-26T17:31:06.752+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "msg": "M4 sent to arbiter; waiting on M5 from peer", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:31:08.207+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:31:23.206+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:31:25.378+02:00", "type": "status", "terminal": "t1t3", "role": null, "status": {"app": "claude-code", "state": "working"}, "state": null}
+{"at": "2026-11-26T17:31:26.574+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "state": "working"}, "state": null}
+{"at": "2026-11-26T17:31:26.854+02:00", "type": "status", "terminal": "t1t1", "role": null, "status": {"app": "claude-code", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:31:26.854+02:00", "type": "turn", "terminal": "t1t1", "role": null, "status": null, "state": "done"}
+{"at": "2026-11-26T17:31:27.470+02:00", "type": "status", "terminal": "t1t3", "role": null, "status": {"app": "claude-code", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:31:27.471+02:00", "type": "turn", "terminal": "t1t3", "role": null, "status": null, "state": "done"}
+{"at": "2026-11-26T17:31:30.746+02:00", "type": "status", "terminal": "t1t1", "role": null, "status": {"app": "claude-code", "msg": "launch 2083 brief: last step DONE, still following it", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:31:31.285+02:00", "type": "status", "terminal": "t1t3", "role": null, "status": {"app": "claude-code", "msg": "M6 ruling relayed; test must cover all elicitation fields", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:31:33.876+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:31:33.966+02:00", "type": "turn", "terminal": "t1t2", "role": null, "status": null, "state": "done"}
+{"at": "2026-11-26T17:31:37.026+02:00", "type": "status", "terminal": "t1t2", "role": null, "status": {"app": "claude-code", "msg": "arbiter ruling sent to reviewer; elicitation schema check added", "state": "done"}, "state": null}
+{"at": "2026-11-26T17:31:38.206+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:31:53.206+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:32:08.207+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:32:23.206+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:32:38.206+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:32:53.207+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}
+{"at": "2026-11-26T17:33:08.206+02:00", "type": null, "terminal": null, "role": null, "status": null, "state": null}

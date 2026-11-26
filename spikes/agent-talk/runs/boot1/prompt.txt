@@ -1,0 +1,1 @@
+Reply READY. If a message with an id like B1 reaches you, reply with its id. Never edit files or send anything.

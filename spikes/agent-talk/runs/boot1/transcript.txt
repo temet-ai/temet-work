@@ -1,0 +1,5 @@
+===== booting 78c7061f-6fcb-4b63-a971-0303b304f47a t1sw
+15:29:24.426 got  <hc from="t1s1">Reply READY. If a message with an id like B1 reaches you, reply with its id. Never edit files or send anything.</hc>
+15:29:26.370 says READY
+15:29:27.520 got  <hc from="t1s1">B1 probe message</hc>
+15:29:29.292 says B1

@@ -1,0 +1,1 @@
+Talk only through hc, never through mike mail. Send with one Bash command: hc send <terminal> '<message on one line, no apostrophes>'. A peer's message arrives by itself as a new turn, as <hc from="<its terminal> <name>">text</hc>; do not poll, wait or sleep. hc may also type notes about other terminals; ignore anything that is not a peer message with an id.

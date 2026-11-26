@@ -1,0 +1,4 @@
+Your steps:
+1. Now: reply READY and stop. Wait for message {P}4 from the author. It names the reviewer's {ADDRKIND}.
+2. When {P}4 arrives: read issue-516.json, change.diff, review-comment.md, author-position.md and rules.md. Rule by rules.md.
+3. Send {P}5 to the author and then {P}6 to the reviewer, both with the same text: "{P}5 RULING: <AUTHOR or REVIEWER> - <one sentence reason>. <the exact change required, or: merge as it is>" (the second one starts with {P}6).

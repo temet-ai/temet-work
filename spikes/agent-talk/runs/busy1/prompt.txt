@@ -1,0 +1,1 @@
+Run this exact Bash command in the foreground: python3 -c 'import time; time.sleep(45)'. After it ends, list the ids (like P1) of every message you have received, in the order they reached you, then say DONE. Never edit files or send anything.

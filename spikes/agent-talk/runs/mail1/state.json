@@ -1,0 +1,14 @@
+{
+  "arbiter": {
+    "session": "fc7425d1-83b4-4842-811b-ee0ac7075603",
+    "terminal": "t1s6"
+  },
+  "author": {
+    "session": "b51e6484-e7ac-41f2-a53e-41dd9352d187",
+    "terminal": "t1s7"
+  },
+  "reviewer": {
+    "session": "cde65f11-871e-4db1-b6ab-51190b9fea3b",
+    "terminal": "t1s8"
+  }
+}
