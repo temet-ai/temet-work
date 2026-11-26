@@ -54,6 +54,17 @@ pub enum Event {
         #[serde(default)]
         repo: Option<String>,
     },
+    /// A project's deploy and verify commands were set.
+    ProjectCommandsSet {
+        /// The project.
+        project: ProjectId,
+        /// Run after a merge; none means merged is deployed.
+        deploy: Option<String>,
+        /// Run after a deploy, to check it works; none means deployed is verified.
+        verify: Option<String>,
+        /// The folder both run in.
+        run_in: Option<String>,
+    },
     /// A group was made.
     GroupCreated {
         /// The group.

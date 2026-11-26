@@ -43,6 +43,13 @@ pub struct ProjectConf {
     pub code_host: Option<String>,
     /// The code host's name for the repository; `name` when left out.
     pub repo: Option<String>,
+    /// Run after a merge, through `sh -c`; merged counts as deployed when left out.
+    pub deploy: Option<String>,
+    /// Run after a deploy, to check it works; deployed counts as verified when
+    /// left out.
+    pub verify: Option<String>,
+    /// The folder `deploy` and `verify` run in; the home folder when left out.
+    pub run_in: Option<String>,
 }
 
 /// One `[[folder]]`: a checkout agents work in.
@@ -153,6 +160,23 @@ impl Config {
                 });
             }
         }
+        for p in &self.projects {
+            let id = ProjectId::new(&p.id);
+            let now = world
+                .projects
+                .get(&id)
+                .map(|w| (w.deploy.clone(), w.verify.clone(), w.run_in.clone()))
+                .unwrap_or_default();
+            let want = (p.deploy.clone(), p.verify.clone(), p.run_in.clone());
+            if now != want {
+                out.push(Event::ProjectCommandsSet {
+                    project: id,
+                    deploy: want.0,
+                    verify: want.1,
+                    run_in: want.2,
+                });
+            }
+        }
         for f in &self.folders {
             let id = FolderId::new(&f.id);
             let same = world.folders.get(&id).is_some_and(|w| {
@@ -202,6 +226,7 @@ mod tests {
 id = "ankh"
 tracker = "fake"
 name = "city/ankh"
+deploy = "make deploy"
 
 [[folder]]
 id = "ankh-1"
@@ -219,8 +244,11 @@ milestones = ["Clocks"]
     fn becomes_events_once() {
         let config = Config::parse(EXAMPLE).expect("parse");
         let events = config.events(&World::default());
-        assert_eq!(events.len(), 3);
-        assert!(matches!(&events[1], Event::FolderAdded { machine, .. } if machine.0 == LOCAL));
+        assert_eq!(events.len(), 4);
+        assert!(
+            matches!(&events[1], Event::ProjectCommandsSet { deploy: Some(d), .. } if d == "make deploy")
+        );
+        assert!(matches!(&events[2], Event::FolderAdded { machine, .. } if machine.0 == LOCAL));
         let (world, _) = World::replay(&events);
         assert_eq!(config.events(&world), vec![], "nothing new the second time");
     }

@@ -269,6 +269,7 @@ dependencies = [
  "temet-work-codehost",
  "temet-work-codehost-github",
  "temet-work-core",
+ "temet-work-deploy",
  "temet-work-mike",
  "temet-work-runner",
  "temet-work-runner-herdr",
@@ -301,6 +302,13 @@ name = "temet-work-core"
 version = "0.0.1"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "temet-work-deploy"
+version = "0.0.1"
+dependencies = [
+ "temet-work-core",
 ]
 
 [[package]]

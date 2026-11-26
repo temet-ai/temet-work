@@ -47,6 +47,8 @@ pub fn parts() -> Vec<Box<dyn Part>> {
         family.add(Box::new(temet_work_codehost_github::GitHub::default()));
         parts.push(Box::new(family));
     }
+    #[cfg(feature = "deploy")]
+    parts.push(Box::new(temet_work_deploy::Deploys::default()));
     #[cfg(feature = "store")]
     parts.push(Box::new(temet_work_store::Store));
     #[cfg(feature = "style")]

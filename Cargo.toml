@@ -20,6 +20,7 @@ temet-work-core = { path = "crates/core" }
 temet-work-tracker = { path = "crates/tracker" }
 temet-work-codehost = { path = "crates/codehost" }
 temet-work-codehost-github = { path = "crates/codehost-github" }
+temet-work-deploy = { path = "crates/deploy" }
 temet-work-runner = { path = "crates/runner" }
 temet-work-runtime = { path = "crates/runtime" }
 temet-work-tracker-github = { path = "crates/tracker-github" }
@@ -49,11 +50,12 @@ publish.workspace = true
 # family. `cargo run --no-default-features --features tracker` builds one part
 # alone; scripts/check-mixes builds every mix that matters.
 [features]
-default = ["tracker", "runner", "runtime", "codehost", "store", "style", "mike", "tracker-github", "runner-herdr", "runtime-claude", "codehost-github"]
+default = ["tracker", "runner", "runtime", "codehost", "deploy", "store", "style", "mike", "tracker-github", "runner-herdr", "runtime-claude", "codehost-github"]
 tracker = ["dep:temet-work-tracker"]
 runner = ["dep:temet-work-runner"]
 runtime = ["dep:temet-work-runtime"]
 codehost = ["dep:temet-work-codehost"]
+deploy = ["dep:temet-work-deploy"]
 store = ["dep:temet-work-store"]
 style = ["dep:temet-work-style"]
 mike = ["dep:temet-work-mike"]
@@ -72,6 +74,7 @@ temet-work-tracker = { workspace = true, optional = true }
 temet-work-runner = { workspace = true, optional = true }
 temet-work-runtime = { workspace = true, optional = true }
 temet-work-codehost = { workspace = true, optional = true }
+temet-work-deploy = { workspace = true, optional = true }
 temet-work-store = { workspace = true, optional = true }
 temet-work-style = { workspace = true, optional = true }
 temet-work-mike = { workspace = true, optional = true }

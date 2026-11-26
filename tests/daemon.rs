@@ -5,7 +5,8 @@
     feature = "tracker",
     feature = "runner",
     feature = "runtime",
-    feature = "codehost"
+    feature = "codehost",
+    feature = "deploy"
 ))]
 
 use temet_work::config::Config;
@@ -23,6 +24,7 @@ const CONFIG: &str = r#"
 id = "ankh"
 tracker = "fake"
 name = "city/ankh"
+deploy = "make deploy"
 
 [[folder]]
 id = "ankh-1"
@@ -67,6 +69,9 @@ fn host() -> Host {
             },
         )],
     }));
+    let deploys = temet_work_deploy::Deploys::with(std::sync::Arc::new(
+        |_: &str, _: &std::path::PathBuf, _: &[(String, String)]| Ok(()),
+    ));
     let mut host = Host::new(
         World::default(),
         vec![
@@ -74,6 +79,7 @@ fn host() -> Host {
             Box::new(runners),
             Box::new(runtimes),
             Box::new(code_hosts),
+            Box::new(deploys),
         ],
         Box::new(Memory::default()),
     );
@@ -241,10 +247,21 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     assert_eq!(
         host.world().issues[&issue].stage,
         Stage::Deploying,
-        "approved, CI passed, merged"
+        "approved, CI passed, merged, deploy command running"
     );
-    let problems: Vec<&String> = host.problems().keys().collect();
-    assert_eq!(problems, ["deploy ankh#1"], "nothing deploys yet");
     let folder = &host.world().folders[&temet_work_core::ids::FolderId::new("ankh-1")];
     assert_eq!(folder.holder, None, "the folder is free for the next issue");
+    for now in 3..100 {
+        host.tick(now).expect("tick");
+        if host.world().issues[&issue].stage == Stage::Done {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        host.world().issues[&issue].stage,
+        Stage::Done,
+        "deployed, verified, closed"
+    );
+    assert!(host.problems().is_empty(), "{:?}", host.problems());
 }

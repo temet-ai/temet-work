@@ -46,6 +46,7 @@ crate, and on no other crate in the workspace.
 | `temet-work-runtime-claude` | runtime only | Claude Code. Codex follows as its own crate. |
 | `temet-work-codehost` | core | The code-host contract: read a pull request and its CI, merge it. A fake and the contract tests. A project's code host can differ from its tracker. |
 | `temet-work-codehost-github` | codehost only | GitHub pull requests. GitLab follows as its own crate. |
+| `temet-work-deploy` | core | Runs a project's deploy and verify commands after a merge. |
 | `temet-work-store` | core | SQLite and the event log. |
 | `temet-work-style` | core | The style guide: tokens, the generated palette, the ban list as data, and the check used when reviewing UI work. |
 | `temet-work-mike` | core | Optional. Reads capture, corrected turns and lessons from a mike proxy as input to the improvement loop. |
@@ -66,14 +67,13 @@ What exists today:
 | `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-codehost` | the contract, a fake and contract tests. The family reads the CI of each pull request in review every 30 seconds and reports it finished, with the names of failing checks; it merges when the loop asks |
 | `temet-work-codehost-github` | pull requests through `gh`, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
+| `temet-work-deploy` | runs the deploy command after a merge and the verify command after a deploy, each on its own thread; a failed deploy is listed as a problem, a failed verify sends the issue back to ready |
 | `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |
 | style, mike | skeletons |
 | `temet-work`, the root package | the parts, the configuration (`docs/configuration.md`), `temet-workd`, which syncs GitHub issues, starts agents and answers commands on its socket, and the `temet-work` command line (`docs/commands.md`) |
 
 What does not work yet:
 
-- Nothing deploys or verifies: no part carries out those effects, so a merged issue
-  stops at deploying and the daemon lists it as a problem.
 - Any agent or person can run any command; a command is not yet limited to the agent
   whose step it is.
 - A fix request waiting for its author to finish a turn is held in memory, so a restart

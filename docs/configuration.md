@@ -26,6 +26,9 @@ tracker = "github"        # the tracker adapter
 name = "temet-ai/radar"   # the tracker's name for it
 # code_host = "github"    # where its pull requests are; the tracker when left out
 # repo = "temet-ai/radar" # the code host's name for it; name when left out
+# deploy = "make deploy"  # run after a merge; merged counts as deployed when left out
+# verify = "make smoke"   # run after a deploy; deployed counts as verified when left out
+# run_in = "/home/me/src/radar-deploy"   # where both run; the home folder when left out
 
 # A work folder: a checkout an author works in, one issue at a time.
 [[folder]]

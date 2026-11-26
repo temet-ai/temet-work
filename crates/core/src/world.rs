@@ -102,16 +102,35 @@ impl World {
                 code_host,
                 repo,
             } => {
-                self.projects.insert(
-                    project.clone(),
-                    Project {
+                let p = self
+                    .projects
+                    .entry(project.clone())
+                    .or_insert_with(|| Project {
                         id: project.clone(),
-                        tracker: tracker.clone(),
-                        name: name.clone(),
-                        code_host: code_host.clone().unwrap_or_else(|| tracker.clone()),
-                        repo: repo.clone().unwrap_or_else(|| name.clone()),
-                    },
-                );
+                        tracker: String::new(),
+                        name: String::new(),
+                        code_host: String::new(),
+                        repo: String::new(),
+                        deploy: None,
+                        verify: None,
+                        run_in: None,
+                    });
+                p.tracker = tracker.clone();
+                p.name = name.clone();
+                p.code_host = code_host.clone().unwrap_or_else(|| tracker.clone());
+                p.repo = repo.clone().unwrap_or_else(|| name.clone());
+            }
+            Event::ProjectCommandsSet {
+                project,
+                deploy,
+                verify,
+                run_in,
+            } => {
+                if let Some(p) = self.projects.get_mut(project) {
+                    p.deploy = deploy.clone();
+                    p.verify = verify.clone();
+                    p.run_in = run_in.clone();
+                }
             }
             Event::GroupCreated {
                 group,

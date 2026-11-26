@@ -199,6 +199,12 @@ pub struct Project {
     pub code_host: String,
     /// The code host's name for the repository.
     pub repo: String,
+    /// Run after a merge; none means merged is deployed.
+    pub deploy: Option<String>,
+    /// Run after a deploy, to check it works; none means deployed is verified.
+    pub verify: Option<String>,
+    /// The folder both run in.
+    pub run_in: Option<String>,
 }
 
 /// What a decision settles.
