@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use temet_work::config::Config;
 use temet_work::socket;
-use temet_work_core::Host;
+use temet_work_core::{Event, Host};
 
 const EVERY: Duration = Duration::from_secs(2);
 
@@ -75,6 +75,11 @@ fn run() -> Result<(), String> {
     }
     let (journal, world) = temet_work::journal(&log_path)?;
     let mut host = Host::new(world, temet_work::parts(), journal);
+    if host.world().log.is_none() {
+        // A new log: its id labels the terminals its agents run in.
+        let id = format!("{:x}{:x}", now_ms(), std::process::id());
+        host.handle(now_ms(), Event::LogStarted { id })?;
+    }
     for event in config.events(host.world()) {
         host.handle(now_ms(), event)?;
     }

@@ -104,6 +104,9 @@ fn a_half_written_last_line_is_left_out() {
     assert_eq!(entries.len(), 1);
     // The next entry is numbered after the last complete one.
     assert_eq!(log.append(0, &events()[1]).expect("append").seq, 2);
+    drop(log);
+    let (_, entries) = Log::open(&p).expect("reopen after appending past the crash");
+    assert_eq!(entries.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 2]);
 }
 
 #[test]

@@ -32,6 +32,12 @@ pub enum Event {
         /// Where it is on that machine.
         path: String,
     },
+    /// A new log was started. Its id labels the terminals its agents run in, so
+    /// two daemons, or a daemon and an older log, never take each other's agents.
+    LogStarted {
+        /// The log's id.
+        id: String,
+    },
     /// A project was added, or its tracker changed.
     ProjectAdded {
         /// The project.

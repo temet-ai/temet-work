@@ -149,6 +149,9 @@ pub struct Agent {
     pub folder: Option<FolderId>,
     /// What it is doing.
     pub state: AgentState,
+    /// When it started: how many events the loop had applied by then. A later
+    /// agent has a larger number.
+    pub started: u64,
 }
 
 /// A group of sessions working on a goal.

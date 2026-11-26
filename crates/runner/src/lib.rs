@@ -191,9 +191,10 @@ impl Runners {
             };
             match self.adapters[i].send(&terminal, &text, true) {
                 Ok(()) => {}
-                Err(RunnerError::Busy | RunnerError::Blocked) => keep.push((agent, text)),
                 // The terminal is gone: its updates report the agent ended.
-                Err(_) => {}
+                Err(RunnerError::Gone | RunnerError::Unknown(_)) => {}
+                // Busy, at a prompt, or the runner could not be reached: try again.
+                Err(_) => keep.push((agent, text)),
             }
         }
         self.outbox = keep;
@@ -226,12 +227,19 @@ impl Part for Runners {
                 let Some(agent) = u.labels.get("agent").cloned() else {
                     continue;
                 };
-                self.terminals
-                    .insert(agent.clone(), (i, u.terminal.clone()));
+                // Another log's terminal, or an agent this log never started.
+                let other_log = world
+                    .log
+                    .as_ref()
+                    .is_some_and(|log| u.labels.get("log") != Some(log));
+                let id = AgentId::new(agent.clone());
+                if other_log || !world.agents.contains_key(&id) {
+                    continue;
+                }
+                self.terminals.insert(agent, (i, u.terminal.clone()));
                 let Some(state) = state_of(&u.status, u.doing.as_deref()) else {
                     continue;
                 };
-                let id = AgentId::new(agent);
                 if world.agents.get(&id).is_some_and(|a| a.state == state) {
                     continue;
                 }
@@ -254,12 +262,15 @@ impl Part for Runners {
                     );
                 };
                 let brief = &launch.brief;
-                let labels = BTreeMap::from([
+                let mut labels = BTreeMap::from([
                     ("agent".to_string(), launch.agent.0.clone()),
                     ("group".to_string(), launch.group.0.clone()),
                     ("issue".to_string(), brief.issue.to_string()),
                     ("role".to_string(), brief.role.name().to_string()),
                 ]);
+                if let Some(log) = &world.log {
+                    labels.insert("log".to_string(), log.clone());
+                }
                 let mut program = program.clone();
                 // Commands the agent runs are recorded as its own.
                 program
@@ -312,6 +323,25 @@ impl Part for Runners {
                     .push((reviewer.id.0.clone(), brief::next_round(issue, *round)));
                 self.deliver();
                 Outcome::done()
+            }
+            Effect::StopAgent { agent } => {
+                let Some((i, terminal)) = self.terminals.get(&agent.0).cloned() else {
+                    return Outcome::Failed(format!("no terminal is known for {agent}"));
+                };
+                match self.adapters[i].stop(&terminal) {
+                    Ok(()) | Err(RunnerError::Gone | RunnerError::Unknown(_)) => {
+                        self.terminals.remove(&agent.0);
+                        self.outbox.retain(|(a, _)| a != &agent.0);
+                        Outcome::Done {
+                            events: vec![Event::AgentChanged {
+                                agent: agent.clone(),
+                                state: AgentState::Ended,
+                            }],
+                            effects: Vec::new(),
+                        }
+                    }
+                    Err(e) => Outcome::Failed(e.to_string()),
+                }
             }
             _ => Outcome::NotMine,
         }
@@ -468,6 +498,39 @@ mod tests {
         assert_eq!(part.carry_out(&next, &w), Outcome::done());
         let screen = part.screen(&reviewer.0).expect("screen");
         assert!(screen.contains("review round 2"), "{screen}");
+    }
+
+    #[test]
+    fn a_stopped_agent_ends_and_another_logs_terminals_are_ignored() {
+        let mut w = world();
+        w.apply(&Event::LogStarted { id: "b".into() });
+        let mut part = runners();
+        let agent = run(&mut part, &mut w, &[fake::PROMPT_PROGRAM]);
+        // The same agent id under another log: its terminal's updates are not this log's.
+        let mut other = world();
+        other.apply(&Event::LogStarted { id: "a".into() });
+        other.apply(&Event::AgentStarted {
+            agent: agent.clone(),
+            group: GroupId::new("watch"),
+            role: Role::Author,
+            issue: Some(IssueId::new("ankh", "1")),
+            machine: MachineId::new(LOCAL),
+            folder: None,
+        });
+        assert_eq!(part.poll(&other, 0).events, vec![]);
+        let stop = Effect::StopAgent {
+            agent: agent.clone(),
+        };
+        assert_eq!(
+            part.carry_out(&stop, &w),
+            Outcome::Done {
+                events: vec![Event::AgentChanged {
+                    agent,
+                    state: AgentState::Ended
+                }],
+                effects: vec![]
+            }
+        );
     }
 
     #[test]

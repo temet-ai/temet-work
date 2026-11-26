@@ -2,11 +2,13 @@
 //! applies is appended, one JSON line each, with its number and the time the
 //! daemon stamped on it. The loop's state is rebuilt by replaying the log.
 //!
-//! A last line cut short by a crash is left out when reading, so a crash never
-//! stops the daemon from starting again.
+//! A line counts once its newline is written: `append` returns only after the
+//! whole line is on disk, so a line without one was never applied. Opening the
+//! log cuts such a line off, so a crash never stops the daemon from starting
+//! again and the next entry starts on a line of its own.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -65,8 +67,12 @@ impl Log {
     /// Opens the log at `path`, making it if it does not exist, and returns it
     /// with the entries already in it.
     pub fn open(path: &Path) -> Result<(Self, Vec<Entry>), StoreError> {
-        let entries = Self::read(path)?;
+        let (entries, complete) = Self::scan(path)?;
         let file = OpenOptions::new().create(true).append(true).open(path)?;
+        if file.metadata()?.len() > complete {
+            file.set_len(complete)?;
+            file.sync_data()?;
+        }
         let next = entries.last().map_or(1, |e| e.seq + 1);
         Ok((
             Self {
@@ -78,33 +84,37 @@ impl Log {
         ))
     }
 
-    /// The entries in the log at `path`. A missing file is an empty log; an
-    /// unfinished last line is left out.
+    /// The entries in the log at `path`. A missing file is an empty log; a
+    /// last line without its newline is left out.
     pub fn read(path: &Path) -> Result<Vec<Entry>, StoreError> {
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Self::scan(path).map(|(entries, _)| entries)
+    }
+
+    /// The entries, and how many bytes of the file hold complete lines.
+    fn scan(path: &Path) -> Result<(Vec<Entry>, u64), StoreError> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
             Err(e) => return Err(e.into()),
         };
-        let lines: Vec<String> = BufReader::new(file).lines().collect::<Result<_, _>>()?;
-        let mut entries = Vec::with_capacity(lines.len());
-        for (i, line) in lines.iter().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<Entry>(line) {
-                Ok(entry) => entries.push(entry),
-                // A crash can leave the last line half written.
-                Err(_) if i + 1 == lines.len() => break,
-                Err(e) => {
-                    return Err(StoreError::Damaged {
-                        line: i + 1,
+        let mut entries = Vec::new();
+        let mut complete = 0;
+        for (n, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+            let Some(body) = line.strip_suffix(b"\n") else {
+                // No newline: the write never finished, so the event was never applied.
+                break;
+            };
+            if !body.iter().all(u8::is_ascii_whitespace) {
+                let entry =
+                    serde_json::from_slice::<Entry>(body).map_err(|e| StoreError::Damaged {
+                        line: n + 1,
                         why: e.to_string(),
-                    });
-                }
+                    })?;
+                entries.push(entry);
             }
+            complete += line.len() as u64;
         }
-        Ok(entries)
+        Ok((entries, complete))
     }
 
     /// Appends an event stamped `at_ms` and returns its entry once it is on disk.
@@ -114,11 +124,13 @@ impl Log {
             at_ms,
             event: event.clone(),
         };
-        let line = serde_json::to_string(&entry).map_err(|e| StoreError::Damaged {
+        let mut line = serde_json::to_string(&entry).map_err(|e| StoreError::Damaged {
             line: 0,
             why: e.to_string(),
         })?;
-        writeln!(self.file, "{line}")?;
+        line.push('\n');
+        // One write, so the newline never lands apart from its line.
+        self.file.write_all(line.as_bytes())?;
         self.file.sync_data()?;
         self.next += 1;
         Ok(entry)

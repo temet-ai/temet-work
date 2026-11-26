@@ -74,6 +74,10 @@ pub trait Tracker: Send {
     /// The project's open milestones.
     fn milestones(&mut self, project: &str) -> Result<Vec<TrackedMilestone>, TrackerError>;
 
+    /// Whether the issue is closed. An error, `NotFound` among them, when the
+    /// tracker cannot say.
+    fn closed(&mut self, project: &str, key: &str) -> Result<bool, TrackerError>;
+
     /// Adds a comment to an issue.
     fn comment(&mut self, project: &str, key: &str, text: &str) -> Result<(), TrackerError>;
 
@@ -148,6 +152,14 @@ impl Tracker for FakeTracker {
             .collect())
     }
 
+    fn closed(&mut self, project: &str, key: &str) -> Result<bool, TrackerError> {
+        self.issues
+            .iter()
+            .find(|(p, i)| p == project && i.key == key)
+            .map(|(_, i)| i.closed)
+            .ok_or_else(|| TrackerError::NotFound(format!("{project}#{key}")))
+    }
+
     fn comment(&mut self, project: &str, key: &str, text: &str) -> Result<(), TrackerError> {
         if !self
             .issues
@@ -212,6 +224,15 @@ pub mod contract {
         ensure(
             !milestones.is_empty(),
             "a project with open milestones lists them",
+        )?;
+        let first = &issues[0].key;
+        ensure(
+            tracker.closed(&project, first) == Ok(false),
+            "a listed open issue is not closed",
+        )?;
+        ensure(
+            tracker.closed(&project, "999999999").is_err(),
+            "an issue the tracker does not have is an error, not open or closed",
         )?;
         ensure(
             issues
@@ -285,24 +306,6 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
                 && i.depends_on == depends_on
                 && i.order == t.order
         });
-        // A dependency that is neither open nor known was closed before syncing began.
-        for d in &depends_on {
-            if !open_keys.contains(d.key.as_str())
-                && !world.issues.contains_key(d)
-                && !out
-                    .iter()
-                    .any(|e| matches!(e, Event::IssueSynced { issue, .. } if issue == d))
-            {
-                out.push(Event::IssueSynced {
-                    issue: d.clone(),
-                    title: String::new(),
-                    milestone: None,
-                    depends_on: Vec::new(),
-                    order: 0,
-                    closed: true,
-                });
-            }
-        }
         if !same {
             out.push(Event::IssueSynced {
                 issue,
@@ -329,6 +332,30 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
             });
         }
     }
+    out
+}
+
+/// The keys open issues depend on that are neither open nor known to the loop.
+/// Each may have been closed before syncing began; only the tracker can say.
+pub fn unknown_dependencies(
+    world: &World,
+    project: &ProjectId,
+    open: &[TrackedIssue],
+) -> Vec<String> {
+    let open_keys: BTreeSet<&str> = open.iter().map(|t| t.key.as_str()).collect();
+    let mut out: Vec<String> = open
+        .iter()
+        .flat_map(|t| &t.depends_on)
+        .filter(|k| {
+            !open_keys.contains(k.as_str())
+                && !world
+                    .issues
+                    .contains_key(&IssueId::new(project.0.clone(), k.as_str()))
+        })
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -379,6 +406,33 @@ impl Part for Trackers {
             match tracker.issues(&project.name) {
                 Ok(open) => {
                     self.errors.remove(&project.id);
+                    // A dependency counts as done only once its tracker says it is
+                    // closed; until then the issue waits, and the reason is shown.
+                    let mut unsure = Vec::new();
+                    for key in unknown_dependencies(world, &project.id, &open) {
+                        match tracker.closed(&project.name, &key) {
+                            Ok(true) => events.push(Event::IssueSynced {
+                                issue: IssueId::new(project.id.0.clone(), key),
+                                title: String::new(),
+                                milestone: None,
+                                depends_on: Vec::new(),
+                                order: 0,
+                                closed: true,
+                            }),
+                            Ok(false) => unsure.push(format!("{key} is open but was not listed")),
+                            Err(e) => unsure.push(format!("{key}: {e}")),
+                        }
+                    }
+                    if !unsure.is_empty() {
+                        self.errors.insert(
+                            project.id.clone(),
+                            format!(
+                                "{}: issues wait on dependencies the tracker cannot confirm closed: {}",
+                                project.name,
+                                unsure.join("; ")
+                            ),
+                        );
+                    }
                     events.extend(changes(world, &project.id, &open));
                 }
                 Err(e) => {
@@ -509,15 +563,29 @@ mod tests {
     }
 
     #[test]
-    fn a_dependency_closed_before_syncing_began_counts_as_done() {
+    fn a_dependency_counts_as_done_only_when_the_tracker_says_it_is_closed() {
         let mut tracker = fake();
-        tracker.issues[0].1.depends_on = vec!["40".into()];
+        let mut closed = issue("40", None);
+        closed.closed = true;
+        tracker.issues.push(("ankh/morpork".into(), closed));
+        tracker.issues[0].1.depends_on = vec!["40".into(), "ENG-41".into()];
         let mut part = Trackers::default();
         part.add(Box::new(tracker));
-        let events = part.poll(&configured(), 0).events;
-        assert!(events.iter().any(
-            |e| matches!(e, Event::IssueSynced { issue, closed: true, .. } if issue.key == "40")
-        ));
+        let polled = part.poll(&configured(), 0);
+        let closed: Vec<&str> = polled
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::IssueSynced {
+                    issue,
+                    closed: true,
+                    ..
+                } => Some(issue.key.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closed, ["40"], "ENG-41 is not confirmed closed");
+        assert!(polled.problem.is_some_and(|p| p.contains("ENG-41")));
     }
 
     #[test]

@@ -54,13 +54,18 @@ struct Conn {
 }
 
 impl Conn {
-    fn open(path: &PathBuf) -> Result<Self, RunnerError> {
+    /// Connects and says hello. A read waits at most `timeout`, so a core that
+    /// stops answering cannot hang the daemon.
+    fn open(path: &PathBuf, timeout: Duration) -> Result<Self, RunnerError> {
         let stream = UnixStream::connect(path).map_err(|e| {
             RunnerError::Other(format!(
                 "cannot reach herdr-core at {}: {e}",
                 path.display()
             ))
         })?;
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|e| RunnerError::Other(e.to_string()))?;
         let reader = BufReader::new(
             stream
                 .try_clone()
@@ -161,13 +166,19 @@ fn take_snapshot(terminals: &Value, s: &mut Shared) {
         };
         let labels = labels_of(t.get("labels"));
         s.labels.insert(addr.to_string(), labels.clone());
+        // A finished terminal that was not removed is still listed; its session is over.
+        let status = if t.get("state").and_then(Value::as_str) == Some("finished") {
+            Status::Gone
+        } else {
+            status_of(
+                t.pointer("/status/state").and_then(Value::as_str),
+                t.pointer("/status/kind").and_then(Value::as_str),
+            )
+        };
         s.updates.push(Update {
             terminal: TerminalId(addr.to_string()),
             labels,
-            status: status_of(
-                t.pointer("/status/state").and_then(Value::as_str),
-                t.pointer("/status/kind").and_then(Value::as_str),
-            ),
+            status,
             doing: t
                 .pointer("/status/msg")
                 .and_then(Value::as_str)
@@ -245,39 +256,72 @@ pub struct Herdr {
     shared: Arc<Mutex<Shared>>,
 }
 
+/// How long a request waits for its answer.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the event connection may stay silent; the core sends a heartbeat
+/// every 15 s, so a longer silence means the connection is dead.
+const EVENTS_TIMEOUT: Duration = Duration::from_secs(45);
+
+fn io_error(e: &RunnerError) -> RpcError {
+    RpcError {
+        kind: "io".into(),
+        message: e.to_string(),
+    }
+}
+
 impl Herdr {
-    fn conn(&mut self) -> Result<&mut Conn, RunnerError> {
+    fn path() -> Result<PathBuf, RunnerError> {
         if sandboxed() {
             return Err(RunnerError::Other(
                 "TEMET_WORK_SANDBOX is set: herdr-core is not reached".into(),
             ));
         }
-        let path = socket_path().ok_or_else(|| {
+        socket_path().ok_or_else(|| {
             RunnerError::Other(
                 "no herdr-core socket: set HC_TERMINAL_SOCKET or XDG_RUNTIME_DIR".into(),
             )
-        })?;
-        let following = self.shared.lock().map(|s| s.alive).unwrap_or(false);
-        if !following {
-            let mut events = Conn::open(&path)?;
-            let snapshot = events
-                .call("events.subscribe", json!({"labels": {OWNER.0: OWNER.1}}))
-                .map_err(rpc)?;
-            if let Ok(mut s) = self.shared.lock() {
-                s.alive = true;
-                if let Some(terminals) = snapshot.get("terminals") {
-                    take_snapshot(terminals, &mut s);
-                }
+        })
+    }
+
+    /// Opens the event subscription when it is not open. The snapshot it
+    /// starts with becomes one update per terminal, so terminals started before
+    /// the daemon are known again.
+    fn follow(&mut self) -> Result<(), RunnerError> {
+        if self.shared.lock().map(|s| s.alive).unwrap_or(false) {
+            return Ok(());
+        }
+        let mut events = Conn::open(&Self::path()?, EVENTS_TIMEOUT)?;
+        let snapshot = events
+            .call("events.subscribe", json!({"labels": {OWNER.0: OWNER.1}}))
+            .map_err(rpc)?;
+        if let Ok(mut s) = self.shared.lock() {
+            s.alive = true;
+            if let Some(terminals) = snapshot.get("terminals") {
+                take_snapshot(terminals, &mut s);
             }
-            let shared = Arc::clone(&self.shared);
-            std::thread::spawn(move || follow(events, shared));
         }
+        let shared = Arc::clone(&self.shared);
+        std::thread::spawn(move || follow(events, shared));
+        Ok(())
+    }
+
+    /// Sends one request on the control connection, opening it when needed. A
+    /// broken connection is dropped, so the next request opens a new one.
+    fn request(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.follow().map_err(|e| io_error(&e))?;
         if self.control.is_none() {
-            self.control = Some(Conn::open(&path)?);
+            let path = Self::path().map_err(|e| io_error(&e))?;
+            self.control = Some(Conn::open(&path, REQUEST_TIMEOUT).map_err(|e| io_error(&e))?);
         }
-        self.control
-            .as_mut()
-            .ok_or_else(|| RunnerError::Other("no connection".into()))
+        let Some(conn) = self.control.as_mut() else {
+            return Err(io_error(&RunnerError::Other("no connection".into())));
+        };
+        let result = conn.call(method, params);
+        if matches!(&result, Err(e) if e.kind == "io") {
+            self.control = None;
+        }
+        result
     }
 }
 
@@ -319,7 +363,7 @@ impl Runner for Herdr {
         if let Some(machine) = &start.machine {
             params["on"] = Value::String(machine.clone());
         }
-        let result = self.conn()?.call("terminal.run", params).map_err(rpc)?;
+        let result = self.request("terminal.run", params).map_err(rpc)?;
         result
             .get("address")
             .and_then(Value::as_str)
@@ -335,18 +379,17 @@ impl Runner for Herdr {
         text: &str,
         only_if_idle: bool,
     ) -> Result<(), RunnerError> {
-        let conn = self.conn()?;
         if only_if_idle {
             // herdr-core's `if` matches one word, and a turn that ended reads `done`,
             // not `idle`: check the status first, then send without `if`.
-            let facts = conn
-                .call("terminal.get", json!({"terminal": terminal.0}))
+            let facts = self
+                .request("terminal.get", json!({"terminal": terminal.0}))
                 .map_err(|e| mapped(terminal, e))?;
             if facts.pointer("/status/state").and_then(Value::as_str) == Some("working") {
                 return Err(RunnerError::Busy);
             }
         }
-        conn.call(
+        self.request(
             "terminal.send",
             json!({"terminal": terminal.0, "text": text}),
         )
@@ -356,8 +399,7 @@ impl Runner for Herdr {
 
     fn screen(&mut self, terminal: &TerminalId) -> Result<String, RunnerError> {
         let result = self
-            .conn()?
-            .call("terminal.read", json!({"terminal": terminal.0, "lines": 0}))
+            .request("terminal.read", json!({"terminal": terminal.0, "lines": 0}))
             .map_err(|e| mapped(terminal, e))?;
         Ok(result
             .get("text")
@@ -367,8 +409,7 @@ impl Runner for Herdr {
     }
 
     fn stop(&mut self, terminal: &TerminalId) -> Result<(), RunnerError> {
-        let conn = self.conn()?;
-        match conn.call("terminal.kill", json!({"terminal": terminal.0})) {
+        match self.request("terminal.kill", json!({"terminal": terminal.0})) {
             Ok(_) => {}
             Err(e) if e.kind == "finished" => {}
             Err(e) => return Err(mapped(terminal, e)),
@@ -376,7 +417,7 @@ impl Runner for Herdr {
         // `rm` refuses a terminal that is still live; kill reports once it has ended,
         // but give the core a moment if it has not caught up.
         for _ in 0..20 {
-            match conn.call("terminal.rm", json!({"terminal": terminal.0})) {
+            match self.request("terminal.rm", json!({"terminal": terminal.0})) {
                 Ok(_) => return Ok(()),
                 Err(e) if e.kind == "live" => std::thread::sleep(Duration::from_millis(100)),
                 Err(e) if e.kind == "not_found" => return Ok(()),
@@ -389,6 +430,12 @@ impl Runner for Herdr {
     }
 
     fn updates(&mut self) -> Vec<Update> {
+        // Follow events even when nothing is being started or sent, so states
+        // keep coming after a restart. A core that is down is tried again next
+        // time; starting or sending reports it.
+        if !sandboxed() {
+            let _ = self.follow();
+        }
         self.shared
             .lock()
             .map(|mut s| std::mem::take(&mut s.updates))
@@ -434,14 +481,17 @@ mod tests {
             {"address": "t3", "labels": {"agent": "author-1", "owner": "temet-work"},
              "status": {"state": "working", "msg": "running the tests"}},
             {"address": "t4", "labels": {"agent": "refiner-1"}, "status": {"state": "done"}},
+            {"address": "t5", "labels": {"agent": "author-2"}, "state": "finished",
+             "status": {"state": "done"}},
             {"labels": {"agent": "no-address"}}
         ]);
         take_snapshot(&snapshot, &mut s);
-        assert_eq!(s.updates.len(), 2);
+        assert_eq!(s.updates.len(), 3);
         assert_eq!(s.updates[0].labels["agent"], "author-1");
         assert_eq!(s.updates[0].status, Status::Working);
         assert_eq!(s.updates[0].doing.as_deref(), Some("running the tests"));
         assert_eq!(s.updates[1].status, Status::Between);
+        assert_eq!(s.updates[2].status, Status::Gone, "finished, not removed");
     }
 
     #[test]

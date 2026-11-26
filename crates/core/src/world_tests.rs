@@ -421,3 +421,109 @@ fn the_same_events_give_the_same_state_and_effects() {
     ];
     assert_eq!(World::replay(&events), World::replay(&events));
 }
+
+fn started(agent: &str, role: Role, key: &str) -> Event {
+    Event::AgentStarted {
+        agent: AgentId::new(agent),
+        group: GroupId::new("watch"),
+        role,
+        issue: Some(issue(key)),
+        machine: MachineId::new("morpork"),
+        folder: None,
+    }
+}
+
+fn ended(agent: &str) -> Event {
+    Event::AgentChanged {
+        agent: AgentId::new(agent),
+        state: crate::model::AgentState::Ended,
+    }
+}
+
+#[test]
+fn an_issue_missing_its_agent_gets_one_until_three_have_ended() {
+    let (mut w, _) = World::replay(&[group(&["m1"], 1), sync("1", "m1", 1, &[])]);
+    assert_eq!(
+        w.missing().start,
+        vec![refiner("1")],
+        "decided on, never started"
+    );
+    w.apply(&started("refiner-1", Role::Refiner, "1"));
+    assert_eq!(w.missing(), crate::world::Missing::default());
+    for n in 1..=crate::world::MAX_STARTS {
+        w.apply(&ended(&format!("refiner-{n}")));
+        if n < crate::world::MAX_STARTS {
+            assert_eq!(w.missing().start, vec![refiner("1")]);
+            w.apply(&started(&format!("refiner-{}", n + 1), Role::Refiner, "1"));
+        }
+    }
+    let gave_up = w.missing();
+    assert_eq!(gave_up.start, vec![]);
+    assert_eq!(
+        gave_up.given_up,
+        ["ankh#1: 3 refiners ended before it moved on; no more are started"]
+    );
+}
+
+#[test]
+fn the_newest_running_agent_is_the_one_that_hears() {
+    let mut w = working_on_one();
+    w.apply(&started("author-9", Role::Author, "1"));
+    w.apply(&started("author-10", Role::Author, "1"));
+    let running = w.running(&issue("1"), Role::Author).expect("an author");
+    assert_eq!(
+        running.id,
+        AgentId::new("author-10"),
+        "not the one that sorts last"
+    );
+}
+
+#[test]
+fn closing_an_issue_mid_work_stops_its_agents_before_freeing_its_folder() {
+    let mut w = working_on_one();
+    w.apply(&started("author-1", Role::Author, "1"));
+    w.apply(&sync("2", "m1", 2, &[]));
+    w.apply(&planned("2"));
+    assert_eq!(stage(&w, "2"), Stage::Ready, "waiting for a folder");
+    let close = Event::IssueSynced {
+        issue: issue("1"),
+        title: "issue 1".into(),
+        milestone: Some(MilestoneId::new("m1")),
+        depends_on: vec![],
+        order: 1,
+        closed: true,
+    };
+    let effects = w.apply(&close);
+    assert_eq!(
+        &effects[..2],
+        [
+            Effect::StopAgent {
+                agent: AgentId::new("author-1")
+            },
+            Effect::ReleaseFolder {
+                folder: FolderId::new("f1")
+            }
+        ]
+    );
+    assert_eq!(
+        effects[2],
+        author("2", "f1"),
+        "then the next issue takes the folder"
+    );
+}
+
+#[test]
+fn a_folder_moved_to_another_project_is_updated() {
+    let mut w = World::default();
+    w.apply(&folder("f1"));
+    w.apply(&Event::FolderAdded {
+        folder: FolderId::new("f1"),
+        project: ProjectId::new("klatch"),
+        machine: MachineId::new("morpork"),
+        path: "/srv/klatch".into(),
+    });
+    assert_eq!(
+        w.folders[&FolderId::new("f1")].project,
+        ProjectId::new("klatch")
+    );
+}

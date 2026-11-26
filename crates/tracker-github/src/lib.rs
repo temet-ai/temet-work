@@ -34,6 +34,10 @@ impl Transport for Cli {
     }
 }
 
+/// The most open issues read from one repository.
+const LIMIT: usize = 1000;
+const LIMIT_ARG: &str = "1000";
+
 /// The GitHub adapter.
 pub struct GitHub {
     transport: Box<dyn Transport>,
@@ -136,11 +140,18 @@ impl Tracker for GitHub {
             "--state",
             "open",
             "--limit",
-            "1000",
+            LIMIT_ARG,
             "--json",
             "number,title,body,milestone,state",
         ])?;
-        parse_issues(&out)
+        let issues = parse_issues(&out)?;
+        // A full page may be cut short; a cut-short list would read as issues closed.
+        if issues.len() >= LIMIT {
+            return Err(TrackerError::Other(format!(
+                "{project} has {LIMIT} or more open issues; temet-work reads at most {LIMIT}"
+            )));
+        }
+        Ok(issues)
     }
 
     fn milestones(&mut self, project: &str) -> Result<Vec<TrackedMilestone>, TrackerError> {
@@ -153,6 +164,17 @@ impl Tracker for GitHub {
             ".[] | {title: .title, open: .open_issues}",
         ])?;
         parse_milestones(&out)
+    }
+
+    fn closed(&mut self, project: &str, key: &str) -> Result<bool, TrackerError> {
+        let out = self.run(&["issue", "view", key, "-R", project, "--json", "state"])?;
+        let v: Value = serde_json::from_str(&out)
+            .map_err(|e| TrackerError::Other(format!("gh issue view: {e}")))?;
+        match v.get("state").and_then(Value::as_str) {
+            Some("CLOSED") => Ok(true),
+            Some(_) => Ok(false),
+            None => Err(TrackerError::Other("gh issue view gave no state".into())),
+        }
     }
 
     fn comment(&mut self, project: &str, key: &str, text: &str) -> Result<(), TrackerError> {
@@ -176,6 +198,17 @@ mod tests {
     impl Transport for Recorded {
         fn gh(&mut self, args: &[&str]) -> Result<String, String> {
             match args.first().copied() {
+                Some("issue")
+                    if args.get(1) == Some(&"view") && args.contains(&"temet-ai/radar") =>
+                {
+                    // Recorded: every listed issue is open; anything else is unknown.
+                    let listed = ["11", "12", "19", "43", "44"];
+                    if listed.contains(&args[2]) {
+                        Ok(r#"{"state":"OPEN"}"#.into())
+                    } else {
+                        Err("GraphQL: Could not resolve to an issue or pull request".into())
+                    }
+                }
                 Some("issue") if args.contains(&"temet-ai/radar") => {
                     Ok(include_str!("../tests/fixtures/radar-issues.json").into())
                 }

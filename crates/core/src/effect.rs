@@ -68,6 +68,11 @@ pub enum Effect {
         /// The decision it comes from.
         from: DecisionId,
     },
+    /// Stop an agent's session: its issue was closed while it worked.
+    StopAgent {
+        /// The agent.
+        agent: crate::ids::AgentId,
+    },
     /// Run an agent's program in a terminal. The part that turns a brief into
     /// a program asks for this; the part that runs terminals carries it out.
     Run {
@@ -95,6 +100,7 @@ impl Effect {
             }
             Self::ProposeRule { from } => format!("propose a rule from decision {}", from.0),
             Self::Run { launch, .. } => format!("run {}", launch.agent),
+            Self::StopAgent { agent } => format!("stop {agent}"),
         }
     }
 

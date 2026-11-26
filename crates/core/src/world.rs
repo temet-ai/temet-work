@@ -16,6 +16,18 @@ use crate::launch::Launch;
 use crate::model::Decision;
 use crate::model::{Agent, AgentState, DecisionKind, Folder, Group, Issue, Project, Role, Stage};
 
+/// How many agents of one role the loop starts on one issue before it gives up.
+pub const MAX_STARTS: usize = 3;
+
+/// What [`World::missing`] finds.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Missing {
+    /// The agents to start.
+    pub start: Vec<Effect>,
+    /// Issues it gave up starting agents for, in a line each.
+    pub given_up: Vec<String>,
+}
+
 /// The machine an agent runs on when its project has no work folder.
 pub const LOCAL: &str = "local";
 
@@ -25,6 +37,8 @@ pub const REVIEW_ROUNDS: u8 = 3;
 /// Everything the loop knows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct World {
+    /// The log's id, once the log has one.
+    pub log: Option<String>,
     /// Projects by id.
     pub projects: BTreeMap<ProjectId, Project>,
     /// Issues by id.
@@ -74,8 +88,12 @@ impl World {
                         holder: None,
                     });
                 // A folder that moved keeps the issue that holds it.
+                f.project = project.clone();
                 f.machine = machine.clone();
                 f.path = path.clone();
+            }
+            Event::LogStarted { id } => {
+                self.log.get_or_insert_with(|| id.clone());
             }
             Event::ProjectAdded {
                 project,
@@ -137,6 +155,18 @@ impl World {
                 if *closed && entry.stage != Stage::Done {
                     entry.stage = Stage::Done;
                     let folder = entry.folder.take();
+                    // Closed in the tracker while agents worked on it: stop them
+                    // before the folder goes to the next issue.
+                    out.extend(
+                        self.agents
+                            .values()
+                            .filter(|a| {
+                                a.issue.as_ref() == Some(issue) && a.state != AgentState::Ended
+                            })
+                            .map(|a| Effect::StopAgent {
+                                agent: a.id.clone(),
+                            }),
+                    );
                     self.release(folder, &mut out);
                 }
             }
@@ -158,6 +188,7 @@ impl World {
                         machine: machine.clone(),
                         folder: folder.clone(),
                         state: AgentState::Idle,
+                        started: self.applied,
                     },
                 );
             }
@@ -321,11 +352,84 @@ impl World {
         out
     }
 
-    /// The agent of `role` working on `issue` whose session has not ended.
+    /// The agent of `role` working on `issue` whose session has not ended; the
+    /// one started last when there are several.
     pub fn running(&self, issue: &IssueId, role: Role) -> Option<&Agent> {
-        self.agents.values().find(|a| {
-            a.issue.as_ref() == Some(issue) && a.role == role && a.state != AgentState::Ended
-        })
+        self.agents
+            .values()
+            .filter(|a| {
+                a.issue.as_ref() == Some(issue) && a.role == role && a.state != AgentState::Ended
+            })
+            .max_by_key(|a| a.started)
+    }
+
+    /// The agents each issue needs now and does not have: a refiner while it is
+    /// refining, an author while it is worked on, a reviewer in review, an arbiter
+    /// with the arbiter. This brings back an agent whose session ended, or one
+    /// the daemon decided on and did not start before it stopped. After
+    /// [`MAX_STARTS`] agents of one role on one issue it gives up, and says so.
+    pub fn missing(&self) -> Missing {
+        let mut out = Missing::default();
+        for i in self.issues.values() {
+            let Some(group) = i.group.clone() else {
+                continue;
+            };
+            let (role, effect) = match i.stage {
+                Stage::Refining => (
+                    Role::Refiner,
+                    Effect::StartAgent {
+                        group,
+                        role: Role::Refiner,
+                        issue: i.id.clone(),
+                        folder: None,
+                    },
+                ),
+                Stage::Working | Stage::Fixing { .. } => (
+                    Role::Author,
+                    Effect::StartAgent {
+                        group,
+                        role: Role::Author,
+                        issue: i.id.clone(),
+                        folder: i.folder.clone(),
+                    },
+                ),
+                Stage::InReview { round } => (
+                    Role::Reviewer,
+                    Effect::StartReview {
+                        issue: i.id.clone(),
+                        round,
+                    },
+                ),
+                Stage::Arbitration { .. } => (
+                    Role::Arbiter,
+                    Effect::StartAgent {
+                        group,
+                        role: Role::Arbiter,
+                        issue: i.id.clone(),
+                        folder: None,
+                    },
+                ),
+                _ => continue,
+            };
+            if self.running(&i.id, role).is_some() {
+                continue;
+            }
+            let tried = self
+                .agents
+                .values()
+                .filter(|a| a.issue.as_ref() == Some(&i.id) && a.role == role)
+                .count();
+            if tried >= MAX_STARTS {
+                out.given_up.push(format!(
+                    "{}: {tried} {}s ended before it moved on; no more are started",
+                    i.id,
+                    role.name()
+                ));
+            } else {
+                out.start.push(effect);
+            }
+        }
+        out
     }
 
     /// What starting an agent takes: its id, the machine and folder it runs in,

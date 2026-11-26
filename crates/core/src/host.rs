@@ -71,6 +71,9 @@ pub struct Polled {
     pub problem: Option<String>,
 }
 
+/// How problems from giving up on an issue's agents are keyed.
+const GAVE_UP: &str = "gave up: ";
+
 /// The most events and effects one call handles before it stops, so a loop
 /// between parts cannot hang the daemon.
 pub const MAX_STEPS: usize = 10_000;
@@ -112,7 +115,26 @@ impl Host {
 
     /// Logs and applies `event`, then carries out everything it leads to.
     pub fn handle(&mut self, now_ms: u64, event: Event) -> Result<(), String> {
-        let mut stack = vec![Work::Event(event)];
+        self.run(now_ms, vec![Work::Event(event)])
+    }
+
+    /// Starts the agents issues need and do not have (`World::missing`).
+    pub fn recover(&mut self, now_ms: u64) -> Result<(), String> {
+        let missing = self.world.missing();
+        self.problems.retain(|k, _| !k.starts_with(GAVE_UP));
+        for line in missing.given_up {
+            self.problems.insert(
+                format!("{GAVE_UP}{line}"),
+                "a person has to look at it".into(),
+            );
+        }
+        self.run(
+            now_ms,
+            missing.start.into_iter().rev().map(Work::Effect).collect(),
+        )
+    }
+
+    fn run(&mut self, now_ms: u64, mut stack: Vec<Work>) -> Result<(), String> {
         let mut steps = 0;
         while let Some(work) = stack.pop() {
             steps += 1;
@@ -146,8 +168,8 @@ impl Host {
         Ok(())
     }
 
-    /// Asks each part what it has seen and handles the events it reports.
-    /// Returns how many there were.
+    /// Asks each part what it has seen and handles the events it reports, then
+    /// starts the agents issues are missing. Returns how many events there were.
     pub fn tick(&mut self, now_ms: u64) -> Result<usize, String> {
         let mut seen = Vec::new();
         for part in &mut self.parts {
@@ -162,6 +184,7 @@ impl Host {
         for event in seen {
             self.handle(now_ms, event)?;
         }
+        self.recover(now_ms)?;
         Ok(n)
     }
 

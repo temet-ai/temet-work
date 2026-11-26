@@ -74,8 +74,11 @@ What does not work yet:
   lists each as a problem.
 - Any agent or person can run any command; a command is not yet limited to the agent
   whose step it is.
-- An agent the loop decided to start, which the daemon did not start before it stopped,
-  is not started after a restart.
+- A fix request waiting for its author to finish a turn is held in memory, so a restart
+  loses it and the author never hears of it.
+- An issue reopened in its tracker after the loop closed it is not worked again.
+- When herdr-core cannot be reached, agents' states stop changing and nothing says why;
+  only starting or messaging an agent reports it.
 
 ## Who coordinates
 
@@ -84,7 +87,9 @@ reviewing and arbitrating. The core's `World::apply` takes one event and returns
 effects for the daemon to carry out; after every event it takes the next issue for refining
 and starts an author on a ready issue when a work folder of its project is free and the
 issues it depends on are done. Review runs for at most three rounds before an arbiter
-rules. A group has no coordinator agent: in the research fleet the standing seat waited 25
+rules. Every round the daemon also starts any agent an issue needs and does not have: one
+whose session ended, or one it decided on and did not start before it stopped. After three
+agents of one role have ended on one issue it stops and lists the issue as a problem. A group has no coordinator agent: in the research fleet the standing seat waited 25
 of its 28 minutes, and in mike's larger runs such seats were where the token and turn costs
 came from (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
 
