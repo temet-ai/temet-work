@@ -11,6 +11,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use temet_work_core::ids::AgentId;
+use temet_work_core::launch::AGENT_VAR;
 use temet_work_core::model::{AgentState, Role};
 use temet_work_core::world::LOCAL;
 use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
@@ -258,8 +259,13 @@ impl Part for Runners {
                     ("issue".to_string(), brief.issue.to_string()),
                     ("role".to_string(), brief.role.name().to_string()),
                 ]);
+                let mut program = program.clone();
+                // Commands the agent runs are recorded as its own.
+                program
+                    .env
+                    .push((AGENT_VAR.to_string(), launch.agent.0.clone()));
                 let start = Start {
-                    program: program.clone(),
+                    program,
                     cwd: brief
                         .folder
                         .clone()

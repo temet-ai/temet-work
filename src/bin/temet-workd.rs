@@ -1,6 +1,7 @@
 //! `temet-workd`, the daemon: it reads the configuration, rebuilds its state
-//! from the event log, and then every two seconds asks each part what it has
-//! seen and carries out what the loop asks for.
+//! from the event log, answers commands on its socket as they come, and every
+//! two seconds asks each part what it has seen and carries out what the loop
+//! asks for.
 //!
 //! ```text
 //! temet-workd [--config FILE] [--log FILE] [--once]
@@ -13,9 +14,11 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use temet_work::config::Config;
+use temet_work::socket;
 use temet_work_core::Host;
 
 const EVERY: Duration = Duration::from_secs(2);
@@ -75,25 +78,42 @@ fn run() -> Result<(), String> {
     for event in config.events(host.world()) {
         host.handle(now_ms(), event)?;
     }
-    let mut shown: BTreeMap<String, String> = BTreeMap::new();
-    loop {
+    if once {
         host.tick(now_ms())?;
-        if once {
-            print!(
-                "{}",
-                temet_work_core::text::text(host.world(), host.problems())
-            );
-            return Ok(());
-        }
-        if host.problems() != &shown {
-            for (from, what) in host.problems() {
-                if shown.get(from) != Some(what) {
-                    eprintln!("problem: {from}: {what}");
+        print!(
+            "{}",
+            temet_work_core::text::text(host.world(), host.problems())
+        );
+        return Ok(());
+    }
+    let socket_path = socket::path();
+    let requests = socket::listen(&socket_path)?;
+    eprintln!("temet-workd: listening at {}", socket_path.display());
+    let mut shown: BTreeMap<String, String> = BTreeMap::new();
+    let mut next_round = Instant::now();
+    loop {
+        if Instant::now() >= next_round {
+            host.tick(now_ms())?;
+            next_round = Instant::now() + EVERY;
+            if host.problems() != &shown {
+                for (from, what) in host.problems() {
+                    if shown.get(from) != Some(what) {
+                        eprintln!("problem: {from}: {what}");
+                    }
                 }
+                shown = host.problems().clone();
             }
-            shown = host.problems().clone();
         }
-        std::thread::sleep(EVERY);
+        match requests.recv_timeout(next_round.saturating_duration_since(Instant::now())) {
+            Ok(pending) => {
+                let reply = socket::answer(&mut host, now_ms(), &pending.request)?;
+                pending.answer(reply);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err("the socket stopped listening".into());
+            }
+        }
     }
 }
 

@@ -64,15 +64,18 @@ What exists today:
 | `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |
 | style, mike | skeletons |
-| `temet-work`, the root package | the parts, the configuration (`docs/configuration.md`), and `temet-workd`, which syncs GitHub issues and starts refiners |
+| `temet-work`, the root package | the parts, the configuration (`docs/configuration.md`), `temet-workd`, which syncs GitHub issues, starts agents and answers commands on its socket, and the `temet-work` command line (`docs/commands.md`) |
 
 What does not work yet:
 
-- The commands agents are told to run when they finish (`temet-work plan`, `ready`,
-  `review`, `rule`) do not exist, so an issue never gets past refining. They come with the
-  daemon's socket.
-- Nothing starts reviewers, merges, deploys or verifies: no part carries out those effects,
-  and the daemon lists each as a problem.
+- Nothing starts a reviewer: no part carries out `StartReview` yet, so an issue waits in
+  review until someone runs `temet-work review`.
+- Nothing reports CI or the plan's checks (`ChecksFinished`), so an approved issue does
+  not merge.
+- Nothing merges, deploys or verifies: no part carries out those effects, and the daemon
+  lists each as a problem.
+- Any agent or person can run any command; a command is not yet limited to the agent
+  whose step it is.
 - An agent the loop decided to start, which the daemon did not start before it stopped,
   is not started after a restart.
 

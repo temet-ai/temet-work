@@ -2,7 +2,9 @@
 //! one optional dependency and one `#[cfg]` block here; an adapter adds itself
 //! to its family inside the family's block. `tests/parts.rs` checks all three.
 
+pub mod cli;
 pub mod config;
+pub mod socket;
 
 use std::path::Path;
 

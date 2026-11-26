@@ -82,3 +82,54 @@ fn a_synced_issue_gets_a_refiner_in_a_labelled_terminal() {
         "{text}"
     );
 }
+
+#[test]
+fn commands_reach_the_daemon_over_its_socket() {
+    use temet_work::socket::{self, Reply};
+    use temet_work_core::{Command, Request};
+
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("daemon-test.sock");
+    let requests = socket::listen(&path).expect("listen");
+    assert!(socket::listen(&path).is_err(), "a second daemon is refused");
+    let client = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let ask = |command| {
+                socket::send(
+                    &path,
+                    &Request {
+                        by: Some(AgentId::new("author-9")),
+                        command,
+                    },
+                )
+                .expect("reply")
+            };
+            (
+                ask(Command::Status),
+                ask(Command::Ready {
+                    issue: IssueId::new("ankh", "1"),
+                }),
+            )
+        })
+    };
+    let mut host = host();
+    host.tick(0).expect("tick");
+    for _ in 0..2 {
+        let pending = requests
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a request");
+        let reply = socket::answer(&mut host, 1, &pending.request).expect("answer");
+        pending.answer(reply);
+    }
+    let (status, ready) = client.join().expect("client");
+    assert!(
+        matches!(&status, Reply::Done { text } if text.contains("refiner-1 on ankh#1")),
+        "{status:?}"
+    );
+    assert_eq!(
+        ready,
+        Reply::Refused {
+            why: "ankh#1 is refining, not being worked on".into()
+        }
+    );
+}

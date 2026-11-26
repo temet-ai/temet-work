@@ -13,6 +13,7 @@ publish = false
 # `foo.workspace = true`.
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
+serde-saphyr = "2.2"
 serde_json = "1"
 toml = "1"
 temet-work-core = { path = "crates/core" }
@@ -60,6 +61,8 @@ runtime-claude = ["runtime", "dep:temet-work-runtime-claude"]
 [dependencies]
 temet-work-core.workspace = true
 serde.workspace = true
+serde-saphyr.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 temet-work-tracker = { workspace = true, optional = true }
 temet-work-runner = { workspace = true, optional = true }

@@ -60,6 +60,12 @@ pub struct IssueId {
 }
 
 impl IssueId {
+    /// Reads `project#key`, the form issue ids are shown in.
+    pub fn parse(s: &str) -> Option<Self> {
+        let (project, key) = s.rsplit_once('#')?;
+        (!project.is_empty() && !key.is_empty()).then(|| Self::new(project, key))
+    }
+
     /// Makes an issue id.
     pub fn new(project: impl Into<String>, key: impl Into<String>) -> Self {
         Self {

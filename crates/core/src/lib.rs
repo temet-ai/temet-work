@@ -6,6 +6,7 @@
 //! part gains.
 
 pub mod brief;
+pub mod command;
 pub mod effect;
 pub mod event;
 pub mod host;
@@ -15,6 +16,7 @@ pub mod model;
 pub mod text;
 pub mod world;
 
+pub use command::{Command, Request};
 pub use effect::Effect;
 pub use event::{Event, Verdict};
 pub use host::{Host, Journal, Outcome, Polled};

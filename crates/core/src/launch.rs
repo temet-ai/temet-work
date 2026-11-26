@@ -7,6 +7,10 @@ use std::path::PathBuf;
 use crate::ids::IssueId;
 use crate::model::Role;
 
+/// The environment variable that names the agent sending a command. Every
+/// agent is started with it, so the commands it runs are recorded as its own.
+pub const AGENT_VAR: &str = "TEMET_WORK_AGENT";
+
 /// A program to start: its arguments, first the program itself, and the
 /// environment variables it adds.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
