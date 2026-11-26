@@ -12,6 +12,7 @@ publish = false
 # Every third-party version and every internal crate, once. Crates say
 # `foo.workspace = true`.
 [workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 temet-work-core = { path = "crates/core" }
 temet-work-tracker = { path = "crates/tracker" }

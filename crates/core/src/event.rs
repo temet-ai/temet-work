@@ -7,7 +7,7 @@ use crate::ids::{
 use crate::model::{AgentState, Decision, Plan, Role};
 
 /// The reviewer's answer for one round.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     /// The change is good.
     Approve,
@@ -19,7 +19,7 @@ pub enum Verdict {
 }
 
 /// One thing that happened.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     /// A work folder exists for a project on a machine.
     FolderAdded {

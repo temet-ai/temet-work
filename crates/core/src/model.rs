@@ -5,7 +5,7 @@ use crate::ids::{
 };
 
 /// Where an issue is in the loop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Stage {
     /// Synced from the tracker, not taken by a group yet.
     New,
@@ -41,7 +41,7 @@ pub enum Stage {
 }
 
 /// One "Done when" line and what proves it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Check {
     /// The line from the issue.
     pub done_when: String,
@@ -50,14 +50,14 @@ pub struct Check {
 }
 
 /// The refiner's plan for an issue.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Plan {
     /// The checks the work must pass.
     pub checks: Vec<Check>,
 }
 
 /// An issue as the loop sees it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Issue {
     /// Its project and tracker key.
     pub id: IssueId,
@@ -84,7 +84,9 @@ pub struct Issue {
 }
 
 /// What an agent does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Role {
     /// Writes an issue's plan.
     Refiner,
@@ -99,7 +101,7 @@ pub enum Role {
 }
 
 /// What an agent is doing, as its runner reports it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentState {
     /// In a turn, with a line on what it is doing.
     Working {
@@ -118,7 +120,7 @@ pub enum AgentState {
 }
 
 /// One agent session.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Agent {
     /// Its id.
     pub id: AgentId,
@@ -137,7 +139,7 @@ pub struct Agent {
 }
 
 /// A group of sessions working on a goal.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Group {
     /// Its id.
     pub id: GroupId,
@@ -152,7 +154,7 @@ pub struct Group {
 }
 
 /// A work folder: a checkout on one machine, held by one issue at a time.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Folder {
     /// Its id.
     pub id: FolderId,
@@ -165,7 +167,7 @@ pub struct Folder {
 }
 
 /// What a decision settles.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DecisionKind {
     /// An arbiter's ruling on a review: approve the change, or send it back.
     Ruling {
@@ -177,7 +179,7 @@ pub enum DecisionKind {
 }
 
 /// A choice an agent made. Work goes on at once; a person can overturn it later.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Decision {
     /// Its number.
     pub id: DecisionId,

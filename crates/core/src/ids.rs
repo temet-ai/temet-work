@@ -5,7 +5,7 @@ use std::fmt;
 macro_rules! id {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
-        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
         pub struct $name(pub String);
 
         impl $name {
@@ -49,7 +49,9 @@ id!(
 );
 
 /// An issue: its project and the key its tracker gives it (`516`, `ENG-41`).
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct IssueId {
     /// The project the issue belongs to.
     pub project: ProjectId,
@@ -74,5 +76,7 @@ impl fmt::Display for IssueId {
 }
 
 /// A decision, numbered in the order decisions were made.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct DecisionId(pub u64);

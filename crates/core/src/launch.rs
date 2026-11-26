@@ -9,7 +9,7 @@ use crate::model::Role;
 
 /// A program to start: its arguments, first the program itself, and the
 /// environment variables it adds.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Program {
     /// The program and its arguments.
     pub argv: Vec<String>,
@@ -18,7 +18,7 @@ pub struct Program {
 }
 
 /// What an agent is started with.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Brief {
     /// What the agent does.
     pub role: Role,

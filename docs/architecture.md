@@ -62,7 +62,8 @@ What exists today:
 | `temet-work-runtime-claude` | passes the runtime contract |
 | `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines |
 | `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
-| store, style, mike | skeletons |
+| `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |
+| style, mike | skeletons |
 
 No daemon runs yet.
 
@@ -133,7 +134,7 @@ features.
 
 ## What comes next
 
-The store, which keeps the event log, and the daemon, which feeds events to the loop and
-carries out its effects through the parts: the GitHub tracker for issues, herdr-core for
+The daemon, which reads the event log, feeds new events to the loop and carries out its
+effects through the parts: the GitHub tracker for issues, herdr-core for
 terminals, Claude Code for agents. Pull requests and merges need a code-host family of
 their own, since a tracker such as Jira hosts no code.
