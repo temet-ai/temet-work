@@ -8,6 +8,11 @@ publish.workspace = true
 
 [dependencies]
 temet-work-runner.workspace = true
+serde_json.workspace = true
+
+[features]
+# Runs tests/contract.rs against the herdr-core on this machine.
+live = []
 
 [lints]
 workspace = true

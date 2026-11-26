@@ -55,8 +55,10 @@ The desktop app will be the one front-end crate. It may depend on the core and o
 Today the core holds the objects and the work loop with its tests. The runner and runtime
 families hold their contracts, a fake each, and contract tests that every adapter runs and
 that fail on a runner which types into a prompt or a runtime which drops the model. The
-Claude Code adapter passes the runtime contract; the herdr-core adapter answers "not built
-yet" until its socket client exists. The other crates are skeletons, so nothing runs yet.
+Claude Code adapter passes the runtime contract. The herdr-core adapter speaks the core's
+socket and passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo
+nextest run -p temet-work-runner-herdr --features live`); in every other test run it opens
+nothing. The other crates are skeletons, and no daemon runs yet.
 
 ## Who coordinates
 
@@ -125,6 +127,6 @@ features.
 
 ## What comes next
 
-The herdr-core socket client behind the runner contract, written from
-`docs/findings/herdr-core.md`. Then the store, which keeps the event log, and the daemon,
-which feeds events to the loop and carries out its effects through the parts.
+The store, which keeps the event log, and the daemon, which feeds events to the loop and
+carries out its effects through the parts: the GitHub tracker for issues, herdr-core for
+terminals, Claude Code for agents.

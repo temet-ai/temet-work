@@ -22,7 +22,7 @@ pub fn parts() -> Vec<Box<dyn Part>> {
         #[allow(unused_mut)]
         let mut family = temet_work_runner::Runners::default();
         #[cfg(feature = "runner-herdr")]
-        family.add(Box::new(temet_work_runner_herdr::Herdr));
+        family.add(Box::new(temet_work_runner_herdr::Herdr::default()));
         parts.push(Box::new(family));
     }
     #[cfg(feature = "runtime")]
