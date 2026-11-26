@@ -72,6 +72,9 @@ What exists today:
 | style, mike | skeletons |
 | `temet-work`, the root package | the parts, the configuration (`docs/configuration.md`), `temet-workd`, which syncs GitHub issues, starts agents and answers commands on its socket, and the `temet-work` command line (`docs/commands.md`) |
 
+Areas (`docs/areas.md`) group projects that work together; stage 1 is built, and an
+issue that changes several repositories is not yet.
+
 What does not work yet:
 
 - Any agent or person can run any command; a command is not yet limited to the agent

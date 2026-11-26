@@ -23,6 +23,7 @@ fn events() -> Vec<Event> {
             group: GroupId::new("watch"),
             name: "Night watch".into(),
             projects: vec![ProjectId::new("ankh")],
+            areas: Vec::new(),
             milestones: vec![MilestoneId::new("m1")],
             refining_at_once: 1,
             model: None,

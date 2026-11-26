@@ -14,7 +14,9 @@ use crate::event::{Event, Verdict};
 use crate::ids::{AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, ProjectId};
 use crate::launch::Launch;
 use crate::model::Decision;
-use crate::model::{Agent, AgentState, DecisionKind, Folder, Group, Issue, Project, Role, Stage};
+use crate::model::{
+    Agent, AgentState, Area, DecisionKind, Folder, Group, Issue, Project, Role, Stage,
+};
 
 /// How many agents of one role the loop starts on one issue before it gives up.
 pub const MAX_STARTS: usize = 3;
@@ -41,6 +43,8 @@ pub struct World {
     pub log: Option<String>,
     /// Projects by id.
     pub projects: BTreeMap<ProjectId, Project>,
+    /// Areas by id.
+    pub areas: BTreeMap<ProjectId, Area>,
     /// Issues by id.
     pub issues: BTreeMap<IssueId, Issue>,
     /// Groups by id.
@@ -121,6 +125,24 @@ impl World {
                 p.code_host = code_host.clone().unwrap_or_else(|| tracker.clone());
                 p.repo = repo.clone().unwrap_or_else(|| name.clone());
             }
+            Event::AreaDefined {
+                area,
+                name,
+                projects,
+                tracker,
+                tracker_name,
+            } => {
+                self.areas.insert(
+                    area.clone(),
+                    Area {
+                        id: area.clone(),
+                        name: name.clone(),
+                        projects: projects.clone(),
+                        tracker: tracker.clone(),
+                        tracker_name: tracker_name.clone(),
+                    },
+                );
+            }
             Event::ProjectCommandsSet {
                 project,
                 deploy,
@@ -139,6 +161,7 @@ impl World {
                 group,
                 name,
                 projects,
+                areas,
                 milestones,
                 refining_at_once,
                 model,
@@ -149,6 +172,7 @@ impl World {
                         id: group.clone(),
                         name: name.clone(),
                         projects: projects.clone(),
+                        areas: areas.clone(),
                         milestones: milestones.clone(),
                         refining_at_once: (*refining_at_once).max(1),
                         model: model.clone(),
@@ -455,6 +479,41 @@ impl World {
         out
     }
 
+    /// The repository an issue is worked in: its own project, or for an issue of
+    /// an area, the first repository its plan names, else the area's first.
+    pub fn repo_of(&self, issue: &Issue) -> Option<&Project> {
+        if let Some(p) = self.projects.get(&issue.id.project) {
+            return Some(p);
+        }
+        let area = self.areas.get(&issue.id.project)?;
+        issue
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.repos.first())
+            .or_else(|| area.projects.first())
+            .and_then(|id| self.projects.get(id))
+    }
+
+    /// The repositories of the area an issue comes from; empty for a project's issue.
+    fn area_repos(&self, issue: &IssueId) -> Vec<ProjectId> {
+        self.areas
+            .get(&issue.project)
+            .map(|a| a.projects.clone())
+            .unwrap_or_default()
+    }
+
+    /// The tracker's name for where an issue comes from: its project's or its area's.
+    pub fn source_name(&self, issue: &IssueId) -> Option<&str> {
+        self.projects
+            .get(&issue.project)
+            .map(|p| p.name.as_str())
+            .or_else(|| {
+                self.areas
+                    .get(&issue.project)
+                    .map(|a| a.tracker_name.as_str())
+            })
+    }
+
     /// Whether `agent`'s issue is waiting on it to finish its step: a refiner while
     /// its issue is refining, an author while it is worked on, a reviewer that has
     /// heard its round, an arbiter while the issue is with the arbiter.
@@ -601,11 +660,13 @@ impl World {
         // so it does not work in a folder an author is changing.
         let place = match folder {
             Some(f) => self.folders.get(f),
-            None => self
-                .folders
-                .values()
-                .find(|f| f.project == issue.project && f.holder.is_none())
-                .or_else(|| self.folders.values().find(|f| f.project == issue.project)),
+            None => {
+                let repo = self.repo_of(i).map_or(&issue.project, |p| &p.id);
+                self.folders
+                    .values()
+                    .find(|f| &f.project == repo && f.holder.is_none())
+                    .or_else(|| self.folders.values().find(|f| &f.project == repo))
+            }
         };
         let path = place.map(|f| std::path::PathBuf::from(&f.path));
         let shared = folder.is_none() && place.is_some_and(|f| f.holder.is_some());
@@ -616,7 +677,14 @@ impl World {
             folder: folder.cloned(),
             brief: crate::launch::Brief {
                 model: self.groups.get(group).and_then(|g| g.model.clone()),
-                ..brief::write(role, i, self.projects.get(&issue.project), path, shared)
+                ..brief::write(
+                    role,
+                    i,
+                    self.source_name(issue),
+                    &self.area_repos(issue),
+                    path,
+                    shared,
+                )
             },
         })
     }
@@ -696,8 +764,16 @@ impl World {
 
     /// Whether a group works on an issue: one of its projects, and one of its
     /// milestones when it names any.
-    fn in_scope(group: &Group, issue: &Issue) -> bool {
-        group.projects.contains(&issue.id.project)
+    fn in_scope(&self, group: &Group, issue: &Issue) -> bool {
+        let from = &issue.id.project;
+        let taken = group.projects.contains(from)
+            || group.areas.contains(from)
+            || group
+                .areas
+                .iter()
+                .filter_map(|a| self.areas.get(a))
+                .any(|a| a.projects.contains(from));
+        taken
             && (group.milestones.is_empty()
                 || issue
                     .milestone
@@ -718,7 +794,7 @@ impl World {
             let mut new: Vec<&Issue> = self
                 .issues
                 .values()
-                .filter(|i| i.stage == Stage::New && i.group.is_none() && Self::in_scope(group, i))
+                .filter(|i| i.stage == Stage::New && i.group.is_none() && self.in_scope(group, i))
                 .collect();
             new.sort_by_key(|i| Self::rank(group, i));
             let take: Vec<IssueId> = new
@@ -751,10 +827,15 @@ impl World {
             ready.sort_by_key(|i| Self::rank(group, i));
             let ready: Vec<IssueId> = ready.iter().map(|i| i.id.clone()).collect();
             for id in ready {
+                let repo = self
+                    .issues
+                    .get(&id)
+                    .and_then(|i| self.repo_of(i))
+                    .map_or_else(|| id.project.clone(), |p| p.id.clone());
                 let free = self
                     .folders
                     .values()
-                    .find(|f| f.project == id.project && f.holder.is_none())
+                    .find(|f| f.project == repo && f.holder.is_none())
                     .map(|f| f.id.clone());
                 let Some(folder) = free else { continue };
                 if let (Some(i), Some(f)) =

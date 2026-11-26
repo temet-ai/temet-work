@@ -39,8 +39,29 @@ pub fn agent_state(state: &AgentState) -> String {
 pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Projects");
+    let project = |out: &mut String, p: &crate::model::Project, indent: &str| {
+        let from = if p.tracker.is_empty() {
+            "issues from its area".to_string()
+        } else {
+            format!("{} in {}", p.name, p.tracker)
+        };
+        let _ = writeln!(out, "{indent}{}: {from}", p.id);
+    };
+    for a in world.areas.values() {
+        let from = if a.tracker.is_empty() {
+            String::new()
+        } else {
+            format!(", issues from {} in {}", a.tracker_name, a.tracker)
+        };
+        let _ = writeln!(out, "  {} ({}){from}", a.id, a.name);
+        for p in a.projects.iter().filter_map(|id| world.projects.get(id)) {
+            project(&mut out, p, "    ");
+        }
+    }
     for p in world.projects.values() {
-        let _ = writeln!(out, "  {}: {} in {}", p.id, p.name, p.tracker);
+        if !world.areas.values().any(|a| a.projects.contains(&p.id)) {
+            project(&mut out, p, "  ");
+        }
     }
     let _ = writeln!(out, "Groups");
     for g in world.groups.values() {

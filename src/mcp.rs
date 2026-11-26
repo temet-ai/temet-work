@@ -64,7 +64,8 @@ fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {
                 "issue": issue_field(),
                 "checks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
-                    "done_when": {"type": "string"}, "proven_by": {"type": "string"}}, "required": ["done_when", "proven_by"]}}
+                    "done_when": {"type": "string"}, "proven_by": {"type": "string"}}, "required": ["done_when", "proven_by"]}},
+                "repos": {"type": "array", "items": {"type": "string"}, "description": "For an issue of an area: the repositories the change needs, in the order they merge."}
             }, "required": ["issue", "checks"]}),
         },
         Tool {
@@ -119,6 +120,16 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
         "plan" => Command::Plan {
             issue: issue(args)?,
             plan: Plan {
+                repos: args
+                    .get("repos")
+                    .and_then(Value::as_array)
+                    .map(|r| {
+                        r.iter()
+                            .filter_map(Value::as_str)
+                            .map(temet_work_core::ids::ProjectId::new)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 checks: args
                     .get("checks")
                     .and_then(Value::as_array)

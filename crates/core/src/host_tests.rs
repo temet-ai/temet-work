@@ -107,6 +107,7 @@ fn setup(refining_at_once: usize) -> Vec<Event> {
             group: GroupId::new("watch"),
             name: "Night watch".into(),
             projects: vec![ProjectId::new("ankh")],
+            areas: Vec::new(),
             milestones: vec![],
             refining_at_once,
             model: None,
@@ -263,6 +264,7 @@ fn an_author_runs_in_its_folder_and_a_refiner_in_any_folder_of_the_project() {
     w.apply(&Event::PlanWritten {
         issue: IssueId::new("ankh", "1"),
         plan: Plan {
+            repos: Vec::new(),
             checks: vec![crate::model::Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),

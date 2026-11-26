@@ -198,8 +198,8 @@ impl Part for Deploys {
                 ));
             }
         }
-        let Some(project) = world.projects.get(&issue.project) else {
-            return Outcome::Failed(format!("project {} is not configured", issue.project));
+        let Some(project) = world.issues.get(issue).and_then(|i| world.repo_of(i)) else {
+            return Outcome::Failed(format!("{issue} has no repository configured"));
         };
         let command = match step {
             Step::Deploy => project.deploy.clone(),
@@ -229,7 +229,7 @@ impl Part for Deploys {
             .unwrap_or_else(|| PathBuf::from("/"));
         let env = vec![
             ("TEMET_WORK_ISSUE".to_string(), issue.to_string()),
-            ("TEMET_WORK_PROJECT".to_string(), issue.project.to_string()),
+            ("TEMET_WORK_PROJECT".to_string(), project.id.to_string()),
             ("TEMET_WORK_REPO".to_string(), project.repo.clone()),
         ];
         let (tx, rx) = mpsc::channel();
@@ -274,6 +274,14 @@ mod tests {
             run_in: Some("/srv/ankh".into()),
             ci: None,
         });
+        w.apply(&Event::IssueSynced {
+            issue: issue(),
+            title: "Mend the clock".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
         w
     }
 
@@ -294,17 +302,19 @@ mod tests {
         IssueId::new("ankh", "1")
     }
 
-    /// Polls until the running commands finish; they finish in microseconds.
+    /// Polls until the running commands finish: usually within a millisecond,
+    /// at most two seconds when the machine is busy.
     fn settle(part: &mut Deploys, w: &World) -> Polled {
         let mut out = Polled::default();
-        for _ in 0..1000 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
             let p = part.poll(w, 0);
             out.events.extend(p.events);
             out.problem = p.problem;
-            if part.running() == 0 {
+            if part.running() == 0 || std::time::Instant::now() > deadline {
                 break;
             }
-            std::thread::yield_now();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         out
     }

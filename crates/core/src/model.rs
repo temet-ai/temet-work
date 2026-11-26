@@ -54,6 +54,10 @@ pub struct Check {
 pub struct Plan {
     /// The checks the work must pass.
     pub checks: Vec<Check>,
+    /// The repositories the change touches, in the order they merge. Empty means
+    /// the issue's own project.
+    #[serde(default)]
+    pub repos: Vec<ProjectId>,
 }
 
 /// An issue as the loop sees it.
@@ -179,6 +183,8 @@ pub struct Group {
     pub name: String,
     /// The projects it takes issues from.
     pub projects: Vec<ProjectId>,
+    /// The areas it takes issues from: the area's own and every project's in it.
+    pub areas: Vec<ProjectId>,
     /// The milestones it works on, most important first. Empty means every issue.
     pub milestones: Vec<MilestoneId>,
     /// How many issues it refines at once.
@@ -202,12 +208,30 @@ pub struct Folder {
     pub holder: Option<IssueId>,
 }
 
+/// An area: repositories that work together, and the tracker its own issues come
+/// from when one tracker project serves them all. `docs/areas.md` has why.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Area {
+    /// Its id; projects and areas share one set of ids.
+    pub id: ProjectId,
+    /// Its name as shown.
+    pub name: String,
+    /// The repositories in it.
+    pub projects: Vec<ProjectId>,
+    /// The id of the tracker adapter that holds its issues; empty when its projects
+    /// keep their own.
+    pub tracker: String,
+    /// The tracker's own name for its project.
+    pub tracker_name: String,
+}
+
 /// A project: one repository and the tracker its issues come from.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     /// Its id.
     pub id: ProjectId,
-    /// The id of the tracker adapter that holds its issues.
+    /// The id of the tracker adapter that holds its issues; empty when its area's
+    /// tracker holds them.
     pub tracker: String,
     /// The tracker's own name for it (`owner/repo`, a project key).
     pub name: String,

@@ -237,9 +237,10 @@ impl CodeHosts {
         issue: &IssueId,
     ) -> Result<(&mut Box<dyn CodeHost>, String), String> {
         let project = world
-            .projects
-            .get(&issue.project)
-            .ok_or_else(|| format!("project {} is not configured", issue.project))?;
+            .issues
+            .get(issue)
+            .and_then(|i| world.repo_of(i))
+            .ok_or_else(|| format!("{issue} has no repository configured"))?;
         let host = self
             .adapters
             .iter_mut()
@@ -291,7 +292,11 @@ impl Part for CodeHosts {
             };
             // No checks yet usually means CI has not started on the new commit; only
             // a project that runs no CI leaves the plan's checks to the reviewer.
-            let runs_ci = world.projects.get(&issue.project).is_none_or(|p| p.ci);
+            let runs_ci = world
+                .issues
+                .get(&issue)
+                .and_then(|i| world.repo_of(i))
+                .is_none_or(|p| p.ci);
             let finished = match pull.checks {
                 Checks::Pending => None,
                 Checks::None if runs_ci => None,

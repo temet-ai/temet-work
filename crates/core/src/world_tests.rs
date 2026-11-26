@@ -14,6 +14,7 @@ fn group(milestones: &[&str], refining_at_once: usize) -> Event {
         group: GroupId::new("watch"),
         name: "Night watch".into(),
         projects: vec![ProjectId::new("ankh")],
+        areas: Vec::new(),
         milestones: milestones.iter().map(|m| MilestoneId::new(*m)).collect(),
         refining_at_once,
         model: None,
@@ -778,5 +779,122 @@ fn an_ended_agent_stays_ended_when_a_late_update_arrives() {
     assert_eq!(
         w.agents[&AgentId::new("author-1")].state,
         crate::model::AgentState::Ended
+    );
+}
+
+/// An area `sc` of projects `ui` and `api`, its issues from its own tracker, a
+/// folder in each project, and a group that takes the whole area.
+fn area_world() -> World {
+    let (w, _) = World::replay(&[
+        Event::AreaDefined {
+            area: ProjectId::new("guild"),
+            name: "Thieves' Guild".into(),
+            projects: vec![ProjectId::new("ui"), ProjectId::new("api")],
+            tracker: "fake".into(),
+            tracker_name: "GLD".into(),
+        },
+        Event::ProjectAdded {
+            project: ProjectId::new("ui"),
+            tracker: String::new(),
+            name: "group/ui".into(),
+            code_host: Some("fake".into()),
+            repo: None,
+        },
+        Event::ProjectAdded {
+            project: ProjectId::new("api"),
+            tracker: String::new(),
+            name: "group/api".into(),
+            code_host: Some("fake".into()),
+            repo: None,
+        },
+        Event::FolderAdded {
+            folder: FolderId::new("ui-1"),
+            project: ProjectId::new("ui"),
+            machine: MachineId::new("morpork"),
+            path: "/srv/ui-1".into(),
+        },
+        Event::FolderAdded {
+            folder: FolderId::new("api-1"),
+            project: ProjectId::new("api"),
+            machine: MachineId::new("morpork"),
+            path: "/srv/api-1".into(),
+        },
+        Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![],
+            areas: vec![ProjectId::new("guild")],
+            milestones: vec![],
+            refining_at_once: 2,
+            model: None,
+        },
+    ]);
+    w
+}
+
+fn area_issue(source: &str, key: &str) -> Event {
+    Event::IssueSynced {
+        issue: IssueId::new(source, key),
+        title: format!("{source} {key}"),
+        milestone: None,
+        depends_on: vec![],
+        order: 1,
+        closed: false,
+    }
+}
+
+#[test]
+fn a_group_that_takes_an_area_takes_its_own_issues_and_its_projects() {
+    let mut w = area_world();
+    w.apply(&area_issue("guild", "GLD-12"));
+    w.apply(&area_issue("api", "7"));
+    w.apply(&area_issue("radar", "44"));
+    assert_eq!(
+        w.issues[&IssueId::new("guild", "GLD-12")].stage,
+        Stage::Refining
+    );
+    assert_eq!(w.issues[&IssueId::new("api", "7")].stage, Stage::Refining);
+    assert_eq!(
+        w.issues[&IssueId::new("radar", "44")].stage,
+        Stage::New,
+        "not in the area"
+    );
+}
+
+#[test]
+fn an_area_issue_is_worked_in_the_first_repository_its_plan_names() {
+    let mut w = area_world();
+    let id = IssueId::new("guild", "GLD-12");
+    w.apply(&area_issue("guild", "GLD-12"));
+    let refiner = w
+        .launch(&GroupId::new("watch"), Role::Refiner, &id, None)
+        .expect("refiner");
+    assert!(
+        refiner.brief.task.contains("repositories are: ui, api"),
+        "{}",
+        refiner.brief.task
+    );
+    assert!(
+        refiner
+            .brief
+            .task
+            .contains("GLD-12 of GLD in its tracker")
+    );
+    let effects = w.apply(&Event::PlanWritten {
+        issue: id.clone(),
+        plan: Plan {
+            repos: vec![ProjectId::new("api"), ProjectId::new("ui")],
+            checks: vec![],
+        },
+    });
+    assert!(effects.contains(&Effect::StartAgent {
+        group: GroupId::new("watch"),
+        role: Role::Author,
+        issue: id.clone(),
+        folder: Some(FolderId::new("api-1")),
+    }));
+    assert_eq!(
+        w.repo_of(&w.issues[&id]).map(|p| p.id.0.as_str()),
+        Some("api")
     );
 }

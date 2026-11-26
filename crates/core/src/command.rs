@@ -210,6 +210,7 @@ mod tests {
 
     fn plan() -> Plan {
         Plan {
+            repos: Vec::new(),
             checks: vec![Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
@@ -230,6 +231,7 @@ mod tests {
                 group: GroupId::new("watch"),
                 name: "Night watch".into(),
                 projects: vec![ProjectId::new("ankh")],
+                areas: Vec::new(),
                 milestones: vec![],
                 refining_at_once: 1,
                 model: None,

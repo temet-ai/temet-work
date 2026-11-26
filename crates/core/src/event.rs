@@ -54,6 +54,21 @@ pub enum Event {
         #[serde(default)]
         repo: Option<String>,
     },
+    /// An area was defined, or changed.
+    AreaDefined {
+        /// The area.
+        area: ProjectId,
+        /// Its name as shown.
+        name: String,
+        /// The repositories in it.
+        projects: Vec<ProjectId>,
+        /// The tracker adapter that holds its own issues; empty for none.
+        #[serde(default)]
+        tracker: String,
+        /// The tracker's own name for its project.
+        #[serde(default)]
+        tracker_name: String,
+    },
     /// A project's deploy and verify commands were set.
     ProjectCommandsSet {
         /// The project.
@@ -77,6 +92,9 @@ pub enum Event {
         name: String,
         /// The projects it takes issues from.
         projects: Vec<ProjectId>,
+        /// The areas it takes issues from.
+        #[serde(default)]
+        areas: Vec<ProjectId>,
         /// The milestones it works on, most important first; empty for all.
         milestones: Vec<MilestoneId>,
         /// How many issues it refines at once.

@@ -20,6 +20,9 @@ pub struct Config {
     /// Projects.
     #[serde(default, rename = "project")]
     pub projects: Vec<ProjectConf>,
+    /// Areas: projects that work together.
+    #[serde(default, rename = "area")]
+    pub areas: Vec<AreaConf>,
     /// Work folders.
     #[serde(default, rename = "folder")]
     pub folders: Vec<FolderConf>,
@@ -34,8 +37,10 @@ pub struct Config {
 pub struct ProjectConf {
     /// A short id, used in issue ids (`radar#44`).
     pub id: String,
-    /// The tracker adapter that holds its issues (`github`).
-    pub tracker: String,
+    /// The tracker adapter that holds its issues (`github`); left out when its
+    /// area's tracker holds them.
+    #[serde(default)]
+    pub tracker: Option<String>,
     /// The tracker's name for it (`owner/repo`).
     pub name: String,
     /// The code-host adapter that holds its pull requests; the tracker when
@@ -70,6 +75,23 @@ pub struct FolderConf {
     pub path: String,
 }
 
+/// One `[[area]]`: projects that work together. `docs/areas.md` says why.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AreaConf {
+    /// A short id, shared with projects, used in its own issues' ids (`guild#GLD-12`).
+    pub id: String,
+    /// Its name as shown; the id when left out.
+    pub name: Option<String>,
+    /// The projects in it.
+    pub projects: Vec<String>,
+    /// The tracker adapter that holds its own issues, when one tracker project
+    /// serves all its projects (`jira`).
+    pub tracker: Option<String>,
+    /// The tracker's name for that project (`GLD`).
+    pub tracker_project: Option<String>,
+}
+
 /// One `[[group]]`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,7 +101,11 @@ pub struct GroupConf {
     /// Its name as shown; the id when left out.
     pub name: Option<String>,
     /// The projects it works on.
+    #[serde(default)]
     pub projects: Vec<String>,
+    /// The areas it works on: each area's own issues and its projects'.
+    #[serde(default)]
+    pub areas: Vec<String>,
     /// The milestones it works through, first to last; every issue of its
     /// projects when left out.
     #[serde(default)]
@@ -127,8 +153,56 @@ impl Config {
                 ));
             }
         }
+        let mut areas = BTreeSet::new();
+        let mut in_area = BTreeSet::new();
+        for a in &self.areas {
+            if projects.contains(a.id.as_str()) || !areas.insert(a.id.as_str()) {
+                return Err(format!(
+                    "{} names both an area and a project, or two areas",
+                    a.id
+                ));
+            }
+            for p in &a.projects {
+                if !projects.contains(p.as_str()) {
+                    return Err(format!(
+                        "area {} names project {p}, which is not listed",
+                        a.id
+                    ));
+                }
+                if !in_area.insert(p.as_str()) {
+                    return Err(format!("project {p} is in two areas"));
+                }
+            }
+            if a.tracker.is_some() != a.tracker_project.is_some() {
+                return Err(format!(
+                    "area {} needs both tracker and tracker_project, or neither",
+                    a.id
+                ));
+            }
+        }
+        for p in &self.projects {
+            let area_tracks = self
+                .areas
+                .iter()
+                .any(|a| a.tracker.is_some() && a.projects.contains(&p.id));
+            if p.tracker.is_none() && !area_tracks {
+                return Err(format!(
+                    "project {} names no tracker, and no area tracks its issues",
+                    p.id
+                ));
+            }
+            if p.tracker.is_none() && p.code_host.is_none() {
+                return Err(format!("project {} names no code_host", p.id));
+            }
+        }
         let mut groups = BTreeSet::new();
         for g in &self.groups {
+            if let Some(a) = g.areas.iter().find(|a| !areas.contains(a.as_str())) {
+                return Err(format!(
+                    "group {} names area {a}, which is not listed",
+                    g.id
+                ));
+            }
             if !groups.insert(g.id.as_str()) {
                 return Err(format!("group {} is listed twice", g.id));
             }
@@ -148,10 +222,11 @@ impl Config {
         let mut out = Vec::new();
         for p in &self.projects {
             let id = ProjectId::new(&p.id);
-            let code_host = p.code_host.clone().unwrap_or_else(|| p.tracker.clone());
+            let tracker = p.tracker.clone().unwrap_or_default();
+            let code_host = p.code_host.clone().unwrap_or_else(|| tracker.clone());
             let repo = p.repo.clone().unwrap_or_else(|| p.name.clone());
             let same = world.projects.get(&id).is_some_and(|w| {
-                w.tracker == p.tracker
+                w.tracker == tracker
                     && w.name == p.name
                     && w.code_host == code_host
                     && w.repo == repo
@@ -159,7 +234,7 @@ impl Config {
             if !same {
                 out.push(Event::ProjectAdded {
                     project: id,
-                    tracker: p.tracker.clone(),
+                    tracker,
                     name: p.name.clone(),
                     code_host: Some(code_host),
                     repo: Some(repo),
@@ -189,6 +264,28 @@ impl Config {
                 });
             }
         }
+        for a in &self.areas {
+            let id = ProjectId::new(&a.id);
+            let name = a.name.clone().unwrap_or_else(|| a.id.clone());
+            let projects: Vec<ProjectId> = a.projects.iter().map(ProjectId::new).collect();
+            let tracker = a.tracker.clone().unwrap_or_default();
+            let tracker_name = a.tracker_project.clone().unwrap_or_default();
+            let same = world.areas.get(&id).is_some_and(|w| {
+                w.name == name
+                    && w.projects == projects
+                    && w.tracker == tracker
+                    && w.tracker_name == tracker_name
+            });
+            if !same {
+                out.push(Event::AreaDefined {
+                    area: id,
+                    name,
+                    projects,
+                    tracker,
+                    tracker_name,
+                });
+            }
+        }
         for f in &self.folders {
             let id = FolderId::new(&f.id);
             let same = world.folders.get(&id).is_some_and(|w| {
@@ -207,11 +304,13 @@ impl Config {
             let id = GroupId::new(&g.id);
             let name = g.name.clone().unwrap_or_else(|| g.id.clone());
             let projects: Vec<ProjectId> = g.projects.iter().map(ProjectId::new).collect();
+            let areas: Vec<ProjectId> = g.areas.iter().map(ProjectId::new).collect();
             let milestones: Vec<MilestoneId> = g.milestones.iter().map(MilestoneId::new).collect();
             let refining_at_once = g.refining_at_once.max(1);
             let same = world.groups.get(&id).is_some_and(|w| {
                 w.name == name
                     && w.projects == projects
+                    && w.areas == areas
                     && w.milestones == milestones
                     && w.refining_at_once == refining_at_once
                     && w.model == g.model
@@ -221,6 +320,7 @@ impl Config {
                     group: id,
                     name,
                     projects,
+                    areas,
                     milestones,
                     refining_at_once,
                     model: g.model.clone(),
@@ -285,6 +385,47 @@ milestones = ["Clocks"]
                 ..
             }]
         ));
+    }
+
+    const AREA: &str = r#"
+[[project]]
+id = "ui"
+name = "group/ui"
+code_host = "fake"
+
+[[project]]
+id = "api"
+name = "group/api"
+code_host = "fake"
+
+[[area]]
+id = "guild"
+name = "Thieves' Guild"
+projects = ["ui", "api"]
+tracker = "fake"
+tracker_project = "GLD"
+
+[[group]]
+id = "watch"
+areas = ["guild"]
+"#;
+
+    #[test]
+    fn an_area_with_its_own_tracker_serves_projects_that_name_none() {
+        let config = Config::parse(AREA).expect("parse");
+        let events = config.events(&World::default());
+        assert!(events.iter().any(
+            |e| matches!(e, Event::AreaDefined { tracker_name, .. } if tracker_name == "GLD")
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::GroupCreated { areas, .. } if areas.len() == 1))
+        );
+        let (world, _) = World::replay(&events);
+        assert_eq!(config.events(&world), vec![], "nothing new the second time");
+        let untracked = AREA.replace("tracker = \"fake\"\ntracker_project = \"GLD\"\n", "");
+        assert!(Config::parse(&untracked).is_err_and(|e| e.contains("names no tracker")));
     }
 
     #[test]

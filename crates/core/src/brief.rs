@@ -5,24 +5,39 @@
 use std::path::PathBuf;
 
 use crate::ids::IssueId;
+use crate::ids::ProjectId;
 use crate::launch::Brief;
-use crate::model::{Issue, Project, Role};
+use crate::model::{Issue, Role};
 
 /// Writes the brief for an agent of `role` on `issue`, run in `folder`.
 /// `shared` says the folder is held by another issue's author, so the agent must
 /// not change it.
+/// `source` is the tracker's name for where the issue comes from, and `repos`
+/// the repositories of its area when it comes from an area's tracker.
 pub fn write(
     role: Role,
     issue: &Issue,
-    project: Option<&Project>,
+    source: Option<&str>,
+    repos: &[ProjectId],
     folder: Option<PathBuf>,
     shared: bool,
 ) -> Brief {
     let id = &issue.id;
-    let source = project.map_or_else(
+    let source = source.map_or_else(
         || format!("issue {} of project {}", id.key, id.project),
-        |p| format!("issue {} of {} in its tracker", id.key, p.name),
+        |name| format!("issue {} of {name} in its tracker", id.key),
     );
+    // An area's issue may touch any of its repositories; the refiner says which.
+    let area_note = if repos.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = repos.iter().map(ToString::to_string).collect();
+        format!(
+            "It belongs to an area whose repositories are: {}. Under checks, add repos: the ones \
+             the change needs, in the order they should merge.\n",
+            list.join(", ")
+        )
+    };
     let checks = issue.plan.as_ref().map_or_else(String::new, |plan| {
         plan.checks
             .iter()
@@ -45,7 +60,7 @@ pub fn write(
     let task = match role {
         Role::Refiner => format!(
             "Refine {id}: {title}. It is {source}.\n\
-             {folder_note}Read the issue and the code it touches in this folder. Change no file here.\n\
+             {folder_note}{area_note}Read the issue and the code it touches in this folder. Change no file here.\n\
              Then send the plan, one entry per check, as YAML on standard input:\n\
              temet-work plan {id} - <<'PLAN'\n\
              checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\

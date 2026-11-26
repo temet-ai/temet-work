@@ -105,8 +105,18 @@ pub fn depends_on(body: &str) -> Vec<String> {
                     && !n.is_empty()
                     && n.chars().all(|c| c.is_ascii_digit())
             });
+            // `other#12` or `owner/repo#12`: an issue in another project or area.
+            let elsewhere = word.split_once('#').is_some_and(|(p, n)| {
+                !p.is_empty()
+                    && p.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+                    && !n.is_empty()
+                    && n.chars().all(|c| c.is_ascii_digit())
+            });
             if (word.starts_with('#') && is_number) || is_jira {
                 out.push(key.to_string());
+            } else if elsewhere {
+                out.push(word.to_string());
             }
         }
     }
@@ -304,7 +314,16 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
     for t in open {
         let issue = id(&t.key);
         let milestone = t.milestone.clone().map(MilestoneId::new);
-        let depends_on: Vec<IssueId> = t.depends_on.iter().map(|k| id(k)).collect();
+        let depends_on: Vec<IssueId> = t
+            .depends_on
+            .iter()
+            .map(|k| {
+                // `other#12`: the project or area by id, or by its tracker's name for it.
+                k.split_once('#')
+                    .and_then(|(source, n)| resolve(world, source).map(|s| IssueId::new(s.0, n)))
+                    .unwrap_or_else(|| id(k))
+            })
+            .collect();
         // Unchanged, unless it was closed in the tracker and is open there again.
         let same = world.issues.get(&issue).is_some_and(|i| {
             i.title == t.title
@@ -349,6 +368,39 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
     out
 }
 
+/// The project or area a dependency names: by its id, or by its tracker's or code
+/// host's name for it.
+fn resolve(world: &World, name: &str) -> Option<ProjectId> {
+    world
+        .projects
+        .values()
+        .find(|p| p.id.0 == name || p.name == name || p.repo == name)
+        .map(|p| p.id.clone())
+        .or_else(|| {
+            world
+                .areas
+                .values()
+                .find(|a| a.id.0 == name || (!a.tracker_name.is_empty() && a.tracker_name == name))
+                .map(|a| a.id.clone())
+        })
+}
+
+/// Where issues come from: each project and area with a tracker of its own, as
+/// (id, tracker adapter, tracker's name for it).
+fn sources(world: &World) -> Vec<(ProjectId, String, String)> {
+    let projects = world
+        .projects
+        .values()
+        .filter(|p| !p.tracker.is_empty())
+        .map(|p| (p.id.clone(), p.tracker.clone(), p.name.clone()));
+    let areas = world
+        .areas
+        .values()
+        .filter(|a| !a.tracker.is_empty())
+        .map(|a| (a.id.clone(), a.tracker.clone(), a.tracker_name.clone()));
+    projects.chain(areas).collect()
+}
+
 /// The keys open issues depend on that are neither open nor known to the loop.
 /// Each may have been closed before syncing began; only the tracker can say.
 pub fn unknown_dependencies(
@@ -361,7 +413,8 @@ pub fn unknown_dependencies(
         .iter()
         .flat_map(|t| &t.depends_on)
         .filter(|k| {
-            !open_keys.contains(k.as_str())
+            !k.contains('#')
+                && !open_keys.contains(k.as_str())
                 && !world
                     .issues
                     .contains_key(&IssueId::new(project.0.clone(), k.as_str()))
@@ -398,35 +451,32 @@ impl Part for Trackers {
 
     fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
         let mut events = Vec::new();
-        for project in world.projects.values() {
+        for (source, tracker_id, name) in sources(world) {
             let due = self
                 .synced_at
-                .get(&project.id)
+                .get(&source)
                 .is_none_or(|at| now_ms >= at + self.every_ms);
             if !due {
                 continue;
             }
-            self.synced_at.insert(project.id.clone(), now_ms);
-            let Some(tracker) = self.adapters.iter_mut().find(|a| a.id() == project.tracker) else {
+            self.synced_at.insert(source.clone(), now_ms);
+            let Some(tracker) = self.adapters.iter_mut().find(|a| a.id() == tracker_id) else {
                 self.errors.insert(
-                    project.id.clone(),
-                    format!(
-                        "{}: no tracker \"{}\" in this build",
-                        project.id, project.tracker
-                    ),
+                    source.clone(),
+                    format!("{source}: no tracker \"{tracker_id}\" in this build"),
                 );
                 continue;
             };
-            match tracker.issues(&project.name) {
+            match tracker.issues(&name) {
                 Ok(open) => {
-                    self.errors.remove(&project.id);
+                    self.errors.remove(&source);
                     // A dependency counts as done only once its tracker says it is
                     // closed; until then the issue waits, and the reason is shown.
                     let mut unsure = Vec::new();
-                    for key in unknown_dependencies(world, &project.id, &open) {
-                        match tracker.closed(&project.name, &key) {
+                    for key in unknown_dependencies(world, &source, &open) {
+                        match tracker.closed(&name, &key) {
                             Ok(true) => events.push(Event::IssueSynced {
-                                issue: IssueId::new(project.id.0.clone(), key),
+                                issue: IssueId::new(source.0.clone(), key),
                                 title: String::new(),
                                 milestone: None,
                                 depends_on: Vec::new(),
@@ -443,24 +493,21 @@ impl Part for Trackers {
                     }
                     // Closed by the loop, still open in the tracker: the close failed; try again.
                     for t in &open {
-                        let id = IssueId::new(project.id.0.clone(), t.key.as_str());
+                        let id = IssueId::new(source.0.clone(), t.key.as_str());
                         if world.issues.get(&id).is_some_and(|i| i.closed_by_loop)
-                            && let Err(e) = tracker.close(&project.name, &t.key)
+                            && let Err(e) = tracker.close(&name, &t.key)
                         {
                             unsure.push(format!("closing {id} failed: {e}"));
                         }
                     }
                     if !unsure.is_empty() {
-                        self.errors.insert(
-                            project.id.clone(),
-                            format!("{}: {}", project.name, unsure.join("; ")),
-                        );
+                        self.errors
+                            .insert(source.clone(), format!("{}: {}", name, unsure.join("; ")));
                     }
-                    events.extend(changes(world, &project.id, &open));
+                    events.extend(changes(world, &source, &open));
                 }
                 Err(e) => {
-                    self.errors
-                        .insert(project.id.clone(), format!("{}: {e}", project.name));
+                    self.errors.insert(source.clone(), format!("{}: {e}", name));
                 }
             }
         }
@@ -473,13 +520,16 @@ impl Part for Trackers {
         let Effect::Close { issue } = effect else {
             return Outcome::NotMine;
         };
-        let Some(project) = world.projects.get(&issue.project) else {
-            return Outcome::Failed(format!("project {} is not configured", issue.project));
+        let Some((_, tracker_id, name)) = sources(world)
+            .into_iter()
+            .find(|(id, _, _)| id == &issue.project)
+        else {
+            return Outcome::Failed(format!("{} has no tracker configured", issue.project));
         };
-        let Some(tracker) = self.adapters.iter_mut().find(|a| a.id() == project.tracker) else {
-            return Outcome::Failed(format!("no tracker \"{}\" in this build", project.tracker));
+        let Some(tracker) = self.adapters.iter_mut().find(|a| a.id() == tracker_id) else {
+            return Outcome::Failed(format!("no tracker \"{tracker_id}\" in this build"));
         };
-        match tracker.close(&project.name, &issue.key) {
+        match tracker.close(&name, &issue.key) {
             Ok(()) => Outcome::done(),
             Err(e) => Outcome::Failed(e.to_string()),
         }
@@ -696,6 +746,34 @@ mod tests {
     #[test]
     fn the_fake_passes_the_contract() {
         assert_eq!(contract::check(&mut fake(), &Writable), Ok(()));
+    }
+
+    #[test]
+    fn a_dependency_on_another_project_is_found_by_its_id_or_its_trackers_name() {
+        let mut w = configured();
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new("klatch"),
+            tracker: "fake".into(),
+            name: "desert/klatch".into(),
+            code_host: None,
+            repo: None,
+        });
+        let mut tracker = fake();
+        tracker.issues[0].1.depends_on =
+            depends_on("Depends on klatch#3 and desert/klatch#4, and nowhere#5.");
+        let events = changes(&w, &ProjectId::new("ankh"), &[tracker.issues[0].1.clone()]);
+        let Some(Event::IssueSynced { depends_on, .. }) = events.first() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(
+            depends_on,
+            &[
+                IssueId::new("klatch", "3"),
+                IssueId::new("klatch", "4"),
+                IssueId::new("ankh", "nowhere#5")
+            ],
+            "an unknown name stays unknown, so the issue waits"
+        );
     }
 
     #[test]

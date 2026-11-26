@@ -43,11 +43,21 @@ id = "radar-2"
 project = "radar"
 path = "/home/me/src/radar-2"
 
+# An area: projects that work together (docs/areas.md). When one tracker project
+# serves all of them, the area names it and its projects name no tracker of their own.
+# [[area]]
+# id = "guild"
+# name = "Thieves' Guild"
+# projects = ["guild-ui", "guild-api"]
+# tracker = "jira"
+# tracker_project = "GLD"
+
 # A group: agents working through some projects' issues.
 [[group]]
 id = "group-1"
 name = "Group 1"
 projects = ["radar"]
+# areas = ["guild"]                        # whole areas: their own issues and their projects'
 milestones = ["Slack sign-in rework"]   # first to last; leave out for every issue
 refining_at_once = 1                    # the default
 ```

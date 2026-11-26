@@ -203,6 +203,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         }
     };
     let plan = Plan {
+        repos: Vec::new(),
         checks: vec![Check {
             done_when: "the clock strikes thirteen".into(),
             proven_by: "listening at midnight".into(),
@@ -272,17 +273,20 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     );
     let folder = &host.world().folders[&temet_work_core::ids::FolderId::new("ankh-1")];
     assert_eq!(folder.holder, None, "the folder is free for the next issue");
-    for now in 3..100 {
+    // The deploy and verify commands run on threads: usually done within a
+    // millisecond, waited on for at most two seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut now = 3;
+    while host.world().issues[&issue].stage != Stage::Done && std::time::Instant::now() < deadline {
         host.tick(now).expect("tick");
-        if host.world().issues[&issue].stage == Stage::Done {
-            break;
-        }
-        std::thread::yield_now();
+        now += 1;
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert_eq!(
         host.world().issues[&issue].stage,
         Stage::Done,
-        "deployed, verified, closed"
+        "deployed, verified, closed: {:?}",
+        host.problems()
     );
     assert!(host.problems().is_empty(), "{:?}", host.problems());
     // The log of a live run, with parts carrying out effects, replays to the same state.
