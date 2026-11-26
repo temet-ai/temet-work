@@ -297,6 +297,10 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
     let id = |key: &str| IssueId::new(project.0.clone(), key);
     let mut out = Vec::new();
     let open_keys: BTreeSet<&str> = open.iter().map(|t| t.key.as_str()).collect();
+    // Oldest first, so a group placing issues as they arrive takes them in the
+    // tracker's order and not in the order the tracker listed them.
+    let mut open: Vec<&TrackedIssue> = open.iter().collect();
+    open.sort_by_key(|t| t.order);
     for t in open {
         let issue = id(&t.key);
         let milestone = t.milestone.clone().map(MilestoneId::new);

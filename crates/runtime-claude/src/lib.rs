@@ -1,5 +1,10 @@
-//! Claude Code sessions: `claude [--model M] TASK` starts an interactive session
-//! with the task as its first prompt.
+//! Claude Code sessions: `claude --permission-mode auto [--model M] TASK` starts
+//! an interactive session with the task as its first prompt.
+//!
+//! Agents run unattended, so they run in auto mode: Claude Code's own check
+//! approves what is safe and refuses what is not, where the default mode would stop
+//! at a prompt nobody answers. A live run on the sandbox stopped at the first
+//! shell loop and the first MCP tool without it.
 //!
 //! A terminal gets its terminal service's environment, not the daemon's, so what a
 //! session started from the person's own shell would have is passed on from the
@@ -29,7 +34,11 @@ impl Runtime for Claude {
     }
 
     fn program(&self, brief: &Brief) -> Program {
-        let mut argv = vec!["claude".to_string()];
+        let mut argv = vec![
+            "claude".to_string(),
+            "--permission-mode".to_string(),
+            "auto".to_string(),
+        ];
         if let Some(model) = &brief.model {
             argv.push("--model".into());
             argv.push(model.clone());

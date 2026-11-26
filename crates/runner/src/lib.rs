@@ -335,8 +335,9 @@ fn state_of(status: &Status, doing: Option<&str>) -> Option<AgentState> {
         Status::Working => Some(AgentState::Working {
             doing: doing.unwrap_or_default().to_string(),
         }),
+        // What it asks for says more than the kind of prompt.
         Status::Blocked { kind } => Some(AgentState::Blocked {
-            reason: kind.clone(),
+            reason: doing.map_or_else(|| kind.clone(), String::from),
         }),
         Status::Gone => Some(AgentState::Ended),
         Status::Unknown => None,
