@@ -1,0 +1,31 @@
+# Output kept as evidence for docs/findings/gpui.md, 26 November 2026 (SAST)
+## Clean builds (after cargo clean)
+Removed 4665 files, 5.4GiB total
+load: 6.51 5.46 3.56 6/3373 985366
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 38s
+CLEAN debug rc=0 wall=158s
+load: 9.99 7.14 4.48 3/3289 1021461
+load: 9.99 7.14 4.48 3/3289 1021481
+Finished `release` profile [optimized] target(s) in 5m 24s
+CLEAN release rc=0 wall=324s
+load: 9.13 8.02 5.63 4/3235 1079067
+## One line changed (ROW_HEIGHT), rerun at 17:44 on the committed code
+$ nice -n 10 cargo build -j 4 
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.08s
+rc=0 wall=8.1s
+$ nice -n 10 cargo build -j 4 --release
+    Finished `release` profile [optimized] target(s) in 1.85s
+rc=0 wall=1.9s
+## Restored
+$ nice -n 10 cargo build -j 4 
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.49s
+rc=0 wall=8.5s
+$ nice -n 10 cargo build -j 4 --release
+    Finished `release` profile [optimized] target(s) in 1.80s
+rc=0 wall=1.8s
+## Launches (measure script: dispatch on workspace 2, no focus, ended with SIGTERM)
+debug: mapped_after=0.82s xwayland=False ws=2 at=[3780, 1774] size=[1100, 700] cpu_idle=0.1% rss=228168 kB threads=31 focus_before=google-chrome focus_after=google-chrome
+  nvidia-smi: | 0 N/A N/A 1182666 C+G ...shell/target/debug/gpui-shell 50MiB |
+release: mapped_after=0.28s xwayland=False ws=2 at=[3780, 1774] size=[1100, 700] cpu_idle=0.0% rss=177844 kB threads=31 focus_before=google-chrome focus_after=google-chrome
+  nvidia-smi: | 0 N/A N/A 1183602 C+G ...ell/target/release/gpui-shell 50MiB |
+measure rc=0
