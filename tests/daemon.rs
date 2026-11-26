@@ -133,3 +133,78 @@ fn commands_reach_the_daemon_over_its_socket() {
         }
     );
 }
+
+#[test]
+fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::model::{Check, Plan};
+    use temet_work_core::{Command, Request, Verdict};
+
+    let mut host = host();
+    host.tick(0).expect("sync");
+    let issue = IssueId::new("ankh", "1");
+    let run = |host: &mut Host, by: &str, command: Command| {
+        let request = Request {
+            by: Some(AgentId::new(by)),
+            command,
+        };
+        match answer(host, 1, &request).expect("answer") {
+            Reply::Done { text } => text,
+            Reply::Refused { why } => panic!("{by}: refused: {why}"),
+        }
+    };
+    let plan = Plan {
+        checks: vec![Check {
+            done_when: "the clock strikes thirteen".into(),
+            proven_by: "listening at midnight".into(),
+        }],
+    };
+    run(
+        &mut host,
+        "refiner-1",
+        Command::Plan {
+            issue: issue.clone(),
+            plan,
+        },
+    );
+    assert!(host.world().agents.contains_key(&AgentId::new("author-1")));
+    let ready = Command::Ready {
+        issue: issue.clone(),
+    };
+    assert_eq!(
+        run(&mut host, "author-1", ready.clone()),
+        "ankh#1 is in review, round 1"
+    );
+    assert!(
+        host.world()
+            .agents
+            .contains_key(&AgentId::new("reviewer-1"))
+    );
+    let block = Command::Review {
+        issue: issue.clone(),
+        verdict: Verdict::Block {
+            points: vec!["no test for a stopped clock".into()],
+        },
+    };
+    assert_eq!(
+        run(&mut host, "reviewer-1", block),
+        "ankh#1 is fixing, round 1"
+    );
+    assert_eq!(
+        run(&mut host, "author-1", ready),
+        "ankh#1 is in review, round 2"
+    );
+    let reviewers: Vec<&str> = host
+        .world()
+        .agents
+        .keys()
+        .map(|a| a.0.as_str())
+        .filter(|a| a.starts_with("reviewer"))
+        .collect();
+    assert_eq!(
+        reviewers,
+        ["reviewer-1"],
+        "the running reviewer takes round 2"
+    );
+    assert!(host.problems().is_empty(), "{:?}", host.problems());
+}

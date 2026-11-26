@@ -68,8 +68,6 @@ What exists today:
 
 What does not work yet:
 
-- Nothing starts a reviewer: no part carries out `StartReview` yet, so an issue waits in
-  review until someone runs `temet-work review`.
 - Nothing reports CI or the plan's checks (`ChecksFinished`), so an approved issue does
   not merge.
 - Nothing merges, deploys or verifies: no part carries out those effects, and the daemon

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
+use temet_work_core::brief;
 use temet_work_core::ids::AgentId;
 use temet_work_core::launch::AGENT_VAR;
 use temet_work_core::model::{AgentState, Role};
@@ -293,21 +294,22 @@ impl Part for Runners {
                 }
             }
             Effect::RequestFix { issue, points } => {
-                let author = world.agents.values().rev().find(|a| {
-                    a.issue.as_ref() == Some(issue)
-                        && a.role == Role::Author
-                        && a.state != AgentState::Ended
-                });
-                let Some(author) = author else {
+                let Some(author) = world.running(issue, Role::Author) else {
                     return Outcome::Failed(format!("no author is running for {issue}"));
                 };
-                let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
-                self.outbox.push((
-                    author.id.0.clone(),
-                    format!(
-                        "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready {issue}"
-                    ),
-                ));
+                self.outbox
+                    .push((author.id.0.clone(), brief::fixes(issue, points)));
+                self.deliver();
+                Outcome::done()
+            }
+            // A reviewer still running hears of the next round; with none, a new
+            // one is started elsewhere.
+            Effect::StartReview { issue, round } => {
+                let Some(reviewer) = world.running(issue, Role::Reviewer) else {
+                    return Outcome::NotMine;
+                };
+                self.outbox
+                    .push((reviewer.id.0.clone(), brief::next_round(issue, *round)));
                 self.deliver();
                 Outcome::done()
             }
@@ -430,6 +432,42 @@ mod tests {
                 .expect("screen")
                 .contains("stopped clock")
         );
+    }
+
+    #[test]
+    fn a_running_reviewer_hears_of_the_next_round_and_none_is_not_this_parts() {
+        let next = Effect::StartReview {
+            issue: IssueId::new("ankh", "1"),
+            round: 2,
+        };
+        let mut w = world();
+        let mut part = runners();
+        assert_eq!(part.carry_out(&next, &w), Outcome::NotMine);
+        let launch = w
+            .launch(
+                &GroupId::new("watch"),
+                Role::Reviewer,
+                &IssueId::new("ankh", "1"),
+                None,
+            )
+            .expect("launch");
+        let reviewer = launch.agent.clone();
+        let run = Effect::Run {
+            launch,
+            program: Program {
+                argv: vec!["cat".into()],
+                env: vec![],
+            },
+        };
+        let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
+            panic!("not started");
+        };
+        for e in &events {
+            w.apply(e);
+        }
+        assert_eq!(part.carry_out(&next, &w), Outcome::done());
+        let screen = part.screen(&reviewer.0).expect("screen");
+        assert!(screen.contains("review round 2"), "{screen}");
     }
 
     #[test]

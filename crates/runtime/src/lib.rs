@@ -4,6 +4,7 @@
 //! This crate holds the [`Runtime`] contract, a [`FakeRuntime`] and the
 //! [`contract`] every runtime adapter runs. Adapter crates depend on this crate only.
 
+use temet_work_core::model::Role;
 use temet_work_core::{Effect, Outcome, Part, World};
 
 /// The core types this contract uses, re-exported so adapters need no other crate.
@@ -106,19 +107,27 @@ impl Part for Runtimes {
     /// Turns the loop's decision to start an agent into a program to run, with
     /// the first runtime in this build.
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
-        let Effect::StartAgent {
-            group,
-            role,
-            issue,
-            folder,
-        } = effect
-        else {
-            return Outcome::NotMine;
+        let (group, role, issue, folder) = match effect {
+            Effect::StartAgent {
+                group,
+                role,
+                issue,
+                folder,
+            } => (group.clone(), *role, issue, folder.as_ref()),
+            // A review with no reviewer running starts one; a running one is
+            // told of the next round elsewhere.
+            Effect::StartReview { issue, .. } if world.running(issue, Role::Reviewer).is_none() => {
+                let Some(group) = world.issues.get(issue).and_then(|i| i.group.clone()) else {
+                    return Outcome::Failed(format!("{issue} has no group to review it"));
+                };
+                (group, Role::Reviewer, issue, None)
+            }
+            _ => return Outcome::NotMine,
         };
         let Some(runtime) = self.adapters.first() else {
             return Outcome::Failed("no agent runtime is compiled into this build".into());
         };
-        let Some(launch) = world.launch(group, *role, issue, folder.as_ref()) else {
+        let Some(launch) = world.launch(&group, role, issue, folder) else {
             return Outcome::Failed(format!("{issue} is not known"));
         };
         let program = runtime.program(&launch.brief);

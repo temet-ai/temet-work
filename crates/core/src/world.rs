@@ -321,6 +321,13 @@ impl World {
         out
     }
 
+    /// The agent of `role` working on `issue` whose session has not ended.
+    pub fn running(&self, issue: &IssueId, role: Role) -> Option<&Agent> {
+        self.agents.values().find(|a| {
+            a.issue.as_ref() == Some(issue) && a.role == role && a.state != AgentState::Ended
+        })
+    }
+
     /// What starting an agent takes: its id, the machine and folder it runs in,
     /// and its brief. The id is its role and a number, counting every agent of
     /// that role this world has started (`author-3`). An agent with no work

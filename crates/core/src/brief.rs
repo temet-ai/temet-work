@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use crate::ids::IssueId;
 use crate::launch::Brief;
 use crate::model::{Issue, Project, Role};
 
@@ -69,4 +70,21 @@ pub fn write(
         model: None,
         folder,
     }
+}
+
+/// What an author is told when the review or the checks found things to fix.
+pub fn fixes(issue: &IssueId, points: &[String]) -> String {
+    let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
+    format!(
+        "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready {issue}"
+    )
+}
+
+/// What a running reviewer is told when the author is ready again.
+pub fn next_round(issue: &IssueId, round: u8) -> String {
+    format!(
+        "The author pushed fixes for {issue}; this is review round {round}. Review the whole change again, \
+         not only the new commits. Then run: temet-work review {issue} approve\n\
+         or: temet-work review {issue} block \"<what is still wrong>\" [\"<what else>\" ...]"
+    )
 }
