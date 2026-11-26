@@ -52,13 +52,17 @@ crate, and on no other crate in the workspace.
 The desktop app will be the one front-end crate. It may depend on the core and on
 `temet-work-style`, and it is the only crate allowed a UI library.
 
-Today the core holds the objects and the work loop with its tests. The runner and runtime
-families hold their contracts, a fake each, and contract tests that every adapter runs and
-that fail on a runner which types into a prompt or a runtime which drops the model. The
-Claude Code adapter passes the runtime contract. The herdr-core adapter speaks the core's
-socket and passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo
-nextest run -p temet-work-runner-herdr --features live`); in every other test run it opens
-nothing. The other crates are skeletons, and no daemon runs yet.
+What exists today:
+
+| Crate | State |
+|---|---|
+| `temet-work-core` | the objects and the work loop, 14 tests |
+| `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model |
+| `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live`) and opens nothing in other test runs |
+| `temet-work-runtime-claude` | passes the runtime contract |
+| tracker, GitHub tracker, store, style, mike | skeletons |
+
+No daemon runs yet.
 
 ## Who coordinates
 
