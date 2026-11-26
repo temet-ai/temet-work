@@ -1,14 +1,83 @@
-//! The agent programs that do the work: starting a session with a brief and a model, and telling working from idle.
+//! Agent runtimes: the programs that do the work. A runtime turns a brief into
+//! the program a runner starts.
 //!
-//! This crate holds the `Runtime` contract and, later, a deterministic fake and the
-//! contract tests every adapter runs. Adapter crates depend on this crate only.
+//! This crate holds the [`Runtime`] contract, a [`FakeRuntime`] and the
+//! [`contract`] every runtime adapter runs. Adapter crates depend on this crate only.
 
 use temet_work_core::Part;
 
-/// One runtime, added by an adapter crate.
+/// The core types this contract uses, re-exported so adapters need no other crate.
+pub use temet_work_core::launch::{Brief, Program};
+
+/// One agent runtime, added by an adapter crate.
 pub trait Runtime: Send {
     /// A short, stable id, the adapter's feature name after `runtime-`.
     fn id(&self) -> &'static str;
+
+    /// The program that starts an agent with this brief: its task as the first
+    /// prompt, and the model when the brief names one.
+    fn program(&self, brief: &Brief) -> Program;
+}
+
+/// A runtime for tests: `fake-agent [--model M] TASK`.
+#[derive(Default)]
+pub struct FakeRuntime;
+
+impl Runtime for FakeRuntime {
+    fn id(&self) -> &'static str {
+        "fake"
+    }
+
+    fn program(&self, brief: &Brief) -> Program {
+        let mut argv = vec!["fake-agent".to_string()];
+        if let Some(model) = &brief.model {
+            argv.push("--model".into());
+            argv.push(model.clone());
+        }
+        argv.push(brief.task.clone());
+        Program {
+            argv,
+            env: Vec::new(),
+        }
+    }
+}
+
+/// The contract every runtime adapter runs.
+pub mod contract {
+    use super::Runtime;
+    use temet_work_core::ids::IssueId;
+    use temet_work_core::launch::Brief;
+    use temet_work_core::model::Role;
+
+    fn brief(model: Option<&str>) -> Brief {
+        Brief {
+            role: Role::Author,
+            issue: IssueId::new("contract", "1"),
+            task: "Add the contract-check test, then stop.".into(),
+            model: model.map(String::from),
+            folder: None,
+        }
+    }
+
+    /// Runs the contract. Returns the first step that failed, in words.
+    pub fn check(runtime: &dyn Runtime) -> Result<(), String> {
+        let program = runtime.program(&brief(None));
+        if program.argv.is_empty() {
+            return Err("the program has a name".into());
+        }
+        if !program
+            .argv
+            .iter()
+            .any(|a| a.contains("Add the contract-check test"))
+        {
+            return Err("the brief's task reaches the program as its first prompt".into());
+        }
+        let with_model = runtime.program(&brief(Some("contract-model")));
+        if !with_model.argv.iter().any(|a| a == "contract-model") {
+            return Err("the brief's model reaches the program".into());
+        }
+        Ok(())
+    }
 }
 
 /// The runtime part: the runtimes compiled into this build, in the order they were added.
@@ -39,20 +108,38 @@ impl Part for Runtimes {
 mod tests {
     use super::*;
 
-    struct Named(&'static str);
+    #[test]
+    fn keeps_adapters_in_the_order_added() {
+        let mut part = Runtimes::default();
+        part.add(Box::new(FakeRuntime));
+        assert_eq!(part.ids(), ["fake"]);
+        assert_eq!(part.id(), "runtime");
+    }
 
-    impl Runtime for Named {
+    #[test]
+    fn the_fake_passes_the_contract() {
+        assert_eq!(contract::check(&FakeRuntime), Ok(()));
+    }
+
+    struct DropsTheModel;
+
+    impl Runtime for DropsTheModel {
         fn id(&self) -> &'static str {
-            self.0
+            "drops-the-model"
+        }
+        fn program(&self, brief: &Brief) -> Program {
+            Program {
+                argv: vec!["agent".into(), brief.task.clone()],
+                env: Vec::new(),
+            }
         }
     }
 
     #[test]
-    fn keeps_adapters_in_the_order_added() {
-        let mut part = Runtimes::default();
-        part.add(Box::new(Named("first")));
-        part.add(Box::new(Named("second")));
-        assert_eq!(part.ids(), ["first", "second"]);
-        assert_eq!(part.id(), "runtime");
+    fn the_contract_rejects_a_runtime_that_drops_the_model() {
+        assert_eq!(
+            contract::check(&DropsTheModel),
+            Err("the brief's model reaches the program".into())
+        );
     }
 }

@@ -52,9 +52,11 @@ crate, and on no other crate in the workspace.
 The desktop app will be the one front-end crate. It may depend on the core and on
 `temet-work-style`, and it is the only crate allowed a UI library.
 
-Today the core holds the objects and the work loop with its tests, and every other crate is
-a skeleton with its smallest contract (a part has an id; a family holds its adapters in
-order), so nothing runs yet.
+Today the core holds the objects and the work loop with its tests. The runner and runtime
+families hold their contracts, a fake each, and contract tests that every adapter runs and
+that fail on a runner which types into a prompt or a runtime which drops the model. The
+Claude Code adapter passes the runtime contract; the herdr-core adapter answers "not built
+yet" until its socket client exists. The other crates are skeletons, so nothing runs yet.
 
 ## Who coordinates
 
@@ -123,7 +125,6 @@ features.
 
 ## What comes next
 
-The runner and runtime contracts, written from what the research fleet found running
-herdr-core and agent sessions (`docs/findings/`), each with a fake and contract tests.
-Then the store, which keeps the event log, and the daemon, which feeds events to the loop
-and carries out its effects through the parts.
+The herdr-core socket client behind the runner contract, written from
+`docs/findings/herdr-core.md`. Then the store, which keeps the event log, and the daemon,
+which feeds events to the loop and carries out its effects through the parts.

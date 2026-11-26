@@ -8,6 +8,7 @@
 pub mod effect;
 pub mod event;
 pub mod ids;
+pub mod launch;
 pub mod model;
 pub mod world;
 
