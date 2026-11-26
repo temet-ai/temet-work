@@ -24,6 +24,8 @@ stderr. `--once` stops after the first round and prints the state as text.
 id = "radar"              # short id, used in issue ids such as radar#44
 tracker = "github"        # the tracker adapter
 name = "temet-ai/radar"   # the tracker's name for it
+# code_host = "github"    # where its pull requests are; the tracker when left out
+# repo = "temet-ai/radar" # the code host's name for it; name when left out
 
 # A work folder: a checkout an author works in, one issue at a time.
 [[folder]]

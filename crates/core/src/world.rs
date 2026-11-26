@@ -99,6 +99,8 @@ impl World {
                 project,
                 tracker,
                 name,
+                code_host,
+                repo,
             } => {
                 self.projects.insert(
                     project.clone(),
@@ -106,6 +108,8 @@ impl World {
                         id: project.clone(),
                         tracker: tracker.clone(),
                         name: name.clone(),
+                        code_host: code_host.clone().unwrap_or_else(|| tracker.clone()),
+                        repo: repo.clone().unwrap_or_else(|| name.clone()),
                     },
                 );
             }
@@ -147,6 +151,7 @@ impl World {
                     plan: None,
                     review_ok: false,
                     checks_ok: None,
+                    pull: None,
                 });
                 entry.title = title.clone();
                 entry.milestone = milestone.clone();
@@ -205,8 +210,11 @@ impl World {
                     i.stage = Stage::Ready;
                 }
             }
-            Event::PullRequestReady { issue } => {
+            Event::PullRequestReady { issue, pull } => {
                 if let Some(i) = self.issues.get_mut(issue) {
+                    if pull.is_some() {
+                        i.pull = pull.clone();
+                    }
                     let round = match i.stage {
                         Stage::Working => Some(1),
                         Stage::Fixing { round } => Some(round.saturating_add(1)),
@@ -258,7 +266,11 @@ impl World {
                     }
                 }
             }
-            Event::ChecksFinished { issue, passed } => {
+            Event::ChecksFinished {
+                issue,
+                passed,
+                failing,
+            } => {
                 if let Some(i) = self.issues.get_mut(issue) {
                     match i.stage {
                         Stage::InReview { round } | Stage::Arbitration { round } => {
@@ -268,9 +280,17 @@ impl World {
                             } else {
                                 i.stage = Stage::Fixing { round };
                                 i.review_ok = false;
+                                let points = if failing.is_empty() {
+                                    vec!["CI failed".into()]
+                                } else {
+                                    failing
+                                        .iter()
+                                        .map(|c| format!("CI check {c} failed"))
+                                        .collect()
+                                };
                                 out.push(Effect::RequestFix {
                                     issue: issue.clone(),
-                                    points: vec!["CI or a check from the plan failed".into()],
+                                    points,
                                 });
                             }
                         }

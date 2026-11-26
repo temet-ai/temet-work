@@ -162,7 +162,10 @@ fn one_issue_holds_a_folder_at_a_time() {
 #[test]
 fn review_blocks_go_back_to_the_author_then_to_an_arbiter_after_three_rounds() {
     let mut w = working_on_one();
-    let pr = Event::PullRequestReady { issue: issue("1") };
+    let pr = Event::PullRequestReady {
+        issue: issue("1"),
+        pull: None,
+    };
     let block = |round| Event::ReviewFinished {
         issue: issue("1"),
         round,
@@ -207,7 +210,10 @@ fn review_blocks_go_back_to_the_author_then_to_an_arbiter_after_three_rounds() {
 #[test]
 fn a_verdict_for_an_old_round_changes_nothing() {
     let mut w = working_on_one();
-    w.apply(&Event::PullRequestReady { issue: issue("1") });
+    w.apply(&Event::PullRequestReady {
+        issue: issue("1"),
+        pull: None,
+    });
     let stale = Event::ReviewFinished {
         issue: issue("1"),
         round: 2,
@@ -221,7 +227,10 @@ fn a_verdict_for_an_old_round_changes_nothing() {
 fn merges_once_review_and_checks_pass_in_either_order() {
     for checks_first in [false, true] {
         let mut w = working_on_one();
-        w.apply(&Event::PullRequestReady { issue: issue("1") });
+        w.apply(&Event::PullRequestReady {
+            issue: issue("1"),
+            pull: None,
+        });
         let approve = Event::ReviewFinished {
             issue: issue("1"),
             round: 1,
@@ -230,6 +239,7 @@ fn merges_once_review_and_checks_pass_in_either_order() {
         let checks = Event::ChecksFinished {
             issue: issue("1"),
             passed: true,
+            failing: vec![],
         };
         let (first, second) = if checks_first {
             (checks, approve)
@@ -244,10 +254,14 @@ fn merges_once_review_and_checks_pass_in_either_order() {
 #[test]
 fn failed_checks_go_back_to_the_author() {
     let mut w = working_on_one();
-    w.apply(&Event::PullRequestReady { issue: issue("1") });
+    w.apply(&Event::PullRequestReady {
+        issue: issue("1"),
+        pull: None,
+    });
     let effects = w.apply(&Event::ChecksFinished {
         issue: issue("1"),
         passed: false,
+        failing: vec![],
     });
     assert!(matches!(effects.as_slice(), [Effect::RequestFix { .. }]));
     assert_eq!(stage(&w, "1"), Stage::Fixing { round: 1 });
@@ -263,7 +277,10 @@ fn merged_deployed_and_checked_closes_the_issue_and_frees_the_folder_for_the_nex
         sync("2", "m1", 2, &[]),
         planned("1"),
         planned("2"),
-        Event::PullRequestReady { issue: issue("1") },
+        Event::PullRequestReady {
+            issue: issue("1"),
+            pull: None,
+        },
         Event::ReviewFinished {
             issue: issue("1"),
             round: 1,
@@ -272,6 +289,7 @@ fn merged_deployed_and_checked_closes_the_issue_and_frees_the_folder_for_the_nex
         Event::ChecksFinished {
             issue: issue("1"),
             passed: true,
+            failing: vec![],
         },
     ] {
         w.apply(&e);
@@ -304,7 +322,10 @@ fn merged_deployed_and_checked_closes_the_issue_and_frees_the_folder_for_the_nex
 fn an_arbiters_ruling_approves_or_sends_the_change_back() {
     for approve in [true, false] {
         let mut w = working_on_one();
-        w.apply(&Event::PullRequestReady { issue: issue("1") });
+        w.apply(&Event::PullRequestReady {
+            issue: issue("1"),
+            pull: None,
+        });
         for round in 1..=REVIEW_ROUNDS {
             w.apply(&Event::ReviewFinished {
                 issue: issue("1"),
@@ -312,12 +333,16 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
                 verdict: Verdict::Block { points: vec![] },
             });
             if round < REVIEW_ROUNDS {
-                w.apply(&Event::PullRequestReady { issue: issue("1") });
+                w.apply(&Event::PullRequestReady {
+                    issue: issue("1"),
+                    pull: None,
+                });
             }
         }
         w.apply(&Event::ChecksFinished {
             issue: issue("1"),
             passed: true,
+            failing: vec![],
         });
         let ruling = Event::DecisionMade {
             decision: Decision {
@@ -417,7 +442,10 @@ fn the_same_events_give_the_same_state_and_effects() {
         sync("3", "m2", 3, &[]),
         planned("2"),
         planned("3"),
-        Event::PullRequestReady { issue: issue("3") },
+        Event::PullRequestReady {
+            issue: issue("3"),
+            pull: None,
+        },
     ];
     assert_eq!(World::replay(&events), World::replay(&events));
 }

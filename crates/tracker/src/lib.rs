@@ -513,6 +513,8 @@ mod tests {
             project: ProjectId::new("ankh"),
             tracker: "fake".into(),
             name: "ankh/morpork".into(),
+            code_host: None,
+            repo: None,
         });
         w
     }
@@ -595,6 +597,8 @@ mod tests {
             project: ProjectId::new("klatch"),
             tracker: "fake".into(),
             name: "no-such/project".into(),
+            code_host: None,
+            repo: None,
         });
         let mut part = Trackers::default();
         part.add(Box::new(fake()));

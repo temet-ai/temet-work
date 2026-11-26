@@ -94,6 +94,8 @@ fn setup(refining_at_once: usize) -> Vec<Event> {
             project: ProjectId::new("ankh"),
             tracker: "fake".into(),
             name: "city/ankh".into(),
+            code_host: None,
+            repo: None,
         },
         Event::FolderAdded {
             folder: FolderId::new("f1"),

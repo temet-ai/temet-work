@@ -1,9 +1,15 @@
 //! The daemon's loop with every family's fake: a configured project's issue is
 //! synced, a group takes it, and a refiner starts in a labelled terminal.
 
-#![cfg(all(feature = "tracker", feature = "runner", feature = "runtime"))]
+#![cfg(all(
+    feature = "tracker",
+    feature = "runner",
+    feature = "runtime",
+    feature = "codehost"
+))]
 
 use temet_work::config::Config;
+use temet_work_codehost::{Checks, FakeCodeHost, Pull, PullState};
 use temet_work_core::host::Memory;
 use temet_work_core::ids::{AgentId, IssueId};
 use temet_work_core::model::Stage;
@@ -50,9 +56,25 @@ fn host() -> Host {
     runtimes.add(Box::new(FakeRuntime));
     let mut runners = temet_work_runner::Runners::default();
     runners.add(Box::new(FakeRunner::default()));
+    let mut code_hosts = temet_work_codehost::CodeHosts::default().every(0);
+    code_hosts.add(Box::new(FakeCodeHost {
+        pulls: vec![(
+            "city/ankh".into(),
+            Pull {
+                number: "57".into(),
+                state: PullState::Open,
+                checks: Checks::Passed,
+            },
+        )],
+    }));
     let mut host = Host::new(
         World::default(),
-        vec![Box::new(trackers), Box::new(runtimes), Box::new(runners)],
+        vec![
+            Box::new(trackers),
+            Box::new(runners),
+            Box::new(runtimes),
+            Box::new(code_hosts),
+        ],
         Box::new(Memory::default()),
     );
     for event in Config::parse(CONFIG).expect("config").events(host.world()) {
@@ -108,6 +130,7 @@ fn commands_reach_the_daemon_over_its_socket() {
                 ask(Command::Status),
                 ask(Command::Ready {
                     issue: IssueId::new("ankh", "1"),
+                    pull: Some("57".into()),
                 }),
             )
         })
@@ -170,6 +193,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     assert!(host.world().agents.contains_key(&AgentId::new("author-1")));
     let ready = Command::Ready {
         issue: issue.clone(),
+        pull: Some("57".into()),
     };
     assert_eq!(
         run(&mut host, "author-1", ready.clone()),
@@ -207,4 +231,20 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         "the running reviewer takes round 2"
     );
     assert!(host.problems().is_empty(), "{:?}", host.problems());
+
+    let approve = Command::Review {
+        issue: issue.clone(),
+        verdict: Verdict::Approve,
+    };
+    run(&mut host, "reviewer-1", approve);
+    host.tick(2).expect("CI read");
+    assert_eq!(
+        host.world().issues[&issue].stage,
+        Stage::Deploying,
+        "approved, CI passed, merged"
+    );
+    let problems: Vec<&String> = host.problems().keys().collect();
+    assert_eq!(problems, ["deploy ankh#1"], "nothing deploys yet");
+    let folder = &host.world().folders[&temet_work_core::ids::FolderId::new("ankh-1")];
+    assert_eq!(folder.holder, None, "the folder is free for the next issue");
 }

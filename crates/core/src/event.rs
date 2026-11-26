@@ -46,6 +46,13 @@ pub enum Event {
         tracker: String,
         /// The tracker's own name for it.
         name: String,
+        /// The id of the code-host adapter that holds its pull requests; the
+        /// tracker's when left out.
+        #[serde(default)]
+        code_host: Option<String>,
+        /// The code host's name for the repository; the tracker's name when left out.
+        #[serde(default)]
+        repo: Option<String>,
     },
     /// A group was made.
     GroupCreated {
@@ -108,6 +115,9 @@ pub enum Event {
     PullRequestReady {
         /// The issue.
         issue: IssueId,
+        /// The pull request's number on the code host, when the author names it.
+        #[serde(default)]
+        pull: Option<String>,
     },
     /// The reviewer finished a round.
     ReviewFinished {
@@ -124,6 +134,9 @@ pub enum Event {
         issue: IssueId,
         /// Whether they passed.
         passed: bool,
+        /// The names of the checks that failed.
+        #[serde(default)]
+        failing: Vec<String>,
     },
     /// An agent made a decision.
     DecisionMade {

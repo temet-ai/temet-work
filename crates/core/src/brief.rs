@@ -40,7 +40,7 @@ pub fn write(
             "Work on {id}: {title}. It is {source}.\n\
              This folder is yours until the change merges. Make a branch, change the code and open a pull request.\n\
              The plan's checks, each to hold before you finish:\n{checks}\
-             When the pull request is open and every check holds, run: temet-work ready {id}",
+             When the pull request is open and every check holds, run: temet-work ready {id} <pull request number>",
             title = issue.title,
         ),
         Role::Reviewer => format!(

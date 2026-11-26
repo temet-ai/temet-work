@@ -38,6 +38,11 @@ pub struct ProjectConf {
     pub tracker: String,
     /// The tracker's name for it (`owner/repo`).
     pub name: String,
+    /// The code-host adapter that holds its pull requests; the tracker when
+    /// left out.
+    pub code_host: Option<String>,
+    /// The code host's name for the repository; `name` when left out.
+    pub repo: Option<String>,
 }
 
 /// One `[[folder]]`: a checkout agents work in.
@@ -130,15 +135,21 @@ impl Config {
         let mut out = Vec::new();
         for p in &self.projects {
             let id = ProjectId::new(&p.id);
-            let same = world
-                .projects
-                .get(&id)
-                .is_some_and(|w| w.tracker == p.tracker && w.name == p.name);
+            let code_host = p.code_host.clone().unwrap_or_else(|| p.tracker.clone());
+            let repo = p.repo.clone().unwrap_or_else(|| p.name.clone());
+            let same = world.projects.get(&id).is_some_and(|w| {
+                w.tracker == p.tracker
+                    && w.name == p.name
+                    && w.code_host == code_host
+                    && w.repo == repo
+            });
             if !same {
                 out.push(Event::ProjectAdded {
                     project: id,
                     tracker: p.tracker.clone(),
                     name: p.name.clone(),
+                    code_host: Some(code_host),
+                    repo: Some(repo),
                 });
             }
         }

@@ -266,6 +266,8 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "temet-work-codehost",
+ "temet-work-codehost-github",
  "temet-work-core",
  "temet-work-mike",
  "temet-work-runner",
@@ -277,6 +279,21 @@ dependencies = [
  "temet-work-tracker",
  "temet-work-tracker-github",
  "toml",
+]
+
+[[package]]
+name = "temet-work-codehost"
+version = "0.0.1"
+dependencies = [
+ "temet-work-core",
+]
+
+[[package]]
+name = "temet-work-codehost-github"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "temet-work-codehost",
 ]
 
 [[package]]

@@ -12,7 +12,8 @@ pub use temet_work_core::launch::AGENT_VAR;
 pub const USAGE: &str = "\
 temet-work status
 temet-work plan ISSUE FILE                  a refiner's plan, as YAML
-temet-work ready ISSUE                      the pull request is open and the checks hold
+temet-work ready ISSUE PULL                 the pull request is open and the checks hold;
+                                            PULL is its number, needed the first time
 temet-work review ISSUE approve
 temet-work review ISSUE block POINT...      what to fix, one argument each
 temet-work rule ISSUE approve REASON
@@ -50,7 +51,10 @@ pub fn request(
             issue: issue()?,
             plan: plan(&read(Path::new(arg(2, "FILE")?))?)?,
         },
-        "ready" => Command::Ready { issue: issue()? },
+        "ready" => Command::Ready {
+            issue: issue()?,
+            pull: args.get(2).cloned(),
+        },
         "review" => Command::Review {
             issue: issue()?,
             verdict: match arg(2, "approve or block")? {

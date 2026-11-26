@@ -29,6 +29,9 @@ pub enum Command {
     Ready {
         /// The issue.
         issue: IssueId,
+        /// The pull request's number; needed the first time.
+        #[serde(default)]
+        pull: Option<String>,
     },
     /// A reviewer's verdict on the round under review.
     Review {
@@ -54,7 +57,7 @@ impl Command {
         match self {
             Self::Status => None,
             Self::Plan { issue, .. }
-            | Self::Ready { issue }
+            | Self::Ready { issue, .. }
             | Self::Review { issue, .. }
             | Self::Rule { issue, .. } => Some(issue),
         }
@@ -111,10 +114,19 @@ impl World {
                     plan: plan.clone(),
                 }
             }
-            Command::Ready { issue } => match at(issue)? {
-                Stage::Working | Stage::Fixing { .. } => Event::PullRequestReady {
-                    issue: issue.clone(),
-                },
+            Command::Ready { issue, pull } => match at(issue)? {
+                Stage::Working | Stage::Fixing { .. } => {
+                    let known = self.issues.get(issue).and_then(|i| i.pull.as_ref());
+                    if pull.is_none() && known.is_none() {
+                        return Err(format!(
+                            "say which pull request: temet-work ready {issue} <number>"
+                        ));
+                    }
+                    Event::PullRequestReady {
+                        issue: issue.clone(),
+                        pull: pull.clone(),
+                    }
+                }
                 now => return refuse(issue, now, "being worked on"),
             },
             Command::Review { issue, verdict } => {
@@ -231,7 +243,14 @@ mod tests {
             Stage::Working,
             "the folder was free"
         );
-        run(&mut w, Command::Ready { issue: issue() }).expect("ready");
+        run(
+            &mut w,
+            Command::Ready {
+                issue: issue(),
+                pull: Some("57".into()),
+            },
+        )
+        .expect("ready");
         let approve = Command::Review {
             issue: issue(),
             verdict: Verdict::Approve,
@@ -240,6 +259,7 @@ mod tests {
         w.apply(&Event::ChecksFinished {
             issue: issue(),
             passed: true,
+            failing: vec![],
         });
         assert_eq!(w.issues[&issue()].stage, Stage::Merging);
     }
@@ -248,14 +268,21 @@ mod tests {
     fn a_command_for_another_step_is_refused_with_the_stage() {
         let w = refining();
         assert_eq!(
-            w.check(None, &Command::Ready { issue: issue() }),
+            w.check(
+                None,
+                &Command::Ready {
+                    issue: issue(),
+                    pull: Some("57".into())
+                }
+            ),
             Err("ankh#1 is refining, not being worked on".into())
         );
         assert!(
             w.check(
                 None,
                 &Command::Ready {
-                    issue: IssueId::new("ankh", "9")
+                    issue: IssueId::new("ankh", "9"),
+                    pull: None
                 }
             )
             .is_err_and(|e| e.contains("no issue ankh#9"))
@@ -265,6 +292,44 @@ mod tests {
             plan: Plan::default(),
         };
         assert!(w.check(None, &empty).is_err());
+    }
+
+    #[test]
+    fn ready_needs_the_pull_request_the_first_time_only() {
+        let mut w = refining();
+        run(
+            &mut w,
+            Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        )
+        .expect("plan");
+        let bare = Command::Ready {
+            issue: issue(),
+            pull: None,
+        };
+        assert!(
+            w.check(None, &bare)
+                .is_err_and(|e| e.contains("temet-work ready ankh#1 <number>"))
+        );
+        run(
+            &mut w,
+            Command::Ready {
+                issue: issue(),
+                pull: Some("57".into()),
+            },
+        )
+        .expect("ready");
+        assert_eq!(w.issues[&issue()].pull.as_deref(), Some("57"));
+        let block = Command::Review {
+            issue: issue(),
+            verdict: Verdict::Block {
+                points: vec!["no test for a stopped clock".into()],
+            },
+        };
+        run(&mut w, block).expect("block");
+        run(&mut w, bare).expect("the pull request is on record");
     }
 
     #[test]
@@ -279,7 +344,14 @@ mod tests {
         )
         .expect("plan");
         for _ in 0..crate::world::REVIEW_ROUNDS {
-            run(&mut w, Command::Ready { issue: issue() }).expect("ready");
+            run(
+                &mut w,
+                Command::Ready {
+                    issue: issue(),
+                    pull: Some("57".into()),
+                },
+            )
+            .expect("ready");
             let block = Command::Review {
                 issue: issue(),
                 verdict: Verdict::Block {

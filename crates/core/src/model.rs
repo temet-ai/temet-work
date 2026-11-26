@@ -81,6 +81,8 @@ pub struct Issue {
     pub review_ok: bool,
     /// Whether CI and the checks passed on the current change.
     pub checks_ok: Option<bool>,
+    /// Its pull request's number on the code host, once the author names it.
+    pub pull: Option<String>,
 }
 
 /// What an agent does.
@@ -193,6 +195,10 @@ pub struct Project {
     pub tracker: String,
     /// The tracker's own name for it (`owner/repo`, a project key).
     pub name: String,
+    /// The id of the code-host adapter that holds its pull requests.
+    pub code_host: String,
+    /// The code host's name for the repository.
+    pub repo: String,
 }
 
 /// What a decision settles.
