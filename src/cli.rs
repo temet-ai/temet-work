@@ -20,6 +20,8 @@ temet-work review ISSUE approve
 temet-work review ISSUE block POINT...      what to fix, one argument each
 temet-work rule ISSUE approve REASON
 temet-work rule ISSUE fix REASON
+temet-work mcp [--allow read|act]           the same views and commands as MCP tools, for agents;
+                                            read (the default) offers status, issue and screen
 temet-work parts                            the parts in this build
 
 ISSUE is project#key, such as radar#44. Agents' commands are recorded as theirs

@@ -13,6 +13,7 @@ fn main() -> ExitCode {
             println!("{}", cli::USAGE);
             return ExitCode::SUCCESS;
         }
+        Some("mcp") => return mcp(&args[1..]),
         Some("parts") => {
             let ids: Vec<&str> = temet_work::parts().iter().map(|p| p.id()).collect();
             let ids = if ids.is_empty() {
@@ -57,4 +58,36 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Serves MCP on standard input and output until the client closes it.
+fn mcp(args: &[String]) -> ExitCode {
+    use std::io::{BufRead, Write};
+    let level = match args {
+        [] => temet_work::mcp::Level::Read,
+        [flag, level] if flag == "--allow" && level == "read" => temet_work::mcp::Level::Read,
+        [flag, level] if flag == "--allow" && level == "act" => temet_work::mcp::Level::Act,
+        _ => {
+            eprintln!("temet-work mcp [--allow read|act]");
+            return ExitCode::from(2);
+        }
+    };
+    let by = std::env::var(cli::AGENT_VAR).ok();
+    let path = socket::path();
+    let mut send = |r: &temet_work_core::Request| socket::send(&path, r);
+    let mut out = std::io::stdout().lock();
+    for line in std::io::stdin().lock().lines() {
+        let Ok(line) = line else { break };
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if let Some(answer) = temet_work::mcp::handle(&msg, level, by.as_deref(), &mut send)
+            && writeln!(out, "{answer}")
+                .and_then(|()| out.flush())
+                .is_err()
+        {
+            break;
+        }
+    }
+    ExitCode::SUCCESS
 }
