@@ -349,6 +349,10 @@ impl Part for Runners {
         "runner"
     }
 
+    fn screen(&mut self, agent: &AgentId) -> Option<Result<String, String>> {
+        Some(Runners::screen(self, &agent.0).map_err(|e| e.to_string()))
+    }
+
     fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
         let mut events = Vec::new();
         // Each agent's state as this poll has seen it, so a quick turn (idle,
@@ -367,7 +371,11 @@ impl Part for Runners {
                     .as_ref()
                     .is_some_and(|log| u.labels.get("log") != Some(log));
                 let id = AgentId::new(agent.clone());
-                if other_log || !world.agents.contains_key(&id) {
+                let ended = world
+                    .agents
+                    .get(&id)
+                    .is_some_and(|a| a.state == AgentState::Ended);
+                if other_log || ended || !world.agents.contains_key(&id) {
                     continue;
                 }
                 alive.insert(agent.clone());

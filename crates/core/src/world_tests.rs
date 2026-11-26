@@ -763,3 +763,20 @@ fn a_failed_verify_sends_the_issue_back_with_why_and_without_the_merged_pull_req
         .expect("launch");
     assert!(launch.brief.task.contains("the clock struck twelve"));
 }
+
+#[test]
+fn an_ended_agent_stays_ended_when_a_late_update_arrives() {
+    let mut w = working_on_one();
+    w.apply(&started("author-1", Role::Author, "1"));
+    w.apply(&ended("author-1"));
+    w.apply(&Event::AgentChanged {
+        agent: AgentId::new("author-1"),
+        state: crate::model::AgentState::Working {
+            doing: "sending the plan".into(),
+        },
+    });
+    assert_eq!(
+        w.agents[&AgentId::new("author-1")].state,
+        crate::model::AgentState::Ended
+    );
+}

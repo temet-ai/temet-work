@@ -135,8 +135,17 @@ pub fn send(path: &Path, request: &Request) -> Result<Reply, String> {
 pub fn answer(host: &mut Host, now_ms: u64, request: &Request) -> Result<Reply, String> {
     match host.world().check(request.by.as_ref(), &request.command) {
         Err(why) => Ok(Reply::Refused { why }),
-        Ok(None) => Ok(Reply::Done {
-            text: temet_work_core::text::text(host.world(), host.problems()),
+        Ok(None) => Ok(match &request.command {
+            temet_work_core::Command::Issue { issue } => Reply::Done {
+                text: temet_work_core::text::issue(host.world(), issue).unwrap_or_default(),
+            },
+            temet_work_core::Command::Screen { agent } => match host.screen(agent) {
+                Ok(text) => Reply::Done { text },
+                Err(why) => Reply::Refused { why },
+            },
+            _ => Reply::Done {
+                text: temet_work_core::text::text(host.world(), host.problems()),
+            },
         }),
         Ok(Some(event)) => {
             host.handle(now_ms, event)?;

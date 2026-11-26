@@ -18,6 +18,16 @@ use crate::world::World;
 pub enum Command {
     /// The state as text.
     Status,
+    /// One issue in full, as text.
+    Issue {
+        /// The issue.
+        issue: IssueId,
+    },
+    /// What an agent's terminal shows now.
+    Screen {
+        /// The agent.
+        agent: AgentId,
+    },
     /// A refiner's plan for an issue it is refining.
     Plan {
         /// The issue.
@@ -55,7 +65,8 @@ impl Command {
     /// The issue the command is about; `None` for `Status`.
     pub fn issue(&self) -> Option<&IssueId> {
         match self {
-            Self::Status => None,
+            Self::Status | Self::Screen { .. } => None,
+            Self::Issue { issue } => Some(issue),
             Self::Plan { issue, .. }
             | Self::Ready { issue, .. }
             | Self::Review { issue, .. }
@@ -90,7 +101,11 @@ impl World {
             Err(format!("{issue} is {}, not {wanted}", stage(now)))
         };
         let event = match command {
-            Command::Status => return Ok(None),
+            Command::Status | Command::Screen { .. } => return Ok(None),
+            Command::Issue { issue } => {
+                at(issue)?;
+                return Ok(None);
+            }
             Command::Plan { issue, plan } => {
                 let now = at(issue)?;
                 if now != Stage::Refining {

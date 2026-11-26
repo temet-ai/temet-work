@@ -42,4 +42,10 @@ pub trait Part: Send {
         let _ = (effect, world);
         Outcome::NotMine
     }
+
+    /// What `agent`'s terminal shows now, if this part runs it.
+    fn screen(&mut self, agent: &ids::AgentId) -> Option<Result<String, String>> {
+        let _ = agent;
+        None
+    }
 }

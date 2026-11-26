@@ -259,7 +259,11 @@ impl World {
                 }
             }
             Event::AgentChanged { agent, state } => {
-                if let Some(a) = self.agents.get_mut(agent) {
+                // An ended session stays ended: an update already on its way when it
+                // was stopped must not bring it back.
+                if let Some(a) = self.agents.get_mut(agent)
+                    && a.state != AgentState::Ended
+                {
                     a.state = state.clone();
                 }
             }

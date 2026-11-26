@@ -11,6 +11,8 @@ pub use temet_work_core::launch::AGENT_VAR;
 /// How to call `temet-work`.
 pub const USAGE: &str = "\
 temet-work status
+temet-work issue ISSUE                      one issue in full
+temet-work screen AGENT                     what an agent's terminal shows now
 temet-work plan ISSUE FILE                  a refiner's plan, as YAML; FILE - reads it from standard input
 temet-work ready ISSUE PULL                 the pull request is open and the checks hold;
                                             PULL is its number, needed the first time
@@ -47,6 +49,10 @@ pub fn request(
     };
     let command = match arg(0, "a command")? {
         "status" => Command::Status,
+        "issue" => Command::Issue { issue: issue()? },
+        "screen" => Command::Screen {
+            agent: AgentId::new(arg(1, "AGENT")?),
+        },
         "plan" => Command::Plan {
             issue: issue()?,
             // `-` is standard input, so an agent can send a plan without writing a file.

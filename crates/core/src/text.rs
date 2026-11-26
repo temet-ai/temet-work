@@ -115,3 +115,65 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     }
     out
 }
+
+/// One issue in full: where it is, its plan, its pull request, what it is to fix,
+/// and its agents.
+pub fn issue(world: &World, id: &crate::ids::IssueId) -> Option<String> {
+    let i = world.issues.get(id)?;
+    let mut out = String::new();
+    let _ = writeln!(out, "{}  {}", i.id, i.title);
+    let _ = writeln!(out, "Stage: {}", stage(i.stage));
+    if let Some(m) = &i.milestone {
+        let _ = writeln!(out, "Milestone: {m}");
+    }
+    if let Some(g) = &i.group {
+        let _ = writeln!(out, "Group: {g}");
+    }
+    if !i.depends_on.is_empty() {
+        let deps: Vec<String> = i
+            .depends_on
+            .iter()
+            .map(|d| {
+                let at = world
+                    .issues
+                    .get(d)
+                    .map_or("unknown".to_string(), |x| stage(x.stage));
+                format!("{d} ({at})")
+            })
+            .collect();
+        let _ = writeln!(out, "Depends on: {}", deps.join(", "));
+    }
+    if let Some(f) = &i.folder {
+        let _ = writeln!(out, "Folder: {f}");
+    }
+    if let Some(p) = &i.pull {
+        let _ = writeln!(out, "Pull request: {p}");
+    }
+    if let Some(plan) = &i.plan {
+        let _ = writeln!(out, "Plan:");
+        for c in &plan.checks {
+            let _ = writeln!(out, "  - {} (shown by: {})", c.done_when, c.proven_by);
+        }
+    }
+    if !i.fix.is_empty() {
+        let _ = writeln!(out, "To fix:");
+        for p in &i.fix {
+            let _ = writeln!(out, "  - {p}");
+        }
+    }
+    let _ = writeln!(out, "Agents:");
+    for a in world
+        .agents
+        .values()
+        .filter(|a| a.issue.as_ref() == Some(id))
+    {
+        let _ = writeln!(
+            out,
+            "  {} ({}): {}",
+            a.id,
+            a.role.name(),
+            agent_state(&a.state)
+        );
+    }
+    Some(out)
+}

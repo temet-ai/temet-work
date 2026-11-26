@@ -113,6 +113,14 @@ impl Host {
         &self.problems
     }
 
+    /// What `agent`'s terminal shows now, from the part that runs it.
+    pub fn screen(&mut self, agent: &crate::ids::AgentId) -> Result<String, String> {
+        self.parts
+            .iter_mut()
+            .find_map(|p| p.screen(agent))
+            .unwrap_or_else(|| Err(format!("no part in this build shows {agent}'s terminal")))
+    }
+
     /// Logs and applies `event`, then carries out everything it leads to.
     pub fn handle(&mut self, now_ms: u64, event: Event) -> Result<(), String> {
         self.run(now_ms, vec![Work::Event(event)])
