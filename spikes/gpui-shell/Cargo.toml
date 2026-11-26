@@ -1,0 +1,15 @@
+[package]
+name = "gpui-shell"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# gpui-component 0.11.0 is built on `gpui-pre`, a crates.io snapshot of
+# zed@f126950, not on `gpui` 0.2.2. Pin the same snapshot under the same name.
+gpui = { package = "gpui-pre", version = "=0.3.14" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", features = ["wayland"] }
+gpui-component = "0.11.0"
+gpui-kit-assets = "0.11.0"
+
+[workspace]
