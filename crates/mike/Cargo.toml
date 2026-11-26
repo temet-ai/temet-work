@@ -1,0 +1,13 @@
+[package]
+name = "temet-work-mike"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+temet-work-core.workspace = true
+
+[lints]
+workspace = true

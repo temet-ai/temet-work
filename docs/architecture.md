@@ -1,0 +1,114 @@
+---
+session_id:
+  - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
+---
+
+# temet-work architecture
+
+This document says how temet-work's code is divided, which rules keep the divisions in
+place, how it is extended and how it is tested. Each rule that a test checks names that
+test.
+
+## What the system does
+
+temet-work runs groups of coding-agent sessions through tickets: it refines a ticket,
+works on it, coordinates the agents, reviews the change, checks that it is correct,
+merges and deploys it, and takes the next ticket. It works across repositories, and
+groups of sessions work side by side without waiting on each other. Agents decide with a
+recorded default and carry on; a person reads those decisions afterwards and can overturn
+them. Nothing in the loop waits on a person.
+
+## Processes
+
+| Process | Owns |
+|---|---|
+| `temet-workd`, the daemon | All state and all work. It keeps running when every window is closed. |
+| herdr-core, or tmux | The terminals agents run in. They outlive the daemon too. |
+| The desktop app (GPUI) | Nothing. It draws the daemon's view data and sends commands. |
+| `temet-work`, the CLI, and its MCP server | Nothing. They send the same commands and read the same view data as the app, so an agent sees what a person sees. |
+
+The app, the CLI and the MCP server reach the daemon over a local socket. A command
+exists once, in the daemon, and every front end uses it by name.
+
+## Crates
+
+The workspace has one small core. Every other crate depends on the core or on its family
+crate, and on no other crate in the workspace.
+
+| Crate | Depends on | Holds |
+|---|---|---|
+| `temet-work-core` | nothing in the workspace | The objects (project, milestone, issue, plan, check, group, agent, decision, rule), the work loop as a pure state machine (an event goes in, state and effects come out), commands, and view data with a text form. The `Part` contract. No I/O, no tool or service names, no UI types. |
+| `temet-work-tracker` | core | The tracker contract, a fake, and the contract tests every tracker adapter runs. |
+| `temet-work-tracker-github` | tracker only | GitHub. GitLab and Jira follow as their own crates. |
+| `temet-work-runner` | core | The runner contract: start a labelled terminal, read it, send to it, wait on it, follow its events. A fake and the contract tests. |
+| `temet-work-runner-herdr` | runner only | herdr-core. tmux follows as its own crate. |
+| `temet-work-runtime` | core | The agent runtime contract: start a session with a brief and a model, tell working from idle. A fake and the contract tests. |
+| `temet-work-runtime-claude` | runtime only | Claude Code. Codex follows as its own crate. |
+| `temet-work-store` | core | SQLite and the event log. |
+| `temet-work-style` | core | The style guide: tokens, the generated palette, the ban list as data, and the check used when reviewing UI work. |
+| `temet-work-mike` | core | Optional. Reads capture, corrected turns and lessons from a mike proxy as input to the improvement loop. |
+| `temet-work`, the root package | core, and each part behind its own feature | Wiring only: `src/lib.rs` registers the compiled-in parts. |
+
+The desktop app will be the one front-end crate. It may depend on the core and on
+`temet-work-style`, and it is the only crate allowed a UI library.
+
+Today every crate above exists as an empty skeleton with its smallest contract (a part has
+an id; a family holds its adapters in order), along with the boundary tests and the mix
+smoke; nothing runs yet.
+
+## Rules the tests enforce
+
+| Rule | Test |
+|---|---|
+| No part depends on another part, and the core depends on no part. | `tests/parts.rs` `no_part_depends_on_another_and_core_depends_on_none` |
+| An adapter depends on its family crate only. | `an_adapter_depends_on_its_family_only` |
+| No part names another part's crate or id, and the core names none. | `no_part_names_another_and_core_names_none` |
+| The core names no tool or service (GitHub, GitLab, Jira, Linear, herdr, tmux, Claude, Codex, mike, Slack). | `core_names_no_tool_or_service` |
+| Only a front end uses a UI library. | `no_ui_library_outside_a_front_end` |
+| Each part and adapter has one feature line in `Cargo.toml` and one `#[cfg]` block in `src/lib.rs`. | `the_root_registers_each_part_behind_its_feature` |
+| Every mix that matters builds, and `parts()` returns exactly the parts compiled in. | `tests/mix.rs` through `scripts/check-mixes` |
+
+The mixes are: no parts, each part alone, all parts, each adapter with its family, and
+everything. A test of every combination is not run: the guard keeps parts from depending
+on each other, so what two parts do together shows up in the all-parts build.
+
+## Adding an adapter in this repository
+
+1. Make `crates/<family>-<tool>/` with a crate `temet-work-<family>-<tool>` that depends
+   on `temet-work-<family>` only.
+2. Add it to `[workspace.dependencies]`, add the feature
+   `<family>-<tool> = ["<family>", "dep:temet-work-<family>-<tool>"]` and the optional
+   dependency in the root `Cargo.toml`.
+3. Add it to its family inside the family's block in `src/lib.rs`, behind
+   `#[cfg(feature = "<family>-<tool>")]`.
+4. Run the family's contract tests against it, then `scripts/check-mixes`.
+
+## Extending from outside the repository
+
+Not decided. The question is how someone adds a Linear tracker or a new agent runtime
+without a pull request here, safely, versioned, and tested against the same contract as
+the adapters in the tree. A first survey points at WebAssembly components with declared
+permissions for trackers and checks, and subprocess plugins speaking JSON lines over
+stdio for runners and runtimes, all driven through the same family traits and the same
+contract tests. That survey read search summaries only; a deeper one comes before the
+decision.
+
+## Tests
+
+| Rule | Where it is set |
+|---|---|
+| A test over 2 s is flagged slow and one over 20 s is killed. | `.config/nextest.toml` |
+| A crate's whole suite stays under 10 s; CI fails when one goes over. | `scripts/test-budget`, run in CI |
+| Most tests are pure core tests: an event goes in, state and effects are checked. They run in milliseconds. | |
+| Adapters are tested through their family's contract tests, with fakes and recorded streams, never live services. | |
+| Storage tests use SQLite in memory; there is no database tier. | |
+| Tests against live services run nightly, behind a feature. | |
+| A crate's tests test that crate with its own fixtures. A change that fails another crate's tests is a coupling fault to fix, not a snapshot to record again. | |
+| While working, run only the changed crate: `cargo nextest run -p <crate>`. CI runs the workspace, the budget and the mixes. | `.github/workflows/ci.yml` |
+| Every test runs sandboxed (`TEMET_WORK_SANDBOX=1`) and in UTC. | `.cargo/config.toml` |
+
+## What comes next
+
+The core's objects and the work loop as a state machine, with tests. Then the runner and
+runtime contracts, written from what the research fleet found running herdr-core and agent
+sessions (`docs/findings/`).

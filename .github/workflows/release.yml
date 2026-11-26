@@ -1,0 +1,123 @@
+name: Release
+
+# An annotated tag v<version> on main publishes a release. The tag must equal
+# the Cargo version. Never move a released tag or replace its assets: publish
+# the next version instead.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - name: Check tag and workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          actual="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "temet-work") | .version')"
+          [[ "$actual" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]
+          test "$version" = "$actual"
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          # No Windows build until there is a Windows user and a test run on it
+          # (docs/RELEASING.md says what Windows users do instead).
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+        if: runner.os == 'Linux'
+      # A step that builds something a later step embeds writes its output to a
+      # file under `set -euo pipefail`: a failure inside $(...) does not stop a step.
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "temet-work") | .version')"
+          target/release/temet-work --version | grep -F "$version"
+          mkdir -p dist
+          tar -czf "dist/temet-work-v${version}-${{ matrix.target }}.tar.gz" -C target/release temet-work -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-NOTICES.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: temet-work-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: temet-work-*
+          path: dist
+          merge-multiple: true
+      - name: Publish the release and its checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          test "$(find . -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 4
+          sha256sum ./*.tar.gz > checksums.txt
+          version="${GITHUB_REF_NAME#v}"
+          pre=""
+          case "$version" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" ./*.tar.gz checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag $pre --title "temet-work $version" \
+            --notes "temet-work $version. Install: \`brew install temet-ai/temet-work/temet-work\`, or mise with \`github:temet-ai/temet-work\`. Each archive holds \`temet-work\`, LICENSE and THIRD-PARTY-NOTICES.md."
+      # The tap's formula, rendered from this release's checksums. Needs
+      # HOMEBREW_TAP_TOKEN, a fine-grained token that can write only to
+      # temet-ai/homebrew-temet-work; without it the step warns and
+      # docs/RELEASING.md's manual step applies.
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      - name: Update the Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set: update temet-ai/homebrew-temet-work by hand (docs/RELEASING.md)"
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/temet-ai/homebrew-temet-work.git" tap
+          mkdir -p tap/Formula
+          python3 src/scripts/render-homebrew-formula "$version" "$GITHUB_REPOSITORY" dist/checksums.txt > tap/Formula/temet-work.rb
+          cd tap
+          git config user.name "temet-work release"
+          git config user.email "temet-work-release@users.noreply.github.com"
+          git add Formula/temet-work.rb
+          git commit -m "temet-work $version"
+          git push

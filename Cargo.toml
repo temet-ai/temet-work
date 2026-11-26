@@ -1,0 +1,83 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+
+# Every third-party version and every internal crate, once. Crates say
+# `foo.workspace = true`.
+[workspace.dependencies]
+serde_json = "1"
+temet-work-core = { path = "crates/core" }
+temet-work-tracker = { path = "crates/tracker" }
+temet-work-runner = { path = "crates/runner" }
+temet-work-runtime = { path = "crates/runtime" }
+temet-work-tracker-github = { path = "crates/tracker-github" }
+temet-work-runner-herdr = { path = "crates/runner-herdr" }
+temet-work-runtime-claude = { path = "crates/runtime-claude" }
+temet-work-store = { path = "crates/store" }
+temet-work-style = { path = "crates/style" }
+temet-work-mike = { path = "crates/mike" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+
+# The root package wires the parts: src/lib.rs registers each one behind its
+# feature, and tests/ checks the boundaries and every mix.
+[package]
+name = "temet-work"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# One feature per part, all on by default. An adapter's feature turns on its
+# family. `cargo run --no-default-features --features tracker` builds one part
+# alone; scripts/check-mixes builds every mix that matters.
+[features]
+default = ["tracker", "runner", "runtime", "store", "style", "mike", "tracker-github", "runner-herdr", "runtime-claude"]
+tracker = ["dep:temet-work-tracker"]
+runner = ["dep:temet-work-runner"]
+runtime = ["dep:temet-work-runtime"]
+store = ["dep:temet-work-store"]
+style = ["dep:temet-work-style"]
+mike = ["dep:temet-work-mike"]
+tracker-github = ["tracker", "dep:temet-work-tracker-github"]
+runner-herdr = ["runner", "dep:temet-work-runner-herdr"]
+runtime-claude = ["runtime", "dep:temet-work-runtime-claude"]
+
+[dependencies]
+temet-work-core.workspace = true
+temet-work-tracker = { workspace = true, optional = true }
+temet-work-runner = { workspace = true, optional = true }
+temet-work-runtime = { workspace = true, optional = true }
+temet-work-store = { workspace = true, optional = true }
+temet-work-style = { workspace = true, optional = true }
+temet-work-mike = { workspace = true, optional = true }
+temet-work-tracker-github = { workspace = true, optional = true }
+temet-work-runner-herdr = { workspace = true, optional = true }
+temet-work-runtime-claude = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+# Dependencies optimised even in dev builds. Line tables only, so test binaries
+# stay small.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.dev]
+debug = "line-tables-only"

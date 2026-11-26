@@ -1,0 +1,14 @@
+# Test budgets. A unit or integration test takes milliseconds; one over 2 s is
+# flagged SLOW and one over 20 s is killed. Every failure is reported, not only
+# the first. CI also fails when a crate's whole suite passes 10 s
+# (scripts/test-budget reads the JUnit file the ci profile writes).
+[profile.default]
+slow-timeout = { period = "2s", terminate-after = 10 }
+fail-fast = false
+
+[profile.ci]
+slow-timeout = { period = "2s", terminate-after = 10 }
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Fail when a crate's test suite takes longer than its budget.
+
+    scripts/test-budget [junit.xml] [--seconds 10]
+
+Reads the JUnit file `cargo nextest run --profile ci` writes (by default
+target/nextest/ci/junit.xml), adds up the test time per crate and prints one
+line per crate, slowest first. Exits 1 when any crate is over the budget, so a
+suite that grows past it stops the build instead of slowly taking over the
+work.
+"""
+
+import argparse
+import sys
+import xml.etree.ElementTree as ET
+from collections import defaultdict
+from pathlib import Path
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("junit", nargs="?", default="target/nextest/ci/junit.xml")
+    ap.add_argument("--seconds", type=float, default=10.0, help="budget per crate (default 10)")
+    args = ap.parse_args()
+
+    path = Path(args.junit)
+    if not path.exists():
+        print(f"test-budget: {path} not found; run `cargo nextest run --profile ci` first", file=sys.stderr)
+        return 2
+
+    per_crate: dict[str, float] = defaultdict(float)
+    counts: dict[str, int] = defaultdict(int)
+    for suite in ET.parse(path).getroot().iter("testsuite"):
+        # nextest names a suite by its binary id: `crate`, `crate::test-file` or `crate::bin/name`.
+        crate = suite.get("name", "?").split("::")[0]
+        for case in suite.iter("testcase"):
+            per_crate[crate] += float(case.get("time", "0") or 0)
+            counts[crate] += 1
+
+    over = []
+    for crate, secs in sorted(per_crate.items(), key=lambda kv: -kv[1]):
+        mark = "OVER" if secs > args.seconds else "ok"
+        print(f"{mark:>4}  {secs:7.2f} s  {counts[crate]:4d} tests  {crate}")
+        if secs > args.seconds:
+            over.append(crate)
+
+    if over:
+        print(f"test-budget: over {args.seconds:g} s: {', '.join(over)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
