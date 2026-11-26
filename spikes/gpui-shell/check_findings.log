@@ -1,0 +1,18 @@
+ok  The daemon / Build on: Keeping one warm app target directory per project, since the... -> Build times, Size and running cost
+ok  The daemon / Build on: A daemon crate with no GPUI dependency, so that building the... -> Build times
+ok  The daemon / Avoid: Starting each item's app build in an empty target directory,... -> Build times
+ok  The daemon / Still unknown: Whether two work folders can build into one target directory... -> Build times
+ok  The daemon / Still unknown: Whether a shared compiler cache shortens the clean build. No... -> Build times
+ok  The daemon / Still unknown: How the app receives daemon state. Feeding a socket stream i... -> What gpui-component gave and what the spike wrote
+ok  The app / Build on: `gpui-component` 0.11.0 with `gpui-pre` pinned to the versio... -> Versions, Size and running cost
+ok  The app / Build on: `Sidebar` and `v_virtual_list` for the project list and the ... -> Problems, What gpui-component gave and what the spike wrote
+ok  The app / Avoid: Depending on `gpui` 0.2.2 beside `gpui-component` (Versions)... -> Versions
+ok  The app / Still unknown: Whether clicking a project filters the list in the running w... -> What gpui-component gave and what the spike wrote
+ok  The app / Still unknown: Scrolling, keyboard focus and navigation, text input and IME... -> Size and running cost
+ok  The app / Still unknown: `DataTable`, `dock`, and text-heavy views such as diffs (Wha... -> What gpui-component gave and what the spike wrote
+ok  The app / Still unknown: Whether the look from the design canvas can replace gpui-com... -> What gpui-component gave and what the spike wrote
+ok  The app / Still unknown: What the `tree-sitter-*` features add to the clean build; no... -> Versions
+ok  The app / Still unknown: How long `gpui-pre` keeps being published, and how an upgrad... -> Versions
+ok  The app / Still unknown: macOS and X11; only the `wayland` backend was enabled (Versi... -> Versions
+ok  The app / Still unknown: Whether smaller debug info shortens the debug rebuild, and s... -> Build times, Size and running cost
+0 failure(s)

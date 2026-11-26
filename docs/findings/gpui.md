@@ -74,7 +74,7 @@ build was launched twice. Launch time runs from the launch command to the window
 `hyprctl clients`, CPU is measured over 10 s starting 6 s after that, and memory is `VmRSS`.
 
 `hyprctl clients -j` showed class `temet-work-gpui-shell`, `xwayland: false` and the requested
-size of 1100x700 (floating).
+size of 1100x700 (floating), on a monitor at scale 1.
 
 ## Problems
 
@@ -120,7 +120,7 @@ more rows, for example) has to ignore it. The spike logs only ranges longer than
 
 ## What gpui-component gave and what the spike wrote
 
-`src/main.rs` is 265 lines.
+`src/main.rs` is 265 lines, with the 36 issue rows as a fixed table in it.
 
 | Part | From gpui-component 0.11.0 | Written in `src/main.rs` |
 |---|---|---|
@@ -142,7 +142,7 @@ Build on:
   A clean debug build took 158 s with `-j 4` and 4.4 GiB of disk; a one-line change in a warm
   directory took 2 to 12 s (Build times, Size and running cost).
 - A daemon crate with no GPUI dependency, so that building the daemon alone does not compile GPUI.
-  This is a recommendation from the same build costs; no daemon was built.
+  This is a recommendation from the same build costs; no daemon was built (Build times).
 
 Avoid:
 
@@ -151,10 +151,12 @@ Avoid:
 
 Still unknown:
 
-- Whether two work folders can build into one target directory at once.
-- Whether a shared compiler cache shortens the clean build. None was set up for these builds.
+- Whether two work folders can build into one target directory at once. Only one folder built here
+  (Build times).
+- Whether a shared compiler cache shortens the clean build. None was set up for these builds
+  (Build times).
 - How the app receives daemon state. Feeding a socket stream into GPUI's executor and redrawing
-  was not tried, because the spike's data is a fixed table in `main.rs`.
+  was not tried; the spike's rows are a fixed table in `main.rs` (What gpui-component gave and what the spike wrote).
 
 ### The app
 
@@ -164,7 +166,8 @@ Build on:
   together. The pair ran on Wayland with NVIDIA from the first successful build (Versions, Size
   and running cost).
 - `Sidebar` and `v_virtual_list` for the project list and the issue list. With 36 rows the list
-  built the 23 in view (Problems). Longer lists, scrolling and sidebar clicks were not tried.
+  built the 23 in view. Longer lists, scrolling and sidebar clicks were not tried (Problems,
+  What gpui-component gave and what the spike wrote).
 
 Avoid:
 
@@ -173,15 +176,18 @@ Avoid:
 Still unknown:
 
 - Whether clicking a project filters the list in the running window. The code is there; no click
-  was sent to the live desktop.
+  was sent to the live desktop (What gpui-component gave and what the spike wrote).
 - Scrolling, keyboard focus and navigation, text input and IME, tiled resizing, scale other than 1,
-  accessibility with a screen reader.
-- `DataTable`, `dock`, and text-heavy views such as diffs.
+  and accessibility with a screen reader. The window was only drawn, floating, at scale 1 (Size and
+  running cost).
+- `DataTable`, `dock`, and text-heavy views such as diffs (What gpui-component gave and what the spike wrote).
 - Whether the look from the design canvas can replace gpui-component's theme. Themes load from
   JSON (`ThemeRegistry::load_themes_from_str`, `watch_dir`). The spike used only the built-in dark
-  theme, whose file names shadcn as author.
+  theme, whose file names shadcn as author (What gpui-component gave and what the spike wrote).
 - What the `tree-sitter-*` features add to the clean build; none was turned on (Versions).
 - How long `gpui-pre` keeps being published, and how an upgrade goes. Its one owner also publishes
   `gpui-component`, its README says to expect breaking changes between versions, and only one pair
   of versions was built (Versions).
-- macOS, X11, and whether smaller debug info shortens the debug rebuild.
+- macOS and X11; only the `wayland` backend was enabled (Versions).
+- Whether smaller debug info shortens the debug rebuild, and shrinks the 767 MB debug binary
+  (Build times, Size and running cost).
