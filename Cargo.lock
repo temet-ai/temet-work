@@ -124,6 +124,7 @@ dependencies = [
 name = "temet-work-runner-herdr"
 version = "0.0.1"
 dependencies = [
+ "serde_json",
  "temet-work-runner",
 ]
 
@@ -166,6 +167,7 @@ dependencies = [
 name = "temet-work-tracker-github"
 version = "0.0.1"
 dependencies = [
+ "serde_json",
  "temet-work-tracker",
 ]
 

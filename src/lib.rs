@@ -14,7 +14,7 @@ pub fn parts() -> Vec<Box<dyn Part>> {
         #[allow(unused_mut)]
         let mut family = temet_work_tracker::Trackers::default();
         #[cfg(feature = "tracker-github")]
-        family.add(Box::new(temet_work_tracker_github::GitHub));
+        family.add(Box::new(temet_work_tracker_github::GitHub::default()));
         parts.push(Box::new(family));
     }
     #[cfg(feature = "runner")]

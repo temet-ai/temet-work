@@ -60,7 +60,9 @@ What exists today:
 | `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model |
 | `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live`) and opens nothing in other test runs |
 | `temet-work-runtime-claude` | passes the runtime contract |
-| tracker, GitHub tracker, store, style, mike | skeletons |
+| `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines |
+| `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
+| store, style, mike | skeletons |
 
 No daemon runs yet.
 
@@ -133,4 +135,5 @@ features.
 
 The store, which keeps the event log, and the daemon, which feeds events to the loop and
 carries out its effects through the parts: the GitHub tracker for issues, herdr-core for
-terminals, Claude Code for agents.
+terminals, Claude Code for agents. Pull requests and merges need a code-host family of
+their own, since a tracker such as Jira hosts no code.
