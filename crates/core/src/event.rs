@@ -130,6 +130,11 @@ pub enum Event {
         #[serde(default)]
         pull: Option<String>,
     },
+    /// What an issue's agent was to hear reached it: the fixes, or a new round.
+    Told {
+        /// The issue.
+        issue: IssueId,
+    },
     /// The reviewer finished a round.
     ReviewFinished {
         /// The issue.

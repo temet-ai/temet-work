@@ -83,6 +83,15 @@ pub struct Issue {
     pub checks_ok: Option<bool>,
     /// Its pull request's number on the code host, once the author names it.
     pub pull: Option<String>,
+    /// What its author is to fix, while it is being fixed.
+    pub fix: Vec<String>,
+    /// Whether the agent its stage needs has heard what to do: the author what
+    /// to fix, the reviewer that a new round is up. A new agent hears it in its
+    /// brief.
+    pub told: bool,
+    /// Whether the loop closed it, after verifying it. One the tracker closed and
+    /// later reopened is worked again; one the loop closed stays closed.
+    pub closed_by_loop: bool,
 }
 
 /// What an agent does.

@@ -26,6 +26,17 @@ pub fn write(
             .map(|c| format!("- {} (shown by: {})\n", c.done_when, c.proven_by))
             .collect()
     });
+    // An author started on an issue sent back to it hears what to fix first.
+    let fixes = if matches!(issue.stage, crate::model::Stage::Fixing { .. })
+        && !issue.fix.is_empty()
+    {
+        let list: String = issue.fix.iter().map(|p| format!("- {p}\n")).collect();
+        format!(
+            "The pull request is open; the review or the checks found these to fix first:\n{list}"
+        )
+    } else {
+        String::new()
+    };
     let task = match role {
         Role::Refiner => format!(
             "Refine {id}: {title}. It is {source}.\n\
@@ -39,7 +50,7 @@ pub fn write(
         Role::Author => format!(
             "Work on {id}: {title}. It is {source}.\n\
              This folder is yours until the change merges. Make a branch, change the code and open a pull request.\n\
-             The plan's checks, each to hold before you finish:\n{checks}\
+             {fixes}The plan's checks, each to hold before you finish:\n{checks}\
              When the pull request is open and every check holds, run: temet-work ready {id} <pull request number>",
             title = issue.title,
         ),

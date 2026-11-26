@@ -555,3 +555,95 @@ fn a_folder_moved_to_another_project_is_updated() {
         ProjectId::new("klatch")
     );
 }
+
+#[test]
+fn an_author_that_has_not_heard_its_fixes_is_told_again_until_it_has() {
+    let mut w = working_on_one();
+    w.apply(&started("author-1", Role::Author, "1"));
+    w.apply(&Event::PullRequestReady {
+        issue: issue("1"),
+        pull: Some("57".into()),
+    });
+    w.apply(&started("reviewer-1", Role::Reviewer, "1"));
+    let points = vec!["no test for a stopped clock".to_string()];
+    w.apply(&Event::ReviewFinished {
+        issue: issue("1"),
+        round: 1,
+        verdict: Verdict::Block {
+            points: points.clone(),
+        },
+    });
+    let fix = Effect::RequestFix {
+        issue: issue("1"),
+        points,
+    };
+    assert_eq!(
+        w.missing().start,
+        vec![fix.clone()],
+        "after a restart the fix is sent again"
+    );
+    w.apply(&Event::Told { issue: issue("1") });
+    assert_eq!(w.missing().start, vec![], "heard it");
+}
+
+#[test]
+fn a_new_author_on_an_issue_being_fixed_hears_the_fixes_in_its_brief() {
+    let mut w = working_on_one();
+    w.apply(&Event::PullRequestReady {
+        issue: issue("1"),
+        pull: Some("57".into()),
+    });
+    w.apply(&Event::ReviewFinished {
+        issue: issue("1"),
+        round: 1,
+        verdict: Verdict::Block {
+            points: vec!["no test for a stopped clock".into()],
+        },
+    });
+    let launch = w
+        .launch(
+            &GroupId::new("watch"),
+            Role::Author,
+            &issue("1"),
+            Some(&FolderId::new("f1")),
+        )
+        .expect("launch");
+    assert!(
+        launch.brief.task.contains("- no test for a stopped clock"),
+        "{}",
+        launch.brief.task
+    );
+    w.apply(&started("author-1", Role::Author, "1"));
+    assert!(w.issues[&issue("1")].told, "starting it told it");
+}
+
+#[test]
+fn an_issue_reopened_in_the_tracker_is_worked_again_but_one_the_loop_closed_is_not() {
+    let reopen = |closed| Event::IssueSynced {
+        issue: issue("1"),
+        title: "issue 1".into(),
+        milestone: Some(MilestoneId::new("m1")),
+        depends_on: vec![],
+        order: 1,
+        closed,
+    };
+    let (mut w, _) = World::replay(&[group(&["m1"], 1), sync("1", "m1", 1, &[]), reopen(true)]);
+    assert_eq!(stage(&w, "1"), Stage::Done);
+    w.apply(&reopen(false));
+    assert_eq!(stage(&w, "1"), Stage::Refining, "reopened, and taken again");
+
+    let mut w = working_on_one();
+    if let Some(i) = w.issues.get_mut(&issue("1")) {
+        i.stage = Stage::Verifying;
+    }
+    w.apply(&Event::Verified {
+        issue: issue("1"),
+        passed: true,
+    });
+    w.apply(&reopen(false));
+    assert_eq!(
+        stage(&w, "1"),
+        Stage::Done,
+        "the loop closed it; its close is retried instead"
+    );
+}

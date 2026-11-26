@@ -171,11 +171,24 @@ impl World {
                     review_ok: false,
                     checks_ok: None,
                     pull: None,
+                    fix: Vec::new(),
+                    told: false,
+                    closed_by_loop: false,
                 });
                 entry.title = title.clone();
                 entry.milestone = milestone.clone();
                 entry.depends_on = depends_on.clone();
                 entry.order = *order;
+                if !*closed && entry.stage == Stage::Done && !entry.closed_by_loop {
+                    // Closed in the tracker, now reopened there: work it again.
+                    entry.stage = Stage::New;
+                    entry.group = None;
+                    entry.plan = None;
+                    entry.review_ok = false;
+                    entry.checks_ok = None;
+                    entry.pull = None;
+                    entry.fix.clear();
+                }
                 if *closed && entry.stage != Stage::Done {
                     entry.stage = Stage::Done;
                     let folder = entry.folder.take();
@@ -215,6 +228,22 @@ impl World {
                         started: self.applied,
                     },
                 );
+                // A new agent hears what its stage needs in its brief.
+                if let Some(i) = issue.as_ref().and_then(|id| self.issues.get_mut(id)) {
+                    let needed = matches!(
+                        (i.stage, role),
+                        (Stage::Fixing { .. }, Role::Author)
+                            | (Stage::InReview { .. }, Role::Reviewer)
+                    );
+                    if needed {
+                        i.told = true;
+                    }
+                }
+            }
+            Event::Told { issue } => {
+                if let Some(i) = self.issues.get_mut(issue) {
+                    i.told = true;
+                }
             }
             Event::AgentChanged { agent, state } => {
                 if let Some(a) = self.agents.get_mut(agent) {
@@ -243,6 +272,8 @@ impl World {
                         i.stage = Stage::InReview { round };
                         i.review_ok = false;
                         i.checks_ok = None;
+                        i.fix.clear();
+                        i.told = false;
                         out.push(Effect::StartReview {
                             issue: issue.clone(),
                             round,
@@ -264,11 +295,7 @@ impl World {
                             Self::try_merge(i, &mut out);
                         }
                         Verdict::Block { points } if *round < REVIEW_ROUNDS => {
-                            i.stage = Stage::Fixing { round: *round };
-                            out.push(Effect::RequestFix {
-                                issue: issue.clone(),
-                                points: points.clone(),
-                            });
+                            Self::send_back(i, *round, points.clone(), &mut out);
                         }
                         Verdict::Block { .. } => {
                             // An issue in review was taken by a group, so it has one.
@@ -297,7 +324,6 @@ impl World {
                             if *passed {
                                 Self::try_merge(i, &mut out);
                             } else {
-                                i.stage = Stage::Fixing { round };
                                 i.review_ok = false;
                                 let points = if failing.is_empty() {
                                     vec!["CI failed".into()]
@@ -307,10 +333,7 @@ impl World {
                                         .map(|c| format!("CI check {c} failed"))
                                         .collect()
                                 };
-                                out.push(Effect::RequestFix {
-                                    issue: issue.clone(),
-                                    points,
-                                });
+                                Self::send_back(i, round, points, &mut out);
                             }
                         }
                         _ => {}
@@ -327,11 +350,7 @@ impl World {
                         i.review_ok = true;
                         Self::try_merge(i, &mut out);
                     } else {
-                        i.stage = Stage::Fixing { round };
-                        out.push(Effect::RequestFix {
-                            issue: decision.issue.clone(),
-                            points: vec![decision.reason.clone()],
-                        });
+                        Self::send_back(i, round, vec![decision.reason.clone()], &mut out);
                     }
                 }
             }
@@ -376,6 +395,7 @@ impl World {
                 {
                     if *passed {
                         i.stage = Stage::Done;
+                        i.closed_by_loop = true;
                         out.push(Effect::Close {
                             issue: issue.clone(),
                         });
@@ -405,7 +425,9 @@ impl World {
     /// The agents each issue needs now and does not have: a refiner while it is
     /// refining, an author while it is worked on, a reviewer in review, an arbiter
     /// with the arbiter. This brings back an agent whose session ended, or one
-    /// the daemon decided on and did not start before it stopped. After
+    /// the daemon decided on and did not start before it stopped. A running
+    /// author or reviewer that has not heard its fixes or its new round is told
+    /// again. After
     /// [`MAX_STARTS`] agents of one role on one issue it gives up, and says so.
     pub fn missing(&self) -> Missing {
         let mut out = Missing::default();
@@ -451,6 +473,23 @@ impl World {
                 _ => continue,
             };
             if self.running(&i.id, role).is_some() {
+                // Running, but not yet told what its stage needs: say it again.
+                // The part that delivers it drops a message already waiting.
+                if !i.told {
+                    match i.stage {
+                        Stage::Fixing { .. } => out.start.push(Effect::RequestFix {
+                            issue: i.id.clone(),
+                            points: i.fix.clone(),
+                        }),
+                        Stage::InReview { round } if round > 1 => {
+                            out.start.push(Effect::StartReview {
+                                issue: i.id.clone(),
+                                round,
+                            })
+                        }
+                        _ => {}
+                    }
+                }
                 continue;
             }
             let tried = self
@@ -497,6 +536,17 @@ impl World {
             folder: folder.cloned(),
             brief: brief::write(role, i, self.projects.get(&issue.project), path),
         })
+    }
+
+    /// Sends an issue back to its author with what to fix.
+    fn send_back(i: &mut Issue, round: u8, points: Vec<String>, out: &mut Vec<Effect>) {
+        i.stage = Stage::Fixing { round };
+        i.fix.clone_from(&points);
+        i.told = false;
+        out.push(Effect::RequestFix {
+            issue: i.id.clone(),
+            points,
+        });
     }
 
     /// Merges when the review and the checks have both passed.

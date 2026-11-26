@@ -76,11 +76,6 @@ What does not work yet:
 
 - Any agent or person can run any command; a command is not yet limited to the agent
   whose step it is.
-- A fix request waiting for its author to finish a turn is held in memory, so a restart
-  loses it and the author never hears of it.
-- An issue reopened in its tracker after the loop closed it is not worked again.
-- When herdr-core cannot be reached, agents' states stop changing and nothing says why;
-  only starting or messaging an agent reports it.
 
 ## Who coordinates
 

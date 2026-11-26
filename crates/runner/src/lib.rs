@@ -137,6 +137,19 @@ pub trait Runner: Send {
 
     /// The updates since the last call, oldest first.
     fn updates(&mut self) -> Vec<Update>;
+
+    /// What stops the runner from reporting updates now, such as a terminal
+    /// service it cannot reach.
+    fn problem(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Text waiting for an agent to finish its turn.
+struct Message {
+    agent: String,
+    issue: temet_work_core::ids::IssueId,
+    text: String,
 }
 
 /// The runner part: the runners compiled into this build, in the order they were added.
@@ -150,7 +163,7 @@ pub struct Runners {
     /// Each agent's terminal: the runner that holds it and its id there.
     terminals: BTreeMap<String, (usize, TerminalId)>,
     /// Text waiting for its agent to finish a turn, as (agent, text).
-    outbox: Vec<(String, String)>,
+    outbox: Vec<Message>,
 }
 
 impl Runners {
@@ -182,22 +195,40 @@ impl Runners {
     }
 
     /// Sends what is waiting; keeps what the agent cannot take yet.
-    fn deliver(&mut self) {
+    /// Queues a message unless the same one is already waiting, then sends what
+    /// can be sent. Returns a `Told` event for each issue whose message arrived.
+    fn queue(&mut self, message: Message) -> Vec<Event> {
+        let waiting = self
+            .outbox
+            .iter()
+            .any(|m| m.agent == message.agent && m.text == message.text);
+        if !waiting {
+            self.outbox.push(message);
+        }
+        self.deliver()
+    }
+
+    /// Sends what is waiting and keeps what the agent cannot take yet. Returns a
+    /// `Told` event for each issue whose message arrived.
+    fn deliver(&mut self) -> Vec<Event> {
         let mut keep = Vec::new();
-        for (agent, text) in std::mem::take(&mut self.outbox) {
-            let Some((i, terminal)) = self.terminals.get(&agent).cloned() else {
-                keep.push((agent, text));
+        let mut told = Vec::new();
+        for m in std::mem::take(&mut self.outbox) {
+            let Some((i, terminal)) = self.terminals.get(&m.agent).cloned() else {
+                keep.push(m);
                 continue;
             };
-            match self.adapters[i].send(&terminal, &text, true) {
-                Ok(()) => {}
-                // The terminal is gone: its updates report the agent ended.
+            match self.adapters[i].send(&terminal, &m.text, true) {
+                Ok(()) => told.push(Event::Told { issue: m.issue }),
+                // The terminal is gone: its updates report the agent ended, and
+                // the loop tells the next one.
                 Err(RunnerError::Gone | RunnerError::Unknown(_)) => {}
                 // Busy, at a prompt, or the runner could not be reached: try again.
-                Err(_) => keep.push((agent, text)),
+                Err(_) => keep.push(m),
             }
         }
         self.outbox = keep;
+        told
     }
 }
 
@@ -246,10 +277,11 @@ impl Part for Runners {
                 events.push(Event::AgentChanged { agent: id, state });
             }
         }
-        self.deliver();
+        events.extend(self.deliver());
+        let problems: Vec<String> = self.adapters.iter().filter_map(|a| a.problem()).collect();
         Polled {
             events,
-            problem: None,
+            problem: (!problems.is_empty()).then(|| problems.join("; ")),
         }
     }
 
@@ -308,10 +340,15 @@ impl Part for Runners {
                 let Some(author) = world.running(issue, Role::Author) else {
                     return Outcome::Failed(format!("no author is running for {issue}"));
                 };
-                self.outbox
-                    .push((author.id.0.clone(), brief::fixes(issue, points)));
-                self.deliver();
-                Outcome::done()
+                let told = self.queue(Message {
+                    agent: author.id.0.clone(),
+                    issue: issue.clone(),
+                    text: brief::fixes(issue, points),
+                });
+                Outcome::Done {
+                    events: told,
+                    effects: Vec::new(),
+                }
             }
             // A reviewer still running hears of the next round; with none, a new
             // one is started elsewhere.
@@ -319,10 +356,15 @@ impl Part for Runners {
                 let Some(reviewer) = world.running(issue, Role::Reviewer) else {
                     return Outcome::NotMine;
                 };
-                self.outbox
-                    .push((reviewer.id.0.clone(), brief::next_round(issue, *round)));
-                self.deliver();
-                Outcome::done()
+                let told = self.queue(Message {
+                    agent: reviewer.id.0.clone(),
+                    issue: issue.clone(),
+                    text: brief::next_round(issue, *round),
+                });
+                Outcome::Done {
+                    events: told,
+                    effects: Vec::new(),
+                }
             }
             Effect::StopAgent { agent } => {
                 let Some((i, terminal)) = self.terminals.get(&agent.0).cloned() else {
@@ -331,7 +373,7 @@ impl Part for Runners {
                 match self.adapters[i].stop(&terminal) {
                     Ok(()) | Err(RunnerError::Gone | RunnerError::Unknown(_)) => {
                         self.terminals.remove(&agent.0);
-                        self.outbox.retain(|(a, _)| a != &agent.0);
+                        self.outbox.retain(|m| m.agent != agent.0);
                         Outcome::Done {
                             events: vec![Event::AgentChanged {
                                 agent: agent.clone(),
@@ -446,7 +488,16 @@ mod tests {
         let mut w = world();
         let mut part = runners();
         let idle = run(&mut part, &mut w, &["cat"]);
-        assert_eq!(part.carry_out(&fix, &w), Outcome::done());
+        assert_eq!(
+            part.carry_out(&fix, &w),
+            Outcome::Done {
+                events: vec![Event::Told {
+                    issue: IssueId::new("ankh", "1")
+                }],
+                effects: vec![]
+            },
+            "delivered at once, so the issue's author has been told"
+        );
         let screen = part.screen(&idle.0).expect("screen");
         assert!(screen.contains("- no test for a stopped clock"), "{screen}");
         assert!(screen.contains("temet-work ready ankh#1"));
@@ -455,7 +506,8 @@ mod tests {
         let mut part = runners();
         let asking = run(&mut part, &mut w, &[fake::PROMPT_PROGRAM]);
         part.carry_out(&fix, &w);
-        assert_eq!(part.waiting(), 1);
+        part.carry_out(&fix, &w);
+        assert_eq!(part.waiting(), 1, "the same message waits once");
         assert!(
             !part
                 .screen(&asking.0)
@@ -495,7 +547,15 @@ mod tests {
         for e in &events {
             w.apply(e);
         }
-        assert_eq!(part.carry_out(&next, &w), Outcome::done());
+        assert_eq!(
+            part.carry_out(&next, &w),
+            Outcome::Done {
+                events: vec![Event::Told {
+                    issue: IssueId::new("ankh", "1")
+                }],
+                effects: vec![]
+            }
+        );
         let screen = part.screen(&reviewer.0).expect("screen");
         assert!(screen.contains("review round 2"), "{screen}");
     }

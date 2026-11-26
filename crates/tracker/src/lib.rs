@@ -300,11 +300,13 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
         let issue = id(&t.key);
         let milestone = t.milestone.clone().map(MilestoneId::new);
         let depends_on: Vec<IssueId> = t.depends_on.iter().map(|k| id(k)).collect();
+        // Unchanged, unless it was closed in the tracker and is open there again.
         let same = world.issues.get(&issue).is_some_and(|i| {
             i.title == t.title
                 && i.milestone == milestone
                 && i.depends_on == depends_on
                 && i.order == t.order
+                && (i.stage != temet_work_core::model::Stage::Done || i.closed_by_loop)
         });
         if !same {
             out.push(Event::IssueSynced {
@@ -419,18 +421,27 @@ impl Part for Trackers {
                                 order: 0,
                                 closed: true,
                             }),
-                            Ok(false) => unsure.push(format!("{key} is open but was not listed")),
-                            Err(e) => unsure.push(format!("{key}: {e}")),
+                            Ok(false) => unsure.push(format!(
+                                "an issue depends on {key}, which is open but was not listed"
+                            )),
+                            Err(e) => unsure.push(format!(
+                                "an issue depends on {key}, which the tracker cannot confirm closed: {e}"
+                            )),
+                        }
+                    }
+                    // Closed by the loop, still open in the tracker: the close failed; try again.
+                    for t in &open {
+                        let id = IssueId::new(project.id.0.clone(), t.key.as_str());
+                        if world.issues.get(&id).is_some_and(|i| i.closed_by_loop)
+                            && let Err(e) = tracker.close(&project.name, &t.key)
+                        {
+                            unsure.push(format!("closing {id} failed: {e}"));
                         }
                     }
                     if !unsure.is_empty() {
                         self.errors.insert(
                             project.id.clone(),
-                            format!(
-                                "{}: issues wait on dependencies the tracker cannot confirm closed: {}",
-                                project.name,
-                                unsure.join("; ")
-                            ),
+                            format!("{}: {}", project.name, unsure.join("; ")),
                         );
                     }
                     events.extend(changes(world, &project.id, &open));
@@ -614,6 +625,37 @@ mod tests {
             part.poll(&w, 1).problem.is_some(),
             "still shown between syncs"
         );
+    }
+
+    #[test]
+    fn a_reopened_issue_is_a_change_and_a_failed_close_is_retried() {
+        let mut w = configured();
+        let mut part = Trackers::default().every(0);
+        part.add(Box::new(fake()));
+        let first = part.poll(&w, 0).events;
+        apply(&mut w, &first);
+        // Issue 1 closed in the tracker earlier (so not by the loop); issue 2 the loop closed.
+        for (key, by_loop) in [("1", false), ("2", true)] {
+            if let Some(i) = w.issues.get_mut(&IssueId::new("ankh", key)) {
+                i.stage = temet_work_core::model::Stage::Done;
+                i.closed_by_loop = by_loop;
+            }
+        }
+        let polled = part.poll(&w, 1);
+        let synced: Vec<&str> = polled
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::IssueSynced {
+                    issue,
+                    closed: false,
+                    ..
+                } => Some(issue.key.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(synced, ["1"], "only the reopened one");
+        assert_eq!(polled.problem, None, "the retried close worked");
     }
 
     #[test]

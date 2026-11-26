@@ -254,6 +254,8 @@ fn follow(mut conn: Conn, shared: Arc<Mutex<Shared>>) {
 pub struct Herdr {
     control: Option<Conn>,
     shared: Arc<Mutex<Shared>>,
+    /// Why the event subscription could not be opened, at the last try.
+    unreachable: Option<String>,
 }
 
 /// How long a request waits for its answer.
@@ -429,12 +431,18 @@ impl Runner for Herdr {
         )))
     }
 
+    fn problem(&self) -> Option<String> {
+        self.unreachable
+            .as_ref()
+            .map(|e| format!("agents' states are not coming in: {e}"))
+    }
+
     fn updates(&mut self) -> Vec<Update> {
         // Follow events even when nothing is being started or sent, so states
         // keep coming after a restart. A core that is down is tried again next
         // time; starting or sending reports it.
         if !sandboxed() {
-            let _ = self.follow();
+            self.unreachable = self.follow().err().map(|e| e.to_string());
         }
         self.shared
             .lock()
