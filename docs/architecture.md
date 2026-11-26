@@ -52,9 +52,20 @@ crate, and on no other crate in the workspace.
 The desktop app will be the one front-end crate. It may depend on the core and on
 `temet-work-style`, and it is the only crate allowed a UI library.
 
-Today every crate above exists as an empty skeleton with its smallest contract (a part has
-an id; a family holds its adapters in order), along with the boundary tests and the mix
-smoke; nothing runs yet.
+Today the core holds the objects and the work loop with its tests, and every other crate is
+a skeleton with its smallest contract (a part has an id; a family holds its adapters in
+order), so nothing runs yet.
+
+## Who coordinates
+
+The daemon does, in code; agents do only what needs judgement: refining, writing code,
+reviewing and arbitrating. The core's `World::apply` takes one event and returns the
+effects for the daemon to carry out; after every event it takes the next issue for refining
+and starts an author on a ready issue when a work folder of its project is free and the
+issues it depends on are done. Review runs for at most three rounds before an arbiter
+rules. A group has no coordinator agent: in the research fleet the standing seat waited 25
+of its 28 minutes, and in mike's larger runs such seats were where the token and turn costs
+came from (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
 
 ## Rules the tests enforce
 
@@ -112,6 +123,7 @@ features.
 
 ## What comes next
 
-The core's objects and the work loop as a state machine, with tests. Then the runner and
-runtime contracts, written from what the research fleet found running herdr-core and agent
-sessions (`docs/findings/`).
+The runner and runtime contracts, written from what the research fleet found running
+herdr-core and agent sessions (`docs/findings/`), each with a fake and contract tests.
+Then the store, which keeps the event log, and the daemon, which feeds events to the loop
+and carries out its effects through the parts.
