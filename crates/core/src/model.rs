@@ -111,6 +111,10 @@ pub struct Issue {
     /// Whether the loop closed it, after verifying it. One the tracker closed and
     /// later reopened is worked again; one the loop closed stays closed.
     pub closed_by_loop: bool,
+    /// Whether one of its pull requests has merged. A failed verify clears
+    /// `merged` and keeps this; reopening the issue in the tracker clears it.
+    #[serde(default)]
+    pub has_merged: bool,
     /// Whether a person's overturn of a ruling approved it: the review is not
     /// asked again, and it merges once the checks pass.
     #[serde(default)]
@@ -118,6 +122,18 @@ pub struct Issue {
 }
 
 impl Issue {
+    /// Whether a person closed it, as far as the loop can tell: done, not closed
+    /// by the loop after verifying it, and with no pull request of its merged,
+    /// since one that merged may have closed it. A closed dependency the loop
+    /// never saw open has no title and does not count. An investigator files
+    /// none of these again; reopening one in the tracker takes it off this list.
+    pub fn closed_by_a_person(&self) -> bool {
+        self.stage == Stage::Done
+            && !self.closed_by_loop
+            && !self.has_merged
+            && !self.title.is_empty()
+    }
+
     /// Takes every work folder the issue holds, the first one first.
     pub fn take_folders(&mut self) -> Vec<FolderId> {
         self.folder
@@ -189,6 +205,16 @@ pub enum AgentState {
         /// What it is asking for.
         reason: String,
     },
+    /// Its turn ended in an error, such as a usage limit. Typing starts a new
+    /// turn, so this is not a prompt.
+    Errored {
+        /// The line its turn ended on; empty when no line named the error.
+        line: String,
+        /// When the limit the line names resets, in milliseconds since 1970,
+        /// when the line gives a time that can be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_ms: Option<u64>,
+    },
     /// The session has ended.
     Ended,
 }
@@ -216,6 +242,39 @@ pub struct Agent {
     /// The SHA-256 digest of the secret it was started with; none for an agent
     /// started before agents had secrets, which is taken by its id.
     pub secret_digest: Option<crate::sender::Digest>,
+    /// The reset time of the last limit the daemon sent it `continue` after, so
+    /// the same limit coming back is not continued again.
+    #[serde(default)]
+    pub continued: Option<u64>,
+    /// Whether its session ended while its issue still waited on it
+    /// ([`crate::world::World::waiting_on`]). Only such agents count toward the
+    /// `starts` limit: one stopped because its issue moved on had finished its step.
+    #[serde(default)]
+    pub ended_waited_on: bool,
+}
+
+impl AgentState {
+    /// When the limit an agent in this state waits on resets, for an agent last
+    /// continued after the limit that reset at `continued`: its turn ended in an
+    /// error whose line gives a reset time later than that. `None` for any other
+    /// state, including an error with no reset time or one already acted on:
+    /// such an agent is treated as idle.
+    pub fn limit_reset(&self, continued: Option<u64>) -> Option<u64> {
+        match self {
+            Self::Errored {
+                resets_ms: Some(at),
+                ..
+            } if continued.is_none_or(|done| *at > done) => Some(*at),
+            _ => None,
+        }
+    }
+}
+
+impl Agent {
+    /// When the limit this agent waits on resets ([`AgentState::limit_reset`]).
+    pub fn limit_reset(&self) -> Option<u64> {
+        self.state.limit_reset(self.continued)
+    }
 }
 
 /// A group of sessions working on a goal.
@@ -233,6 +292,50 @@ pub struct Group {
     pub milestones: Vec<MilestoneId>,
     /// How many issues it refines at once.
     pub refining_at_once: usize,
+    /// Below how many issues in its work queue it starts an investigator; none
+    /// for the default, twice the work folders of its projects
+    /// ([`crate::World::queue_low`]). 0 starts none.
+    #[serde(default)]
+    pub queue_low: Option<usize>,
+    /// Minutes from the end of its last investigation before another may start.
+    #[serde(default = "investigate_every")]
+    pub investigate_every: u64,
+}
+
+/// How many minutes a group waits after an investigation ends before it starts
+/// another, when its configuration names none.
+pub const INVESTIGATE_EVERY: u64 = 120;
+
+fn investigate_every() -> u64 {
+    INVESTIGATE_EVERY
+}
+
+/// A group's investigation: an investigator reads the group's projects for
+/// planned work that is not built and defects in merged work, and files an issue
+/// for each. A group has at most one running at a time.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Investigation {
+    /// The group.
+    pub group: GroupId,
+    /// Its investigator.
+    pub agent: AgentId,
+    /// When it started, in milliseconds since the Unix epoch.
+    pub started_ms: u64,
+    /// When the group's investigation before it started; none for its first.
+    pub since_ms: Option<u64>,
+    /// When it ended; none while it runs.
+    pub ended_ms: Option<u64>,
+    /// The issues its investigator filed, in order.
+    pub filed: Vec<IssueId>,
+    /// Whether its investigator said it is done.
+    pub done: bool,
+}
+
+impl Investigation {
+    /// Whether it is still running.
+    pub fn running(&self) -> bool {
+        self.ended_ms.is_none()
+    }
 }
 
 /// A work folder: a checkout on one machine, held by one issue at a time.

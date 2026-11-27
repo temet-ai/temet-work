@@ -51,7 +51,7 @@ mod tests {
     fn brief() -> Brief {
         Brief {
             role: Role::Author,
-            issue: IssueId::new("a", "1"),
+            issue: Some(IssueId::new("a", "1")),
             task: "do it".into(),
             model: None,
             permission: "auto".into(),

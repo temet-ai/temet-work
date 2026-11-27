@@ -19,7 +19,7 @@ yet.
 | Project | the app or an area | A repository: the tracker its issues come from (GitHub, GitLab or Jira), the code host its pull requests are on, and its work folders. |
 | Setting | a level: global, area, project, milestone or task | A value that says how work is done, such as the runtime, model or review rounds, for every role or one role. The most specific level that sets it wins (`docs/settings.md`). |
 | Group | the app | Sessions working together on a goal: its agents and the issues it has taken, from one or more projects, in the order of the milestones it works on. The daemon coordinates a group; no agent does. Groups run side by side and do not wait on each other. |
-| Agent | a group | One session: its role (refiner, author, reviewer, arbiter, investigator), machine, work folder, terminal and state. Its model comes from its group until the settings give runtime and model per role (`docs/settings.md`). |
+| Agent | a group | One session: its role (refiner, author, reviewer, arbiter, investigator), machine, work folder, terminal and state. The settings give its runtime and model by its issue and role (`docs/settings.md`). |
 | Machine | the app | Where agents run, with its build slots. |
 | Limit | the app | A runtime account's usage windows (Claude 5 hours and 7 days, Codex 5 hours). |
 | Style guide | the app | Tokens, components, the ban list and the checks used when reviewing UI work. A project may set its accent, display face and density. |

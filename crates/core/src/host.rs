@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use crate::Part;
 use crate::effect::Effect;
 use crate::event::Event;
-use crate::model::AgentState;
+use crate::model::{Agent, AgentState};
 use crate::world::World;
 
 /// Where the host writes every event before it applies it.
@@ -78,6 +78,9 @@ const GAVE_UP: &str = "gave up: ";
 /// How problems from an agent stopped at a prompt are keyed.
 const BLOCKED: &str = "blocked: ";
 
+/// How problems from an agent whose turn ended in an error are keyed.
+const ERRORED: &str = "errored: ";
+
 /// The most events and effects one call handles before it stops, so a loop
 /// between parts cannot hang the daemon.
 pub const MAX_STEPS: usize = 10_000;
@@ -95,14 +98,60 @@ pub struct Host {
     problems: BTreeMap<String, String>,
 }
 
+/// What the parts' families offer for the settings that name an adapter, by
+/// setting. The daemon puts it in the world before it replays the log, since an
+/// older log's plain model is bound to the build's default runtime.
+pub fn catalog(parts: &[Box<dyn Part>]) -> BTreeMap<String, crate::settings::Choice> {
+    parts
+        .iter()
+        .flat_map(|p| p.choices())
+        .map(|c| (c.key.clone(), c))
+        .collect()
+}
+
+/// Whether the problem under `key` is one the host writes for a stopped agent
+/// ([`stopped`]).
+pub(crate) fn of_a_stopped_agent(key: &str) -> bool {
+    key.starts_with(BLOCKED) || key.starts_with(ERRORED)
+}
+
+/// The problem an agent stopped at a prompt or on an error is listed as, with
+/// its key; none for an agent in any other state. `place` says where it runs, as
+/// ` in PATH`, or is empty.
+pub(crate) fn stopped(agent: &Agent, place: impl FnOnce() -> String) -> Option<(String, String)> {
+    match &agent.state {
+        AgentState::Blocked { reason } => Some((
+            format!("{BLOCKED}{}", agent.id),
+            format!(
+                "{}{} is blocked: {reason}; the daemon cannot answer it",
+                agent.id,
+                place()
+            ),
+        )),
+        AgentState::Errored { line, .. } => {
+            let line = if line.is_empty() {
+                String::new()
+            } else {
+                format!(": {line}")
+            };
+            let next = if agent.limit_reset().is_some() {
+                "the daemon sends continue after it resets"
+            } else {
+                "the daemon reminds it and stops it as it does an idle agent"
+            };
+            Some((
+                format!("{ERRORED}{}", agent.id),
+                format!("{}{} stopped on an error{line}; {next}", agent.id, place()),
+            ))
+        }
+        _ => None,
+    }
+}
+
 impl Host {
     /// A host over `world`, already built from the journal's events.
     pub fn new(mut world: World, parts: Vec<Box<dyn Part>>, journal: Box<dyn Journal>) -> Self {
-        world.catalog = parts
-            .iter()
-            .flat_map(|p| p.choices())
-            .map(|c| (c.key.clone(), c))
-            .collect();
+        world.catalog = catalog(&parts);
         Self {
             world,
             parts,
@@ -130,13 +179,63 @@ impl Host {
             .unwrap_or_else(|| Err(format!("no part in this build shows {agent}'s terminal")))
     }
 
-    /// Logs and applies `event`, then carries out everything it leads to.
-    pub fn handle(&mut self, now_ms: u64, event: Event) -> Result<(), String> {
-        self.run(now_ms, vec![Work::Event(event)])
+    /// The text of `issue`, from the part that reads it, or why there is none to
+    /// show.
+    pub fn issue_text(&self, issue: &crate::ids::IssueId) -> Result<crate::IssueText, String> {
+        self.parts
+            .iter()
+            .find_map(|p| p.issue_text(&self.world, issue))
+            .unwrap_or_else(|| Err("no part in this build reads issue text".into()))
     }
 
-    /// Starts the agents issues need and do not have (`World::missing`).
+    /// Logs and applies `event`, then carries out everything it leads to, and
+    /// ends the investigations that it ended (`World::investigation_events`).
+    pub fn handle(&mut self, now_ms: u64, event: Event) -> Result<(), String> {
+        self.run(now_ms, vec![Work::Event(event)])?;
+        self.investigations(now_ms, false)
+    }
+
+    /// Carries out `effect` now, offered to the parts in order, and returns the
+    /// events it led to, or why it failed. A command that waits for a part's
+    /// answer, such as filing an issue, goes through here. The outer error stops
+    /// the daemon: an event could not be logged.
+    pub fn perform(
+        &mut self,
+        now_ms: u64,
+        effect: &Effect,
+    ) -> Result<Result<Vec<Event>, String>, String> {
+        match self.offer(effect) {
+            Outcome::Done { events, effects } => {
+                self.problems.remove(&effect.describe());
+                let mut stack: Vec<Work> = effects.into_iter().rev().map(Work::Effect).collect();
+                stack.extend(events.iter().cloned().rev().map(Work::Event));
+                self.run(now_ms, stack)?;
+                self.investigations(now_ms, false)?;
+                Ok(Ok(events))
+            }
+            Outcome::Failed(why) => Ok(Err(why)),
+            Outcome::NotMine => Ok(Err(format!(
+                "no part in this build can {}",
+                effect.describe()
+            ))),
+        }
+    }
+
+    /// Logs and applies what the clock makes due at `now_ms`: the end of each
+    /// investigation whose investigator is done, and, when `start`, the start of
+    /// one for each group short of work.
+    fn investigations(&mut self, now_ms: u64, start: bool) -> Result<(), String> {
+        let due = self.world.investigation_events(now_ms, start);
+        if due.is_empty() {
+            return Ok(());
+        }
+        self.run(now_ms, due.into_iter().rev().map(Work::Event).collect())
+    }
+
+    /// Starts an investigation for each group short of work, then the agents
+    /// issues and investigations need and do not have (`World::missing`).
     pub fn recover(&mut self, now_ms: u64) -> Result<(), String> {
+        self.investigations(now_ms, true)?;
         let missing = self.world.missing();
         self.problems.retain(|k, _| !k.starts_with(GAVE_UP));
         for line in missing.given_up {
@@ -208,29 +307,25 @@ impl Host {
     }
 
     /// Lists every agent stopped at a prompt as a problem: the daemon never
-    /// answers a prompt, so a person has to. Rebuilt on each tick, so it goes
-    /// when the agent leaves the state or ends.
+    /// answers a prompt, so a person has to. Lists every agent whose turn ended in
+    /// an error too, with what the daemon will do about it. Rebuilt on each tick,
+    /// so each goes when the agent leaves the state or ends.
     fn report_blocked(&mut self) {
-        self.problems.retain(|k, _| !k.starts_with(BLOCKED));
+        self.problems.retain(|k, _| !of_a_stopped_agent(k));
         for agent in self.world.agents.values() {
-            let AgentState::Blocked { reason } = &agent.state else {
-                continue;
+            let place = || {
+                agent
+                    .issue
+                    .as_ref()
+                    .and_then(|i| self.world.issues.get(i))
+                    .and_then(|i| self.world.folder_for(i, agent.role, agent.folder.as_ref()))
+                    // A reader's folder is not recorded: name none on another machine.
+                    .filter(|f| f.machine == agent.machine)
+                    .map_or_else(String::new, |f| format!(" in {}", f.path))
             };
-            let place = agent
-                .issue
-                .as_ref()
-                .and_then(|i| self.world.issues.get(i))
-                .and_then(|i| self.world.folder_for(i, agent.role, agent.folder.as_ref()))
-                // A reader's folder is not recorded: name none on another machine.
-                .filter(|f| f.machine == agent.machine)
-                .map_or_else(String::new, |f| format!(" in {}", f.path));
-            self.problems.insert(
-                format!("{BLOCKED}{}", agent.id),
-                format!(
-                    "{}{place} is blocked: {reason}; the daemon cannot answer it",
-                    agent.id
-                ),
-            );
+            if let Some((key, line)) = stopped(agent, place) {
+                self.problems.insert(key, line);
+            }
         }
     }
 

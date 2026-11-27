@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
+use temet_work_core::ids::{AgentId, DecisionId, GroupId, IssueId, ProjectId, RuleId};
 use temet_work_core::model::{Plan, Role};
 use temet_work_core::settings::Target;
 use temet_work_core::{Command, Request, Verdict};
@@ -11,8 +11,8 @@ pub use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 
 /// How to call `temet-work`.
 pub const USAGE: &str = "\
-temet-work status
-temet-work issue ISSUE                      one issue in full
+temet-work status [--json]                  the state as text, or with --json as data
+temet-work issue ISSUE                      one issue in full, with its text from the last sync
 temet-work screen AGENT                     what an agent's terminal shows now
 temet-work plan ISSUE FILE                  a refiner's plan, as YAML; FILE - reads it from standard input
 temet-work ready ISSUE PULL|REPO=PULL...     the pull request is open and the checks hold;
@@ -25,6 +25,11 @@ temet-work overturn DECISION OPTION REASON
                                             a person's: choose another option of a decision, as
                                             `status` numbers them; REASON is required
 temet-work proposal RULE keep|drop          a person's: keep or drop a rule proposed from an overturn
+temet-work file PROJECT TITLE BODY [--milestone M]
+                                            an investigator's: file an issue in a project or area its
+                                            group takes; BODY - reads it from standard input; the
+                                            reply names the new issue
+temet-work investigated GROUP               an investigator's: its group's investigation is done
 temet-work set TARGET [--role ROLE] KEY VALUE
                                             give a setting a value at one level
 temet-work unset TARGET [--role ROLE] KEY   remove it, so the next level answers
@@ -32,12 +37,34 @@ temet-work settings TARGET [--role ROLE]    every setting in effect there, and t
 temet-work mcp [--allow read|act]           the same views and commands as MCP tools, for agents;
                                             read (the default) offers status, issue and screen
 temet-work parts                            the parts in this build
+temet-work --version                        the version and the build id
 
 ISSUE is project#key, such as radar#44. TARGET is global, an area or project id, a
 milestone as project:Milestone name, or an issue. ROLE is refiner, author, reviewer,
 arbiter or investigator. Agents' commands are recorded as theirs
 through TEMET_WORK_AGENT and carry the secret in TEMET_WORK_AGENT_TOKEN; the
 daemon sets both when it starts an agent.";
+
+/// The flag that asks `status` for data.
+pub const JSON: &str = "--json";
+
+/// What `--json` on a command other than `status` is answered with.
+pub fn json_refused() -> String {
+    format!("{JSON} goes with status only\n\n{USAGE}")
+}
+
+/// Whether `args` give [`JSON`] as a flag. In a command's free text (a value, a
+/// title or body, a review point or a reason) it is a word like any other.
+fn has_json(args: &[String]) -> bool {
+    let word = |i: usize| args.get(i).map(String::as_str);
+    let before_text = match word(0) {
+        Some("file") => 2,
+        Some("set" | "rule" | "overturn") => 3,
+        Some("review") if word(2) == Some("block") => 3,
+        _ => args.len(),
+    };
+    args.iter().take(before_text).any(|a| a == JSON)
+}
 
 /// A plan from its YAML text.
 pub fn plan(yaml: &str) -> Result<Plan, String> {
@@ -46,18 +73,24 @@ pub fn plan(yaml: &str) -> Result<Plan, String> {
 
 /// Takes `--role ROLE` out of `args`, wherever it is.
 fn take_role(args: &[String]) -> Result<(Vec<String>, Option<Role>), String> {
+    let (rest, role) = take(args, "--role")?;
+    Ok((rest, role.as_deref().map(Role::parse).transpose()?))
+}
+
+/// Takes `flag VALUE` out of `args`, wherever it is.
+fn take(args: &[String], flag: &str) -> Result<(Vec<String>, Option<String>), String> {
     let mut rest = Vec::new();
-    let mut role = None;
+    let mut value = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--role" {
-            let name = it.next().ok_or("--role needs a role")?;
-            role = Some(Role::parse(name)?);
+        if a == flag {
+            let v = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+            value = Some(v.clone());
         } else {
             rest.push(a.clone());
         }
     }
-    Ok((rest, role))
+    Ok((rest, value))
 }
 
 /// Reads the arguments after the program name into a request. `by` is the
@@ -69,6 +102,7 @@ pub fn request(
     read: impl Fn(&Path) -> Result<String, String>,
 ) -> Result<Request, String> {
     let (args, role) = take_role(args)?;
+    let (args, milestone) = take(&args, "--milestone")?;
     let args = args.as_slice();
     let arg = |i: usize, what: &str| {
         args.get(i)
@@ -80,7 +114,13 @@ pub fn request(
         IssueId::parse(s)
             .ok_or_else(|| format!("{s} is not an issue; write project#key, such as radar#44"))
     };
-    let command = match arg(0, "a command")? {
+    let name = arg(0, "a command")?;
+    let json = has_json(args);
+    if json && name != "status" {
+        return Err(json_refused());
+    }
+    let command = match name {
+        "status" if json => Command::View,
         "status" => Command::Status,
         "issue" => Command::Issue { issue: issue()? },
         "screen" => Command::Screen {
@@ -178,6 +218,19 @@ pub fn request(
             target: Target::parse(arg(1, "TARGET")?),
             role,
         },
+        "file" => Command::File {
+            project: ProjectId::new(arg(1, "PROJECT")?),
+            title: arg(2, "TITLE")?.to_string(),
+            // `-` is standard input, so a body can run over several lines.
+            body: match arg(3, "BODY")? {
+                "-" => read(Path::new("-"))?,
+                _ => args[3..].join(" "),
+            },
+            milestone,
+        },
+        "investigated" => Command::Investigated {
+            group: GroupId::new(arg(1, "GROUP")?),
+        },
         other => return Err(format!("no command {other}\n\n{USAGE}")),
     };
     Ok(Request::new(
@@ -223,6 +276,95 @@ mod tests {
         );
         assert!(ready("ready ankh#1 57 58").is_err());
         assert!(ready("ready ankh#1 ui=").is_err());
+    }
+
+    #[test]
+    fn file_reads_project_title_body_and_milestone_and_investigated_its_group() {
+        let line = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let r = request(
+            &line(&[
+                "file",
+                "ankh",
+                "Wind the clock",
+                "-",
+                "--milestone",
+                "First",
+            ]),
+            Some("investigator-1".into()),
+            |p| {
+                assert_eq!(p, Path::new("-"));
+                Ok("Wind it nightly.\nDepends on #12\n".into())
+            },
+        )
+        .expect("request");
+        assert_eq!(r.by, Some(AgentId::new("investigator-1")));
+        assert_eq!(
+            r.command,
+            Command::File {
+                project: ProjectId::new("ankh"),
+                title: "Wind the clock".into(),
+                body: "Wind it nightly.\nDepends on #12\n".into(),
+                milestone: Some("First".into()),
+            }
+        );
+        let inline = request(
+            &line(&["file", "ankh", "Wind the clock", "Wind", "it"]),
+            None,
+            no_files,
+        )
+        .expect("request");
+        assert!(matches!(
+            inline.command,
+            Command::File { body, milestone: None, .. } if body == "Wind it"
+        ));
+        assert!(
+            request(&args("file ankh title"), None, no_files).is_err(),
+            "no body"
+        );
+        assert_eq!(
+            request(&args("investigated watch"), None, no_files).map(|r| r.command),
+            Ok(Command::Investigated {
+                group: GroupId::new("watch")
+            })
+        );
+    }
+
+    #[test]
+    fn json_asks_status_for_the_view_and_is_refused_on_any_other_command() {
+        let read = |line: &str| request(&args(line), None, no_files).map(|r| r.command);
+        assert_eq!(read("status"), Ok(Command::Status));
+        assert_eq!(read("status --json"), Ok(Command::View));
+        for line in [
+            "issue ankh#1 --json",
+            "screen author-1 --json",
+            "ready ankh#1 --json",
+            "review ankh#1 approve --json",
+            "retry ankh#1 --json",
+            "settings radar --json",
+            "unset radar model --json",
+            "set radar --json model opus",
+            "file --json ankh title body",
+            "investigated watch --json",
+            "--json status",
+        ] {
+            assert!(
+                read(line).is_err_and(|e| e.contains("temet-work status [--json]")),
+                "{line}"
+            );
+        }
+        // In free text it is a word like any other.
+        assert!(matches!(
+            read("set radar verify gh run list --json status"),
+            Ok(Command::Set { value, .. }) if value == "gh run list --json status"
+        ));
+        assert!(matches!(
+            read("rule ankh#1 fix print --json too"),
+            Ok(Command::Rule { reason, .. }) if reason == "print --json too"
+        ));
+        assert!(matches!(
+            read("review ankh#1 block --json"),
+            Ok(Command::Review { verdict: Verdict::Block { points }, .. }) if points == ["--json"]
+        ));
     }
 
     #[test]

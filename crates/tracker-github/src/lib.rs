@@ -189,6 +189,39 @@ impl Tracker for GitHub {
             other => other.map(|_| ()),
         }
     }
+
+    fn create(
+        &mut self,
+        project: &str,
+        title: &str,
+        body: &str,
+        milestone: Option<&str>,
+    ) -> Result<TrackedIssue, TrackerError> {
+        let mut args = vec![
+            "issue", "create", "-R", project, "--title", title, "--body", body,
+        ];
+        if let Some(m) = milestone {
+            args.extend(["--milestone", m]);
+        }
+        let out = self.run(&args)?;
+        // gh prints the new issue's address, which ends in its number.
+        let number = out
+            .lines()
+            .rev()
+            .find_map(|l| l.trim().rsplit('/').next()?.parse::<u64>().ok())
+            .ok_or_else(|| {
+                TrackerError::Other(format!("gh issue create named no issue: {}", out.trim()))
+            })?;
+        Ok(TrackedIssue {
+            key: number.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            milestone: milestone.map(String::from),
+            depends_on: depends_on(body),
+            order: number,
+            closed: false,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +284,107 @@ mod tests {
         assert_eq!(first.milestone.as_deref(), Some("Slack sign-in rework"));
         assert_eq!(first.order, 44);
         assert!(issues.iter().any(|i| i.milestone.is_none()));
+    }
+
+    /// The recorded output, with an issue filed through it listed afterwards as
+    /// GitHub lists it.
+    #[derive(Clone, Default)]
+    struct Filing {
+        created: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl Transport for Filing {
+        fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            let mut created = self.created.lock().map_err(|e| e.to_string())?;
+            if args.starts_with(&["issue", "create"]) {
+                created.push(args.iter().map(ToString::to_string).collect());
+                return Ok("https://github.com/temet-ai/radar/issues/45\n".into());
+            }
+            let out = Recorded.gh(args)?;
+            let Some(new) = created.last().filter(|_| args.get(1) == Some(&"list")) else {
+                return Ok(out);
+            };
+            let arg = |flag: &str| {
+                new.iter()
+                    .position(|a| a == flag)
+                    .and_then(|i| new.get(i + 1))
+                    .cloned()
+            };
+            let mut list: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+            if let Some(items) = list.as_array_mut() {
+                items.push(serde_json::json!({
+                    "number": 45,
+                    "title": arg("--title"),
+                    "body": arg("--body"),
+                    "milestone": arg("--milestone").map(|m| serde_json::json!({"title": m})),
+                    "state": "OPEN",
+                }));
+            }
+            Ok(list.to_string())
+        }
+    }
+
+    struct MayFile;
+
+    impl temet_work_tracker::contract::Harness for MayFile {
+        fn project(&self) -> String {
+            "temet-ai/radar".into()
+        }
+        fn writable_issue(&self) -> Option<String> {
+            None
+        }
+        fn may_create(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn creates_an_issue_in_its_milestone_on_recorded_output() {
+        let filing = Filing::default();
+        let mut gh = GitHub::with(Box::new(filing.clone()));
+        assert_eq!(
+            temet_work_tracker::contract::check(&mut gh, &MayFile),
+            Ok(())
+        );
+        let created = gh
+            .create(
+                "temet-ai/radar",
+                "Mend the clock",
+                "Depends on #44",
+                Some("Slack sign-in rework"),
+            )
+            .expect("created");
+        assert_eq!(
+            (
+                created.key.as_str(),
+                created.order,
+                created.depends_on.as_slice()
+            ),
+            ("45", 45, ["44".to_string()].as_slice())
+        );
+        let sent = filing.created.lock().expect("lock");
+        assert_eq!(
+            sent.last().map(Vec::as_slice),
+            Some(
+                [
+                    "issue",
+                    "create",
+                    "-R",
+                    "temet-ai/radar",
+                    "--title",
+                    "Mend the clock",
+                    "--body",
+                    "Depends on #44",
+                    "--milestone",
+                    "Slack sign-in rework"
+                ]
+                .map(String::from)
+                .as_slice()
+            )
+        );
+        let mut none = GitHub::with(Box::new(Filing::default()));
+        none.create("temet-ai/radar", "Mend the clock", "", None)
+            .expect("created with no milestone");
     }
 
     #[test]

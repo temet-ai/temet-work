@@ -46,8 +46,14 @@ pub enum Peer {
     /// The sending process and its parents were read: the digests of the agent
     /// secrets found in their environments, from any daemon.
     Read(Vec<Digest>),
-    /// The sending process itself could not be read; why.
-    Unreadable(String),
+    /// The sending process itself could not be read.
+    Unreadable {
+        /// Why it could not be read.
+        why: String,
+        /// The digests of the agent secrets found in its parents, which are
+        /// read all the same; empty when none was found or none could be reached.
+        above: Vec<Digest>,
+    },
     /// Not looked at: the platform has no process tree to read (macOS), or the
     /// request was made inside the daemon.
     Unchecked,
@@ -84,20 +90,20 @@ impl World {
     /// gave another agent in the sender's process tree refuses it. A request
     /// that names no agent may read anything; one that changes something is
     /// refused when it carries an agent's secret, comes from inside an agent's
-    /// process tree, from a process that cannot be read, or through the relay.
+    /// process tree, or through the relay. Named or not, a command that changes
+    /// something is refused from a process that cannot be read.
     pub fn admit(&self, sender: &Sender, command: &Command) -> Result<(), String> {
-        let found: Vec<&AgentId> = match &sender.peer {
-            Peer::Read(digests) => {
-                let mut ids: Vec<&AgentId> = digests
-                    .iter()
-                    .filter_map(|d| self.holder(d).map(|a| &a.id))
-                    .collect();
-                ids.sort();
-                ids.dedup();
-                ids
-            }
-            _ => Vec::new(),
+        let (digests, unreadable) = match &sender.peer {
+            Peer::Read(digests) => (digests.as_slice(), None),
+            Peer::Unreadable { why, above } => (above.as_slice(), Some(why)),
+            Peer::Unchecked => (Default::default(), None),
         };
+        let mut found: Vec<&AgentId> = digests
+            .iter()
+            .filter_map(|d| self.holder(d).map(|a| &a.id))
+            .collect();
+        found.sort();
+        found.dedup();
         let carried = sender.proof.as_ref().and_then(|p| self.holder(p));
         let Some(by) = &sender.by else {
             if !command.changes() {
@@ -118,7 +124,7 @@ impl World {
                      outside any agent's terminal"
                 ));
             }
-            if let Peer::Unreadable(why) = &sender.peer {
+            if let Some(why) = unreadable {
                 return Err(format!(
                     "{name} names no agent, and the process that sent it cannot be read ({why}), \
                      so it cannot be told from an agent's"
@@ -172,6 +178,16 @@ impl World {
                  holds {other}'s secret"
             ));
         }
+        // A client keeps its connection open until the reply, so an agent's own
+        // is alive and readable; one that is not may hold anything.
+        if let Some(why) = unreadable
+            && command.changes()
+        {
+            return Err(format!(
+                "the request names {by}, but the process that sent it could not be read ({why}), \
+                 so it cannot be told from another agent's"
+            ));
+        }
         Ok(())
     }
 }
@@ -181,6 +197,7 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Status => "status",
+            Self::View => "view",
             Self::Issue { .. } => "issue",
             Self::Screen { .. } => "screen",
             Self::Plan { .. } => "plan",
@@ -193,15 +210,21 @@ impl Command {
             Self::Rule { .. } => "rule",
             Self::Overturn { .. } => "overturn",
             Self::Proposal { .. } => "proposal",
+            Self::File { .. } => "file",
+            Self::Investigated { .. } => "investigated",
         }
     }
 
-    /// Whether the command changes anything; `status`, `issue`, `screen` and
-    /// `settings` only read.
+    /// Whether the command changes anything; `status`, `view`, `issue`, `screen`
+    /// and `settings` only read.
     pub fn changes(&self) -> bool {
         !matches!(
             self,
-            Self::Status | Self::Issue { .. } | Self::Screen { .. } | Self::Settings { .. }
+            Self::Status
+                | Self::View
+                | Self::Issue { .. }
+                | Self::Screen { .. }
+                | Self::Settings { .. }
         )
     }
 }
@@ -267,6 +290,13 @@ mod tests {
         }
     }
 
+    fn unreadable(why: &str, above: Vec<Digest>) -> Peer {
+        Peer::Unreadable {
+            why: why.into(),
+            above,
+        }
+    }
+
     fn approve() -> Command {
         Command::Review {
             issue: IssueId::new("ankh", "1"),
@@ -312,6 +342,13 @@ mod tests {
             &Command::Status,
         );
         assert!(status.is_err());
+        let unnamed = sender(Some("reviewer-1"), None, Peer::Unchecked);
+        assert_eq!(
+            w.admit(&unnamed, &Command::View),
+            w.admit(&unnamed, &Command::Status)
+        );
+        let named = sender(Some("reviewer-1"), Some("b"), Peer::Unchecked);
+        assert_eq!(w.admit(&named, &Command::View), Ok(()));
         // Through the relay, from a clean tree, the secret is proof enough.
         assert_eq!(
             review(relayed(Some("reviewer-1"), Some("b"), Peer::Read(vec![]))),
@@ -392,6 +429,11 @@ mod tests {
             )
             .expect_err("refused");
         assert!(why.starts_with("reviewer-2 has ended"), "{why}");
+        let view = w.admit(
+            &sender(Some("reviewer-2"), Some("e"), Peer::Unchecked),
+            &Command::View,
+        );
+        assert_eq!(view, Err(why));
     }
 
     #[test]
@@ -424,6 +466,79 @@ mod tests {
     }
 
     #[test]
+    fn secrets_found_above_an_unreadable_sender_count() {
+        let w = world();
+        let why = w
+            .admit(
+                &sender(
+                    Some("reviewer-1"),
+                    Some("b"),
+                    unreadable("process 40: denied", vec![d("a")]),
+                ),
+                &approve(),
+            )
+            .expect_err("refused");
+        assert_eq!(
+            why,
+            "the request names reviewer-1 but comes from inside author-1's process tree, \
+             which holds author-1's secret"
+        );
+    }
+
+    #[test]
+    fn a_named_agents_change_from_an_unreadable_sender_is_refused_and_reads_answer() {
+        let w = world();
+        // Nothing found above it, or only the named agent's own secret.
+        for above in [vec![], vec![d("f")], vec![d("b")]] {
+            let s = sender(
+                Some("reviewer-1"),
+                Some("b"),
+                unreadable("process 40 has ended", above),
+            );
+            assert_eq!(
+                w.admit(&s, &approve()),
+                Err(
+                    "the request names reviewer-1, but the process that sent it could not be read \
+                     (process 40 has ended), so it cannot be told from another agent's"
+                        .into()
+                )
+            );
+            for read in [
+                Command::Status,
+                Command::View,
+                Command::Issue {
+                    issue: IssueId::new("ankh", "1"),
+                },
+                Command::Screen {
+                    agent: AgentId::new("author-1"),
+                },
+                Command::Settings {
+                    target: crate::settings::Target::Global,
+                    role: None,
+                },
+            ] {
+                assert_eq!(w.admit(&s, &read), Ok(()), "{read:?}");
+            }
+        }
+        // An agent started before secrets is no exception.
+        let rule = Command::Rule {
+            issue: IssueId::new("ankh", "1"),
+            approve: true,
+            reason: "fine".into(),
+        };
+        let s = sender(
+            Some("arbiter-1"),
+            None,
+            unreadable("SO_PEERCRED: no", vec![]),
+        );
+        let why = w.admit(&s, &rule).expect_err("refused");
+        assert!(
+            why.contains("arbiter-1") && why.contains("SO_PEERCRED: no"),
+            "{why}"
+        );
+    }
+
+    #[test]
     fn a_person_command_from_inside_an_agent_is_refused_and_reads_still_answer() {
         let w = world();
         let keep = Command::Proposal {
@@ -440,6 +555,7 @@ mod tests {
         );
         for read in [
             Command::Status,
+            Command::View,
             Command::Screen {
                 agent: AgentId::new("author-1"),
             },
@@ -471,13 +587,21 @@ mod tests {
             .admit(&sender(None, Some("a"), Peer::Read(vec![])), &set)
             .expect_err("refused");
         assert!(carried.contains("carries author-1's secret"), "{carried}");
-        let unreadable = w
+        let why = w
             .admit(
-                &sender(None, None, Peer::Unreadable("process 7: gone".into())),
+                &sender(None, None, unreadable("process 7: gone", vec![])),
                 &set,
             )
             .expect_err("refused");
-        assert!(unreadable.contains("process 7: gone"), "{unreadable}");
+        assert!(why.contains("process 7: gone"), "{why}");
+        // A secret found above an unreadable sender names the agent.
+        let why = w
+            .admit(
+                &sender(None, None, unreadable("process 7: gone", vec![d("a")])),
+                &set,
+            )
+            .expect_err("refused");
+        assert!(why.contains("inside author-1's process tree"), "{why}");
         let far = w
             .admit(&relayed(None, None, Peer::Read(vec![])), &set)
             .expect_err("refused");
@@ -487,6 +611,10 @@ mod tests {
         );
         assert_eq!(
             w.admit(&relayed(None, None, Peer::Read(vec![])), &Command::Status),
+            Ok(())
+        );
+        assert_eq!(
+            w.admit(&relayed(None, None, Peer::Read(vec![])), &Command::View),
             Ok(())
         );
     }

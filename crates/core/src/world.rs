@@ -4,8 +4,10 @@
 //! must do. After every event the loop places work: it takes the next issue for
 //! refining and starts an author on a ready issue when a work folder of its
 //! project is free, on the machine its `machine` setting names, and the issues it
-//! depends on are done. Nothing here reads a clock, a file or the network, so the
-//! same events always give the same state.
+//! depends on are done. An issue that leaves its group's scope gets no new agent,
+//! fix, review or merge until it comes back ([`World::paused`]). Nothing here
+//! reads a clock, a file or the network, so the same events always give the same
+//! state.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,8 +18,8 @@ use crate::ids::{AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, Pro
 use crate::launch::Launch;
 use crate::model::Decision;
 use crate::model::{
-    Agent, AgentState, Area, DecisionKind, Folder, Group, Issue, Project, Role, Rule, RuleState,
-    Stage,
+    Agent, AgentState, Area, DecisionKind, Folder, Group, INVESTIGATE_EVERY, Investigation, Issue,
+    Project, Role, Rule, RuleState, Stage,
 };
 use crate::settings::{self, FILE, Scope, Value};
 
@@ -54,8 +56,14 @@ pub struct World {
     pub decisions: BTreeMap<DecisionId, Decision>,
     /// Rules proposed from overturned decisions, by id.
     pub rules: BTreeMap<RuleId, Rule>,
+    /// Each group's investigation: the one running, else its last.
+    pub investigations: BTreeMap<GroupId, Investigation>,
     /// Settings by level, role and key (`docs/settings.md`).
     pub settings: BTreeMap<crate::settings::Key, crate::settings::Entry>,
+    /// The `model.<runtime>` an older log's last plain `model` at each scope and
+    /// role was bound to, so its next plain change there takes that value away
+    /// after the global runtime has changed. Built from the log as it replays.
+    pub plain_models: BTreeMap<(Scope, Option<Role>), String>,
     /// What the build's adapters offer for the settings that name one, put in by
     /// the host. It is not built from events.
     pub catalog: BTreeMap<String, crate::settings::Choice>,
@@ -66,12 +74,22 @@ pub struct World {
 impl World {
     /// Builds the state from events in order, with every effect they asked for.
     pub fn replay<'a>(events: impl IntoIterator<Item = &'a Event>) -> (Self, Vec<Effect>) {
-        let mut world = Self::default();
+        Self::default().replay_onto(events)
+    }
+
+    /// Builds the state from events in order onto this world, with every effect
+    /// they asked for. A world that already holds the build's catalog binds an
+    /// older log's plain model to the build's default runtime where the log had
+    /// set no global one.
+    pub fn replay_onto<'a>(
+        mut self,
+        events: impl IntoIterator<Item = &'a Event>,
+    ) -> (Self, Vec<Effect>) {
         let mut effects = Vec::new();
         for event in events {
-            effects.extend(world.apply(event));
+            effects.extend(self.apply(event));
         }
-        (world, effects)
+        (self, effects)
     }
 
     /// Applies one event and returns what the daemon must do.
@@ -176,9 +194,17 @@ impl World {
                 value,
                 by,
             } => {
-                if let Some(role) = settings::kept_role(scope, *role, key, by) {
-                    self.overturn_agents_value(scope, role, key, by);
-                    self.put(scope, role, key, value, by);
+                // Older logs hold plain models: each is the global runtime's here,
+                // and replaces the plain model set before at that place.
+                let bound = self.bound_key(key);
+                if let Some(role) = settings::kept_role(scope, *role, &bound, by) {
+                    if key == "model" {
+                        self.drop_plain_model(scope, role, by);
+                        self.plain_models
+                            .insert((scope.clone(), role), bound.clone());
+                    }
+                    self.overturn_agents_value(scope, role, &bound, by);
+                    self.put(scope, role, &bound, value, by);
                 }
             }
             Event::SettingUnset {
@@ -187,9 +213,16 @@ impl World {
                 key,
                 by,
             } => {
-                if let Some(role) = settings::kept_role(scope, *role, key, by) {
-                    self.overturn_agents_value(scope, role, key, by);
-                    self.settings.remove(&(scope.clone(), role, key.clone()));
+                // An older log's plain unset takes away the model its plain set
+                // there was bound to; with none, the global runtime's here.
+                let bound = self.bound_key(key);
+                if let Some(role) = settings::kept_role(scope, *role, &bound, by) {
+                    let plain = (key == "model")
+                        .then(|| self.drop_plain_model(scope, role, by))
+                        .flatten();
+                    self.overturn_agents_value(scope, role, &bound, by);
+                    self.settings
+                        .remove(&(scope.clone(), role, plain.unwrap_or(bound)));
                 }
             }
             Event::GroupCreated {
@@ -200,17 +233,24 @@ impl World {
                 milestones,
                 refining_at_once,
                 model,
+                queue_low,
+                investigate_every,
             } => {
-                // Older logs: a group's model, as a setting on what it works on.
+                // Older logs: a group's model, as a plain model on what it works
+                // on, for the runtime that is global here.
                 if let Some(m) = model {
+                    let key = self.bound_key("model");
                     let scopes = projects
                         .iter()
                         .map(|p| Scope::Project(p.clone()))
                         .chain(areas.iter().map(|a| Scope::Area(a.clone())));
                     for scope in scopes {
-                        let key = (scope.clone(), None, "model".to_string());
-                        if !self.settings.contains_key(&key) {
-                            self.put(&scope, None, "model", &Value::Text(m.clone()), FILE);
+                        if !self
+                            .settings
+                            .contains_key(&(scope.clone(), None, key.clone()))
+                        {
+                            self.put(&scope, None, &key, &Value::Text(m.clone()), FILE);
+                            self.plain_models.insert((scope, None), key.clone());
                         }
                     }
                 }
@@ -223,6 +263,8 @@ impl World {
                         areas: areas.clone(),
                         milestones: milestones.clone(),
                         refining_at_once: (*refining_at_once).max(1),
+                        queue_low: *queue_low,
+                        investigate_every: investigate_every.unwrap_or(INVESTIGATE_EVERY),
                     },
                 );
             }
@@ -254,6 +296,7 @@ impl World {
                     fix_keeps_round: false,
                     round: 0,
                     closed_by_loop: false,
+                    has_merged: false,
                     review_waived: false,
                 });
                 entry.title = title.clone();
@@ -269,6 +312,7 @@ impl World {
                     entry.checks_ok = None;
                     entry.pulls.clear();
                     entry.merged.clear();
+                    entry.has_merged = false;
                     entry.fix.clear();
                     entry.review_waived = false;
                 }
@@ -318,6 +362,8 @@ impl World {
                         state: AgentState::Idle,
                         started: self.applied,
                         secret_digest: secret_digest.clone(),
+                        continued: None,
+                        ended_waited_on: false,
                     },
                 );
                 // A new agent hears what its stage needs in its brief.
@@ -338,12 +384,24 @@ impl World {
                 }
             }
             Event::AgentChanged { agent, state } => {
+                let waited_on = self.agents.get(agent).is_some_and(|a| self.waiting_on(a));
                 // An ended session stays ended: an update already on its way when it
                 // was stopped must not bring it back.
                 if let Some(a) = self.agents.get_mut(agent)
                     && a.state != AgentState::Ended
                 {
                     a.state = state.clone();
+                    a.ended_waited_on = *state == AgentState::Ended && waited_on;
+                }
+            }
+            Event::Continued { agent, resets_ms } => {
+                if let Some(a) = self.agents.get_mut(agent)
+                    && a.state != AgentState::Ended
+                {
+                    a.state = AgentState::Working {
+                        doing: String::new(),
+                    };
+                    a.continued = Some(*resets_ms);
                 }
             }
             Event::PlanWritten { issue, plan } => {
@@ -405,6 +463,8 @@ impl World {
                 verdict,
             } => {
                 let rounds = self.setting_number(issue, None, "review_rounds");
+                let arbiter_running = self.running(issue, Role::Arbiter).is_some();
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == (Stage::InReview { round: *round })
                 {
@@ -413,18 +473,25 @@ impl World {
                     match verdict {
                         Verdict::Approve => Self::try_merge(i, &mut out),
                         Verdict::Block { points } if u64::from(*round) < rounds => {
-                            Self::send_back(i, *round, points.clone(), false, &mut out);
+                            Self::send_back(i, *round, points.clone(), false, arbiters, &mut out);
                         }
                         Verdict::Block { .. } => {
                             // An issue in review was taken by a group, so it has one.
                             if let Some(group) = i.group.clone() {
                                 i.stage = Stage::Arbitration { round: *round };
-                                out.push(Effect::StartAgent {
-                                    group,
-                                    role: Role::Arbiter,
-                                    issue: issue.clone(),
-                                    folder: None,
-                                });
+                                // One arbiter at a time. One still running, because
+                                // a stop failed or an older log left it, is reminded
+                                // and stopped like any idle agent, or, once it has
+                                // ruled, asked again to stop by `World::missing`. A
+                                // fresh one starts once it has ended.
+                                if !arbiter_running {
+                                    out.push(Effect::StartAgent {
+                                        group,
+                                        role: Role::Arbiter,
+                                        issue: issue.clone(),
+                                        folder: None,
+                                    });
+                                }
                             }
                         }
                     }
@@ -435,6 +502,7 @@ impl World {
                 passed,
                 failing,
             } => {
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue) {
                     match i.stage {
                         Stage::InReview { round } | Stage::Arbitration { round } => {
@@ -451,7 +519,7 @@ impl World {
                                         .map(|c| format!("CI check {c} failed"))
                                         .collect()
                                 };
-                                Self::send_back(i, round, points, true, &mut out);
+                                Self::send_back(i, round, points, true, arbiters, &mut out);
                             }
                         }
                         _ => {}
@@ -460,15 +528,20 @@ impl World {
             }
             Event::DecisionMade { decision } => {
                 self.decisions.insert(decision.id, decision.clone());
+                // The arbiter's work is done once its ruling is in; a later
+                // arbitration starts a fresh one, which hears that dispute.
+                let done = self.stop(&decision.issue, &[Role::Arbiter]);
                 if let DecisionKind::Ruling { approve } = decision.kind
                     && let Some(i) = self.issues.get_mut(&decision.issue)
                     && let Stage::Arbitration { round } = i.stage
                 {
                     if approve {
+                        out.extend(done);
                         i.review_ok = true;
                         Self::try_merge(i, &mut out);
                     } else {
-                        Self::send_back(i, round, vec![decision.reason.clone()], false, &mut out);
+                        let points = vec![decision.reason.clone()];
+                        Self::send_back(i, round, points, false, done, &mut out);
                     }
                 }
             }
@@ -488,8 +561,11 @@ impl World {
                     if let DecisionKind::Ruling { approve } = d.kind {
                         let issue = d.issue.clone();
                         let reviewers = self.stop(&issue, &[Role::Reviewer]);
+                        let arbiters = self.stop(&issue, &[Role::Arbiter]);
                         if let Some(i) = self.issues.get_mut(&issue) {
-                            Self::overturn_ruling(i, approve, reason, reviewers, &mut out);
+                            Self::overturn_ruling(
+                                i, approve, reason, reviewers, arbiters, &mut out,
+                            );
                         }
                     }
                 }
@@ -520,6 +596,7 @@ impl World {
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Merging
                 {
+                    i.has_merged = true;
                     match repo {
                         Some(r) => {
                             i.merged.insert(r.clone());
@@ -551,6 +628,7 @@ impl World {
                 }
             }
             Event::PullConflicts { issue, repo } => {
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && let Stage::InReview { round } | Stage::Arbitration { round } = i.stage
                 {
@@ -563,7 +641,7 @@ impl World {
                         "the pull request{which} conflicts with the branch it merges into: rebase \
                          onto that branch, then push your own branch with `git push --force-with-lease`"
                     )];
-                    Self::send_back(i, round, points, true, &mut out);
+                    Self::send_back(i, round, points, true, arbiters, &mut out);
                 }
             }
             Event::MergeRefused { issue, reason } => {
@@ -572,6 +650,7 @@ impl World {
                     .get(issue)
                     .map(|i| self.repos_of(i))
                     .unwrap_or_default();
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Merging
                 {
@@ -593,7 +672,67 @@ impl World {
                         ),
                         _ => format!("the pull request cannot merge: {reason}"),
                     };
-                    Self::send_back(i, round, vec![point], true, &mut out);
+                    Self::send_back(i, round, vec![point], true, arbiters, &mut out);
+                }
+            }
+            Event::InvestigationStarted {
+                group,
+                agent,
+                at_ms,
+            } => {
+                let open = self
+                    .investigations
+                    .get(group)
+                    .is_some_and(Investigation::running);
+                if self.groups.contains_key(group) && !open {
+                    let since_ms = self.investigations.get(group).map(|i| i.started_ms);
+                    self.investigations.insert(
+                        group.clone(),
+                        Investigation {
+                            group: group.clone(),
+                            agent: agent.clone(),
+                            started_ms: *at_ms,
+                            since_ms,
+                            ended_ms: None,
+                            filed: Vec::new(),
+                            done: false,
+                        },
+                    );
+                    out.push(Effect::Investigate {
+                        group: group.clone(),
+                    });
+                }
+            }
+            Event::IssueFiled {
+                group,
+                agent,
+                issue,
+                ..
+            } => {
+                if let Some(i) = self.investigations.get_mut(group)
+                    && i.running()
+                    && &i.agent == agent
+                    && !i.filed.contains(issue)
+                {
+                    i.filed.push(issue.clone());
+                }
+            }
+            Event::Investigated { group, agent } => {
+                if let Some(i) = self.investigations.get_mut(group)
+                    && i.running()
+                    && &i.agent == agent
+                {
+                    i.done = true;
+                    out.extend(self.stop_agent(agent));
+                }
+            }
+            Event::InvestigationEnded { group, at_ms, .. } => {
+                if let Some(i) = self.investigations.get_mut(group)
+                    && i.running()
+                {
+                    i.ended_ms = Some(*at_ms);
+                    let agent = i.agent.clone();
+                    out.extend(self.stop_agent(&agent));
                 }
             }
             Event::Retried { issue } => {
@@ -646,6 +785,8 @@ impl World {
                 }
             }
         }
+        out.retain(|e| !self.waits_for_scope(e));
+        self.follow_scope();
         out.extend(self.place());
         out.retain(|e| !self.waits_for_machine(e));
         out
@@ -674,6 +815,16 @@ impl World {
             );
         }
         repos
+    }
+
+    /// An issue's pull requests by repository, in the order they merge; one for a
+    /// repository it no longer names comes after those.
+    pub(crate) fn pulls_of<'a>(&self, issue: &'a Issue) -> Vec<(&'a ProjectId, &'a String)> {
+        let repos = self.repos_of(issue);
+        let mut pulls: Vec<_> = issue.pulls.iter().collect();
+        // The sort keeps the order of those that come after.
+        pulls.sort_by_key(|(r, _)| repos.iter().position(|x| x == *r).unwrap_or(repos.len()));
+        pulls
     }
 
     /// The repository an issue is worked in: its first.
@@ -707,15 +858,27 @@ impl World {
     /// its issue is refining, an author while it is worked on, a reviewer that has
     /// heard its round, an arbiter while the issue is with the arbiter. Once a
     /// reviewer's or arbiter's approval is in, the issue waits on the checks, not
-    /// on that agent.
+    /// on that agent. An arbiter that has ruled on the issue has finished its step,
+    /// and so has an author on a paused issue that has not heard its fixes. A
+    /// group's investigation waits on its investigator until it says it is done.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
+        if self.investigates(agent) {
+            return true;
+        }
         let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
             return false;
         };
         match (i.stage, agent.role) {
-            (Stage::Refining, Role::Refiner)
-            | (Stage::Working | Stage::Fixing { .. }, Role::Author) => true,
-            (Stage::Arbitration { .. }, Role::Arbiter) => !i.review_ok,
+            (Stage::Refining, Role::Refiner) | (Stage::Working, Role::Author) => true,
+            (Stage::Fixing { .. }, Role::Author) => i.told || !self.paused(i),
+            (Stage::Arbitration { .. }, Role::Arbiter) => {
+                !i.review_ok
+                    && !self.decisions.values().any(|d| {
+                        d.issue == i.id
+                            && d.by == agent.id
+                            && matches!(d.kind, DecisionKind::Ruling { .. })
+                    })
+            }
             (Stage::InReview { .. }, Role::Reviewer) => i.told && !i.review_ok,
             _ => false,
         }
@@ -738,11 +901,18 @@ impl World {
     /// needs neither while its checks run. This brings back an agent whose session
     /// ended, or one the daemon decided on and did not start before it stopped. A
     /// running author or reviewer that has not heard its fixes or its new round is
-    /// told again. After the `starts` setting's number of agents of one role on one
-    /// issue it gives up, and says so.
+    /// told again, and an arbiter that ruled in an earlier arbitration and still
+    /// runs is asked again to stop. After the `starts` setting's number of agents of one role have
+    /// ended while one issue waited on them it gives up, and says so. A paused
+    /// issue gets nothing until it is back in its group's scope, and then what its
+    /// stage needs. A running investigation whose investigator never started gets
+    /// one.
     pub fn missing(&self) -> Missing {
-        let mut out = Missing::default();
-        for i in self.issues.values() {
+        let mut out = Missing {
+            start: self.missing_investigators(),
+            ..Missing::default()
+        };
+        for i in self.issues.values().filter(|i| !self.paused(i)) {
             // A merge, deploy or verify lost to a restart or a failure is asked for
             // again; the parts that do them do not repeat work already done or running.
             let id = i.id.clone();
@@ -800,6 +970,26 @@ impl World {
                 _ => continue,
             };
             if self.running(&i.id, role).is_some() {
+                // An arbiter whose ruling is in has finished its step, so nothing
+                // reminds or stops it. One still running when the issue waits on an
+                // arbiter again is one whose stop failed, or that an older log left
+                // running: ask for its stop again, and a fresh one starts once it
+                // has ended.
+                if role == Role::Arbiter {
+                    out.start.extend(
+                        self.agents
+                            .values()
+                            .filter(|a| {
+                                a.issue.as_ref() == Some(&i.id)
+                                    && a.role == Role::Arbiter
+                                    && a.state != AgentState::Ended
+                                    && !self.waiting_on(a)
+                            })
+                            .map(|a| Effect::StopAgent {
+                                agent: a.id.clone(),
+                            }),
+                    );
+                }
                 // Running, but not yet told what its stage needs: say it again.
                 // The part that delivers it drops a message already waiting.
                 if !i.told {
@@ -819,10 +1009,13 @@ impl World {
                 }
                 continue;
             }
+            // Only agents that ended while the issue waited on them count: not one
+            // the loop stopped because the issue went back to its author.
             let tried = self
                 .agents
                 .values()
                 .filter(|a| a.issue.as_ref() == Some(&i.id) && a.role == role)
+                .filter(|a| a.ended_waited_on)
                 .count();
             if tried as u64 >= self.setting_number(&i.id, Some(role), "starts") {
                 out.given_up.push(format!(
@@ -862,7 +1055,8 @@ impl World {
     /// that role this world has started (`author-3`). An agent with no work
     /// folder of its own runs in a folder of its project without holding it.
     /// `None` when the issue is unknown, or when such an agent has no folder on
-    /// the machine its `machine` setting names.
+    /// the machine its `machine` setting names. An investigator works for its
+    /// group, not on an issue: it starts through [`World::launch_investigator`].
     pub fn launch(
         &self,
         group: &GroupId,
@@ -870,6 +1064,9 @@ impl World {
         issue: &IssueId,
         folder: Option<&FolderId>,
     ) -> Option<Launch> {
+        if role == Role::Investigator {
+            return None;
+        }
         let i = self.issues.get(issue)?;
         if folder.is_none() && !self.has_place(i, role) {
             return None;
@@ -964,14 +1161,19 @@ impl World {
             .collect()
     }
 
-    /// Sends an issue back to its author with what to fix.
+    /// Sends an issue back to its author with what to fix, and stops its running
+    /// arbiters (`arbiters`, from [`Self::stop`]). An arbiter's work ends with its
+    /// ruling, and its brief names the round and pull requests it was started for,
+    /// so the next final-round block starts a fresh one.
     fn send_back(
         i: &mut Issue,
         round: u8,
         points: Vec<String>,
         keeps_round: bool,
+        arbiters: Vec<Effect>,
         out: &mut Vec<Effect>,
     ) {
+        out.extend(arbiters);
         i.stage = Stage::Fixing { round };
         i.fix.clone_from(&points);
         i.told = false;
@@ -989,6 +1191,7 @@ impl World {
         was_approve: bool,
         reason: &str,
         reviewers: Vec<Effect>,
+        arbiters: Vec<Effect>,
         out: &mut Vec<Effect>,
     ) {
         if was_approve {
@@ -999,12 +1202,12 @@ impl World {
                         out.extend(reviewers);
                     }
                     i.review_ok = false;
-                    Self::send_back(i, round, vec![reason.to_string()], false, out);
+                    Self::send_back(i, round, vec![reason.to_string()], false, arbiters, out);
                 }
                 Stage::Merging => {
                     i.review_ok = false;
                     let round = i.round.max(1);
-                    Self::send_back(i, round, vec![reason.to_string()], false, out);
+                    Self::send_back(i, round, vec![reason.to_string()], false, arbiters, out);
                 }
                 Stage::Fixing { .. } => {
                     i.fix.push(reason.to_string());
@@ -1069,6 +1272,75 @@ impl World {
             .and_then(|m| group.milestones.iter().position(|g| g == m))
             .unwrap_or(usize::MAX);
         (milestone, issue.order, issue.id.key.clone())
+    }
+
+    /// Whether `issue` has left the scope of the group that took it: the group no
+    /// longer lists its milestone, its project or its area. It is worked out each
+    /// time from the issue and the group, so nothing about it is stored. A done
+    /// issue has not left.
+    pub fn out_of_scope(&self, issue: &Issue) -> bool {
+        issue.stage != Stage::Done
+            && issue
+                .group
+                .as_ref()
+                .and_then(|g| self.groups.get(g))
+                .is_some_and(|g| !self.in_scope(g, issue))
+    }
+
+    /// Whether nothing new starts on `issue` because it left its group's scope
+    /// before any of its pull requests merged. One with a pull request merged, or
+    /// deploying or verifying, is past the agents and finishes.
+    pub fn paused(&self, issue: &Issue) -> bool {
+        self.out_of_scope(issue)
+            && issue.merged.is_empty()
+            && !matches!(issue.stage, Stage::Deploying | Stage::Verifying)
+    }
+
+    /// Whether `effect` starts or tells an agent, or asks for a merge, on a paused
+    /// issue. The loop drops it; [`World::missing`] asks again once the issue is
+    /// back in scope.
+    fn waits_for_scope(&self, effect: &Effect) -> bool {
+        match effect {
+            Effect::StartAgent { issue, .. }
+            | Effect::RequestFix { issue, .. }
+            | Effect::StartReview { issue, .. }
+            | Effect::Merge { issue } => self.issues.get(issue).is_some_and(|i| self.paused(i)),
+            _ => false,
+        }
+    }
+
+    /// Follows the issues whose group no longer covers them. A refining one
+    /// whose refiner has stopped goes back to new: it has no plan, and a refiner
+    /// started when it comes back must wait for a free slot like any other. A
+    /// ready one another group covers goes to that group: it has a plan and holds
+    /// no agent or folder, so nothing ties it to the group that refined it.
+    fn follow_scope(&mut self) {
+        let mut back = Vec::new();
+        let mut moved = Vec::new();
+        for i in self.issues.values().filter(|i| self.out_of_scope(i)) {
+            match i.stage {
+                Stage::Refining if self.running(&i.id, Role::Refiner).is_none() => {
+                    back.push(i.id.clone());
+                }
+                Stage::Ready => {
+                    if let Some(g) = self.groups.values().find(|g| self.in_scope(g, i)) {
+                        moved.push((i.id.clone(), g.id.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for id in back {
+            if let Some(i) = self.issues.get_mut(&id) {
+                i.stage = Stage::New;
+                i.group = None;
+            }
+        }
+        for (id, group) in moved {
+            if let Some(i) = self.issues.get_mut(&id) {
+                i.group = Some(group);
+            }
+        }
     }
 
     /// Whether a group works on an issue: one of its projects, and one of its
@@ -1158,6 +1430,7 @@ impl World {
                 .filter(|i| {
                     i.group.as_ref() == Some(&group.id)
                         && i.stage == Stage::Ready
+                        && self.in_scope(group, i)
                         && self.ready_to_start(i)
                 })
                 .collect();

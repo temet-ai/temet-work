@@ -81,7 +81,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "issue",
-            description: "One issue in full: its stage, plan, pull request, what it is to fix, its dependencies and its agents.",
+            description: "One issue in full: its stage, its text from its tracker's last sync (or why that was not read), plan, pull request, what it is to fix, its dependencies and its agents.",
             acts: false,
             schema: json!({"type": "object", "properties": {"issue": issue_field()}, "required": ["issue"]}),
         },
@@ -157,6 +157,25 @@ fn tools() -> Vec<Tool> {
                 "rule": {"type": "integer", "description": "The rule's number, as status lists it under Rules."},
                 "action": {"type": "string", "enum": ["keep", "drop"]}
             }, "required": ["rule", "action"]}),
+        },
+        Tool {
+            name: "file",
+            description: "An investigator's: file an issue in a project or area its group takes issues from. The milestone is the last of the group's when none is named. The reply names the new issue, so a later one can say it depends on it.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "project": {"type": "string", "description": "The project or area id, as the investigator's brief lists it."},
+                "title": {"type": "string"},
+                "body": {"type": "string", "description": "What to change and what done means; a line Depends on <id> for each issue it waits for."},
+                "milestone": {"type": "string", "description": "A milestone the group takes; the last of its milestones when left out."}
+            }, "required": ["project", "title", "body"]}),
+        },
+        Tool {
+            name: "investigated",
+            description: "An investigator's: its group's investigation is done. Its session is then stopped.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "group": {"type": "string", "description": "The group's id."}
+            }, "required": ["group"]}),
         },
         Tool {
             name: "set",
@@ -323,6 +342,18 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
             role: role(args)?,
             key: text(args, "key")?,
         },
+        "file" => Command::File {
+            project: ProjectId::new(text(args, "project")?),
+            title: text(args, "title")?,
+            body: text(args, "body")?,
+            milestone: args
+                .get("milestone")
+                .and_then(Value::as_str)
+                .map(String::from),
+        },
+        "investigated" => Command::Investigated {
+            group: temet_work_core::ids::GroupId::new(text(args, "group")?),
+        },
         other => return Err(format!("no tool {other}")),
     })
 }
@@ -408,6 +439,8 @@ pub fn handle(
                 match reply {
                     Ok(Reply::Done { text }) => tool_text(text, false),
                     Ok(Reply::Refused { why }) => tool_text(format!("refused: {why}"), true),
+                    // No tool asks for the view; a reply that holds one is shown as it is.
+                    Ok(Reply::View { view }) => tool_text(json!(view).to_string(), false),
                     Err(e) => tool_text(e, true),
                 },
             )
@@ -456,7 +489,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 13);
+        assert_eq!(names(Level::Act).len(), 15);
     }
 
     #[test]
@@ -548,6 +581,38 @@ mod tests {
         );
         assert!(names(Level::Act).contains(&"overturn".to_string()));
         assert!(!names(Level::Read).contains(&"proposal".to_string()));
+    }
+
+    #[test]
+    fn file_and_investigated_become_the_same_requests_the_command_line_sends() {
+        let mut sent = Vec::new();
+        call(
+            Level::Act,
+            "file",
+            json!({"project": "ankh", "title": "Wind the clock", "body": "Depends on #12", "milestone": "First"}),
+            &mut sent,
+        );
+        call(
+            Level::Act,
+            "investigated",
+            json!({"group": "watch"}),
+            &mut sent,
+        );
+        let commands: Vec<Command> = sent.into_iter().map(|r| r.command).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::File {
+                    project: ProjectId::new("ankh"),
+                    title: "Wind the clock".into(),
+                    body: "Depends on #12".into(),
+                    milestone: Some("First".into()),
+                },
+                Command::Investigated {
+                    group: temet_work_core::ids::GroupId::new("watch"),
+                },
+            ]
+        );
     }
 
     #[test]

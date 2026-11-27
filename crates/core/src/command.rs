@@ -4,10 +4,13 @@
 //! before it becomes an event, so a command cannot move an issue past a step it
 //! is not at.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
+use crate::effect::Effect;
 use crate::event::{Event, Verdict};
-use crate::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
+use crate::ids::{AgentId, DecisionId, GroupId, IssueId, MilestoneId, ProjectId, RuleId};
 use crate::model::{Decision, DecisionKind, Plan, Role, Rule, RuleState, Stage};
 use crate::settings::{self, Agents, Scope, Target};
 use crate::text::stage;
@@ -19,6 +22,8 @@ use crate::world::World;
 pub enum Command {
     /// The state as text.
     Status,
+    /// The state as data ([`View`](crate::View)), for a front end.
+    View,
     /// One issue in full, as text.
     Issue {
         /// The issue.
@@ -115,19 +120,52 @@ pub enum Command {
         /// True to keep it, false to drop it.
         keep: bool,
     },
+    /// An investigator files an issue in the tracker of a project or area its
+    /// group takes issues from. The reply names the new issue.
+    File {
+        /// The project or area.
+        project: ProjectId,
+        /// The issue's title.
+        title: String,
+        /// Its text.
+        #[serde(default)]
+        body: String,
+        /// Its milestone; the last of the group's when none is named.
+        #[serde(default)]
+        milestone: Option<String>,
+    },
+    /// An investigator says its group's investigation is done.
+    Investigated {
+        /// The group.
+        group: GroupId,
+    },
 }
+
+/// How long a front end waits after one [`Command::View`] ends, answered or failed,
+/// before it sends the next. Counting from the end of an ask, not at a fixed rate,
+/// keeps asks from overlapping and a slow daemon from gathering a queue of them.
+pub const VIEW_PERIOD: Duration = Duration::from_secs(1);
+
+/// How long a front end waits for the daemon's answer to [`Command::View`] before
+/// it counts the ask as failed. A local reply takes milliseconds and the daemon
+/// answers requests one at a time, so no answer in this time means its loop is
+/// busy or stuck.
+pub const VIEW_DEADLINE: Duration = Duration::from_secs(5);
 
 impl Command {
     /// The issue the command is about; `None` for `Status`.
     pub fn issue(&self) -> Option<&IssueId> {
         match self {
             Self::Status
+            | Self::View
             | Self::Screen { .. }
             | Self::Set { .. }
             | Self::Unset { .. }
             | Self::Settings { .. }
             | Self::Overturn { .. }
-            | Self::Proposal { .. } => None,
+            | Self::Proposal { .. }
+            | Self::File { .. }
+            | Self::Investigated { .. } => None,
             Self::Issue { issue } => Some(issue),
             Self::Plan { issue, .. }
             | Self::Ready { issue, .. }
@@ -188,13 +226,17 @@ impl World {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
+        // The plan keeps what the refiner wrote; its settings are recorded under
+        // the keys they are bound to.
         if let Event::PlanWritten { issue, plan } = &event {
             let who = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
+            let scope = Scope::Task(issue.clone());
             for (key, value) in &plan.settings {
+                let role = settings::recorded_role(None, key, &who);
                 out.push(Event::SettingSet {
-                    scope: Scope::Task(issue.clone()),
-                    role: settings::recorded_role(None, key, &who),
-                    key: key.clone(),
+                    scope: scope.clone(),
+                    role,
+                    key: self.model_key(&scope, role, key)?,
                     value: value.clone(),
                     by: who.clone(),
                 });
@@ -253,7 +295,8 @@ impl World {
         let Some(agent) = self.agents.get(by) else {
             return Err(format!("{by} is not an agent this daemon started"));
         };
-        let agents = settings::spec(key)?.agents;
+        let spec = settings::spec(key)?;
+        let agents = spec.agents;
         if let Agents::MayNot(why) = agents {
             return Err(format!("only a person sets {key}, because {why}"));
         }
@@ -265,10 +308,11 @@ impl World {
                     Some(Stage::Refining) => match role {
                         Some(other) if agents == Agents::ForAuthor && other != Role::Author => {
                             Err(format!(
-                                "only a person sets {key} for the {}, because the {key}s of \
+                                "only a person sets {key} for the {}, because the {}s of \
                                  reviewers, arbiters, refiners and investigators are a person's \
                                  to set; a refiner's {key} is for the author",
-                                other.name()
+                                other.name(),
+                                spec.key
                             ))
                         }
                         _ => Ok(()),
@@ -335,8 +379,129 @@ impl World {
         ))
     }
 
-    /// The event a command becomes, or why the loop refuses it. `Status`
-    /// becomes no event.
+    /// The investigator `by` names, with its group, when it runs its group's
+    /// investigation; why `step` is not `by`'s otherwise.
+    fn investigator(
+        &self,
+        by: Option<&AgentId>,
+        step: &str,
+    ) -> Result<&crate::model::Group, String> {
+        let Some(by) = by else {
+            return Err(format!(
+                "{step} is a group's investigator's: a person may not run it; a person files \
+                 issues in the tracker itself"
+            ));
+        };
+        let agent = self.agents.get(by).ok_or_else(|| {
+            format!("{step} is an investigator's: {by} is not an agent this daemon started")
+        })?;
+        if agent.role != Role::Investigator {
+            return Err(format!(
+                "{step} is an investigator's: {by} is the {} of {}",
+                agent.role.name(),
+                agent
+                    .issue
+                    .as_ref()
+                    .map_or_else(|| agent.group.to_string(), ToString::to_string)
+            ));
+        }
+        match self.investigating(&agent.group) {
+            Some(i) if i.agent == *by && !i.done => self
+                .groups
+                .get(&agent.group)
+                .ok_or_else(|| format!("there is no group {}", agent.group)),
+            _ => Err(format!(
+                "{step} is the running investigator's: {by}'s investigation of {} is over",
+                agent.group
+            )),
+        }
+    }
+
+    /// The effect a `file` command becomes: an issue to file in the tracker of
+    /// `project`, for the investigator `by`. Refused for anyone but a group's
+    /// running investigator, for a project or area its group does not take issues
+    /// from, for a milestone the group does not take, and for a title that an
+    /// issue of that project already has, open or closed by a person (the
+    /// plainest duplicate; judging whether one covers it otherwise is the
+    /// investigator's). The milestone is the last of the group's when none is
+    /// named, and none for a group that names none.
+    pub fn filing(&self, by: Option<&AgentId>, command: &Command) -> Result<Effect, String> {
+        let Command::File {
+            project,
+            title,
+            body,
+            milestone,
+        } = command
+        else {
+            return Err(format!("{} is not file", command.name()));
+        };
+        let group = self.investigator(by, "file")?;
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("an issue needs a title".into());
+        }
+        let sources = self.group_sources(group);
+        if !sources.contains(project) {
+            let list: Vec<String> = sources.iter().map(ToString::to_string).collect();
+            return Err(format!(
+                "{} takes no issues from {project}; it files in: {}",
+                group.id,
+                if list.is_empty() {
+                    "none".into()
+                } else {
+                    list.join(", ")
+                }
+            ));
+        }
+        let milestone = match milestone
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            Some(m) if group.milestones.is_empty() || group.milestones.iter().any(|g| g.0 == m) => {
+                Some(MilestoneId::new(m))
+            }
+            Some(m) => {
+                let list: Vec<String> = group.milestones.iter().map(ToString::to_string).collect();
+                return Err(format!(
+                    "{} does not take milestone {m}; it takes: {}",
+                    group.id,
+                    list.join(", ")
+                ));
+            }
+            None => self.filing_milestone(group),
+        };
+        let same = |t: &str| t.trim().eq_ignore_ascii_case(title);
+        let titled = || {
+            self.issues
+                .values()
+                .filter(|i| &i.id.project == project && same(&i.title))
+        };
+        if let Some(open) = titled().find(|i| i.stage != Stage::Done) {
+            return Err(format!(
+                "{} is open with the title \"{}\" already; file an issue no open one covers",
+                open.id, open.title
+            ));
+        }
+        if let Some(closed) = titled().find(|i| i.closed_by_a_person()) {
+            return Err(format!(
+                "{} was closed by a person with the title \"{}\"; do not file it again: a person \
+                 who wants it built reopens it",
+                closed.id, closed.title
+            ));
+        }
+        Ok(Effect::File {
+            group: group.id.clone(),
+            agent: by.cloned().unwrap_or_else(|| AgentId::new(PERSON)),
+            source: project.clone(),
+            title: title.to_string(),
+            body: body.clone(),
+            milestone,
+        })
+    }
+
+    /// The event a command becomes, or why the loop refuses it. A command that
+    /// only reads, such as `Status`, becomes no event.
     pub fn check(&self, by: Option<&AgentId>, command: &Command) -> Result<Option<Event>, String> {
         let at = |issue: &IssueId| {
             self.issues
@@ -348,7 +513,26 @@ impl World {
             Err(format!("{issue} is {}, not {wanted}", stage(now)))
         };
         let event = match command {
-            Command::Status | Command::Screen { .. } => return Ok(None),
+            Command::Status | Command::View | Command::Screen { .. } => return Ok(None),
+            // Filing waits for the tracker's answer: the daemon carries it out
+            // through `World::filing`, not as an event of its own.
+            Command::File { .. } => {
+                self.filing(by, command)?;
+                return Ok(None);
+            }
+            Command::Investigated { group } => {
+                let g = self.investigator(by, "investigated")?;
+                if &g.id != group {
+                    return Err(format!(
+                        "investigated {group}: you investigate for {}, not {group}",
+                        g.id
+                    ));
+                }
+                Event::Investigated {
+                    group: group.clone(),
+                    agent: by.cloned().unwrap_or_else(|| AgentId::new(PERSON)),
+                }
+            }
             Command::Issue { issue } => {
                 at(issue)?;
                 return Ok(None);
@@ -363,11 +547,21 @@ impl World {
                     return Err("a plan needs at least one check".into());
                 }
                 let task = Scope::Task(issue.clone());
+                let who = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
+                let mut bound: std::collections::BTreeMap<String, &str> = Default::default();
                 for (key, value) in &plan.settings {
-                    self.may_set(by, &task, None, key)
+                    let role = settings::recorded_role(None, key, &who);
+                    let at = self
+                        .may_set(by, &task, None, key)
                         .and_then(|()| settings::check_value(key, value))
                         .and_then(|()| self.check_choice(key, value))
+                        .and_then(|()| self.model_key(&task, role, key))
                         .map_err(|e| format!("the plan's settings: {e}"))?;
+                    if let Some(other) = bound.insert(at.clone(), key) {
+                        return Err(format!(
+                            "the plan's settings: {other} and {key} are both {at}; give one"
+                        ));
+                    }
                 }
                 if let Some(c) = plan
                     .checks
@@ -476,40 +670,71 @@ impl World {
                 value,
             } => {
                 let scope = self.scope_of(target)?;
+                if role.is_some() {
+                    settings::check_role(key, "--role")?;
+                }
                 self.may_set(by, &scope, *role, key)?;
                 let value = settings::parse_value(key, value)?;
                 self.check_choice(key, &value)?;
                 let by = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
+                let role = settings::recorded_role(*role, key, &by);
                 Event::SettingSet {
+                    key: self.model_key(&scope, role, key)?,
                     scope,
-                    role: settings::recorded_role(*role, key, &by),
-                    key: key.clone(),
+                    role,
                     value,
                     by,
                 }
             }
             Command::Unset { target, role, key } => {
                 let scope = self.scope_of(target)?;
+                if role.is_some() {
+                    settings::check_role(key, "--role")?;
+                }
                 self.may_set(by, &scope, *role, key)?;
                 settings::spec(key)?;
                 let who = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
                 let at = settings::recorded_role(*role, key, &who);
+                // A plain model is the global runtime's model now, as when it is set.
+                let bound = self.bound_key(key);
                 // A person's unset for every role also takes an agent's value for
                 // the author away, so it has something to unset when only that is.
-                let there = self
-                    .settings
-                    .contains_key(&(scope.clone(), at, key.clone()))
-                    || (by.is_none() && at.is_none() && self.agents_author_value(&scope, key));
-                if !there {
+                let held = |key: &str| {
+                    self.settings
+                        .contains_key(&(scope.clone(), at, key.to_string()))
+                        || (by.is_none() && at.is_none() && self.agents_author_value(&scope, key))
+                };
+                if !held(&bound) {
+                    // A value left from a build that had the runtime can be unset.
+                    self.check_model_runtime(key)?;
                     let for_role = at.map_or_else(String::new, |r| format!(" for {}", r.name()));
-                    return Err(format!(
-                        "{key} is not set at {target}{for_role}; nothing to unset"
-                    ));
+                    // A plain model set under another global runtime is under
+                    // that runtime's key: say which, so it can be taken away.
+                    let other = (bound != *key)
+                        .then(|| {
+                            self.settings
+                                .keys()
+                                .map(|(_, _, k)| k)
+                                .filter(|k| k.starts_with("model.") && **k != bound)
+                                .find(|k| held(k))
+                        })
+                        .flatten();
+                    return Err(match other {
+                        Some(other) => format!(
+                            "a plain {key} is {bound} now, the global runtime's, and {bound} is \
+                             not set at {target}{for_role}; {other} is: unset {other} to take it away"
+                        ),
+                        None if bound != *key => format!(
+                            "a plain {key} is {bound} now, the global runtime's, and {bound} is \
+                             not set at {target}{for_role}; nothing to unset"
+                        ),
+                        None => format!("{key} is not set at {target}{for_role}; nothing to unset"),
+                    });
                 }
                 Event::SettingUnset {
                     scope,
                     role: at,
-                    key: key.clone(),
+                    key: bound,
                     by: who,
                 }
             }
@@ -661,6 +886,8 @@ mod tests {
                 milestones: vec![],
                 refining_at_once: 1,
                 model: None,
+                queue_low: None,
+                investigate_every: None,
             },
             Event::IssueSynced {
                 issue: issue(),
@@ -790,6 +1017,23 @@ mod tests {
         };
         let refiner = AgentId::new("refiner-1");
         assert!(w.check(Some(&refiner), &empty).is_err());
+    }
+
+    #[test]
+    fn view_reads_back_from_its_line_and_becomes_no_event() {
+        let line = r#"{"command":"view"}"#;
+        assert_eq!(serde_json::to_string(&Command::View).expect("json"), line);
+        assert_eq!(
+            serde_json::from_str::<Command>(line).expect("a command"),
+            Command::View
+        );
+        let w = refining();
+        for by in [None, Some(AgentId::new("author-1"))] {
+            assert_eq!(w.events(by.as_ref(), &Command::View), Ok(Vec::new()));
+        }
+        assert!(!Command::View.changes());
+        assert_eq!(Command::View.issue(), None);
+        assert_eq!(Command::View.name(), "view");
     }
 
     #[test]
@@ -1112,6 +1356,8 @@ mod plan_settings {
                 milestones: vec![],
                 refining_at_once: 1,
                 model: None,
+                queue_low: None,
+                investigate_every: None,
             },
             Event::IssueSynced {
                 issue: issue(),
@@ -1241,6 +1487,191 @@ mod plan_settings {
                 .expect("known");
             assert_eq!(launch.brief.model.as_deref(), Some(model), "{role:?}");
         }
+    }
+
+    /// ankh#1 being refined, in a build with the runtimes alpha (its default)
+    /// and beta, and alpha set globally by a person.
+    fn on_alpha() -> World {
+        let mut w = refining();
+        w.catalog.insert(
+            "runtime".into(),
+            crate::settings::Choice {
+                key: "runtime".into(),
+                allowed: vec!["alpha".into(), "beta".into()],
+                default: Some("alpha".into()),
+            },
+        );
+        run(&mut w, None, &set("global", None, "runtime", "alpha"));
+        w
+    }
+
+    #[test]
+    fn a_plain_model_is_logged_under_the_global_runtimes_key_when_it_is_written() {
+        let mut w = on_alpha();
+        let events = run(&mut w, None, &set("ankh#1", None, "model", "opus"));
+        assert_eq!(
+            events,
+            [Event::SettingSet {
+                scope: Scope::Task(issue()),
+                role: None,
+                key: "model.alpha".into(),
+                value: Value::Text("opus".into()),
+                by: PERSON.into(),
+            }]
+        );
+        // A refiner's plan: its model is the author's model.alpha, and the plan
+        // keeps what the refiner wrote.
+        let mut w = on_alpha();
+        let command = plan(&[("model", Value::Text("opus".into()))]);
+        let events = run(&mut w, Some("refiner-1"), &command);
+        assert_eq!(
+            events[0],
+            Event::SettingSet {
+                scope: Scope::Task(issue()),
+                role: Some(Role::Author),
+                key: "model.alpha".into(),
+                value: Value::Text("opus".into()),
+                by: "refiner-1".into(),
+            }
+        );
+        assert!(
+            matches!(&events[1], Event::PlanWritten { plan, .. }
+                if plan.settings.keys().eq(["model"])),
+            "{events:?}"
+        );
+        // model and model.alpha are one key, so a plan gives one of them.
+        let both = plan(&[
+            ("model", Value::Text("opus".into())),
+            ("model.alpha", Value::Text("haiku".into())),
+        ]);
+        let why = on_alpha()
+            .check(Some(&AgentId::new("refiner-1")), &both)
+            .expect_err("refused");
+        assert!(why.contains("both model.alpha"), "{why}");
+    }
+
+    #[test]
+    fn a_plain_model_is_refused_where_that_scope_and_role_run_another_runtime() {
+        let mut w = on_alpha();
+        run(
+            &mut w,
+            None,
+            &set("global", Some(Role::Reviewer), "runtime", "beta"),
+        );
+        let why = w
+            .events(None, &set("ankh", Some(Role::Reviewer), "model", "gpt-x"))
+            .expect_err("refused");
+        assert!(why.contains("model.beta"), "{why}");
+        // For every role it is alpha's, which the reviewers do not read.
+        let events = run(&mut w, None, &set("ankh", None, "model", "haiku"));
+        assert!(
+            matches!(&events[..], [Event::SettingSet { key, role: None, .. }] if key == "model.alpha"),
+            "{events:?}"
+        );
+        // A plan's model is the author's: refused where the author runs beta.
+        let mut w = on_alpha();
+        run(
+            &mut w,
+            None,
+            &set("ankh", Some(Role::Author), "runtime", "beta"),
+        );
+        let before = w.clone();
+        let refiner = AgentId::new("refiner-1");
+        let command = plan(&[("model", Value::Text("opus".into()))]);
+        let why = w.events(Some(&refiner), &command).expect_err("refused");
+        assert!(
+            why.starts_with("the plan's settings: ") && why.contains("model.beta"),
+            "{why}"
+        );
+        // Its own runtime's key is taken, and nothing else was recorded.
+        assert_eq!(w, before);
+        let command = plan(&[("model.beta", Value::Text("gpt-x".into()))]);
+        assert!(w.events(Some(&refiner), &command).is_ok());
+    }
+
+    #[test]
+    fn a_persons_model_or_model_of_the_global_runtime_overturns_the_refiners() {
+        for mine in ["model", "model.alpha"] {
+            for role in [None, Some(Role::Author)] {
+                let mut w = on_alpha();
+                run(
+                    &mut w,
+                    Some("refiner-1"),
+                    &set("ankh#1", None, "model", "opus"),
+                );
+                let events = run(&mut w, None, &set("ankh#1", role, mine, "haiku"));
+                assert!(
+                    matches!(&events[..], [Event::SettingSet { key, .. }] if key == "model.alpha"),
+                    "one change, nothing else: {events:?}"
+                );
+                assert_eq!(
+                    read(&w, Role::Author, "model"),
+                    is("haiku", "task, set by person"),
+                    "{mine} {role:?}"
+                );
+            }
+            // An unset takes the refiner's value away, in one change.
+            let mut w = on_alpha();
+            run(
+                &mut w,
+                Some("refiner-1"),
+                &set("ankh#1", None, "model", "opus"),
+            );
+            let unset = Command::Unset {
+                target: Target::Issue(issue()),
+                role: None,
+                key: mine.into(),
+            };
+            let events = run(&mut w, None, &unset);
+            assert!(
+                matches!(&events[..], [Event::SettingUnset { key, role: None, .. }] if key == "model.alpha"),
+                "{events:?}"
+            );
+            assert_eq!(read(&w, Role::Author, "model"), None, "{mine}");
+        }
+        // Another runtime's model is not the same model, so it takes nothing away.
+        let mut w = on_alpha();
+        run(
+            &mut w,
+            Some("refiner-1"),
+            &set("ankh#1", None, "model", "opus"),
+        );
+        let events = run(&mut w, None, &set("ankh#1", None, "model.beta", "gpt-x"));
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            read(&w, Role::Author, "model"),
+            is("opus", "task, set by refiner-1")
+        );
+    }
+
+    #[test]
+    fn an_unset_of_a_plain_model_names_the_model_key_that_is_set() {
+        let mut w = on_alpha();
+        run(&mut w, None, &set("ankh#1", None, "model", "opus"));
+        run(&mut w, None, &set("global", None, "runtime", "beta"));
+        let why = w.events(None, &unset(None)).expect_err("refused");
+        assert!(
+            why.contains("model.beta") && why.contains("model.alpha is: unset model.alpha"),
+            "{why}"
+        );
+        let unset_alpha = Command::Unset {
+            target: Target::Issue(issue()),
+            role: None,
+            key: "model.alpha".into(),
+        };
+        run(&mut w, None, &unset_alpha);
+        let why = w.events(None, &unset(None)).expect_err("refused");
+        assert!(why.ends_with("nothing to unset"), "{why}");
+        // A refiner's value for the author is named to a person too.
+        let mut w = on_alpha();
+        run(
+            &mut w,
+            Some("refiner-1"),
+            &set("ankh#1", None, "model", "opus"),
+        );
+        run(&mut w, None, &set("global", None, "runtime", "beta"));
+        let why = w.events(None, &unset(None)).expect_err("refused");
+        assert!(why.contains("model.alpha is"), "{why}");
     }
 
     #[test]
@@ -1428,6 +1859,41 @@ mod plan_settings {
         );
     }
 
+    #[test]
+    fn a_role_on_a_setting_not_read_per_role_is_refused() {
+        let mut w = refining();
+        let reviewer = Some(Role::Reviewer);
+        let refiner = AgentId::new("refiner-1");
+        let set_for = |role| set("ankh", role, "review_rounds", "1");
+        let unset_for_reviewer = Command::Unset {
+            target: Target::parse("ankh"),
+            role: reviewer,
+            key: "review_rounds".into(),
+        };
+        // A person and an agent are told the same, and no event comes of it.
+        for by in [None, Some(&refiner)] {
+            for command in [set_for(reviewer), unset_for_reviewer.clone()] {
+                let why = w.events(by, &command).expect_err("refused");
+                assert_eq!(
+                    why,
+                    "review_rounds is the same for every role, so it takes no --role; the \
+                     settings that take a role are: runtime, model, runner, machine, \
+                     permission, remind_after, reminders, starts"
+                );
+            }
+        }
+        let events = run(&mut w, None, &set_for(None));
+        assert!(
+            matches!(events.as_slice(), [Event::SettingSet { role: None, .. }]),
+            "{events:?}"
+        );
+        // With a value for every role there, the reason is still the role.
+        assert!(
+            w.events(None, &unset_for_reviewer)
+                .is_err_and(|e| e.contains("every role") && !e.contains("nothing to unset"))
+        );
+    }
+
     /// A refiner's plan, set and unset of `key`, for every role, are each refused
     /// naming it, and leave nothing behind; a person's set is accepted.
     fn only_a_person_may_set(key: &str, typed: &str, value: Value) {
@@ -1460,7 +1926,8 @@ mod plan_settings {
             Some(Role::Arbiter),
             Some(Role::Investigator),
         ];
-        for role in roles {
+        let per_role = settings::spec(key).expect("a setting").per_role;
+        for role in roles.into_iter().filter(|r| per_role || r.is_none()) {
             refused(&w, &set(role));
             refused(&w, &unset(role));
             // A person's set is accepted, and the value is not an agent's to remove.
@@ -1503,7 +1970,7 @@ mod plan_settings {
         assert!(
             task.contains(
                 "Only a person sets runtime, runner, permission, review_rounds, ci, deploy, \
-                 verify, run_in:"
+                 verify, run_in, investigate:"
             ),
             "{task}"
         );
@@ -1888,11 +2355,20 @@ mod plan_settings {
             Role::Arbiter,
             Role::Investigator,
         ];
+        // An investigator works for its group: it starts once its group investigates.
         let task = |w: &World, role| {
-            w.launch(&GroupId::new("watch"), role, &issue(), None)
-                .expect("launch")
-                .brief
-                .task
+            let launch = if role == Role::Investigator {
+                let mut w = w.clone();
+                w.apply(&Event::InvestigationStarted {
+                    group: GroupId::new("watch"),
+                    agent: AgentId::new("investigator-1"),
+                    at_ms: 0,
+                });
+                w.launch_investigator(&GroupId::new("watch"))
+            } else {
+                w.launch(&GroupId::new("watch"), role, &issue(), None)
+            };
+            launch.expect("launch").brief.task
         };
         let mut w = with_rule();
         for role in roles {
@@ -1971,6 +2447,8 @@ mod ready_in_several_repositories {
             milestones: vec![],
             refining_at_once: 1,
             model: None,
+            queue_low: None,
+            investigate_every: None,
         });
         events.push(Event::IssueSynced {
             issue: gld(),

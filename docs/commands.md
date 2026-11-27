@@ -4,6 +4,12 @@ session_id:
   - 30de12a8-8bb8-4310-a59b-8d5267ce0b97
   - 26cd49d9-7565-4506-b988-a9b64ed0fa45
   - 7d9306de-2941-41bd-8a60-efad6ed38f2a
+  - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
+  - 48c80237-558e-4a4a-a82d-bd96b37f1f46
+  - 29b5659a-5fe0-4f00-806c-b1db18d91396
+  - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
+  - 0645e4e2-33bd-43f8-980f-503649da2f15
+  - edd1e649-f07a-4d7c-b5c6-ff74b0021fbb
 ---
 
 # Commands
@@ -14,8 +20,8 @@ reports its step done.
 
 | Command | Who runs it | Accepted when the issue is |
 |---|---|---|
-| `temet-work status` | anyone | any |
-| `temet-work issue ISSUE` | anyone: the issue in full, with its plan, pull requests, fixes and agents | any |
+| `temet-work status [--json]` | anyone; `--json` prints the state as data (below) | any |
+| `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes and agents. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise) | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
 | `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...` | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL` | working, or fixing |
@@ -27,8 +33,10 @@ reports its step done.
 | `temet-work overturn DECISION OPTION REASON` | a person only; `DECISION` and `OPTION` are the numbers `status` lists (options count from 1), `REASON` is required | any, if the decision exists, the option is another than the one chosen, and the reason is not empty. What it changes depends on the issue: see below |
 | `temet-work proposal RULE keep` | a person only: the rule moves to kept and ends every brief written from then on | the rule is proposed |
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
-| `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify` and `run_in`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role | any for a person; refining for a refiner |
-| `temet-work unset TARGET [--role ROLE] KEY` | the same | any for a person; refining for a refiner |
+| `temet-work file PROJECT TITLE BODY [--milestone M]` | only the investigator of a group whose investigation is running, for a project or area its group takes issues from; `BODY` `-` reads it from standard input. The reply names the new issue and how a "Depends on" line names it | no issue: while the group's investigation runs. The milestone is the last in the group's list when none is named; one the group does not take is refused, and a group with no milestones files with none. A title an open issue of that project already has is refused, and so is the title of an issue a person closed in that project (one the loop did not close after verifying it, with none of its pull requests merged); the reply names the issue |
+| `temet-work investigated GROUP` | only the investigator of GROUP whose investigation is running: the investigation ends and the investigator's session is stopped | no issue: while GROUP's investigation runs |
+| `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`, `run_in` and `investigate`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role. `--role` is for the settings that take a role (`docs/settings.md`, Roles) | any for a person; refining for a refiner |
+| `temet-work unset TARGET [--role ROLE] KEY` | the same, `--role` included | any for a person; refining for a refiner |
 | `temet-work settings TARGET [--role ROLE]` | anyone | any |
 
 ## Who may run a step
@@ -46,8 +54,11 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
   `review` is refused with the owning role named: those would skip the work an agent is
   there to do. To get a stuck agent moving, a person rules or changes settings with `set`
   and `unset`.
-- `status`, `issue`, `screen` and `settings` are open to anyone. `set` and `unset` keep
-  their own rule, in the table.
+- `status` (with or without `--json`), `issue`, `screen` and `settings` are open to
+  anyone. `set` and `unset` keep their own rule, in the table.
+- `file` and `investigated` belong to a group's running investigator, which works for its
+  group and on no issue. A person, another agent, or an investigator whose investigation
+  has ended is refused with the reason; a person files issues in the tracker itself.
 
 ## How the daemon knows who sent a command
 
@@ -71,6 +82,13 @@ itself is in no log, reply, status or issue text.
   daemon's machine under `sshd`, which says nothing of the machine the command came from.
   The relay's mark only adds refusals, so a process on the daemon's machine that sets it
   is still judged by its own tree.
+- On Linux the sending process itself may be impossible to read: its program has no read
+  bit, it called `prctl(PR_SET_DUMPABLE, 0)`, or it has ended. The daemon still reads its
+  parents, so a secret found there refuses the command as above. A command that changes
+  something and names an agent is refused from such a process even when nothing is found,
+  and the refusal says why it could not be read. `status`, `issue`, `screen` and
+  `settings` still answer it. An agent's own `temet-work` stays alive and readable while
+  it waits for the reply.
 - A command that names no agent is a person's. It may read from anywhere. A command that
   changes something (`rule`, `overturn`, `retry`, `proposal`, `set` and `unset`) is
   refused when it carries an agent's secret; when, on Linux, the sending process or one of
@@ -84,14 +102,24 @@ itself is in no log, reply, status or issue text.
 
 Agents run as the same user as the daemon, so this does not stop an agent that:
 
-- starts a process that leaves its process tree (`setsid -f`): with both variables
+- starts any process outside its process tree (`hc exec`, `hc run`, a double fork,
+  `tmux new -d`, `systemd-run --user`, `at`, cron, `setsid -f`): with both variables
   dropped it passes as a person, and with another agent's id and secret it passes as
-  that agent;
+  that agent. `hc exec` and `hc run` start the program as herdr-core's child with
+  herdr-core's environment, not the agent's, so it passes as a person even without
+  `env -u`;
 - edits the daemon's files or its event log;
 - logs in to the daemon's machine over SSH and runs `temet-work` there, outside the relay;
 - runs on another machine and reads another agent's secret from that machine's `/proc`:
   through the relay it passes as that agent, since the daemon cannot see the processes
   there;
+- sends text to another agent's terminal through herdr-core (`hc send`, `hc keys`): it
+  acts as that agent. A line starting with `!` runs as a shell command in that agent's
+  process tree with its secret, so both the secret check and the tree check pass, and
+  plain text is a prompt that agent acts on. `hc send` run from a terminal puts an
+  `<hc from="…">` tag before the text, which unsetting `HC_TERMINAL_ID` leaves out.
+  Terminals carry `group`, `issue` and `role` labels, so one such as the terminal of
+  `reviewer-3` on `watch#12` is easy to find;
 - types into a person's terminal.
 
 On macOS the daemon checks secrets but not process trees, because `SO_PEERCRED` and
@@ -115,15 +143,19 @@ checks:
 issue. `ROLE` is refiner, author, reviewer, arbiter or investigator; without it a value is
 for every role. `settings` lists every setting in effect there, each with the level that
 set it (`task, set by refiner-3`, `built in`); `temet-work issue` shows the same for the
-role at work on the issue. A value of the wrong kind, an unknown key or a runtime or
-runner the build lacks is refused with the reason, and the command exits 1.
+role at work on the issue. `KEY` is a setting's name, or `model.<runtime>`
+(`model.codex`) for the model of one runtime's agents; a plain `model` is recorded as the
+global runtime's `model.<runtime>` when it is set, and the reply names that key. A value of
+the wrong kind, an unknown key, a runtime or runner the build lacks, a `model.<runtime>`
+for such a runtime, or a plain `model` where that scope and role run a runtime other than
+the global one is refused with the reason, and the command exits 1.
 
-A refiner may add task-level settings to its plan, other than the eight only a person
-sets: `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify` and
-`run_in` (`docs/settings.md`, "Setting them"). What it sets is recorded as set by it. Its
-`model`, from the plan or from its `set`, is for the author only: the models of reviewers,
-arbiters and refiners are a person's to set, and a person's `set` on the issue with no
-role overturns the refiner's value. A plan with settings:
+A refiner may add task-level settings to its plan, other than the nine only a person
+sets: `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`,
+`run_in` and `investigate` (`docs/settings.md`, "Setting them"). What it sets is recorded
+as set by it. Its `model` or `model.<runtime>`, from the plan or from its `set`, is for the
+author only: the models of reviewers, arbiters and refiners are a person's to set, and a
+person's `set` on the issue with no role overturns the refiner's value. A plan with settings:
 
 ```yaml
 checks:
@@ -138,13 +170,25 @@ A command for an issue at another step is refused, with the step the issue is at
 command line exits 0 when the daemon did it, 1 when the daemon refused it, and 2 when the
 command was not understood or no daemon answered.
 
+`temet-work status --json` sends the `view` command (`{"command":"view"}` on the socket)
+and prints the reply as indented JSON: projects, groups, the issues that are not done and
+the count of done ones, agents, decisions and problems (`crates/core/src/view.rs`; what it
+carries is listed in `docs/privacy.md`). Issue ids are `project#key`, each stage and agent
+state is a fixed word with the text form's words beside it, and decision options are
+numbered from 1. `--json` on any other command is refused with the usage; inside a value,
+a title, a body, a review point or a reason it is a word like any other.
+
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
 `status`, `issue`, `screen` and `settings`; `act` adds `plan`, `ready`, `review`, `rule`,
-`retry`, `overturn`, `proposal`, `set` and `unset`.
+`retry`, `overturn`, `proposal`, `file`, `investigated`, `set` and `unset`.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
+
+`temet-work --version` prints one line, `temet-work <version> (<build id>)`, without
+asking the daemon. The build id is the commit the binary was built from, as
+`temet-workd --version` shows it.
 
 A command an agent runs is recorded as that agent's (see "How the daemon knows who sent a
 command"). A ruling is recorded as a decision, listed by `temet-work status` with its
@@ -181,7 +225,9 @@ began on code that has since changed.
 
 The daemon listens at `$TEMET_WORK_SOCKET`, else `$XDG_RUNTIME_DIR/temet-work/daemon.sock`,
 else `~/.local/state/temet-work/daemon.sock`, one JSON request per line and one JSON reply
-per line.
+per line. The line `{"ask":"build"}` asks the daemon its build. It replies at once with
+`{"reply":"done","text":"BUILD"}`, naming the build it is running, and the same connection
+takes requests as before.
 
 `TEMET_WORK_DAEMON` picks how a command reaches the daemon: unset or empty is the local
 socket above; `ssh://[USER@]HOST[:PORT][/SOCKET/PATH]` runs `ssh -o BatchMode=yes
@@ -193,8 +239,11 @@ and the command fails with `ssh HOST: no answer within 60 s`. A host ssh cannot 
 fails with `ssh HOST: could not connect: ...`.
 The hidden command `temet-work relay` copies one request line from standard input to the
 local socket, marked as relayed, and the reply line back; it exits 4 when no daemon
-answers. When `--build` is missing or is not its own build, it does not contact the daemon and replies with a
-refusal: `temet-work on NAME is build X, the daemon is build Y: update it`.
+answers. Before it sends the request, it asks the daemon its build on the same connection.
+When `--build` is missing or names another build, it does not send the request and replies
+with a refusal that names the daemon's build:
+`temet-work on NAME is build X, the daemon is build Y: update it`. A daemon too old to
+answer the question is not sent the request either, and the refusal says to restart it.
 The hidden command `temet-work trust-folder RUNTIME PATH` marks PATH trusted for the
 runtime in its user files on the machine it runs on, as the daemon does before an agent
 starts in a folder on its own machine. For a folder on another machine the daemon runs it

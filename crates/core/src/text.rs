@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use crate::IssueText;
 use crate::model::{AgentState, Role, Stage};
 use crate::world::World;
 
@@ -24,6 +25,16 @@ pub fn stage(stage: Stage) -> String {
     }
 }
 
+/// An issue's stage, and "out of scope" when its group no longer covers it.
+pub(crate) fn issue_stage(world: &World, issue: &crate::model::Issue) -> String {
+    let at = stage(issue.stage);
+    if world.out_of_scope(issue) {
+        format!("{at}, out of scope")
+    } else {
+        at
+    }
+}
+
 /// An agent's state in a few words.
 pub fn agent_state(state: &AgentState) -> String {
     match state {
@@ -31,6 +42,8 @@ pub fn agent_state(state: &AgentState) -> String {
         AgentState::Working { doing } => format!("working: {doing}"),
         AgentState::Idle => "idle".into(),
         AgentState::Blocked { reason } => format!("blocked: {reason}"),
+        AgentState::Errored { line, .. } if line.is_empty() => "error".into(),
+        AgentState::Errored { line, .. } => format!("error: {line}"),
         AgentState::Ended => "ended".into(),
     }
 }
@@ -72,13 +85,30 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
         } else {
             milestones.join(", ")
         };
+        let investigation = match world.investigations.get(&g.id) {
+            Some(i) if i.running() => format!("; investigating: {}", i.agent),
+            Some(i) => {
+                let filed = match i.filed.len() {
+                    1 => "1 issue".to_string(),
+                    n => format!("{n} issues"),
+                };
+                let ended = i
+                    .ended_ms
+                    .map(crate::investigation::utc)
+                    .unwrap_or_default();
+                format!("; last investigated {ended}, filed {filed}")
+            }
+            None => String::new(),
+        };
         let _ = writeln!(
             out,
-            "  {} ({}): {}; {scope}; refines {} at a time",
+            "  {} ({}): {}; {scope}; refines {} at a time; {} in its queue, investigates below {}{investigation}",
             g.id,
             g.name,
             projects.join(", "),
-            g.refining_at_once
+            g.refining_at_once,
+            world.queue(g),
+            world.queue_low(g),
         );
     }
     let _ = writeln!(out, "Issues");
@@ -111,7 +141,7 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             out,
             "  {}  {}  {}{milestone}{pulls}",
             i.id,
-            stage(i.stage),
+            issue_stage(world, i),
             i.title
         );
     }
@@ -255,13 +285,17 @@ fn lines(
     out
 }
 
-/// One issue in full: where it is, its plan, its pull request, what it is to fix,
-/// and its agents.
-pub fn issue(world: &World, id: &crate::ids::IssueId) -> Option<String> {
+/// One issue in full: where it is, its own text (`read`, or why there is none to
+/// show), its plan, its pull request, what it is to fix, and its agents.
+pub fn issue(
+    world: &World,
+    id: &crate::ids::IssueId,
+    read: &Result<IssueText, String>,
+) -> Option<String> {
     let i = world.issues.get(id)?;
     let mut out = String::new();
     let _ = writeln!(out, "{}  {}", i.id, i.title);
-    let _ = writeln!(out, "Stage: {}", stage(i.stage));
+    let _ = writeln!(out, "Stage: {}", issue_stage(world, i));
     if let Some(m) = &i.milestone {
         let _ = writeln!(out, "Milestone: {m}");
     }
@@ -297,20 +331,15 @@ pub fn issue(world: &World, id: &crate::ids::IssueId) -> Option<String> {
         let _ = writeln!(out, "{label}: {}", folders.join(", "));
     }
     // One line per repository, in the order they merge.
-    for repo in world
-        .repos_of(i)
-        .iter()
-        .chain(i.pulls.keys().filter(|r| !world.repos_of(i).contains(r)))
-    {
-        if let Some(number) = i.pulls.get(repo) {
-            let state = if i.merged.contains(repo) {
-                ", merged"
-            } else {
-                ""
-            };
-            let _ = writeln!(out, "Pull request: {repo} #{number}{state}");
-        }
+    for (repo, number) in world.pulls_of(i) {
+        let state = if i.merged.contains(repo) {
+            ", merged"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "Pull request: {repo} #{number}{state}");
     }
+    own_text(&mut out, read);
     if let Some(plan) = &i.plan {
         let _ = writeln!(out, "Plan:");
         for c in &plan.checks {
@@ -346,6 +375,27 @@ pub fn issue(world: &World, id: &crate::ids::IssueId) -> Option<String> {
         role,
     ));
     Some(out)
+}
+
+/// An issue's own text between a line that says where it came from and a line
+/// that ends it. Text that is empty, or was not read, is one line saying so: a
+/// reader must not take the rest of the output for the issue's text.
+fn own_text(out: &mut String, read: &Result<IssueText, String>) {
+    let _ = match read {
+        Ok(t) if t.text.trim().is_empty() => {
+            writeln!(out, "The issue's text is empty: {}.", t.from)
+        }
+        Ok(t) => writeln!(
+            out,
+            "Text of {}:\n{}\nEnd of the issue's text.",
+            t.from,
+            t.text.trim_end()
+        ),
+        Err(why) => {
+            let why: Vec<&str> = why.split_whitespace().collect();
+            writeln!(out, "The issue's text was not read: {}", why.join(" "))
+        }
+    };
 }
 
 #[cfg(test)]
@@ -394,8 +444,8 @@ mod settings {
             Event::SettingSet {
                 scope: Scope::Project(ProjectId::new("radar")),
                 role: Some(Role::Reviewer),
-                key: "merge".into(),
-                value: Value::Text("rebase".into()),
+                key: "permission".into(),
+                value: Value::Text("plan".into()),
                 by: "person".into(),
             },
         ] {
@@ -437,15 +487,80 @@ radar#44, author
             "{for_reviewer}"
         );
         assert!(
-            for_reviewer.contains("merge          rebase  project"),
+            for_reviewer.contains("permission     plan    project"),
             "{for_reviewer}"
         );
         let for_author = settings(&w, &Target::parse("radar"), Some(Role::Author)).expect("ok");
         assert!(
-            for_author.contains("merge          squash  built in"),
+            for_author.contains("permission     auto    built in"),
             "{for_author}"
         );
         assert!(settings(&w, &Target::parse("nowhere"), None).is_err());
+    }
+
+    #[test]
+    fn the_listing_shows_a_setting_not_read_per_role_without_the_role() {
+        use crate::model::Stage;
+        let mut w = world();
+        let id = IssueId::new("radar", "44");
+        let radar = Scope::Project(ProjectId::new("radar"));
+        let every = [
+            ("review_rounds", Value::Number(2), Value::Number(1)),
+            ("ci", Value::Flag(false), Value::Flag(true)),
+            ("merge", text_of("rebase"), text_of("merge")),
+            ("deploy", text_of("make deploy"), text_of("make other")),
+            ("verify", text_of("make smoke"), text_of("make other")),
+            ("run_in", text_of("/srv/radar"), text_of("/srv/other")),
+            ("sync_every", Value::Number(90), Value::Number(1)),
+            ("ci_every", Value::Number(45), Value::Number(1)),
+        ];
+        // Even a role's value that is nearer than the one for every role is passed
+        // over.
+        for (key, for_all, for_reviewers) in &every {
+            w.put(&Scope::Global, None, key, for_all, crate::settings::FILE);
+            w.put(
+                &radar,
+                Some(Role::Reviewer),
+                key,
+                for_reviewers,
+                crate::settings::FILE,
+            );
+        }
+        w.put(
+            &radar,
+            Some(Role::Reviewer),
+            "model.alpha",
+            &text_of("haiku"),
+            crate::settings::FILE,
+        );
+        w.issues.get_mut(&id).expect("synced").stage = Stage::InReview { round: 1 };
+        let target = Target::parse("radar");
+        let listed = settings(&w, &target, Some(Role::Reviewer)).expect("known");
+        let view = issue(&w, &id, &unread()).expect("known");
+        assert!(view.contains("Settings for the reviewer:\n"), "{view}");
+        for (key, for_all, _) in &every {
+            let want = Some(format!("{for_all} global"));
+            assert_eq!(row(&listed, key), want, "{key}: {listed}");
+            assert_eq!(row(&view, key), want, "{key}: {view}");
+        }
+        assert_eq!(
+            w.setting_number(&id, Some(Role::Reviewer), "review_rounds"),
+            w.setting_number(&id, None, "review_rounds")
+        );
+        assert_eq!(w.setting_number(&id, None, "review_rounds"), 2);
+        assert_eq!(row(&listed, "model").as_deref(), Some("haiku project"));
+    }
+
+    fn text_of(value: &str) -> Value {
+        Value::Text(value.into())
+    }
+
+    /// The words that follow `key` on the line of `listing` that lists it.
+    fn row(listing: &str, key: &str) -> Option<String> {
+        listing.lines().find_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some(key)).then(|| words.collect::<Vec<_>>().join(" "))
+        })
     }
 
     #[test]
@@ -533,6 +648,8 @@ radar#44, author
                 milestones: Vec::new(),
                 refining_at_once: 3,
                 model: None,
+                queue_low: None,
+                investigate_every: None,
             },
             // radar#1 takes the Mac folder, radar#2 waits for it, radar#3 for radar#2.
             synced("1", vec![]),
@@ -549,7 +666,7 @@ radar#44, author
 Projects
   radar: city/radar in t
 Groups
-  watch (Night watch): radar; every milestone; refines 3 at a time
+  watch (Night watch): radar; every milestone; refines 3 at a time; 2 in its queue, investigates below 2
 Issues
   radar#1  working  Issue 1
   radar#2  ready  Issue 2
@@ -595,13 +712,235 @@ Problems
     }
 
     #[test]
+    fn the_model_listed_is_the_one_the_roles_runtime_runs() {
+        let mut w = world();
+        let target = Target::parse("radar#44");
+        let set = |w: &mut World, scope, role, key: &str, value: &str| {
+            w.apply(&Event::SettingSet {
+                scope,
+                role,
+                key: key.into(),
+                value: Value::Text(value.into()),
+                by: "person".into(),
+            });
+        };
+        set(&mut w, Scope::Global, None, "model", "sonnet");
+        set(
+            &mut w,
+            Scope::Global,
+            Some(Role::Reviewer),
+            "runtime",
+            "beta",
+        );
+        let listed = |w: &World, role| settings(w, &target, Some(role)).expect("known");
+        let author = listed(&w, Role::Author);
+        assert!(
+            author.contains("  model          opus    task, set by refiner-3\n"),
+            "{author}"
+        );
+        let reviewer = listed(&w, Role::Reviewer);
+        assert!(reviewer.contains("  runtime        beta    global, set by person\n"));
+        assert!(
+            !reviewer.contains("  model "),
+            "no model reaches a beta reviewer: {reviewer}"
+        );
+        set(
+            &mut w,
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model.beta",
+            "gpt-x",
+        );
+        let reviewer = listed(&w, Role::Reviewer);
+        assert!(
+            reviewer.contains("  model          gpt-x   global, set by person\n"),
+            "{reviewer}"
+        );
+        assert_eq!(listed(&w, Role::Author), author);
+        let status = text(&w, &BTreeMap::new());
+        assert!(
+            status.contains("  global, reviewer: model.beta = gpt-x, set by person\n"),
+            "{status}"
+        );
+        assert!(
+            status.contains("  global: model.alpha = sonnet, set by person\n"),
+            "{status}"
+        );
+    }
+
+    /// What a build that reads no issue text gives the view.
+    fn unread() -> Result<IssueText, String> {
+        Err("not read here".into())
+    }
+
+    #[test]
+    fn the_issue_view_shows_its_text_above_the_plan_or_one_line_saying_why_not() {
+        let mut w = world();
+        let id = IssueId::new("radar", "44");
+        w.issues.get_mut(&id).expect("synced").plan = Some(crate::model::Plan::default());
+        let view = |text: &str| {
+            let read = Ok(IssueText {
+                from: "issue 44 of city/radar at the last sync".into(),
+                text: text.into(),
+            });
+            issue(&w, &id, &read).expect("known")
+        };
+        let shown = view("Sign in once.\n\nPlan:\nnone yet\n");
+        assert!(
+            shown.contains(
+                "\nText of issue 44 of city/radar at the last sync:\n\
+                 Sign in once.\n\nPlan:\nnone yet\nEnd of the issue's text.\nPlan:\n"
+            ),
+            "{shown}"
+        );
+        let empty = view(" \n");
+        assert!(
+            empty.contains(
+                "\nThe issue's text is empty: issue 44 of city/radar at the last sync.\n"
+            ),
+            "{empty}"
+        );
+        assert!(!empty.contains("Text of"), "{empty}");
+        let why = Err("city/radar: signed out\n  run the sign-in again".into());
+        let missed = issue(&w, &id, &why).expect("known");
+        assert!(
+            missed.contains(
+                "\nThe issue's text was not read: city/radar: signed out run the sign-in again\n\
+                 Plan:\n"
+            ),
+            "{missed}"
+        );
+        assert!(!missed.contains("Text of"), "{missed}");
+        assert!(missed.starts_with("radar#44  Sign in\n"), "{missed}");
+    }
+
+    #[test]
     fn the_issue_view_shows_the_settings_of_the_role_at_work_on_it() {
         let w = world();
-        let text = issue(&w, &IssueId::new("radar", "44")).expect("known");
+        let text = issue(&w, &IssueId::new("radar", "44"), &unread()).expect("known");
         assert!(text.contains("Settings for the refiner:\n"), "{text}");
         assert!(
             !text.contains("  model "),
             "the refiner's model is for the author, not the refiner: {text}"
+        );
+    }
+
+    #[test]
+    fn the_status_shows_a_group_investigating_and_one_that_investigated() {
+        use crate::ids::{AgentId, GroupId, MachineId};
+        let group = |id: &str| Event::GroupCreated {
+            group: GroupId::new(id),
+            name: id.to_uppercase(),
+            projects: vec![ProjectId::new("radar")],
+            areas: Vec::new(),
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: None,
+            queue_low: Some(3),
+            investigate_every: None,
+        };
+        let started = |group: &str, agent: &str, at_ms| {
+            [
+                Event::InvestigationStarted {
+                    group: GroupId::new(group),
+                    agent: AgentId::new(agent),
+                    at_ms,
+                },
+                Event::AgentStarted {
+                    agent: AgentId::new(agent),
+                    group: GroupId::new(group),
+                    role: Role::Investigator,
+                    issue: None,
+                    machine: MachineId::new("local"),
+                    folder: None,
+                    secret_digest: None,
+                },
+            ]
+        };
+        let filed = |key: &str| Event::IssueFiled {
+            group: GroupId::new("guard"),
+            agent: AgentId::new("investigator-1"),
+            issue: IssueId::new("radar", key),
+            title: format!("Issue {key}"),
+            milestone: None,
+        };
+        let mut w = world();
+        for e in [group("guard"), group("watch")]
+            .into_iter()
+            .chain(started("guard", "investigator-1", 0))
+            .chain([filed("7"), filed("8")])
+            .chain([Event::InvestigationEnded {
+                group: GroupId::new("guard"),
+                at_ms: 1_795_784_700_000,
+                filed: 2,
+            }])
+            .chain(started("watch", "investigator-2", 1_795_784_700_000))
+        {
+            w.apply(&e);
+        }
+        let all = text(&w, &BTreeMap::new());
+        assert!(
+            all.contains(
+                "Groups\n  \
+                 guard (GUARD): radar; every milestone; refines 1 at a time; 1 in its queue, \
+                 investigates below 3; last investigated 2026-11-27 13:05 UTC, filed 2 issues\n  \
+                 watch (WATCH): radar; every milestone; refines 1 at a time; 0 in its queue, \
+                 investigates below 3; investigating: investigator-2\n"
+            ),
+            "{all}"
+        );
+        assert!(all.contains("  investigator-2: idle (on local)\n"), "{all}");
+    }
+
+    #[test]
+    fn the_status_counts_only_the_queue_in_scope() {
+        use crate::ids::{GroupId, MilestoneId};
+        let ankh = ProjectId::new("ankh");
+        let mut w = World::default();
+        w.apply(&Event::ProjectAdded {
+            project: ankh.clone(),
+            tracker: "t".into(),
+            name: "city/ankh".into(),
+            code_host: None,
+            repo: None,
+        });
+        w.apply(&Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ankh],
+            areas: Vec::new(),
+            milestones: vec![MilestoneId::new("First")],
+            refining_at_once: 1,
+            model: None,
+            queue_low: Some(8),
+            investigate_every: None,
+        });
+        let sync = |key: u64, milestone: &str| Event::IssueSynced {
+            issue: IssueId::new("ankh", key.to_string()),
+            title: format!("Issue {key}"),
+            milestone: Some(MilestoneId::new(milestone)),
+            depends_on: Vec::new(),
+            order: key,
+            closed: false,
+        };
+        // Twelve refined in First; the last ten are then moved to Later.
+        for key in 1..=12 {
+            w.apply(&sync(key, "First"));
+            w.apply(&Event::PlanWritten {
+                issue: IssueId::new("ankh", key.to_string()),
+                plan: Default::default(),
+            });
+        }
+        for key in 3..=12 {
+            w.apply(&sync(key, "Later"));
+        }
+        let all = text(&w, &BTreeMap::new());
+        assert!(
+            all.contains(
+                "\n  watch (Night watch): ankh; First; refines 1 at a time; 2 in its queue, \
+                 investigates below 8\n"
+            ),
+            "{all}"
         );
     }
 
@@ -614,11 +953,11 @@ Problems
             "{all}"
         );
         assert!(
-            all.contains("  radar#44, author: model = opus, set by refiner-3\n"),
+            all.contains("  radar#44, author: model.alpha = opus, set by refiner-3\n"),
             "{all}"
         );
         assert!(
-            all.contains("  radar, reviewer: merge = rebase, set by person\n"),
+            all.contains("  radar, reviewer: permission = plan, set by person\n"),
             "{all}"
         );
     }

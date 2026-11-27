@@ -6,10 +6,12 @@
 //! subscription filtered by temet-work's own label, on its own connection; `idle`
 //! and `done` both meaning a turn ended; a send refused while the terminal is at
 //! a prompt; the visible screen as the cheap read. Terminals are started with no
-//! parent, so agents outlive a restart of the daemon.
+//! parent, so agents outlive a restart of the daemon. An agent's terminal also
+//! gets the labels that put it on the herdr app's screens (`app_labels`).
 //!
 //! While `TEMET_WORK_SANDBOX` is set to anything but empty, as it is in every
-//! test run, the client opens nothing and every call fails.
+//! test run, the client opens nothing and every call fails, unless it was given
+//! a socket of its own ([`Herdr::socket`]).
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -128,11 +130,47 @@ fn rpc(e: RpcError) -> RunnerError {
     RunnerError::Other(format!("herdr-core: {} ({})", e.message, e.kind))
 }
 
+/// `text` as part of a space or tab id: `-` for every character other than A-Z,
+/// a-z, 0-9 and `-`, as mike makes the space ids of its fleet seats.
+fn id_part(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// The labels that put an agent's terminal on the herdr app's screens: a space
+/// per group, a tab in it per issue, and the agent's name. The app shows a
+/// terminal that has `herdr.space` and `herdr.tab`, and makes the space or tab
+/// when it does not know the id. The issue label names its project
+/// (`ankh#WATCH-12`), so two projects' issues with one key get two tabs. An agent
+/// on no issue, an investigator, gets a tab in its group's space named for its
+/// role, and its group in its name where an issue would be. A start without a
+/// `group` and an `agent` label, as the runner contract's are, gets none.
+fn app_labels(labels: &BTreeMap<String, String>) -> Option<[(&'static str, String); 3]> {
+    let (group, agent) = (labels.get("group")?, labels.get("agent")?);
+    let (tab, about) = match labels.get("issue") {
+        Some(issue) => (issue, issue),
+        None => (labels.get("role")?, group),
+    };
+    let space = id_part(group);
+    Some([
+        ("herdr.space", format!("sptemet-work-{space}")),
+        (
+            "herdr.tab",
+            format!("tbtemet-work-{space}-{}", id_part(tab)),
+        ),
+        ("herdr.name", format!("{agent} {about}")),
+    ])
+}
+
 /// The `terminal.run` parameters for a start: `on` names the machine, and is
 /// left out for a terminal on this one.
 fn run_params(start: &Start) -> Value {
     let mut labels = start.labels.clone();
     labels.insert(OWNER.0.into(), OWNER.1.into());
+    for (key, value) in app_labels(&start.labels).into_iter().flatten() {
+        labels.insert(key.into(), value);
+    }
     let mut params = json!({
         "argv": start.program.argv,
         "cwd": start.cwd,
@@ -288,12 +326,18 @@ fn unbase64(text: &str) -> Vec<u8> {
     out
 }
 
-fn status_of(state: Option<&str>, kind: Option<&str>) -> Status {
+/// A terminal's status from herdr-core's `state`, `kind` and `msg`. `error` is a
+/// turn that ended in an error, such as a usage limit; its `msg`, when the core
+/// sends one, says which.
+fn status_of(state: Option<&str>, kind: Option<&str>, msg: Option<&str>) -> Status {
     match state {
         Some("idle" | "done") => Status::Between,
         Some("working") => Status::Working,
         Some("blocked") => Status::Blocked {
             kind: kind.unwrap_or("prompt").to_string(),
+        },
+        Some("error") => Status::Error {
+            message: msg.filter(|m| !m.trim().is_empty()).map(String::from),
         },
         _ => Status::Unknown,
     }
@@ -359,6 +403,7 @@ fn take_snapshot(terminals: &Value, s: &mut Shared) {
             status_of(
                 t.pointer("/status/state").and_then(Value::as_str),
                 t.pointer("/status/kind").and_then(Value::as_str),
+                t.pointer("/status/msg").and_then(Value::as_str),
             )
         };
         s.updates.push(Update {
@@ -405,6 +450,7 @@ fn follow(mut conn: Conn, shared: Arc<Mutex<Shared>>) {
                     "status" => Some(status_of(
                         data.pointer("/status/state").and_then(Value::as_str),
                         data.pointer("/status/kind").and_then(Value::as_str),
+                        data.pointer("/status/msg").and_then(Value::as_str),
                     )),
                     "finished" | "lost" | "removed" => Some(Status::Gone),
                     _ => None,
@@ -445,6 +491,8 @@ pub struct Herdr {
     unreachable: Option<String>,
     /// The build of the daemon this runner is part of.
     build: Option<String>,
+    /// The socket to reach instead of [`socket_path`]'s.
+    socket: Option<PathBuf>,
 }
 
 /// How long a request waits for its answer.
@@ -474,7 +522,18 @@ impl Herdr {
         self
     }
 
-    fn path() -> Result<PathBuf, RunnerError> {
+    /// Reaches the core listening at `path` instead of the one the environment
+    /// names, sandbox or not: how a test puts a stand-in core in its place.
+    #[must_use]
+    pub fn socket(mut self, path: impl Into<PathBuf>) -> Self {
+        self.socket = Some(path.into());
+        self
+    }
+
+    fn path(&self) -> Result<PathBuf, RunnerError> {
+        if let Some(path) = &self.socket {
+            return Ok(path.clone());
+        }
         if sandboxed() {
             return Err(RunnerError::Other(
                 "TEMET_WORK_SANDBOX is set: herdr-core is not reached".into(),
@@ -494,7 +553,7 @@ impl Herdr {
         if self.shared.lock().map(|s| s.alive).unwrap_or(false) {
             return Ok(());
         }
-        let mut events = Conn::open(&Self::path()?, EVENTS_TIMEOUT)?;
+        let mut events = Conn::open(&self.path()?, EVENTS_TIMEOUT)?;
         let snapshot = events
             .call("events.subscribe", json!({"labels": {OWNER.0: OWNER.1}}))
             .map_err(rpc)?;
@@ -514,7 +573,7 @@ impl Herdr {
     fn request(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
         self.follow().map_err(|e| io_error(&e))?;
         if self.control.is_none() {
-            let path = Self::path().map_err(|e| io_error(&e))?;
+            let path = self.path().map_err(|e| io_error(&e))?;
             self.control = Some(Conn::open(&path, REQUEST_TIMEOUT).map_err(|e| io_error(&e))?);
         }
         let Some(conn) = self.control.as_mut() else {
@@ -634,7 +693,7 @@ impl Runner for Herdr {
         // Follow events even when nothing is being started or sent, so states
         // keep coming after a restart. A core that is down is tried again next
         // time; starting or sending reports it.
-        if !sandboxed() {
+        if self.socket.is_some() || !sandboxed() {
             self.unreachable = self.follow().err().map(|e| e.to_string());
         }
         self.shared
@@ -659,6 +718,136 @@ mod tests {
     fn a_start_on_another_machine_sends_on_and_a_local_one_does_not() {
         assert_eq!(run_params(&start_on(Some("mac")))["on"], "mac");
         assert!(run_params(&start_on(None)).get("on").is_none());
+    }
+
+    /// A start as the runner family labels one, on this machine.
+    fn start_of(group: &str, issue: &str, agent: &str, role: &str) -> Start {
+        Start {
+            labels: [
+                ("agent", agent),
+                ("group", group),
+                ("issue", issue),
+                ("role", role),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into(),
+            ..Start::default()
+        }
+    }
+
+    #[test]
+    fn a_start_on_another_machine_carries_the_same_app_labels_as_one_here() {
+        let here = start_of("watch", "ankh-morpork#12", "author-22", "author");
+        let there = Start {
+            machine: Some("lancre".into()),
+            ..here.clone()
+        };
+        let (here, there) = (run_params(&here), run_params(&there));
+        assert_eq!(there["on"], "lancre");
+        assert_eq!(there["labels"], here["labels"]);
+        assert_eq!(there["labels"]["herdr.space"], "sptemet-work-watch");
+        assert_eq!(
+            there["labels"]["herdr.tab"],
+            "tbtemet-work-watch-ankh-morpork-12"
+        );
+        assert_eq!(there["labels"]["herdr.name"], "author-22 ankh-morpork#12");
+    }
+
+    #[test]
+    fn a_group_shares_a_space_and_an_issues_agents_share_a_tab() {
+        let labels = |group, issue, agent, role| {
+            let params = run_params(&start_of(group, issue, agent, role));
+            let label = |key: &str| params["labels"][key].as_str().map(String::from);
+            (label("herdr.space"), label("herdr.tab"))
+        };
+        let author = labels("watch", "ankh-morpork#12", "author-22", "author");
+        let reviewer = labels("watch", "ankh-morpork#12", "reviewer-3", "reviewer");
+        let other_project = labels("watch", "pseudopolis#12", "author-23", "author");
+        let other_group = labels("guild", "ankh-morpork#12", "author-24", "author");
+        assert!(author.0.is_some() && author.1.is_some());
+        assert_eq!(reviewer, author);
+        assert_eq!(other_project.0, author.0);
+        assert_ne!(other_project.1, author.1);
+        assert_ne!(other_group.0, author.0);
+        assert_ne!(other_group.1, author.1);
+    }
+
+    #[test]
+    fn space_and_tab_ids_keep_to_letters_digits_and_hyphens() {
+        let ids = |group, issue| {
+            let params = run_params(&start_of(group, issue, "author-1", "author"));
+            ["herdr.space", "herdr.tab", "herdr.name"].map(|key| {
+                params["labels"][key]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+        };
+        assert_eq!(
+            ids("watch", "ankh#WATCH-12"),
+            [
+                "sptemet-work-watch",
+                "tbtemet-work-watch-ankh-WATCH-12",
+                "author-1 ankh#WATCH-12"
+            ]
+        );
+        assert_eq!(
+            ids("watch", "ankh-morpork#12")[1],
+            "tbtemet-work-watch-ankh-morpork-12"
+        );
+        assert_eq!(
+            ids("watch", "ankh-morpork/watch#12")[1],
+            "tbtemet-work-watch-ankh-morpork-watch-12"
+        );
+        assert_eq!(
+            ids("night watch_2", "unseen.university#7"),
+            [
+                "sptemet-work-night-watch-2",
+                "tbtemet-work-night-watch-2-unseen-university-7",
+                "author-1 unseen.university#7"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_investigator_gets_its_groups_space_and_a_tab_of_its_own() {
+        let labels = [
+            ("agent", "investigator-1"),
+            ("group", "watch"),
+            ("role", "investigator"),
+        ];
+        let params = run_params(&Start {
+            labels: labels.map(|(k, v)| (k.to_string(), v.to_string())).into(),
+            ..Start::default()
+        });
+        assert_eq!(params["labels"]["herdr.space"], "sptemet-work-watch");
+        assert_eq!(
+            params["labels"]["herdr.tab"],
+            "tbtemet-work-watch-investigator"
+        );
+        assert_eq!(params["labels"]["herdr.name"], "investigator-1 watch");
+    }
+
+    #[test]
+    fn a_start_without_a_group_gets_no_app_labels() {
+        let app_keys = |labels: &[(&str, &str)]| {
+            let params = run_params(&Start {
+                labels: labels
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                ..Start::default()
+            });
+            params["labels"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(k, _)| k.starts_with("herdr."))
+                .count()
+        };
+        // The runner contract's own terminals.
+        assert_eq!(app_keys(&[("item", "contract-1"), ("role", "contract")]), 0);
+        assert_eq!(app_keys(&[("agent", "author-1"), ("issue", "ankh#1")]), 0);
     }
 
     fn trust_on_mac() -> Program {
@@ -820,16 +1009,36 @@ mod tests {
 
     #[test]
     fn maps_idle_and_done_to_between_turns() {
-        assert_eq!(status_of(Some("idle"), None), Status::Between);
-        assert_eq!(status_of(Some("done"), None), Status::Between);
-        assert_eq!(status_of(Some("working"), None), Status::Working);
+        assert_eq!(status_of(Some("idle"), None, None), Status::Between);
+        assert_eq!(status_of(Some("done"), None, None), Status::Between);
+        assert_eq!(status_of(Some("working"), None, None), Status::Working);
         assert_eq!(
-            status_of(Some("blocked"), Some("question")),
+            status_of(Some("blocked"), Some("question"), None),
             Status::Blocked {
                 kind: "question".into()
             }
         );
-        assert_eq!(status_of(None, None), Status::Unknown);
+        // A turn that ended in an error, with the core's message when it sends one.
+        assert_eq!(
+            status_of(
+                Some("error"),
+                None,
+                Some("You've hit your 5-hour limit · resets 5:40pm")
+            ),
+            Status::Error {
+                message: Some("You've hit your 5-hour limit · resets 5:40pm".into())
+            }
+        );
+        assert_eq!(
+            status_of(Some("error"), None, None),
+            Status::Error { message: None }
+        );
+        assert_eq!(
+            status_of(Some("error"), None, Some("  ")),
+            Status::Error { message: None },
+            "a blank message is none"
+        );
+        assert_eq!(status_of(None, None, None), Status::Unknown);
     }
 
     #[test]
@@ -854,10 +1063,17 @@ mod tests {
             {"address": "t4", "labels": {"agent": "refiner-1"}, "status": {"state": "done"}},
             {"address": "t5", "labels": {"agent": "author-2"}, "state": "finished",
              "status": {"state": "done"}},
+            {"address": "t6", "labels": {"agent": "author-3"}, "status": {"state": "error"}},
             {"labels": {"agent": "no-address"}}
         ]);
         take_snapshot(&snapshot, &mut s);
-        assert_eq!(s.updates.len(), 3);
+        assert_eq!(s.updates.len(), 4);
+        assert_eq!(s.updates[3].labels["agent"], "author-3");
+        assert_eq!(
+            s.updates[3].status,
+            Status::Error { message: None },
+            "an agent whose turn ended in an error before the daemon started"
+        );
         assert_eq!(s.updates[0].labels["agent"], "author-1");
         assert_eq!(s.updates[0].status, Status::Working);
         assert_eq!(s.updates[0].doing.as_deref(), Some("running the tests"));
@@ -875,7 +1091,7 @@ mod tests {
             .filter(|u| u.status == Status::Gone)
             .map(|u| u.terminal.0.as_str())
             .collect();
-        assert_eq!(gone, ["t3", "t5"]);
+        assert_eq!(gone, ["t3", "t5", "t6"]);
     }
 
     #[test]

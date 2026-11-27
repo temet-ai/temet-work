@@ -148,6 +148,17 @@ pub struct Choice {
     pub default: Option<String>,
 }
 
+impl Choice {
+    /// The adapters this build has, in words.
+    fn listed(&self) -> String {
+        if self.allowed.is_empty() {
+            "none".to_string()
+        } else {
+            self.allowed.join(", ")
+        }
+    }
+}
+
 /// What kind of value a setting takes.
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
@@ -184,6 +195,9 @@ pub struct Spec {
     pub about: &'static str,
     /// Whether an agent may set it.
     pub agents: Agents,
+    /// Whether it is read for the role of an agent, so that a role can have its
+    /// own value. One that is not is the same for every role.
+    pub per_role: bool,
 }
 
 /// The modes an agent can be started in, which `permission` takes one of.
@@ -197,7 +211,7 @@ const PERMISSIONS: &[&str] = &[
 ];
 
 /// Every setting, in the order they are listed.
-pub const SPECS: [Spec; 16] = [
+pub const SPECS: [Spec; 17] = [
     Spec {
         key: "runtime",
         kind: Kind::Text,
@@ -206,12 +220,16 @@ pub const SPECS: [Spec; 16] = [
             "a runtime may not follow permission, so the runtime decides what an agent \
              may do without asking",
         ),
+        per_role: true,
     },
     Spec {
         key: "model",
         kind: Kind::Text,
-        about: "the model an agent runs; the runtime's own default when none is set",
+        about: "the model of one runtime's agents, written model.<runtime>; a plain model is \
+                recorded as model.<the global runtime> when it is written; the runtime's own \
+                default when none is set",
         agents: Agents::ForAuthor,
+        per_role: true,
     },
     Spec {
         key: "runner",
@@ -221,12 +239,14 @@ pub const SPECS: [Spec; 16] = [
             "it follows from the person's machines, not from the issue, and a value for \
              one issue replaces the one a person chose for a role",
         ),
+        per_role: true,
     },
     Spec {
         key: "machine",
         kind: Kind::Text,
         about: "the machine of the work folder an agent is given; any machine when none is set",
         agents: Agents::May,
+        per_role: true,
     },
     Spec {
         key: "permission",
@@ -235,6 +255,7 @@ pub const SPECS: [Spec; 16] = [
         agents: Agents::MayNot(
             "it decides what every later agent on the issue may do without asking",
         ),
+        per_role: true,
     },
     Spec {
         key: "review_rounds",
@@ -244,6 +265,7 @@ pub const SPECS: [Spec; 16] = [
             "it decides how many rounds of review an issue gets before the arbiter rules, \
              so fewer rounds weaken its review",
         ),
+        per_role: false,
     },
     Spec {
         key: "ci",
@@ -253,60 +275,78 @@ pub const SPECS: [Spec; 16] = [
             "ci false takes the CI gate off the code the issue's own author writes, \
              in every repository the issue changes",
         ),
+        per_role: false,
     },
     Spec {
         key: "deploy",
         kind: Kind::Text,
         about: "the command run after a merge",
         agents: Agents::MayNot("the daemon runs it as a shell command after a merge"),
+        per_role: false,
     },
     Spec {
         key: "verify",
         kind: Kind::Text,
         about: "the command run after a deploy",
         agents: Agents::MayNot("the daemon runs it after a deploy"),
+        per_role: false,
     },
     Spec {
         key: "run_in",
         kind: Kind::Text,
         about: "the folder deploy and verify run in",
         agents: Agents::MayNot("it is the folder deploy and verify run in"),
+        per_role: false,
     },
     Spec {
         key: "merge",
         kind: Kind::OneOf(&["squash", "merge", "rebase"]),
         about: "how the code host merges a pull request",
         agents: Agents::May,
+        per_role: false,
     },
     Spec {
         key: "remind_after",
         kind: Kind::Count(1),
         about: "minutes an agent its issue waits on may sit idle before it is reminded",
         agents: Agents::May,
+        per_role: true,
     },
     Spec {
         key: "reminders",
         kind: Kind::Count(0),
         about: "reminders before an idle agent is stopped",
         agents: Agents::May,
+        per_role: true,
     },
     Spec {
         key: "starts",
         kind: Kind::Count(1),
-        about: "agents of one role started on one issue before the loop gives up",
+        about: "agents of one role that end while one issue waits on them before the loop gives up",
         agents: Agents::May,
+        per_role: true,
     },
     Spec {
         key: "sync_every",
         kind: Kind::Count(1),
         about: "seconds between syncs of a project with its tracker",
         agents: Agents::May,
+        per_role: false,
     },
     Spec {
         key: "ci_every",
         kind: Kind::Count(1),
         about: "seconds between reads of a pull request's CI",
         agents: Agents::May,
+        per_role: false,
+    },
+    Spec {
+        key: "investigate",
+        kind: Kind::Text,
+        about: "lines added to the investigator's brief under the project's name, such as \
+                parts of the code another team owns",
+        agents: Agents::MayNot("it is text written into every later investigator's brief"),
+        per_role: false,
     },
 ];
 
@@ -315,12 +355,41 @@ pub fn specs() -> impl Iterator<Item = &'static Spec> {
     SPECS.iter()
 }
 
-/// The setting called `key`.
+/// The runtime a `model.<runtime>` key names the model of.
+fn model_runtime(key: &str) -> Option<&str> {
+    key.strip_prefix("model.").filter(|r| !r.is_empty())
+}
+
+/// The setting called `key`; a `model.<runtime>` key is `model` for one runtime.
 pub fn spec(key: &str) -> Result<&'static Spec, String> {
-    specs().find(|s| s.key == key).ok_or_else(|| {
+    let name = if model_runtime(key).is_some() {
+        "model"
+    } else {
+        key
+    };
+    specs().find(|s| s.key == name).ok_or_else(|| {
         let keys: Vec<&str> = specs().map(|s| s.key).collect();
         format!("no setting {key}; the settings are: {}", keys.join(", "))
     })
+}
+
+/// Whether `key` is read per role.
+fn per_role(key: &str) -> bool {
+    spec(key).is_ok_and(|s| s.per_role)
+}
+
+/// Refuses a role for `key` when it is not read per role, since such a value
+/// would have no effect. `named` is what the caller gave the role with.
+pub fn check_role(key: &str, named: &str) -> Result<(), String> {
+    if spec(key)?.per_role {
+        return Ok(());
+    }
+    let keys: Vec<&str> = specs().filter(|s| s.per_role).map(|s| s.key).collect();
+    Err(format!(
+        "{key} is the same for every role, so it takes no {named}; the settings that \
+         take a role are: {}",
+        keys.join(", ")
+    ))
 }
 
 /// The value in the code for `key`, used when no level sets one. The runtime and
@@ -377,16 +446,21 @@ pub(crate) fn recorded_role(role: Option<Role>, key: &str, by: &str) -> Option<R
 }
 
 /// The role the loop keeps a logged change under, or `None` when it leaves the
-/// change out. Logs from before agents were refused hold changes an agent made
-/// for one issue that it may no longer make: of a setting only a person sets,
-/// left out, and of a setting that is now the author's only, for every role
-/// (read as the author's) or for another role (left out).
+/// change out. Older logs hold a role's value of a setting that is not read per
+/// role, which never had an effect and is left out. Logs from before agents were
+/// refused hold changes an agent made for one issue that it may no longer make:
+/// of a setting only a person sets, left out, and of a setting that is now the
+/// author's only, for every role (read as the author's) or for another role (left
+/// out).
 pub(crate) fn kept_role(
     scope: &Scope,
     role: Option<Role>,
     key: &str,
     by: &str,
 ) -> Option<Option<Role>> {
+    if role.is_some() && spec(key).is_ok_and(|s| !s.per_role) {
+        return None;
+    }
     if !matches!(scope, Scope::Task(_)) || !is_agent(by) {
         return Some(role);
     }
@@ -416,9 +490,10 @@ pub fn parse_value(key: &str, raw: &str) -> Result<Value, String> {
 }
 
 impl World {
-    /// Refuses a value that names an adapter this build does not have, and says
-    /// which ones it has.
+    /// Refuses a value that names an adapter this build does not have, or a
+    /// model for a runtime it does not have, and says which ones it has.
     pub fn check_choice(&self, key: &str, value: &Value) -> Result<(), String> {
+        self.check_model_runtime(key)?;
         let Some(choice) = self.catalog.get(key) else {
             return Ok(());
         };
@@ -426,12 +501,20 @@ impl World {
             Value::Text(t) if choice.allowed.iter().any(|a| a == t) => Ok(()),
             _ => Err(format!(
                 "{key} \"{value}\" is not in this build; this build has: {}",
-                if choice.allowed.is_empty() {
-                    "none".to_string()
-                } else {
-                    choice.allowed.join(", ")
-                }
+                choice.listed()
             )),
+        }
+    }
+
+    /// Refuses a `model.<runtime>` key whose runtime this build does not have.
+    pub(crate) fn check_model_runtime(&self, key: &str) -> Result<(), String> {
+        match (model_runtime(key), self.catalog.get("runtime")) {
+            (Some(runtime), Some(c)) if !c.allowed.iter().any(|a| a == runtime) => Err(format!(
+                "{key} is for runtime \"{runtime}\", which is not in this build; \
+                 this build has: {}",
+                c.listed()
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -533,11 +616,18 @@ impl World {
     /// The setting `key` over `scope`'s chain for `role` (none: the values for
     /// every role only), and which level set it. Within a level the role's own
     /// value comes before the value for every role; across levels the nearer one
-    /// comes first. The build's own value is the last resort.
+    /// comes first. The build's own value is the last resort. `model` answers
+    /// for the runtime that runs there ([`World::keys_read`]). A key that is not
+    /// read per role is answered as for no role.
     pub fn resolve(&self, scope: &Scope, role: Option<Role>, key: &str) -> Option<Resolved> {
+        let role = role.filter(|_| per_role(key));
+        let keys = self.keys_read(scope, role, key);
         for (level, at) in self.chain(scope) {
-            let own = role.and_then(|r| self.settings.get(&(at.clone(), Some(r), key.to_string())));
-            let entry = own.or_else(|| self.settings.get(&(at.clone(), None, key.to_string())));
+            let get = |role: Option<Role>| {
+                keys.iter()
+                    .find_map(|k| self.settings.get(&(at.clone(), role, k.clone())))
+            };
+            let entry = role.and_then(|r| get(Some(r))).or_else(|| get(None));
             if let Some(e) = entry {
                 return Some(Resolved {
                     value: e.value.clone(),
@@ -560,6 +650,95 @@ impl World {
         })
     }
 
+    /// The key that answers `key` over `scope` for `role`. A model belongs to a
+    /// runtime: for `model` that is `model.<runtime>` of the runtime that runs
+    /// there, so a model written for one runtime never reaches another. A plain
+    /// `model` is bound when it is written ([`World::model_key`]), so only a
+    /// world that knows no runtime at all, and so binds none, reads one.
+    fn keys_read(&self, scope: &Scope, role: Option<Role>, key: &str) -> Vec<String> {
+        if key != "model" {
+            return vec![key.to_string()];
+        }
+        match self.resolve(scope, role, "runtime") {
+            Some(runtime) => vec![format!("model.{}", runtime.value)],
+            None => vec![key.to_string()],
+        }
+    }
+
+    /// The runtime a plain `model` is for: the global `runtime` for every role,
+    /// else the build's default.
+    pub fn global_runtime(&self) -> Option<Value> {
+        self.resolve(&Scope::Global, None, "runtime")
+            .map(|r| r.value)
+    }
+
+    /// The key a plain `model` is bound to now: `model.<the global runtime>`.
+    /// Every other key, and a plain `model` in a world that knows no runtime,
+    /// is its own. A logged change is bound this way when it is applied, so an
+    /// older log's plain model is the runtime's that was global at that point.
+    pub fn bound_key(&self, key: &str) -> String {
+        match self.global_runtime() {
+            Some(runtime) if key == "model" => format!("model.{runtime}"),
+            _ => key.to_string(),
+        }
+    }
+
+    /// The key a change of `key` at `scope` for `role` is recorded under, as it
+    /// is written: a plain `model` is bound to the global runtime
+    /// ([`World::bound_key`]), so the log says which runtime it is for and a
+    /// later change of the global runtime does not move it. Refused, naming
+    /// `model.<runtime>`, where the runtime in effect for that scope and role is
+    /// not the global one: refiners and the docs read a plain model as the
+    /// global runtime's, and binding it to that one would leave it unread.
+    pub fn model_key(
+        &self,
+        scope: &Scope,
+        role: Option<Role>,
+        key: &str,
+    ) -> Result<String, String> {
+        let bound = self.bound_key(key);
+        if bound == key {
+            return Ok(bound);
+        }
+        let global = self.global_runtime().map(|r| r.to_string());
+        let here = self
+            .resolve(scope, role, "runtime")
+            .map(|r| r.value.to_string());
+        match (here, global) {
+            (Some(here), Some(global)) if here != global => {
+                let who =
+                    role.map_or_else(|| "every role".to_string(), |r| format!("the {}", r.name()));
+                let at = match scope {
+                    Scope::Global => "globally".to_string(),
+                    other => format!("at {other}"),
+                };
+                Err(format!(
+                    "a plain model is the global runtime's ({global}), and {who} runs \
+                     {here} {at}: name the runtime, as model.{here}"
+                ))
+            }
+            _ => Ok(bound),
+        }
+    }
+
+    /// The runtime in effect at `scope` for `role` (none: for every role), with
+    /// who set it, when it is neither `bound`, the runtime a plain `model` there
+    /// was bound to, nor the global runtime. A model bound to the runtime in
+    /// effect reaches its agents. One bound before a change of the global
+    /// runtime carries the old runtime's name, so naming the new runtime's key
+    /// would point at the wrong fix.
+    pub fn runtime_unlike_model(
+        &self,
+        scope: &Scope,
+        role: Option<Role>,
+        bound: &str,
+    ) -> Option<Resolved> {
+        let here = self.resolve(scope, role, "runtime")?;
+        let runs = here.value.to_string();
+        let global = self.global_runtime().map(|g| g.to_string());
+        (runs != bound && global.as_deref() != Some(runs.as_str())).then_some(here)
+    }
+
     /// The setting for an issue and role.
     pub fn setting(&self, issue: &IssueId, role: Option<Role>, key: &str) -> Option<Resolved> {
         self.resolve(&Scope::Task(issue.clone()), role, key)
@@ -573,7 +752,18 @@ impl World {
     /// The setting as a whole number; the built-in one when a level holds a value of
     /// another kind.
     pub fn setting_number(&self, issue: &IssueId, role: Option<Role>, key: &str) -> u64 {
-        match self.setting(issue, role, key).map(|r| r.value) {
+        self.number_at(&Scope::Task(issue.clone()), role, key)
+    }
+
+    /// The setting over `scope`'s chain as text, when it has a value.
+    pub fn text_at(&self, scope: &Scope, role: Option<Role>, key: &str) -> Option<String> {
+        self.resolve(scope, role, key).map(|r| r.value.to_string())
+    }
+
+    /// The setting over `scope`'s chain as a whole number; the built-in one when a
+    /// level holds a value of another kind.
+    pub fn number_at(&self, scope: &Scope, role: Option<Role>, key: &str) -> u64 {
+        match self.resolve(scope, role, key).map(|r| r.value) {
             Some(Value::Number(n)) => n,
             _ => match builtin(key) {
                 Some(Value::Number(n)) => n,
@@ -659,6 +849,33 @@ impl World {
             self.settings
                 .remove(&(scope.clone(), Some(Role::Author), key.to_string()));
         }
+    }
+
+    /// Takes away the plain `model` an older log set at `scope` for `role`,
+    /// under the `model.<runtime>` it was bound to, which may be another
+    /// runtime's than the global one now, and says which key that was. A plain
+    /// change by a person or the file for every role also takes away an agent's
+    /// plain model for the author there, as when both were the one key `model`.
+    pub(crate) fn drop_plain_model(
+        &mut self,
+        scope: &Scope,
+        role: Option<Role>,
+        by: &str,
+    ) -> Option<String> {
+        let author = (scope.clone(), Some(Role::Author));
+        let agents = self
+            .plain_models
+            .get(&author)
+            .filter(|key| role.is_none() && !is_agent(by) && self.agents_author_value(scope, key))
+            .cloned();
+        if let Some(key) = agents {
+            self.plain_models.remove(&author);
+            self.settings
+                .remove(&(scope.clone(), Some(Role::Author), key));
+        }
+        let key = self.plain_models.remove(&(scope.clone(), role))?;
+        self.settings.remove(&(scope.clone(), role, key.clone()));
+        Some(key)
     }
 
     /// Records a value as `by`, as `SettingSet` does.
@@ -898,7 +1115,8 @@ mod level {
     }
 
     #[test]
-    fn only_a_person_sets_ci_deploy_permission_review_rounds_run_in_runner_runtime_and_verify() {
+    fn only_a_person_sets_ci_deploy_investigate_permission_review_rounds_run_in_runner_runtime_and_verify()
+     {
         let mut keys: Vec<&str> = specs()
             .filter(|s| matches!(s.agents, Agents::MayNot(_)))
             .map(|s| s.key)
@@ -909,6 +1127,7 @@ mod level {
             [
                 "ci",
                 "deploy",
+                "investigate",
                 "permission",
                 "review_rounds",
                 "run_in",
@@ -917,6 +1136,37 @@ mod level {
                 "verify",
             ]
         );
+    }
+
+    #[test]
+    fn each_setting_says_whether_it_is_read_per_role() {
+        let per = [
+            "runtime",
+            "model",
+            "runner",
+            "machine",
+            "permission",
+            "remind_after",
+            "reminders",
+            "starts",
+        ];
+        let every = [
+            "review_rounds",
+            "ci",
+            "deploy",
+            "verify",
+            "run_in",
+            "merge",
+            "sync_every",
+            "ci_every",
+            "investigate",
+        ];
+        for (keys, per_role) in [(&per[..], true), (&every[..], false)] {
+            for key in keys {
+                assert_eq!(spec(key).map(|s| s.per_role), Ok(per_role), "{key}");
+            }
+        }
+        assert_eq!(per.len() + every.len(), SPECS.len(), "a key is in neither");
     }
 
     #[test]
@@ -1241,7 +1491,21 @@ mod replay {
             key: "verify".into(),
             by: "refiner-3".into(),
         });
-        let w = world(&events);
+        // The build's default is the runtime a plain model is for, so the daemon
+        // puts the build's choices in before it replays the log.
+        let (w, _) = World {
+            catalog: [(
+                "runtime".to_string(),
+                Choice {
+                    key: "runtime".into(),
+                    allowed: vec!["alpha".into(), "beta".into()],
+                    default: Some("alpha".into()),
+                },
+            )]
+            .into(),
+            ..World::default()
+        }
+        .replay_onto(&events);
         let at = |key| {
             w.setting(&IssueId::new("radar", "44"), Some(Role::Author), key)
                 .map(|r| (r.value.to_string(), r.source()))
@@ -1264,7 +1528,7 @@ mod replay {
             .filter(|(_, e)| e.by == "refiner-3")
             .map(|((_, _, key), _)| key.as_str())
             .collect();
-        assert_eq!(agents, ["model"]);
+        assert_eq!(agents, ["model.alpha"]);
     }
 
     #[test]
@@ -1331,6 +1595,275 @@ mod replay {
         }
     }
 
+    /// `events` replayed onto a build with the runtimes alpha, its default, and
+    /// beta, as the daemon replays its log.
+    fn on_two_runtimes(events: &[Event]) -> World {
+        World {
+            catalog: [(
+                "runtime".to_string(),
+                Choice {
+                    key: "runtime".into(),
+                    allowed: vec!["alpha".into(), "beta".into()],
+                    default: Some("alpha".into()),
+                },
+            )]
+            .into(),
+            ..World::default()
+        }
+        .replay_onto(events)
+        .0
+    }
+
+    /// Every model value kept, as its scope, role, key and value.
+    fn models(w: &World) -> Vec<(Scope, Option<Role>, &str, String)> {
+        w.settings
+            .iter()
+            .filter(|((_, _, key), _)| key.starts_with("model"))
+            .map(|((scope, role, key), e)| {
+                (scope.clone(), *role, key.as_str(), e.value.to_string())
+            })
+            .collect()
+    }
+
+    fn unset(scope: Scope, role: Option<Role>, key: &str, by: &str) -> Event {
+        Event::SettingUnset {
+            scope,
+            role,
+            key: key.into(),
+            by: by.into(),
+        }
+    }
+
+    #[test]
+    fn an_older_logs_plain_model_replays_as_the_model_of_the_runtime_global_at_that_point() {
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        let task = || Scope::Task(IssueId::new("radar", "44"));
+        let mut events = base();
+        // No global runtime yet, so the build's default: alpha.
+        events.push(Event::GroupCreated {
+            group: crate::ids::GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ProjectId::new("radar")],
+            areas: Vec::new(),
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: Some("sonnet".into()),
+            queue_low: None,
+            investigate_every: None,
+        });
+        let guild = || Scope::Area(ProjectId::new("guild"));
+        events.push(set(guild(), None, "model", "haiku", "person"));
+        events.push(unset(guild(), None, "model", "person"));
+        // Before #93 this was the only way to give reviewers on beta a model.
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "runtime",
+            "beta",
+            "person",
+        ));
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "gpt-x",
+            "person",
+        ));
+        events.push(set(task(), None, "model", "opus", "refiner-3"));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        // From here a plain model is beta's.
+        events.push(set(
+            radar(),
+            Some(Role::Arbiter),
+            "model",
+            "gpt-y",
+            "person",
+        ));
+        // The person takes gpt-x away: it was bound to alpha when it was set.
+        events.push(unset(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "person",
+        ));
+        let w = on_two_runtimes(&events);
+        let read = |role| {
+            w.setting(&IssueId::new("radar", "44"), Some(role), "model")
+                .map(|r| r.value.to_string())
+        };
+        assert_eq!(read(Role::Author), None, "opus and sonnet are alpha's");
+        assert_eq!(read(Role::Reviewer), None, "gpt-x was taken away");
+        assert_eq!(read(Role::Arbiter).as_deref(), Some("gpt-y"));
+        assert_eq!(
+            models(&w),
+            [
+                (radar(), None, "model.alpha", "sonnet".into()),
+                (radar(), Some(Role::Arbiter), "model.beta", "gpt-y".into()),
+                (task(), Some(Role::Author), "model.alpha", "opus".into()),
+            ]
+        );
+        let status = crate::text::text(&w, &Default::default());
+        assert!(
+            !status.contains("  global, reviewer: model.alpha = gpt-x, set by person\n"),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn an_older_logs_plain_unset_removes_the_model_its_set_was_bound_to() {
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "gpt-x",
+            "person",
+        ));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(unset(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "person",
+        ));
+        let w = on_two_runtimes(&events);
+        assert_eq!(models(&w), []);
+        let status = crate::text::text(&w, &Default::default());
+        assert!(
+            !status.contains("global, reviewer: model.alpha = gpt-x"),
+            "{status}"
+        );
+        // Reviewers put back on alpha do not get it again.
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "runtime",
+            "alpha",
+            "person",
+        ));
+        let w = on_two_runtimes(&events);
+        assert_eq!(
+            w.setting(&IssueId::new("radar", "44"), Some(Role::Reviewer), "model"),
+            None
+        );
+        // Where the log set no plain model, the unset is the global runtime's now.
+        events.push(set(
+            radar(),
+            Some(Role::Reviewer),
+            "model.beta",
+            "gpt-z",
+            "person",
+        ));
+        events.push(unset(radar(), Some(Role::Reviewer), "model", "person"));
+        assert_eq!(models(&on_two_runtimes(&events)), []);
+    }
+
+    #[test]
+    fn an_older_logs_plain_set_after_a_runtime_change_replaces_the_earlier_model() {
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "gpt-x",
+            "person",
+        ));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "gpt-y",
+            "person",
+        ));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(
+                Scope::Global,
+                Some(Role::Reviewer),
+                "model.beta",
+                "gpt-y".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn an_older_logs_plain_unset_removes_a_groups_old_model() {
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        let guild = || Scope::Area(ProjectId::new("guild"));
+        let mut events = base();
+        // No global runtime yet, so the build's default: alpha.
+        events.push(Event::GroupCreated {
+            group: crate::ids::GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ProjectId::new("radar")],
+            areas: vec![ProjectId::new("guild")],
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: Some("sonnet".into()),
+            queue_low: None,
+            investigate_every: None,
+        });
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(unset(radar(), None, "model", "person"));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(guild(), None, "model.alpha", "sonnet".into())]
+        );
+        events.push(unset(guild(), None, "model", "person"));
+        assert_eq!(models(&on_two_runtimes(&events)), []);
+    }
+
+    #[test]
+    fn an_older_logs_plain_unset_leaves_another_runtimes_model() {
+        let reviewers = || Some(Role::Reviewer);
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(radar(), reviewers(), "model", "gpt-x", "person"));
+        events.push(set(radar(), reviewers(), "model.beta", "gpt-y", "person"));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(unset(radar(), reviewers(), "model", "person"));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(radar(), reviewers(), "model.beta", "gpt-y".into())]
+        );
+        // A model.alpha written by name over the plain one there is that model.
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(radar(), reviewers(), "model", "gpt-x", "person"));
+        events.push(set(radar(), reviewers(), "model.alpha", "gpt-w", "person"));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(unset(radar(), reviewers(), "model", "person"));
+        assert_eq!(models(&on_two_runtimes(&events)), []);
+    }
+
+    #[test]
+    fn an_older_logs_plain_unset_by_a_person_takes_the_refiners_earlier_model_away() {
+        let task = || Scope::Task(IssueId::new("radar", "44"));
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(task(), None, "model", "opus", "refiner-3"));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(task(), Some(Role::Author), "model.alpha", "opus".into())],
+            "the refiner's model is the author's"
+        );
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        let mut unset_it = events.clone();
+        unset_it.push(unset(task(), None, "model", "person"));
+        assert_eq!(models(&on_two_runtimes(&unset_it)), []);
+        // A person's plain model for every role takes it away too.
+        events.push(set(task(), None, "model", "gpt-y", "person"));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(task(), None, "model.beta", "gpt-y".into())]
+        );
+    }
+
     #[test]
     fn an_unset_removes_the_value_and_replaying_the_log_gives_the_same_settings() {
         let mut events = base();
@@ -1372,6 +1905,8 @@ mod unknown_adapter {
     use super::level::{base, world};
     use super::*;
     use crate::command::Command;
+    use crate::ids::{AgentId, MachineId};
+    use crate::model::{Check, Plan};
 
     fn with_catalog() -> World {
         let mut w = world(&base());
@@ -1401,6 +1936,99 @@ mod unknown_adapter {
             "{why}"
         );
         assert!(w.check(None, &set("beta")).is_ok());
+    }
+
+    #[test]
+    fn a_model_for_a_runtime_the_build_lacks_is_refused_with_the_ones_it_has() {
+        use crate::event::Event;
+        let mut w = with_catalog();
+        let set = |key: &str| Command::Set {
+            target: Target::parse("global"),
+            role: None,
+            key: key.into(),
+            value: "x".into(),
+        };
+        let unset = |key: &str| Command::Unset {
+            target: Target::parse("global"),
+            role: None,
+            key: key.into(),
+        };
+        let lacking = |why: String| {
+            assert!(
+                why.contains("model.nonesuch") && why.contains("alpha, beta"),
+                "{why}"
+            );
+        };
+        lacking(w.check(None, &set("model.nonesuch")).expect_err("refused"));
+        lacking(
+            w.check(None, &unset("model.nonesuch"))
+                .expect_err("refused"),
+        );
+        // A value left from a build that had the runtime can still be taken away.
+        w.put(
+            &Scope::Global,
+            None,
+            "model.nonesuch",
+            &Value::Text("x".into()),
+            "person",
+        );
+        assert!(w.check(None, &unset("model.nonesuch")).is_ok());
+        assert!(w.check(None, &set("model.nonesuch")).is_err());
+        for event in w.events(None, &set("model.beta")).expect("accepted") {
+            w.apply(&event);
+        }
+        assert!(w.check(None, &unset("model.beta")).is_ok());
+        for empty in ["model.", "models.beta", "merge.beta"] {
+            let why = w.check(None, &set(empty)).expect_err("no such setting");
+            assert!(why.starts_with(&format!("no setting {empty}")), "{why}");
+        }
+        // A refiner's plan is held to the same runtimes.
+        w.apply(&Event::GroupCreated {
+            group: crate::ids::GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ProjectId::new("radar")],
+            areas: Vec::new(),
+            milestones: vec![crate::ids::MilestoneId::new("Sign-in")],
+            refining_at_once: 1,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        });
+        let refiner = AgentId::new("refiner-1");
+        w.apply(&Event::AgentStarted {
+            agent: refiner.clone(),
+            group: crate::ids::GroupId::new("watch"),
+            role: Role::Refiner,
+            issue: Some(IssueId::new("radar", "44")),
+            folder: None,
+            machine: MachineId::new("local"),
+            secret_digest: None,
+        });
+        let plan = |key: &str| Command::Plan {
+            issue: IssueId::new("radar", "44"),
+            plan: Plan {
+                checks: vec![Check {
+                    done_when: "it works".into(),
+                    proven_by: "a test".into(),
+                }],
+                repos: Vec::new(),
+                settings: [(key.to_string(), Value::Text("x".into()))].into(),
+            },
+        };
+        lacking(
+            w.check(Some(&refiner), &plan("model.nonesuch"))
+                .expect_err("refused"),
+        );
+        let events = w
+            .events(Some(&refiner), &plan("model.beta"))
+            .expect("accepted");
+        assert!(
+            matches!(
+                &events[0],
+                Event::SettingSet { key, role: Some(Role::Author), .. } if key == "model.beta"
+            ),
+            "{events:?}"
+        );
     }
 
     #[test]

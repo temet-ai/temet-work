@@ -8,6 +8,15 @@ use temet_work::socket::{self, Reply};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The commands answered here take no `--json`; `cli::request` refuses it for
+    // the rest.
+    if let Some("help" | "-h" | "--help" | "mcp" | "parts" | "--version") =
+        args.first().map(String::as_str)
+        && args.iter().any(|a| a == cli::JSON)
+    {
+        eprintln!("{}", cli::json_refused());
+        return ExitCode::from(2);
+    }
     match args.first().map(String::as_str) {
         None | Some("help" | "-h" | "--help") => {
             println!("{}", cli::USAGE);
@@ -16,6 +25,14 @@ fn main() -> ExitCode {
         Some("mcp") => return mcp(&args[1..]),
         Some("relay") => return relay(&args[1..]),
         Some("trust-folder") => return trust_folder(&args[1..]),
+        Some("--version") => {
+            println!(
+                "temet-work {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                temet_work::BUILD
+            );
+            return ExitCode::SUCCESS;
+        }
         Some("parts") => {
             let parts = temet_work::parts();
             let ids: Vec<String> = parts
@@ -82,6 +99,16 @@ fn main() -> ExitCode {
             eprintln!("refused: {why}");
             ExitCode::from(1)
         }
+        Ok(Reply::View { view }) => match serde_json::to_string_pretty(&view) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("the view cannot be written as JSON: {e}");
+                ExitCode::from(2)
+            }
+        },
         Err(e) => {
             eprintln!("{e}");
             ExitCode::from(2)
@@ -98,7 +125,7 @@ fn secret() -> Option<String> {
 
 /// `temet-work relay` (hidden): the far end of an SSH transport. Copies one
 /// request line from standard input to this machine's daemon and the reply line
-/// back to standard output, when the caller names this build.
+/// back to standard output, when the caller names the running daemon's build.
 fn relay(args: &[String]) -> ExitCode {
     let (mut path, mut caller) = (None, socket::Caller::default());
     let mut args = args.iter();

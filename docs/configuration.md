@@ -1,6 +1,9 @@
 ---
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
+  - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
+  - 48c80237-558e-4a4a-a82d-bd96b37f1f46
+  - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
 ---
 
 # Configuring temet-workd
@@ -84,22 +87,25 @@ name = "temet-ai/radar"   # the tracker's name for it
 # run_in = "/home/me/src/radar-deploy"   # where both run; the home folder when left out
 # ci = false              # its pull requests run no CI; the plan's checks are left to the reviewer
 
-# Settings (docs/settings.md): [settings] is global, [settings.reviewer] is for one role.
+# Settings (docs/settings.md): [settings] is global, [settings.reviewer] is for one role,
+# and takes only the settings that take a role (docs/settings.md, Roles).
+# A model belongs to a runtime, so a `model` table names the runtime each one is for.
 # [settings]
 # runtime = "claude"
-# model = "sonnet"
+# [settings.model]
+# claude = "sonnet"
 # [settings.reviewer]
 # runtime = "codex"
 #
 # A project's, an area's and a milestone's own: under the project, the area or [[milestone]].
-# [project.settings]
-# model = "haiku"
+# [project.settings.model]
+# claude = "haiku"
 #
 # [[milestone]]
 # of = "radar"                 # a project or an area
 # name = "Slack sign-in rework"
-# [milestone.settings]
-# model = "opus"
+# [milestone.settings.model]
+# claude = "opus"
 
 # A work folder: a checkout an author works in, one issue at a time.
 [[folder]]
@@ -130,6 +136,8 @@ projects = ["radar"]
 # areas = ["guild"]                        # whole areas: their own issues and their projects'
 milestones = ["Slack sign-in rework"]   # first to last; leave out for every issue
 refining_at_once = 1                    # the default
+# queue_low = 4                         # starts an investigator below this many issues in its queue
+# investigate_every = 120               # minutes from one investigation's end to the next; the default
 ```
 
 A group takes its projects' open issues in milestone order, then in the tracker's order.
@@ -137,6 +145,58 @@ It refines `refining_at_once` issues at a time. It starts an author on a refined
 when one of the project's folders is free (on the issue's `machine`, when that setting
 names one) and every issue in the issue's "Depends on" lines is done. A project with two
 folders has at most two authors working at once.
+
+An issue leaves a group's scope when the group no longer lists its milestone, project or
+area, because the issue moved or the group changed. An agent already working on it
+finishes its step: a refiner its plan, an author its change or the fixes it has heard, a
+reviewer its round, an arbiter its ruling. After that the group does not start an agent on
+it, send a fix or a new review round, or merge an approved change. The issue keeps its
+work folders and its idle author, which hold its branch and what the author knew.
+`temet-work status` and `temet-work issue` show its stage followed by "out of scope".
+Three cases go differently:
+
+- A refined issue no author has started on holds no agent or folder, so another group
+  whose lists cover it takes it, without refining it again.
+- A refining issue whose refiner stops before its plan is in goes back to the new issues.
+  It holds no refining slot while it is out, and is refined from the start when a group
+  takes it.
+- An issue with one of its pull requests merged, or deploying or verifying, finishes: the
+  rest merge in the plan's order, then it deploys and is verified.
+
+When the issue is back in its group's lists it carries on from the stage it reached: the
+agent that stage needs starts or is told, or the merge goes ahead. An issue with a plan is
+not refined again.
+
+A group's work queue is the refining, ready and new issues in its scope (its milestones,
+projects and areas): those it is refining or has refined and not started, and those no group
+has taken yet. An issue moved out of them does not hold off an investigator, and counts again
+once it is back. When the queue holds fewer than `queue_low` issues, the daemon starts one
+investigator for the group. Left out, `queue_low` is twice the work folders of the group's
+projects and of the projects in its areas, or 2 when they have none; 0 starts no
+investigator. The investigator holds no work folder and changes no file: it runs in a
+free folder of the group's first project, or in one an author holds when none is free. It
+reads each project's docs for planned work that is not built, the open issues, and the pull
+requests merged since the group's last investigation started (the last 7 days for its
+first), and files an issue for each planned item no open issue covers and for each defect
+it can show (`temet-work file`, `docs/commands.md`). Each goes in the last milestone of the
+group's list unless it names another the group takes, and is in the loop as soon as it is
+filed. A project's `investigate` setting adds lines to the investigator's brief
+(`docs/settings.md`). Closing an issue is how a person says no to it: the brief lists the
+issues a person closed in the group's projects and areas, and the investigator files none of
+them again. The list holds issues the daemon saw open while syncing. A close in the tracker
+counts as a person's unless the daemon made it after verifying the issue, or one of the
+issue's pull requests had merged before it, since a pull request can close its issue as it
+merges. So a person's own close after such a merge does not count either, and the issue may
+be filed again; reopening the issue clears the merge. A person who wants a listed issue
+built reopens it.
+
+The investigation ends when the investigator runs `temet-work investigated GROUP` or its
+session ends. An idle investigator is reminded and then stopped after `remind_after` and
+`reminders`, like any agent the loop waits on. The next one starts once the queue is short
+again and `investigate_every` minutes have passed since the last one ended: 120 when left
+out, and at least 1. A group never investigated may start one at once. `temet-work status`
+shows how many issues the group's queue holds, the count compared with `queue_low`, beside
+`queue_low` itself, and `investigating: investigator-N` while one runs.
 
 A project's `deploy` and `verify` commands run through `sh -c` in its `run_in` folder (your
 home folder when left out), with `TEMET_WORK_ISSUE` (the issue, such as `radar#44`),
@@ -151,13 +211,24 @@ Projects with different `run_in` folders deploy side by side. The daemon reaches
 Settings at every level, from global down to one task, are in `docs/settings.md`. The
 tables `[settings]` (with `[settings.<role>]` inside it), `[project.settings]`,
 `[area.settings]` and `[[milestone]]` become `SettingSet` events recorded as set by
-`file`, when the daemon reads the file and again whenever it changes. A group's `model`
-and a project's `ci`, `deploy`, `verify` and `run_in` are still accepted and are read as
-settings at their level, so an existing file behaves as before. A key the daemon does not
-know is an error naming the key. A value that names a runtime or runner the build does
-not have stops the daemon at start, with the ones it has listed, and so does a build with
-no default runtime or runner and no global value for it. What a person or an agent has
-set since is not overwritten by the file; a value taken out of the file is unset.
+`file`. The daemon reads the file when it starts, so a change to it takes effect at the
+next start. A `model` table in any of them, or in a role's table, gives a model per
+runtime: `[settings.model]` with `claude = "sonnet"` is the setting `model.claude`. A
+plain `model = "..."` is recorded as `model.<runtime>` of the file's global runtime (its
+`[settings]` `runtime`, else the build's default), and stops the daemon at start, naming
+`model.<runtime>`, in a table whose scope and role run another runtime. A runtime a person
+set by command counts for that as well as one the file gives, except where it is the
+global runtime a person moved. A group's `model` and a project's `ci`, `deploy`, `verify`
+and `run_in` are still accepted and are read as settings at their level, so an existing
+file behaves as before. A group's `model` is bound to the file's global runtime and never
+stops the start; under a project on another runtime, that project's agents run their
+runtime's default. A key the
+daemon does not know is an error naming the key, and so is a key in a role's table that
+takes no role (`docs/settings.md`, Roles). A value that names a runtime or runner the
+build does not have, or a model for such a runtime, stops the daemon at start, with the
+ones it has listed, and so does a build with no default runtime or runner and no global
+value for it. What a person or an agent has set since is not overwritten by the file; a
+value taken out of the file is unset.
 
 Listing a folder under `[[folder]]` is your choice to let agents work in it. Before each
 agent starts in a folder, the `claude` runtime marks the folder trusted
@@ -166,11 +237,13 @@ agent starts in a folder, the `claude` runtime marks the folder trusted
 and leaves a folder already trusted alone. For a folder on another machine this happens
 on that machine, in its user file ("A work folder on another machine", below). An agent
 stopped at a prompt the daemon cannot answer is listed under Problems with its name, its
-folder and the prompt, and the line goes when the agent goes on or ends.
+folder and the prompt, and the line goes when the agent goes on or ends. An agent whose
+turn ended in an error, such as a usage limit, is listed the same way with the line its
+turn ended on (`docs/architecture.md`, "Who coordinates").
 
-Each project, folder and group in the file becomes an event in the log the first time the
-daemon reads it, and again whenever it changes. Removing one from the file does not
-remove it from the daemon yet.
+Each project, folder and group in the file becomes an event in the log at the first start
+that reads it, and again at a start that finds it changed. Removing one from the file does
+not remove it from the daemon yet.
 
 ## A work folder on another machine
 
@@ -193,7 +266,7 @@ environment (`ssh://omit/PATH/TO/daemon.sock` when this daemon was started with
 after the host is the daemon's socket there, and none means its default). Every `temet-work` command the agent runs then goes over
 `ssh -o BatchMode=yes omit temet-work relay --build BUILD --host NAME [--socket PATH]`,
 which hands the request to the daemon's local socket when `BUILD`, the build of the agent's
-`temet-work`, is the build of the one on the daemon's machine. No port is opened and no new
+`temet-work`, is the build of the running daemon. No port is opened and no new
 secret is made. `BatchMode` makes a missing
 key fail with ssh's own error instead of waiting for a password. With no `daemon_host`
 the daemon starts no agent on another machine and lists a problem naming `machine` and
@@ -210,10 +283,12 @@ The other machine needs five things, and each has a command that checks it:
 | `temet-work` at the daemon's build | `ssh mac 'TEMET_WORK_DAEMON=ssh://omit temet-work status'`: at another build it is refused, naming both builds |
 | The checkout at `path`, and the agent runtime (such as `claude`) | `ssh mac 'cd /Users/me/projects/radar && git status -sb && command -v claude'` |
 
-The build is what `git describe --always --dirty` said where `temet-work` was built, and
-`temet-workd --build` prints the daemon's. `temet-work` has no flag that prints its own, so
-the check is that `temet-work relay` on the daemon's machine does not refuse it. The
-refusal is one line,
+The build is what `git describe --always --dirty` said where the program was built.
+`temet-workd --build` prints the build of the installed binary, which is the running
+daemon's only until the next install. `temet-work` has no flag that prints its own, so
+the check is that `temet-work relay` on the daemon's machine does not refuse it. The relay
+asks the running daemon its build, so the build of the `temet-work` that runs the relay
+makes no difference. The refusal is one line that names the running daemon's build,
 `refused: temet-work on mac is build X, the daemon is build Y: update it`. A `temet-work`
 too old to send its build is refused as build `unknown` on `the other machine`. Two
 clones of one commit can describe it differently (other tags, or a longer short hash),
@@ -222,6 +297,10 @@ and those count as different builds.
 So the other machine's `temet-work` must be at the daemon's build. The relay checks that
 only once an agent runs there. A `temet-work` older than the trust step below fails at
 that step, before any agent starts, so the relay's refusal is never reached.
+
+A daemon started from a `temet-work` too old to say its build gets no command from another
+machine until it is restarted. The command is refused with
+`refused: the daemon at PATH does not say its build: it was started from an older temet-work; restart it`.
 
 Before each agent starts in a folder on another machine, the daemon trusts the folder
 there: herdr-core runs `temet-work trust-folder claude PATH` on that machine, with no

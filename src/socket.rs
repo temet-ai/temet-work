@@ -12,41 +12,26 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use temet_work_core::{Host, Peer, Request};
 
-/// The daemon's answer to one request.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "reply", rename_all = "snake_case")]
-pub enum Reply {
-    /// Done; the text says what changed, or holds the state for `status`.
-    Done {
-        /// What to show.
-        text: String,
-    },
-    /// Refused, and why.
-    Refused {
-        /// Why, in a line.
-        why: String,
-    },
+pub use temet_work_core::Reply;
+
+/// A line that asks the socket something about the daemon itself, such as
+/// `{"ask":"build"}`. The socket code answers it; it never reaches the loop.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "ask", rename_all = "snake_case")]
+enum Question {
+    /// The [`crate::BUILD`] of the process that holds the socket.
+    Build,
 }
 
-/// Where the daemon listens: `TEMET_WORK_SOCKET`, else
-/// `$XDG_RUNTIME_DIR/temet-work/daemon.sock`, else under the user's own state
-/// folder. Never the shared temp folder, where another user could make the path
-/// first.
+/// Where the daemon listens: the core's rule
+/// ([`temet_work_core::socket::path`]) over this process's environment.
 pub fn path() -> PathBuf {
-    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-    if let Some(p) = var("TEMET_WORK_SOCKET") {
-        return PathBuf::from(p);
-    }
-    let dir = var("XDG_RUNTIME_DIR").map_or_else(
-        || {
-            var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default()
-                .join(".local/state")
-        },
-        PathBuf::from,
-    );
-    dir.join("temet-work").join("daemon.sock")
+    let var = std::env::var_os;
+    temet_work_core::socket::path(
+        var("TEMET_WORK_SOCKET"),
+        var("XDG_RUNTIME_DIR"),
+        var("HOME"),
+    )
 }
 
 /// A request waiting for the daemon's reply.
@@ -66,8 +51,16 @@ impl Pending {
 }
 
 /// Listens at `path` and hands each request to the returned channel, from a
-/// thread per connection. Refuses when a daemon already answers there.
+/// thread per connection. That thread answers `{"ask":"build"}` itself, with
+/// this program's [`crate::BUILD`], without waiting for the daemon's loop.
+/// Refuses when a daemon already answers there.
 pub fn listen(path: &Path) -> Result<Receiver<Pending>, String> {
+    listen_as(path, crate::BUILD)
+}
+
+/// [`listen`], answering the build question with `build`: for a test that needs
+/// a daemon of another build.
+pub fn listen_as(path: &Path, build: &str) -> Result<Receiver<Pending>, String> {
     if UnixStream::connect(path).is_ok() {
         return Err(format!(
             "a daemon is already listening at {}",
@@ -81,16 +74,17 @@ pub fn listen(path: &Path) -> Result<Receiver<Pending>, String> {
     }
     let listener = UnixListener::bind(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let (tx, rx) = mpsc::channel();
+    let build: Arc<str> = build.into();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let tx = tx.clone();
-            std::thread::spawn(move || serve(stream, &tx));
+            let (tx, build) = (tx.clone(), Arc::clone(&build));
+            std::thread::spawn(move || serve(stream, &build, &tx));
         }
     });
     Ok(rx)
 }
 
-fn serve(stream: UnixStream, tx: &Sender<Pending>) {
+fn serve(stream: UnixStream, build: &str, tx: &Sender<Pending>) {
     // Who sent it, read once: the process at the other end of a connection
     // stays the same.
     let peer = crate::peer::of(&stream);
@@ -99,8 +93,11 @@ fn serve(stream: UnixStream, tx: &Sender<Pending>) {
     for line in BufReader::new(read).lines() {
         let Ok(line) = line else { return };
         let reply = match serde_json::from_str::<Request>(&line) {
-            Err(e) => Reply::Refused {
-                why: format!("not a request: {e}"),
+            Err(e) => match serde_json::from_str::<Question>(&line) {
+                Ok(Question::Build) => Reply::Done { text: build.into() },
+                Err(_) => Reply::Refused {
+                    why: format!("not a request: {e}"),
+                },
             },
             Ok(request) => {
                 let (reply, answered) = mpsc::channel();
@@ -430,10 +427,20 @@ pub struct Caller<'a> {
 
 /// `temet-work relay`: copies one request line from `input` to the daemon's
 /// socket at `path` and its reply line to `out`, so the other end of an SSH hop
-/// speaks the daemon's own wire format. A `caller` that is not this build gets a
-/// refusal naming both builds, and the daemon is not contacted: this program and
-/// the daemon come from one install. The request is marked as relayed, so the
+/// speaks the daemon's own wire format. The relay is only a pipe for that line,
+/// so its own build does not matter: it asks the daemon which build it is
+/// (`{"ask":"build"}`) and sends the request on the same connection, so one
+/// process answers both. A `caller` at another build gets a refusal naming both
+/// builds, and a daemon that does not say its build gets one saying to restart
+/// it; neither is sent the request. The request is marked as relayed, so the
 /// daemon knows it came from another machine.
+///
+/// The build is asked over the socket because the answer comes from the process
+/// that holds it. A `<socket>.build` file can be left by an earlier daemon, or
+/// stay behind after a rollback to a daemon that writes none. A path to the
+/// daemon's own `temet-work` in an agent's [`DAEMON_VAR`] runs whatever is
+/// installed there now, which after a reinstall without a restart is not what
+/// the daemon runs.
 pub fn relay(
     path: &Path,
     caller: Caller,
@@ -443,33 +450,57 @@ pub fn relay(
     let mut line = String::new();
     let mut input = input;
     input.read_line(&mut line).map_err(|e| e.to_string())?;
-    if caller.build != Some(shell_word(crate::BUILD).as_str()) {
-        let refusal = Reply::Refused {
-            why: format!(
-                "temet-work on {} is build {}, the daemon is build {}: update it",
-                caller.host.unwrap_or("the other machine"),
-                caller.build.unwrap_or("unknown"),
-                crate::BUILD
-            ),
-        };
-        let refusal = serde_json::to_string(&refusal).map_err(|e| e.to_string())?;
-        return writeln!(out, "{refusal}")
-            .and_then(|()| out.flush())
-            .map_err(|e| e.to_string());
-    }
-    let line = relayed(line.trim_end());
-    let mut stream = connect(path)?;
-    stream
-        .write_all(line.as_bytes())
-        .and_then(|()| stream.write_all(b"\n"))
-        .map_err(|e| e.to_string())?;
-    let mut reply = String::new();
-    BufReader::new(stream)
-        .read_line(&mut reply)
-        .map_err(|e| e.to_string())?;
+    let stream = connect(path)?;
+    let mut replies = BufReader::new(&stream);
+    let question = serde_json::to_string(&Question::Build).map_err(|e| e.to_string())?;
+    let answer = exchange(&stream, &mut replies, &question)
+        .ok()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "no temet-work daemon answers at {} (it closed the connection before it said its build); it may be restarting: run the command again in a minute",
+                path.display()
+            )
+        })?;
+    let refusal = match serde_json::from_str::<Reply>(&answer) {
+        Ok(Reply::Done { text: build }) if caller.build == Some(shell_word(&build).as_str()) => {
+            None
+        }
+        Ok(Reply::Done { text: build }) => Some(format!(
+            "temet-work on {} is build {}, the daemon is build {build}: update it",
+            caller.host.unwrap_or("the other machine"),
+            caller.build.unwrap_or("unknown"),
+        )),
+        _ => Some(format!(
+            "the daemon at {} does not say its build: it was started from an older temet-work; restart it",
+            path.display()
+        )),
+    };
+    let reply = match refusal {
+        Some(why) => {
+            let refusal = Reply::Refused { why };
+            serde_json::to_string(&refusal).map_err(|e| e.to_string())? + "\n"
+        }
+        None => exchange(&stream, &mut replies, &relayed(line.trim_end()))?,
+    };
     out.write_all(reply.as_bytes())
         .and_then(|()| out.flush())
         .map_err(|e| e.to_string())
+}
+
+/// Writes one line to the daemon and reads the line it replies with, which is
+/// empty when it closed the connection instead.
+fn exchange(
+    mut stream: &UnixStream,
+    replies: &mut impl BufRead,
+    line: &str,
+) -> Result<String, String> {
+    stream
+        .write_all(format!("{line}\n").as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut reply = String::new();
+    replies.read_line(&mut reply).map_err(|e| e.to_string())?;
+    Ok(reply)
 }
 
 /// A request line marked as relayed. A line that is not a JSON object goes on
@@ -527,6 +558,9 @@ pub fn answer(
     if let Err(why) = host.world().admit(&sender, &request.command) {
         return Ok(Reply::Refused { why });
     }
+    if let temet_work_core::Command::File { .. } = &request.command {
+        return file(host, now_ms, request);
+    }
     match host.world().events(request.by.as_ref(), &request.command) {
         Err(why) => Ok(Reply::Refused { why }),
         Ok(events) if events.is_empty() => Ok(match &request.command {
@@ -536,8 +570,12 @@ pub fn answer(
                     Err(why) => Reply::Refused { why },
                 }
             }
+            temet_work_core::Command::View => Reply::View {
+                view: temet_work_core::View::new(host.world(), host.problems()),
+            },
             temet_work_core::Command::Issue { issue } => Reply::Done {
-                text: temet_work_core::text::issue(host.world(), issue).unwrap_or_default(),
+                text: temet_work_core::text::issue(host.world(), issue, &host.issue_text(issue))
+                    .unwrap_or_default(),
             },
             temet_work_core::Command::Screen { agent } => match host.screen(agent) {
                 Ok(text) => Reply::Done { text },
@@ -569,6 +607,20 @@ pub fn answer(
                         text: format!("rule {} is {state}", rule.0),
                     });
                 }
+                temet_work_core::Command::Investigated { group } => {
+                    let filed = host
+                        .world()
+                        .investigations
+                        .get(group)
+                        .map_or(0, |i| i.filed.len());
+                    return Ok(Reply::Done {
+                        text: format!(
+                            "the investigation for {group} has ended with {filed} issue{} filed; \
+                             your session is stopped",
+                            if filed == 1 { "" } else { "s" }
+                        ),
+                    });
+                }
                 _ => (),
             };
             let text = request
@@ -582,6 +634,63 @@ pub fn answer(
             Ok(Reply::Done { text })
         }
     }
+}
+
+/// The daemon's request log: who sent a command and what came of it. A command
+/// that only reads and was answered has no line, so the app's `view` once a
+/// second does not bury the commands that changed something or were refused.
+pub fn request_line(request: &Request, reply: &Reply) -> Option<String> {
+    let came_of_it = match reply {
+        Reply::Refused { why } => format!("refused: {why}"),
+        Reply::Done { .. } | Reply::View { .. } if request.command.changes() => "done".to_string(),
+        Reply::Done { .. } | Reply::View { .. } => return None,
+    };
+    // The variant's name alone: its fields may be long.
+    let debug = format!("{:?}", request.command);
+    Some(format!(
+        "request: by={} {} -> {came_of_it}",
+        request.by.as_ref().map_or("none", |a| a.0.as_str()),
+        debug.split([' ', '{', '(']).next().unwrap_or_default(),
+    ))
+}
+
+/// Files an issue for an investigator through the tracker, and answers with the
+/// new issue's id and how a later issue names it in a "Depends on" line.
+fn file(host: &mut Host, now_ms: u64, request: &Request) -> Result<Reply, String> {
+    let effect = match host.world().filing(request.by.as_ref(), &request.command) {
+        Ok(effect) => effect,
+        Err(why) => return Ok(Reply::Refused { why }),
+    };
+    let events = match host.perform(now_ms, &effect)? {
+        Ok(events) => events,
+        Err(why) => return Ok(Reply::Refused { why }),
+    };
+    let Some((issue, milestone)) = events.iter().find_map(|e| match e {
+        temet_work_core::Event::IssueFiled {
+            issue, milestone, ..
+        } => Some((issue, milestone)),
+        _ => None,
+    }) else {
+        return Ok(Reply::Refused {
+            why: "the tracker filed nothing".into(),
+        });
+    };
+    // A number is written `#12` in a "Depends on" line; a key such as GLD-12 as it is.
+    let named = if issue.key.chars().all(|c| c.is_ascii_digit()) {
+        format!("#{}", issue.key)
+    } else {
+        issue.key.clone()
+    };
+    let milestone = milestone.as_ref().map_or_else(
+        || " with no milestone".to_string(),
+        |m| format!(" in milestone {m}"),
+    );
+    Ok(Reply::Done {
+        text: format!(
+            "filed {issue}{milestone}; an issue of {} that waits for it says: Depends on {named}",
+            issue.project
+        ),
+    })
 }
 
 /// What a `set` or `unset` is answered with, read from the event it was recorded
@@ -668,6 +777,78 @@ mod tests {
     }
 
     #[test]
+    fn request_line_logs_changes_and_refusals_and_no_answered_read() {
+        use temet_work_core::ids::{AgentId, IssueId};
+        use temet_work_core::settings::Target;
+        use temet_work_core::{Command, View, World};
+
+        let line = |by: Option<&str>, command: Command, reply: &Reply| {
+            request_line(&Request::new(by.map(AgentId::new), command), reply)
+        };
+        let done = Reply::Done {
+            text: "all quiet".into(),
+        };
+        let refused = Reply::Refused {
+            why: "the clacks are down".into(),
+        };
+        let view = Reply::View {
+            view: View::new(&World::default(), &Default::default()),
+        };
+        let issue = || IssueId::new("ankh", "1");
+        let screen = || Command::Screen {
+            agent: AgentId::new("author-1"),
+        };
+        let plan = || Command::Plan {
+            issue: issue(),
+            plan: temet_work_core::model::Plan {
+                checks: Vec::new(),
+                repos: Vec::new(),
+                settings: Default::default(),
+            },
+        };
+        let set = Command::Set {
+            target: Target::Global,
+            role: None,
+            key: "model".into(),
+            value: "sonnet".into(),
+        };
+        let settings = Command::Settings {
+            target: Target::Global,
+            role: None,
+        };
+
+        assert_eq!(line(None, Command::View, &view), None);
+        assert_eq!(line(None, Command::Status, &done), None);
+        let read = Command::Issue { issue: issue() };
+        assert_eq!(line(Some("author-1"), read, &done), None);
+        assert_eq!(line(None, screen(), &done), None);
+        assert_eq!(line(None, settings, &done), None);
+
+        for (by, command, name) in [
+            (None, Command::View, "none View"),
+            (Some("author-1"), Command::Status, "author-1 Status"),
+            (Some("author-1"), screen(), "author-1 Screen"),
+            (Some("refiner-1"), plan(), "refiner-1 Plan"),
+        ] {
+            assert_eq!(
+                line(by, command, &refused),
+                Some(format!(
+                    "request: by={name} -> refused: the clacks are down"
+                ))
+            );
+        }
+
+        assert_eq!(
+            line(Some("refiner-1"), plan(), &done).as_deref(),
+            Some("request: by=refiner-1 Plan -> done")
+        );
+        assert_eq!(
+            line(None, set, &done).as_deref(),
+            Some("request: by=none Set -> done")
+        );
+    }
+
+    #[test]
     fn the_relay_marks_a_request_and_passes_anything_else_on() {
         let line = r#"{"by":"author-1","secret":"s","command":{"command":"status"}}"#;
         let marked: Request = serde_json::from_str(&relayed(line)).expect("a request");
@@ -747,26 +928,144 @@ mod tests {
         );
     }
 
-    #[test]
-    fn relay_refuses_a_caller_that_sends_no_build_before_it_touches_the_socket() {
+    /// A socket path under this checkout's build folder, with nothing at it.
+    fn socket_at(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp");
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join(format!("{}-{name}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    const STATUS: &str = r#"{"by":null,"command":{"command":"status"}}"#;
+
+    /// What the relay writes back for a status request from `caller`.
+    fn relayed_status(path: &Path, caller: Caller) -> Reply {
         let mut out = Vec::new();
-        // No daemon is there: reaching for it would be an error.
-        let relayed = relay(
-            Path::new("/nonexistent/daemon.sock"),
-            Caller::default(),
-            &b"{\"command\":\"from an older client\"}\n"[..],
-            &mut out,
-        );
-        assert_eq!(relayed, Ok(()));
+        let input = format!("{STATUS}\n");
+        assert_eq!(relay(path, caller, input.as_bytes(), &mut out), Ok(()));
+        serde_json::from_slice(&out).expect("a reply")
+    }
+
+    fn at_octarine() -> Caller<'static> {
+        Caller {
+            build: Some("octarine"),
+            host: Some("lancre"),
+        }
+    }
+
+    #[test]
+    fn the_socket_says_its_build_and_still_answers_the_next_request() {
+        let path = socket_at("ask-build");
+        let requests = listen(&path).expect("listen");
+        let stream = UnixStream::connect(&path).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("timeout");
+        let mut replies = BufReader::new(&stream);
+        let mut ask = |line: &str| {
+            let reply = exchange(&stream, &mut replies, line)?;
+            serde_json::from_str::<Reply>(&reply).map_err(|e| e.to_string())
+        };
+        // Answered with nothing reading the channel: the loop plays no part.
         assert_eq!(
-            serde_json::from_slice::<Reply>(&out).expect("a reply"),
+            ask(r#"{"ask":"build"}"#),
+            Ok(Reply::Done {
+                text: crate::BUILD.into()
+            })
+        );
+        let daemon = std::thread::spawn(move || {
+            let pending = requests
+                .recv_timeout(Duration::from_secs(1))
+                .expect("a request");
+            assert_eq!(pending.request, status(None));
+            pending.answer(Reply::Done {
+                text: "all quiet".into(),
+            });
+        });
+        let reply = ask(STATUS);
+        daemon.join().expect("daemon");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(reply, all_quiet());
+    }
+
+    /// A daemon that takes one connection, closes its listener, and answers each
+    /// line on that connection with what `reply` makes of it. Joining it gives
+    /// the lines it got.
+    fn one_connection(
+        path: &Path,
+        reply: impl Fn(&str) -> &'static str + Send + 'static,
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        let listener = UnixListener::bind(path).expect("bind");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            drop(listener);
+            let lines = BufReader::new(stream.try_clone().expect("clone")).lines();
+            lines
+                .map(|line| {
+                    let line = line.expect("a line");
+                    writeln!(stream, "{}", reply(&line)).expect("reply");
+                    line
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn the_relay_asks_and_sends_the_request_on_one_connection() {
+        let path = socket_at("one-connection");
+        let daemon = one_connection(&path, |line| {
+            if line == r#"{"ask":"build"}"# {
+                r#"{"reply":"done","text":"octarine"}"#
+            } else {
+                r#"{"reply":"done","text":"all quiet"}"#
+            }
+        });
+        let reply = relayed_status(&path, at_octarine());
+        let lines = daemon.join().expect("daemon");
+        let again = UnixStream::connect(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(Ok(reply), all_quiet());
+        assert_eq!(lines, [r#"{"ask":"build"}"#.to_string(), relayed(STATUS)]);
+        assert!(again.is_err(), "a second connection was taken");
+    }
+
+    #[test]
+    fn a_daemon_that_does_not_say_its_build_is_sent_no_request() {
+        let path = socket_at("older-daemon");
+        // What a daemon from before the question says to a line it cannot read.
+        let daemon = one_connection(
+            &path,
+            |_| r#"{"reply":"refused","why":"not a request: missing field `command`"}"#,
+        );
+        let reply = relayed_status(&path, at_octarine());
+        let lines = daemon.join().expect("daemon");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            reply,
             Reply::Refused {
                 why: format!(
-                    "temet-work on the other machine is build unknown, the daemon is build {}: update it",
-                    crate::BUILD
+                    "the daemon at {} does not say its build: it was started from an older temet-work; restart it",
+                    path.display()
                 )
             }
         );
+        assert_eq!(lines, [r#"{"ask":"build"}"#]);
+    }
+
+    #[test]
+    fn relay_asks_the_daemon_its_build_to_refuse_a_caller_that_sends_none() {
+        let path = socket_at("no-build");
+        let requests = listen_as(&path, "octarine").expect("listen");
+        let reply = relayed_status(&path, Caller::default());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            reply,
+            Reply::Refused {
+                why: "temet-work on the other machine is build unknown, the daemon is build octarine: update it".into()
+            }
+        );
+        assert!(requests.try_recv().is_err(), "the request was forwarded");
     }
 
     #[test]

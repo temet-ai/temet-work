@@ -12,8 +12,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
+use temet_work_core::command::PERSON;
 use temet_work_core::ids::{FolderId, GroupId, MachineId, MilestoneId, ProjectId};
-use temet_work_core::model::Role;
+use temet_work_core::model::{INVESTIGATE_EVERY, Role};
 use temet_work_core::settings::{self, FILE, Key, Scope, Value};
 use temet_work_core::world::LOCAL;
 use temet_work_core::{Event, World};
@@ -109,14 +110,33 @@ pub struct FolderConf {
 type Wanted = BTreeMap<Key, Value>;
 
 /// Reads a `[settings]`-style table at `scope`: scalars are the settings for every
-/// role, a table named for a role holds that role's.
+/// role, a table named for a role holds that role's, of the settings read per role.
+/// In either, a table `model` holds a model for each runtime it names.
 fn read_settings(table: &toml::Table, scope: &Scope, out: &mut Wanted) -> Result<(), String> {
     let at = |scope: &Scope| match scope {
         Scope::Global => "[settings]".to_string(),
         other => format!("the settings of {other}"),
     };
+    let mut read = |role: Option<Role>, key: &str, value: &toml::Value| {
+        // TOML cannot hold `model = "x"` and `model.y` in one table, so a
+        // runtime's model is an entry of a `model` table: the key `model.y`.
+        let entries = match value {
+            toml::Value::Table(models) if key == "model" => models
+                .iter()
+                .map(|(runtime, model)| (format!("model.{runtime}"), model))
+                .collect(),
+            _ => vec![(key.to_string(), value)],
+        };
+        for (key, value) in entries {
+            let value = value_of(&key, value).map_err(|e| format!("{}: {e}", at(scope)))?;
+            out.insert((scope.clone(), role, key), value);
+        }
+        Ok::<(), String>(())
+    };
     for (key, value) in table {
-        if let toml::Value::Table(inner) = value {
+        if let toml::Value::Table(inner) = value
+            && key != "model"
+        {
             let role = Role::parse(key).map_err(|_| {
                 format!(
                     "{}: {key} is not a setting, and is not a role either; \
@@ -124,20 +144,31 @@ fn read_settings(table: &toml::Table, scope: &Scope, out: &mut Wanted) -> Result
                     at(scope)
                 )
             })?;
+            let role_table = table_name(scope, Some(role), "");
             for (key, value) in inner {
-                out.insert(
-                    (scope.clone(), Some(role), key.clone()),
-                    value_of(key, value).map_err(|e| format!("{}: {e}", at(scope)))?,
-                );
+                settings::check_role(key, "role table")
+                    .map_err(|e| format!("{role_table}: {e}"))?;
+                read(Some(role), key, value)?;
             }
             continue;
         }
-        out.insert(
-            (scope.clone(), None, key.clone()),
-            value_of(key, value).map_err(|e| format!("{}: {e}", at(scope)))?,
-        );
+        read(None, key, value)?;
     }
     Ok(())
+}
+
+/// The table of the file that holds `scope`'s settings for `role` (none: for
+/// every role), with `sub` (`.model`) after it, as an error names it.
+fn table_name(scope: &Scope, role: Option<Role>, sub: &str) -> String {
+    let role = role.map_or_else(String::new, |r| format!(".{}", r.name()));
+    match scope {
+        Scope::Global => format!("[settings{role}{sub}]"),
+        Scope::Project(id) => format!("[project.settings{role}{sub}] of {id}"),
+        Scope::Area(id) => format!("[area.settings{role}{sub}] of {id}"),
+        Scope::Milestone { .. } | Scope::Task(_) => {
+            format!("[milestone.settings{role}{sub}] of {scope}")
+        }
+    }
 }
 
 /// A setting's value from TOML, checked against what the setting takes.
@@ -198,6 +229,13 @@ pub struct GroupConf {
     /// The model its agents run (`haiku`, `sonnet`); the runtime's default when
     /// left out. Read as the `model` setting of the projects and areas it works on.
     pub model: Option<String>,
+    /// Below how many issues in its work queue it starts an investigator; twice
+    /// the work folders of its projects (2 with none) when left out, and 0 for
+    /// never.
+    pub queue_low: Option<usize>,
+    /// Minutes from the end of its last investigation before another may start;
+    /// 120 when left out.
+    pub investigate_every: Option<u64>,
 }
 
 fn local() -> String {
@@ -290,6 +328,13 @@ impl Config {
         }
         let mut groups = BTreeSet::new();
         for g in &self.groups {
+            if g.investigate_every == Some(0) {
+                return Err(format!(
+                    "group {} has investigate_every 0: it takes at least 1 minute, so a group with \
+                     nothing left to plan does not investigate in a loop",
+                    g.id
+                ));
+            }
             if let Some(a) = g.areas.iter().find(|a| !areas.contains(a.as_str())) {
                 return Err(format!(
                     "group {} names area {a}, which is not listed",
@@ -306,15 +351,15 @@ impl Config {
                 ));
             }
         }
+        self.group_models()?;
         self.wanted()?;
         Ok(())
     }
 
-    /// Every setting the file gives, with the legacy keys read as settings at
-    /// their level: a group's `model` on the projects and areas it works on, a
-    /// project's `ci`, `deploy`, `verify` and `run_in` on the project. A table
-    /// written out wins over a legacy key at the same place.
-    fn wanted(&self) -> Result<Wanted, String> {
+    /// A group's old `model`, as the plain `model` of each project and area it
+    /// works on. It is kept apart from the tables' settings because it binds
+    /// differently ([`Config::bound`]).
+    fn group_models(&self) -> Result<Wanted, String> {
         let mut out = Wanted::new();
         let mut from_group: BTreeMap<Scope, (String, String)> = BTreeMap::new();
         for g in &self.groups {
@@ -341,6 +386,14 @@ impl Config {
                 );
             }
         }
+        Ok(out)
+    }
+
+    /// Every setting the file's tables give, with a project's old keys `ci`,
+    /// `deploy`, `verify` and `run_in` read as settings on the project. A table
+    /// written out wins over an old key at the same place.
+    fn wanted(&self) -> Result<Wanted, String> {
+        let mut out = Wanted::new();
         for p in &self.projects {
             let scope = Scope::Project(ProjectId::new(&p.id));
             for (key, value) in [
@@ -381,13 +434,117 @@ impl Config {
         Ok(out)
     }
 
+    /// The file's settings with each plain `model` bound as it is written: to
+    /// `model.<runtime>` of the file's global runtime (its `[settings]` runtime,
+    /// else the build's default in `world`'s catalog). A table's plain `model` is
+    /// refused where the file gives that scope and role another runtime; a
+    /// group's old `model` never is, since it predates models per runtime. Only
+    /// the file is read, never the live settings: a person's later `set global
+    /// runtime` must not turn the file's model into another runtime's on the
+    /// next start. A table's own model wins over a group's at the same place.
+    fn bound(&self, world: &World) -> Result<Wanted, String> {
+        let file = self.file_runtimes(world)?;
+        let (plain, mut out): (Wanted, Wanted) = self
+            .wanted()?
+            .into_iter()
+            .partition(|((_, _, key), _)| key == "model");
+        for ((scope, role, key), value) in plain {
+            let bound = file.model_key(&scope, role, &key).map_err(|e| {
+                format!(
+                    "{}: {e}, an entry of {}",
+                    table_name(&scope, role, ""),
+                    table_name(&scope, role, ".model")
+                )
+            })?;
+            out.entry((scope, role, bound)).or_insert(value);
+        }
+        for ((scope, role, key), value) in self.group_models()? {
+            out.entry((scope, role, file.bound_key(&key)))
+                .or_insert(value);
+        }
+        Ok(out)
+    }
+
+    /// A world that holds only `world`'s catalog, the file's areas and the
+    /// runtimes the file gives.
+    fn file_runtimes(&self, world: &World) -> Result<World, String> {
+        let mut file = World {
+            catalog: world.catalog.clone(),
+            ..World::default()
+        };
+        for a in &self.areas {
+            file.apply(&Event::AreaDefined {
+                area: ProjectId::new(&a.id),
+                name: a.id.clone(),
+                projects: a.projects.iter().map(ProjectId::new).collect(),
+                tracker: String::new(),
+                tracker_name: String::new(),
+            });
+        }
+        for ((scope, role, key), value) in self.wanted()? {
+            if key == "runtime" {
+                file.apply(&Event::SettingSet {
+                    scope,
+                    role,
+                    key,
+                    value,
+                    by: FILE.into(),
+                });
+            }
+        }
+        Ok(file)
+    }
+
     /// Why this build cannot run with the file's settings: one that names a
-    /// runtime or runner it does not have.
+    /// runtime or runner it does not have, or gives such a runtime a model, or a
+    /// plain model in a table whose scope and role run a runtime other than the
+    /// global one, by the file or by a person's command ([`Config::check_live`]).
     pub fn check_build(&self, world: &World) -> Result<(), String> {
-        for ((scope, _, key), value) in self.wanted()? {
+        for ((scope, _, key), value) in self.bound(world)? {
             world
                 .check_choice(&key, &value)
                 .map_err(|e| format!("the settings of {scope}: {e}"))?;
+        }
+        self.check_live(world)
+    }
+
+    /// A plain `model` of the file's tables against the runtimes `world` holds
+    /// once this file's events are applied, as the start will leave them, so a
+    /// runtime only an earlier file set no longer counts. It is refused where
+    /// its scope and role run neither the runtime it is bound to nor the live
+    /// global runtime ([`World::runtime_unlike_model`]). A group's old `model`
+    /// is never refused ([`Config::bound`]).
+    fn check_live(&self, world: &World) -> Result<(), String> {
+        let Some(bound) = self.file_runtimes(world)?.global_runtime() else {
+            return Ok(());
+        };
+        let bound = bound.to_string();
+        let (live, _) = world.clone().replay_onto(&self.events(world));
+        for (scope, role, _) in self.wanted()?.keys().filter(|(_, _, k)| k == "model") {
+            let Some(here) = live.runtime_unlike_model(scope, *role, &bound) else {
+                continue;
+            };
+            let runs = here.value;
+            let who = match here.by.as_deref() {
+                Some(PERSON) => "a person",
+                Some(by) => by,
+                None => "the build",
+            };
+            let whose = role.map_or_else(
+                || "every role's".to_string(),
+                |r| format!("the {}s'", r.name()),
+            );
+            let at = match here.scope {
+                Some(Scope::Global) | None => "globally".to_string(),
+                Some(other) => format!("at {other}"),
+            };
+            return Err(format!(
+                "{}: {who} set {whose} runtime to {runs} {at}, and a plain model in the file \
+                 is the file's global runtime's ({bound}): name the runtime, as model.{runs}, \
+                 an entry of {}",
+                table_name(scope, *role, ""),
+                table_name(scope, *role, ".model")
+            ));
         }
         Ok(())
     }
@@ -454,28 +611,31 @@ impl Config {
             }
         }
         // Before the groups, so what a group takes on already has its settings.
-        let wanted = self.wanted().unwrap_or_default();
-        for (key, value) in &wanted {
-            let current = world.settings.get(key);
-            // Not over a value a person or an agent has set since.
-            if current.is_none_or(|e| e.by == FILE && &e.value != value) {
-                out.push(Event::SettingSet {
-                    scope: key.0.clone(),
-                    role: key.1,
-                    key: key.2.clone(),
-                    value: value.clone(),
-                    by: FILE.into(),
-                });
+        // Settings the file cannot bind (`check_build` refuses them) change
+        // nothing, rather than unset what the file set before.
+        if let Ok(wanted) = self.bound(world) {
+            for (key, value) in &wanted {
+                let current = world.settings.get(key);
+                // Not over a value a person or an agent has set since.
+                if current.is_none_or(|e| e.by == FILE && &e.value != value) {
+                    out.push(Event::SettingSet {
+                        scope: key.0.clone(),
+                        role: key.1,
+                        key: key.2.clone(),
+                        value: value.clone(),
+                        by: FILE.into(),
+                    });
+                }
             }
-        }
-        for (key, entry) in &world.settings {
-            if entry.by == FILE && !wanted.contains_key(key) {
-                out.push(Event::SettingUnset {
-                    scope: key.0.clone(),
-                    role: key.1,
-                    key: key.2.clone(),
-                    by: FILE.into(),
-                });
+            for (key, entry) in &world.settings {
+                if entry.by == FILE && !wanted.contains_key(key) {
+                    out.push(Event::SettingUnset {
+                        scope: key.0.clone(),
+                        role: key.1,
+                        key: key.2.clone(),
+                        by: FILE.into(),
+                    });
+                }
             }
         }
         for g in &self.groups {
@@ -491,6 +651,8 @@ impl Config {
                     && w.areas == areas
                     && w.milestones == milestones
                     && w.refining_at_once == refining_at_once
+                    && w.queue_low == g.queue_low
+                    && w.investigate_every == g.investigate_every.unwrap_or(INVESTIGATE_EVERY)
             });
             if !same {
                 out.push(Event::GroupCreated {
@@ -501,6 +663,8 @@ impl Config {
                     milestones,
                     refining_at_once,
                     model: None,
+                    queue_low: g.queue_low,
+                    investigate_every: g.investigate_every,
                 });
             }
         }
@@ -571,6 +735,39 @@ milestones = ["Clocks"]
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn a_group_reads_queue_low_and_investigate_every_or_leaves_them_to_the_defaults() {
+        let group = |config: &Config| {
+            let (world, _) = World::replay(&config.events(&World::default()));
+            world.groups[&GroupId::new("watch")].clone()
+        };
+        let plain = Config::parse(EXAMPLE).expect("parse");
+        let g = group(&plain);
+        assert_eq!((g.queue_low, g.investigate_every), (None, 120));
+        let set = Config::parse(&EXAMPLE.replace(
+            "milestones = [\"Clocks\"]",
+            "milestones = [\"Clocks\"]\nqueue_low = 5\ninvestigate_every = 30",
+        ))
+        .expect("parse");
+        let g = group(&set);
+        assert_eq!((g.queue_low, g.investigate_every), (Some(5), 30));
+        // A change of either is sent again; the same values are not.
+        let (world, _) = World::replay(&plain.events(&World::default()));
+        assert!(matches!(
+            set.events(&world).as_slice(),
+            [Event::GroupCreated {
+                queue_low: Some(5),
+                investigate_every: Some(30),
+                ..
+            }]
+        ));
+        let (world, _) = World::replay(&set.events(&World::default()));
+        assert_eq!(set.events(&world), vec![]);
+        let never = EXAMPLE.replace("milestones = [\"Clocks\"]", "investigate_every = 0");
+        let why = Config::parse(&never).expect_err("0 minutes");
+        assert!(why.contains("investigate_every 0"), "{why}");
     }
 
     const AREA: &str = r#"
@@ -757,8 +954,9 @@ starts = 1
                 .map(|e| e.value.clone())
         };
         let radar = || Scope::Project(ProjectId::new("radar"));
+        // [settings] names alpha, so its plain model is alpha's.
         assert_eq!(
-            get(Scope::Global, None, "model"),
+            get(Scope::Global, None, "model.alpha"),
             Some(Value::Text("sonnet".into()))
         );
         assert_eq!(
@@ -785,7 +983,7 @@ starts = 1
                     name: "Sign-in rework".into()
                 },
                 None,
-                "model"
+                "model.alpha"
             ),
             Some(Value::Text("opus".into()))
         );
@@ -845,6 +1043,389 @@ starts = 1
         );
         let empty = format!("[settings]\nmachine = \"\"\n{TODAY}");
         assert!(Config::parse(&empty).is_err_and(|e| e.contains("machine")));
+    }
+
+    #[test]
+    fn a_model_table_gives_each_runtime_its_model_at_every_level_and_role() {
+        let text = r#"
+[settings.model]
+alpha = "sonnet"
+beta = "gpt-x"
+
+[settings.reviewer.model]
+beta = "gpt-y"
+
+[[project]]
+id = "ankh"
+tracker = "fake"
+name = "city/ankh"
+
+[project.settings.model]
+alpha = "haiku"
+
+[project.settings.author.model]
+beta = "gpt-z"
+
+[[area]]
+id = "guild"
+projects = ["ankh"]
+
+[area.settings.model]
+alpha = "guild's"
+
+[[milestone]]
+of = "ankh"
+name = "Clocks"
+
+[milestone.settings.model]
+alpha = "opus"
+
+[milestone.settings.arbiter]
+model = { beta = "gpt-w" }
+"#;
+        let w = world_of(text);
+        let ankh = || Scope::Project(ProjectId::new("ankh"));
+        let milestone = || Scope::Milestone {
+            of: ProjectId::new("ankh"),
+            name: "Clocks".into(),
+        };
+        let want = [
+            (Scope::Global, None, "model.alpha", "sonnet"),
+            (Scope::Global, None, "model.beta", "gpt-x"),
+            (Scope::Global, Some(Role::Reviewer), "model.beta", "gpt-y"),
+            (ankh(), None, "model.alpha", "haiku"),
+            (ankh(), Some(Role::Author), "model.beta", "gpt-z"),
+            (
+                Scope::Area(ProjectId::new("guild")),
+                None,
+                "model.alpha",
+                "guild's",
+            ),
+            (milestone(), None, "model.alpha", "opus"),
+            (milestone(), Some(Role::Arbiter), "model.beta", "gpt-w"),
+        ];
+        assert_eq!(w.settings.len(), want.len(), "{:?}", w.settings);
+        for (scope, role, key, value) in want {
+            let entry = &w.settings[&(scope, role, key.to_string())];
+            assert_eq!(
+                (entry.value.to_string().as_str(), entry.by.as_str()),
+                (value, FILE)
+            );
+        }
+        for (bad, named) in [
+            ("[settings.model]\nalpha = 4\n", "model.alpha"),
+            (
+                "[settings.model.reviewer]\nalpha = \"x\"\n",
+                "model.reviewer",
+            ),
+            ("[settings.model]\nalpha = \"\"\n", "model.alpha"),
+        ] {
+            let why = Config::parse(bad).expect_err(bad);
+            assert!(why.contains(named), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_model_for_a_runtime_the_build_lacks_stops_the_start_naming_it() {
+        use temet_work_core::settings::Choice;
+        let mut world = World::default();
+        world.catalog.insert(
+            "runtime".into(),
+            Choice {
+                key: "runtime".into(),
+                allowed: vec!["alpha".into(), "beta".into()],
+                default: Some("alpha".into()),
+            },
+        );
+        for table in ["[settings.model]", "[settings.reviewer.model]"] {
+            let text = format!("{table}\nnonesuch = \"x\"\n{TODAY}");
+            let config = Config::parse(&text).expect("the file is well formed");
+            let err = config.check_build(&world).expect_err("refused");
+            assert!(
+                err.contains("model.nonesuch") && err.contains("alpha, beta"),
+                "{err}"
+            );
+        }
+        let had = format!("[settings.model]\nbeta = \"x\"\n{TODAY}");
+        let config = Config::parse(&had).expect("parse");
+        assert!(config.check_build(&world).is_ok());
+    }
+
+    /// A world in a build with the stand-in runtimes alpha, its default, and beta.
+    fn two_runtimes() -> World {
+        let mut world = World::default();
+        world.catalog.insert(
+            "runtime".into(),
+            temet_work_core::settings::Choice {
+                key: "runtime".into(),
+                allowed: vec!["alpha".into(), "beta".into()],
+                default: Some("alpha".into()),
+            },
+        );
+        world
+    }
+
+    /// The model in the brief of `group`'s `role` on a new issue `project#44` of
+    /// the milestone Sign-in rework.
+    fn brief_model(world: &World, group: &str, project: &str, role: Role) -> Option<String> {
+        let issue = temet_work_core::ids::IssueId::new(project, "44");
+        let mut w = world.clone();
+        w.apply(&Event::IssueSynced {
+            issue: issue.clone(),
+            title: "Sign in".into(),
+            milestone: Some(MilestoneId::new("Sign-in rework")),
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        w.launch(&GroupId::new(group), role, &issue, None)
+            .expect("known")
+            .brief
+            .model
+    }
+
+    /// A person's change of `scope`'s runtime for `role`.
+    fn persons_runtime(scope: Scope, role: Option<Role>, runtime: &str) -> Event {
+        Event::SettingSet {
+            scope,
+            role,
+            key: "runtime".into(),
+            value: Value::Text(runtime.into()),
+            by: temet_work_core::command::PERSON.into(),
+        }
+    }
+
+    #[test]
+    fn a_plain_model_where_the_file_gives_another_runtime_stops_the_start_naming_it() {
+        let world = two_runtimes();
+        let reviewers_beta = "[settings.reviewer]\nruntime = \"beta\"\n";
+        for text in [
+            // The issue's example, with the stand-ins.
+            format!("{reviewers_beta}model = \"gpt-x\"\n{TODAY}"),
+            format!(
+                "{reviewers_beta}{TODAY}\n[[project]]\nid = \"ledger\"\ntracker = \"github\"\n\
+                 name = \"temet-ai/ledger\"\n\n[project.settings.reviewer]\nmodel = \"gpt-x\"\n"
+            ),
+        ] {
+            let config = Config::parse(&text).expect("the file is well formed");
+            let err = config.check_build(&world).expect_err("refused");
+            assert!(err.contains("model.beta"), "{err}");
+            assert!(err.contains("model]"), "names the model table: {err}");
+        }
+        // Named for its runtime, the model loads and reaches the beta reviewer.
+        let text =
+            format!("{reviewers_beta}\n[settings.reviewer.model]\nbeta = \"gpt-x\"\n{TODAY}");
+        let config = Config::parse(&text).expect("parse");
+        assert!(config.check_build(&world).is_ok());
+        let (w, _) = two_runtimes().replay_onto(&config.events(&world));
+        let brief = |role| brief_model(&w, "group-1", "radar", role);
+        assert_eq!(brief(Role::Reviewer).as_deref(), Some("gpt-x"));
+        // The group's old model is alpha's, the build's default.
+        assert_eq!(brief(Role::Author).as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn a_plain_model_where_a_person_gave_another_runtime_stops_the_start_naming_it() {
+        let ledger = Scope::Project(ProjectId::new("ledger"));
+        for (person, text, table) in [
+            (
+                Scope::Global,
+                format!("[settings.reviewer]\nmodel = \"gpt-x\"\n{TODAY}"),
+                "[settings.reviewer.model]",
+            ),
+            (
+                ledger.clone(),
+                format!(
+                    "{TODAY}\n[[project]]\nid = \"ledger\"\ntracker = \"github\"\n\
+                     name = \"temet-ai/ledger\"\n\n[project.settings.reviewer]\nmodel = \"gpt-x\"\n"
+                ),
+                "[project.settings.reviewer.model] of ledger",
+            ),
+        ] {
+            let config = Config::parse(&text).expect("the file is well formed");
+            assert!(config.check_build(&two_runtimes()).is_ok(), "{table}");
+            // `temet-work set global --role reviewer runtime beta`, or `set ledger`.
+            let (world, _) = two_runtimes().replay_onto(&[persons_runtime(
+                person,
+                Some(Role::Reviewer),
+                "beta",
+            )]);
+            let err = config.check_build(&world).expect_err("refused");
+            assert!(
+                err.contains("model.beta")
+                    && err.contains(table)
+                    && err.contains("a person set the reviewers' runtime to beta"),
+                "{err}"
+            );
+        }
+        // Named for its runtime, the model loads and reaches the beta reviewer.
+        let (world, _) = two_runtimes().replay_onto(&[persons_runtime(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "beta",
+        )]);
+        let text = format!("[settings.reviewer.model]\nbeta = \"gpt-x\"\n{TODAY}");
+        let config = Config::parse(&text).expect("parse");
+        assert!(config.check_build(&world).is_ok());
+        let (w, _) = world.clone().replay_onto(&config.events(&world));
+        assert_eq!(
+            brief_model(&w, "group-1", "radar", Role::Reviewer).as_deref(),
+            Some("gpt-x")
+        );
+    }
+
+    /// `TODAY` without its group's `model`, so a global model reaches radar's
+    /// agents.
+    fn today_without_a_group_model() -> String {
+        TODAY.replace("model = \"haiku\"\n", "")
+    }
+
+    #[test]
+    fn a_runtime_only_an_earlier_file_set_does_not_stop_the_start() {
+        let today = today_without_a_group_model();
+        let earlier = Config::parse(&format!("[settings.reviewer]\nruntime = \"beta\"\n{today}"))
+            .expect("parse");
+        let (world, _) = two_runtimes().replay_onto(&earlier.events(&two_runtimes()));
+        let reviewers = |w: &World| w.text_at(&Scope::Global, Some(Role::Reviewer), "runtime");
+        assert_eq!(reviewers(&world).as_deref(), Some("beta"));
+        let now = Config::parse(&format!("[settings.reviewer]\nmodel = \"gpt-x\"\n{today}"))
+            .expect("parse");
+        now.check_build(&world)
+            .expect("the earlier file's runtime is unset");
+        let (w, _) = world.clone().replay_onto(&now.events(&world));
+        assert_eq!(reviewers(&w).as_deref(), Some("alpha"));
+        assert_eq!(
+            w.settings[&(Scope::Global, Some(Role::Reviewer), "model.alpha".into())].value,
+            Value::Text("gpt-x".into())
+        );
+        assert_eq!(
+            brief_model(&w, "group-1", "radar", Role::Reviewer).as_deref(),
+            Some("gpt-x")
+        );
+    }
+
+    #[test]
+    fn a_groups_old_model_over_a_project_on_another_runtime_starts_bound_to_the_global_one() {
+        let text = r#"
+[[project]]
+id = "ledger"
+tracker = "github"
+name = "temet-ai/ledger"
+
+[project.settings]
+runtime = "beta"
+
+[[folder]]
+id = "ledger-1"
+project = "ledger"
+path = "/home/me/src/ledger-1"
+
+[[group]]
+id = "group-2"
+projects = ["ledger"]
+milestones = ["Sign-in rework"]
+model = "sonnet"
+"#;
+        let ledger = || Scope::Project(ProjectId::new("ledger"));
+        let by_person = || {
+            two_runtimes()
+                .replay_onto(&[persons_runtime(ledger(), None, "beta")])
+                .0
+        };
+        // The file's runtime, the person's and the file's, and the person's alone.
+        let without_runtime = text.replace("[project.settings]\nruntime = \"beta\"\n", "");
+        for (text, world) in [
+            (text.to_string(), two_runtimes()),
+            (text.to_string(), by_person()),
+            (without_runtime, by_person()),
+        ] {
+            let config = Config::parse(&text).expect("parse");
+            config.check_build(&world).expect("starts");
+            let (w, _) = world.clone().replay_onto(&config.events(&world));
+            assert_eq!(
+                w.settings[&(ledger(), None, "model.alpha".into())].value,
+                Value::Text("sonnet".into())
+            );
+            assert_eq!(
+                w.text_at(&ledger(), Some(Role::Author), "runtime")
+                    .as_deref(),
+                Some("beta")
+            );
+            assert_eq!(brief_model(&w, "group-2", "ledger", Role::Author), None);
+        }
+    }
+
+    #[test]
+    fn a_plain_model_in_the_file_is_bound_by_the_file_alone() {
+        let alpha = format!(
+            "[settings]\nmodel = \"sonnet\"\n\n[settings.reviewer]\nmodel = \"opus\"\n{}",
+            today_without_a_group_model()
+        );
+        let config = Config::parse(&alpha).expect("parse");
+        let (mut w, _) = two_runtimes().replay_onto(&config.events(&two_runtimes()));
+        let global = |key: &str| (Scope::Global, None, key.to_string());
+        let reviewers = |key: &str| (Scope::Global, Some(Role::Reviewer), key.to_string());
+        assert_eq!(
+            w.settings[&global("model.alpha")].value,
+            Value::Text("sonnet".into())
+        );
+        // A person moves the global runtime, and the daemon restarts on the same
+        // file: it starts, and the file's models stay alpha's.
+        w.apply(&persons_runtime(Scope::Global, None, "beta"));
+        config
+            .check_build(&w)
+            .expect("a moved global runtime starts");
+        assert_eq!(config.events(&w), vec![], "no model.beta, nothing unset");
+        assert!(w.settings.contains_key(&global("model.alpha")));
+        assert!(!w.settings.contains_key(&global("model.beta")));
+        assert_eq!(
+            w.settings[&reviewers("model.alpha")].value,
+            Value::Text("opus".into())
+        );
+        // The person puts the reviewers back on alpha: they read the file's opus.
+        let mut back = w.clone();
+        back.apply(&persons_runtime(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "alpha",
+        ));
+        config.check_build(&back).expect("reviewers on alpha start");
+        assert_eq!(
+            brief_model(&back, "group-1", "radar", Role::Reviewer).as_deref(),
+            Some("opus")
+        );
+        // The file's own runtime becomes beta: the model is rebound.
+        let beta =
+            Config::parse(&alpha.replace("[settings]\n", "[settings]\nruntime = \"beta\"\n"))
+                .expect("parse");
+        let events = beta.events(&w);
+        assert!(
+            events.contains(&Event::SettingSet {
+                scope: Scope::Global,
+                role: None,
+                key: "model.beta".into(),
+                value: Value::Text("sonnet".into()),
+                by: FILE.into(),
+            }),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&Event::SettingUnset {
+                scope: Scope::Global,
+                role: None,
+                key: "model.alpha".into(),
+                by: FILE.into(),
+            }),
+            "{events:?}"
+        );
+        for event in &events {
+            w.apply(event);
+        }
+        assert_eq!(
+            w.settings[&global("model.beta")].value,
+            Value::Text("sonnet".into())
+        );
+        assert!(!w.settings.contains_key(&global("model.alpha")));
     }
 
     /// The first TOML block under `heading` in `docs/configuration.md`.
@@ -934,7 +1515,7 @@ starts = 1
         });
         assert_eq!(config.events(&w), vec![]);
         assert_eq!(
-            w.settings[&(Scope::Global, None, "model".to_string())].value,
+            w.settings[&(Scope::Global, None, "model.alpha".to_string())].value,
             Value::Text("fable".into())
         );
     }
@@ -957,6 +1538,42 @@ starts = 1
         assert!(Config::parse(&milestone).is_err_and(|e| e.contains("speed")));
         let unlisted = format!("{TODAY}\n[[milestone]]\nof = \"nowhere\"\nname = \"M\"\n");
         assert!(Config::parse(&unlisted).is_err_and(|e| e.contains("nowhere")));
+    }
+
+    #[test]
+    fn a_role_table_refuses_a_setting_not_read_per_role() {
+        let area = "[[area]]\nid = \"guild\"\nprojects = [\"radar\"]\n";
+        let milestone = "[[milestone]]\nof = \"radar\"\nname = \"M\"\n";
+        for (table, text) in [
+            (
+                "[settings.reviewer]",
+                format!("[settings]\n[settings.reviewer]\nci = false\n{TODAY}"),
+            ),
+            (
+                "[project.settings.reviewer]",
+                TODAY.replace(
+                    "ci = false\n",
+                    "ci = false\n[project.settings.reviewer]\nci = false\n",
+                ),
+            ),
+            (
+                "[area.settings.reviewer]",
+                format!("{TODAY}\n{area}[area.settings.reviewer]\nci = false\n"),
+            ),
+            (
+                "[milestone.settings.reviewer]",
+                format!("{TODAY}\n{milestone}[milestone.settings.reviewer]\nci = false\n"),
+            ),
+        ] {
+            let why = Config::parse(&text).expect_err(table);
+            assert!(
+                why.starts_with(table)
+                    && why.contains("ci is the same for every role, so it takes no role table"),
+                "{why}"
+            );
+        }
+        Config::parse(&format!("[settings.reviewer]\nmodel = \"opus\"\n{TODAY}"))
+            .expect("the model is read per role");
     }
 
     #[test]

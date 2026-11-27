@@ -11,20 +11,36 @@ pub mod effect;
 pub mod event;
 pub mod host;
 pub mod ids;
+pub mod investigation;
 pub mod launch;
 pub mod model;
 pub mod placement;
+pub mod reply;
 pub mod sender;
 pub mod settings;
+pub mod socket;
 pub mod text;
+pub mod view;
 pub mod world;
 
 pub use command::{Command, Request};
 pub use effect::Effect;
 pub use event::{Event, Verdict};
 pub use host::{Host, Journal, Outcome, Polled};
+pub use reply::Reply;
 pub use sender::{Digest, Peer, Sender};
+pub use view::View;
 pub use world::World;
+
+/// An issue's own text, as a part last read it from where the issue comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssueText {
+    /// Where the text came from and when it was read, in words that follow
+    /// "Text of".
+    pub from: String,
+    /// The text; empty when the issue has none there.
+    pub text: String,
+}
 
 /// A part of temet-work: a family of adapters (trackers, runners, agent
 /// runtimes) or a service such as storage or the style guide. The root package
@@ -56,6 +72,13 @@ pub trait Part: Send {
     /// What `agent`'s terminal shows now, if this part runs it.
     fn screen(&mut self, agent: &ids::AgentId) -> Option<Result<String, String>> {
         let _ = agent;
+        None
+    }
+
+    /// The text of `issue` as this part last read it, or why it has not read it,
+    /// if this part reads issue text. It asks nothing of any service.
+    fn issue_text(&self, world: &World, issue: &ids::IssueId) -> Option<Result<IssueText, String>> {
+        let _ = (world, issue);
         None
     }
 }

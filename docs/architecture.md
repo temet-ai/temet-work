@@ -2,6 +2,11 @@
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
   - 26cd49d9-7565-4506-b988-a9b64ed0fa45
+  - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
+  - c27ea5f8-79a8-4f76-ae9d-52bda3729faa
+  - d1ccda48-cbb5-44cc-9ea0-c03999c970e9
+  - 0645e4e2-33bd-43f8-980f-503649da2f15
+  - edd1e649-f07a-4d7c-b5c6-ff74b0021fbb
 ---
 
 # temet-work architecture
@@ -32,8 +37,8 @@ The app, the CLI and the MCP server reach the daemon through one transport inter
 (`Transport` in `src/socket.rs`): a client sends a request and gets a reply, and has no
 idea how it travelled. There are two implementations, the daemon's local socket and
 SSH (`ssh HOST temet-work relay`, which copies one JSON line to the daemon's socket on
-its machine, and refuses a client of another build). `TEMET_WORK_DAEMON` picks one. The
-address carries the daemon's socket as its path
+its machine, and refuses a client whose build is not the running daemon's).
+`TEMET_WORK_DAEMON` picks one. The address carries the daemon's socket as its path
 (`ssh://omit/run/user/1000/temet-work/daemon.sock`), because sshd passes no environment
 and a second daemon on one machine has to be told apart; no path means the default
 socket. A TCP transport with a token, on a private
@@ -73,13 +78,13 @@ What exists today:
 
 | Crate | State |
 |---|---|
-| `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, and the state as text |
-| `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, and holds text for an agent until its turn ends |
-| `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
+| `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, the state as text and, beside it, as view data (`view.rs`) that the `view` command answers with, the daemon's reply, and the rule for where its socket is |
+| `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, holds text for an agent until its turn ends, and types `continue` into an agent whose usage limit has reset |
+| `temet-work-runner-herdr` | the herdr-core socket client; puts each agent's terminal on the herdr app's screens by starting it with `herdr.space`, `herdr.tab` and `herdr.name`, one space per group, one tab per issue and one for the group's investigator; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
 | `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |
-| `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
-| `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
-| `temet-work-tracker-jira` | issues, fix versions as milestones, comments and Done transitions through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
+| `temet-work-tracker` | the contract (issues, milestones, comment, close, create), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, keeps each open issue's text from the last sync in memory for `temet-work issue`, and closes verified issues |
+| `temet-work-tracker-github` | issues and milestones through `gh`, and issues filed with `gh issue create`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
+| `temet-work-tracker-jira` | issues, fix versions as milestones, comments, new issues and Done transitions through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
 | `temet-work-codehost` | the contract, a fake and contract tests. The family reads each pull request in review every 30 seconds, reports a conflict, and reports CI finished once it has on all of an issue's pull requests, with the names of failing checks; it merges them when the loop asks, in the plan's order, each after the previous repository's main pipeline passed |
 | `temet-work-codehost-github` | pull requests through `gh`, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-codehost-gitlab` | merge requests through `glab` and its sign-in, merged with `--squash`, `--rebase` or neither; a pipeline reads as failed once a job that may not fail has failed; passes the contract on recorded output and, read only, against GitLab (`--features live`) |
@@ -108,18 +113,63 @@ changes (on the issue's `machine`, when that setting names one) and the issues i
 on are done. Review runs for at most three rounds before an arbiter
 rules. Every round the daemon also starts any agent an issue needs and does not have: one
 whose session ended, or one it decided on and did not start before it stopped. After three
-agents of one role have ended on one issue it stops and lists the issue as a problem. It
+agents of one role have ended on one issue while it waited on them, it stops and lists the
+issue as a problem. It
 also asks again for a merge, deploy or verify that was lost; the parts that do them do not
 repeat work already done or running; a deploy that restarts the daemon is recorded by
 the new daemon, which finds the build in the handoff file (`docs/configuration.md`). An agent its
 issue waits on that sits idle is reminded after ten minutes and again after twenty, and its session
-is stopped after thirty so a fresh one takes over. A reviewer or arbiter whose approval is in is not
+is stopped after thirty so a fresh one takes over. An agent whose turn ends in an error, such as a
+usage limit, is listed under Problems with the line its turn ended on: the terminal's status
+message, or else the line on its screen that names the error, read once. When that line gives a
+reset time the runner family can read (`resets 5pm`, `resets 5:40pm` or `resets 17:40`, in the
+daemon's time zone; am or pm may follow a space in any case, as in `resets 5:40 PM`), the daemon
+types `continue` one minute after it, without starting a new agent, and text waiting for the agent
+goes after that. A time up to an hour past counts as passed, whether it is yesterday's, today's or
+tomorrow's, so a limit seen just after its reset is continued at once. The reset time is kept in the
+event log, so a restart does not lose it. A time more than six hours ahead is not read, and the
+agent is treated as idle: reminded, then stopped. The same happens when an error has no reset time
+the daemon can read, or comes back with a reset time no later than the one already continued after.
+A reminder starts a turn, which may end on the same error, or on another with no reset time to
+wait for. When the daemon saw that turn working for at least `remind_after` (ten minutes by
+default) before the error came back, the turn counts as recovery and a new count starts at that
+error. A shorter turn counts toward the stop: the next reminder or the stop is still timed from
+the last reminder. The count also starts again when such a turn ends between turns, when the
+agent stops at a prompt or on a limit with a reset time, when it ends, and when its issue stops
+waiting on it. A reviewer whose approval is in is not
 waited on while the checks run: it is not reminded, no other is started in its place, and it stays
 until the merge, so after a failed check a reviewer still running hears the next round. A refiner
-stops once its plan is in; the author, reviewer and arbiter stop once the issue's last pull request
-merges. A group has no coordinator agent: in the research fleet the standing seat waited 25 of its
-28 minutes, and in mike's larger runs such seats were where the token and turn costs came from
+stops once its plan is in and an arbiter once its ruling is in. The arbiter also stops when its
+issue goes back to the author by a failed check, a conflict, a refused merge or a person's
+overturn, so a later arbitration on the issue starts a fresh arbiter that hears that dispute.
+No second arbiter starts as long as one whose stop failed still runs. The daemon asks again each
+round to stop one that has ruled, since nothing reminds it, and starts a fresh one once it has
+ended. An approval by ruling is not replaced while the checks run. The author and reviewer stop once the issue's last pull request merges. A group has no
+coordinator agent: in the research fleet the standing seat waited 25 of its 28 minutes, and in
+mike's larger runs such seats were where the token and turn costs came from
 (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
+
+A group takes for refining, and starts authors on, only issues its milestones, projects and
+areas cover. Whether an issue it took is still covered is worked out from the issue and the group
+each time and is not stored, so a log replays to the same state. An issue that leaves its group's
+scope before any of its pull requests merged is paused (`World::paused`): `World::apply` drops the
+effects that would start an agent, send a fix, start or announce a review round, or ask for a
+merge, `World::missing` returns nothing for it, and `World::waiting_on` is false for an author
+that has not heard its fixes, so it is not reminded into working. Agents already working finish
+their step, since stopping one mid-turn throws away a plan half written or edits not yet
+committed, and a milestone move is often undone. The issue keeps its folders and its idle author.
+A paused ready issue goes to another group that covers it, since it holds no agent or folder; a
+paused refining issue whose refiner has stopped goes back to new, so it holds no refining slot.
+An issue with a pull request merged still merges the rest, deploys and is verified: stopping
+between repositories would leave main branches that do not match, and a merged change has to
+deploy to match main. When the issue is covered again, `World::missing` starts or tells the
+agent its stage needs, or asks for the merge.
+
+When a group's work queue runs short, the daemon starts one investigator for it, which holds
+no folder, reads the group's projects and files the next issues through `temet-work file`
+(`docs/configuration.md`). The daemon counts the queue, keeps to one investigator per group
+and waits `investigate_every` between investigations; the clock comes into the core as the
+time `Host::tick` takes, and each investigation's start and end times are on its events.
 
 ## How parts meet
 
@@ -213,8 +263,10 @@ In this order:
 
 1. The settings chain (`docs/settings.md`): global, area, project, milestone and task
    levels, with roles inside each; runtimes and runners chosen by it; every family tested
-   with two adapters at once. Done: Claude Code and Codex are both runtimes, chosen by the
-   `runtime` setting.
+   with two adapters at once. Done: the levels and the roles inside them are built, the
+   `runtime` setting chooses between Claude Code and Codex and the `runner` setting chooses
+   the runner, and the tracker, code-host, runtime and runner families are each tested with
+   two adapters.
 2. The app's theme generated from the design system's tokens, then the navbar with areas
    through review (`docs/ui.md`).
 3. The desktop window on GPUI, drawing the daemon's view data.

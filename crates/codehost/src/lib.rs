@@ -98,8 +98,9 @@ pub trait CodeHost: Send {
 }
 
 /// A code host in memory, for tests.
-#[derive(Default)]
 pub struct FakeCodeHost {
+    /// Its id.
+    pub id: &'static str,
     /// Pull requests, as (repo, pull).
     pub pulls: Vec<(String, Pull)>,
     /// How each merge was asked for (`squash`, `merge` or `rebase`), in order.
@@ -111,9 +112,28 @@ pub struct FakeCodeHost {
     pub merged_repos: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
+impl Default for FakeCodeHost {
+    fn default() -> Self {
+        Self::named("fake")
+    }
+}
+
+impl FakeCodeHost {
+    /// A fake code host with the given id.
+    pub fn named(id: &'static str) -> Self {
+        Self {
+            id,
+            pulls: Vec::new(),
+            merges: Default::default(),
+            mains: Default::default(),
+            merged_repos: Default::default(),
+        }
+    }
+}
+
 impl CodeHost for FakeCodeHost {
     fn id(&self) -> &'static str {
-        "fake"
+        self.id
     }
 
     fn pull(&mut self, repo: &str, number: &str) -> Result<Pull, CodeHostError> {
@@ -846,6 +866,135 @@ mod tests {
         assert!(matches!(part.carry_out(&merge, &w), Outcome::Failed(_)));
     }
 
+    /// Code hosts "fake" and "other", in that order. Each has pull request 1 in
+    /// every one of `repos`, failing a check named after the host, so a read from
+    /// the wrong one shows.
+    fn two(repos: &[&str]) -> [FakeCodeHost; 2] {
+        ["fake", "other"].map(|id| {
+            let failing = Checks::Failed {
+                failing: vec![id.into()],
+            };
+            FakeCodeHost {
+                pulls: repos
+                    .iter()
+                    .map(|r| (r.to_string(), pull("1", failing.clone())))
+                    .collect(),
+                ..FakeCodeHost::named(id)
+            }
+        })
+    }
+
+    fn part_of(hosts: [FakeCodeHost; 2]) -> CodeHosts {
+        let mut part = CodeHosts::default();
+        for host in hosts {
+            part.add(Box::new(host));
+        }
+        part
+    }
+
+    const REPOS: [&str; 3] = ["city/ankh", "desert/klatch", "hills/lancre"];
+
+    /// ankh#1 in review on code host "fake", which its tracker names, and klatch#1
+    /// on "other" with tracker "fake".
+    fn on_two_hosts() -> World {
+        let mut w = World::default();
+        add_in_review(&mut w, "ankh", "city/ankh", None);
+        add_in_review(&mut w, "klatch", "desert/klatch", Some("other"));
+        w
+    }
+
+    /// A project on tracker "fake" whose issue 1 is in review with pull request 1.
+    fn add_in_review(w: &mut World, id: &str, name: &str, code_host: Option<&str>) {
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new(id),
+            tracker: "fake".into(),
+            name: name.into(),
+            code_host: code_host.map(String::from),
+            repo: None,
+        });
+        let issue = IssueId::new(id, "1");
+        w.apply(&Event::IssueSynced {
+            issue: issue.clone(),
+            title: "t".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let i = w.issues.get_mut(&issue).expect("issue");
+        i.stage = Stage::InReview { round: 1 };
+        i.pulls.insert(ProjectId::new(id), "1".into());
+    }
+
+    fn failed_on(project: &str, host: &str) -> Event {
+        Event::ChecksFinished {
+            issue: IssueId::new(project, "1"),
+            passed: false,
+            failing: vec![host.into()],
+        }
+    }
+
+    #[test]
+    fn two_adapters_each_project_has_its_ci_read_from_its_own() {
+        let polled = part_of(two(&REPOS)).poll(&on_two_hosts(), 0);
+        assert_eq!(polled.problem, None);
+        assert_eq!(
+            polled.events,
+            vec![failed_on("ankh", "fake"), failed_on("klatch", "other")]
+        );
+    }
+
+    #[test]
+    fn two_adapters_each_merge_goes_through_the_projects_own_only() {
+        let w = on_two_hosts();
+        for (project, repo, own) in [("ankh", "city/ankh", 0), ("klatch", "desert/klatch", 1)] {
+            let hosts = two(&REPOS);
+            let merges = hosts.each_ref().map(|h| h.merges.clone());
+            let repos = hosts[own].merged_repos.clone();
+            let merge = Effect::Merge {
+                issue: IssueId::new(project, "1"),
+            };
+            assert!(matches!(
+                part_of(hosts).carry_out(&merge, &w),
+                Outcome::Done { events, .. } if matches!(events.as_slice(), [Event::Merged { .. }])
+            ));
+            assert_eq!(*merges[own].lock().expect("lock"), ["squash"], "{project}");
+            assert!(
+                merges[1 - own].lock().expect("lock").is_empty(),
+                "{project}"
+            );
+            assert_eq!(*repos.lock().expect("lock"), [repo]);
+        }
+    }
+
+    #[test]
+    fn two_adapters_a_code_host_the_build_lacks_is_a_problem_and_the_others_are_still_read() {
+        let mut w = on_two_hosts();
+        add_in_review(&mut w, "lancre", "hills/lancre", Some("nonesuch"));
+        let hosts = two(&REPOS);
+        let merges = hosts.each_ref().map(|h| h.merges.clone());
+        let mut part = part_of(hosts);
+        let polled = part.poll(&w, 0);
+        assert_eq!(
+            polled.problem.as_deref(),
+            Some("lancre#1: no code host \"nonesuch\" in this build")
+        );
+        assert_eq!(
+            polled.events,
+            vec![failed_on("ankh", "fake"), failed_on("klatch", "other")]
+        );
+        let merge = Effect::Merge {
+            issue: IssueId::new("lancre", "1"),
+        };
+        assert_eq!(
+            part.carry_out(&merge, &w),
+            Outcome::Failed("no code host \"nonesuch\" in this build".into())
+        );
+        for m in merges {
+            assert!(m.lock().expect("lock").is_empty());
+        }
+    }
+
     #[test]
     fn keeps_adapters_in_the_order_added() {
         let mut part = CodeHosts::default();
@@ -1058,6 +1207,60 @@ mod tests {
                 repo: Some(pid("ui")),
             });
             assert_eq!(part.carry_out(&merge(), &w), merged("svc"));
+        }
+
+        #[test]
+        fn two_adapters_each_pull_request_of_one_issue_is_read_and_merged_by_its_own() {
+            let mut w = world(Stage::InReview { round: 1 });
+            w.apply(&Event::ProjectAdded {
+                project: pid("svc"),
+                tracker: String::new(),
+                name: "group/svc".into(),
+                code_host: Some("other".into()),
+                repo: None,
+            });
+            let read = part_of(two_with_pulls()).poll(&w, 0);
+            assert_eq!(read.problem, None);
+            assert_eq!(
+                read.events,
+                vec![Event::ChecksFinished {
+                    issue: gld(),
+                    passed: false,
+                    failing: vec!["fake (ui)".into(), "other (svc)".into()],
+                }]
+            );
+
+            w.issues.get_mut(&gld()).expect("issue").stage = Stage::Merging;
+            let hosts = two_with_pulls();
+            let repos = hosts.each_ref().map(|h| h.merged_repos.clone());
+            // ui's main pipeline passes on its own host and fails on the other.
+            hosts[1]
+                .mains
+                .lock()
+                .expect("lock")
+                .insert("group/ui".into(), failed("other"));
+            let mut part = part_of(hosts);
+            assert_eq!(part.carry_out(&merge(), &w), merged("ui"));
+            w.apply(&Event::Merged {
+                issue: gld(),
+                repo: Some(pid("ui")),
+            });
+            assert_eq!(part.carry_out(&merge(), &w), merged("svc"));
+            assert_eq!(*repos[0].lock().expect("lock"), ["group/ui"]);
+            assert_eq!(*repos[1].lock().expect("lock"), ["group/svc"]);
+        }
+
+        /// The two code hosts, each with both of the issue's pull requests.
+        fn two_with_pulls() -> [FakeCodeHost; 2] {
+            let mut hosts = two(&[]);
+            for host in &mut hosts {
+                let failing = failed(host.id);
+                host.pulls = vec![
+                    ("group/ui".into(), pull("1", failing.clone())),
+                    ("group/svc".into(), pull("2", failing)),
+                ];
+            }
+            hosts
         }
 
         #[test]

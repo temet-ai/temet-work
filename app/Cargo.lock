@@ -6519,7 +6519,9 @@ dependencies = [
  "gpui-pre-platform",
  "gpui-pre-wgpu",
  "serde_json",
+ "temet-work-core",
  "temet-work-style",
+ "tempfile",
 ]
 
 [[package]]

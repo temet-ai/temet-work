@@ -10,6 +10,7 @@ pub mod socket;
 
 use std::path::{Path, PathBuf};
 
+use temet_work_core::host::Host;
 use temet_work_core::{Journal, Part, World};
 
 /// The parts compiled into this build, in a fixed order: families first, then
@@ -108,21 +109,42 @@ pub fn trust_folder(runtime: &str, folder: &Path) -> Result<(), String> {
     }
 }
 
-/// Opens the event log at `path` and rebuilds the state from it. A build
-/// without the store keeps events in memory, so nothing survives a restart.
-#[cfg(feature = "store")]
-pub fn journal(path: &Path) -> Result<(Box<dyn Journal>, World), String> {
-    let (log, entries) = temet_work_store::Log::open(path).map_err(|e| e.to_string())?;
-    Ok((Box::new(log), temet_work_store::replay(&entries)))
+/// The daemon's host: the event log at `path` replayed onto a world that
+/// already holds what `parts` offer, so an older log's plain model is bound to
+/// the build's default runtime where the log set no global one.
+pub fn start(path: &Path, parts: Vec<Box<dyn Part>>) -> Result<Host, String> {
+    let (journal, world) = journal(path, temet_work_core::host::catalog(&parts))?;
+    Ok(Host::new(world, parts, journal))
 }
 
-/// Opens the event log at `path` and rebuilds the state from it. A build
-/// without the store keeps events in memory, so nothing survives a restart.
+/// Opens the event log at `path` and rebuilds the state from it, onto a world
+/// that holds `catalog`. A build without the store keeps events in memory, so
+/// nothing survives a restart.
+#[cfg(feature = "store")]
+pub fn journal(path: &Path, catalog: Catalog) -> Result<(Box<dyn Journal>, World), String> {
+    let (log, entries) = temet_work_store::Log::open(path).map_err(|e| e.to_string())?;
+    let (world, _) = World {
+        catalog,
+        ..World::default()
+    }
+    .replay_onto(entries.iter().map(|e| &e.event));
+    Ok((Box::new(log), world))
+}
+
+/// Opens the event log at `path` and rebuilds the state from it, onto a world
+/// that holds `catalog`. A build without the store keeps events in memory, so
+/// nothing survives a restart.
 #[cfg(not(feature = "store"))]
-pub fn journal(path: &Path) -> Result<(Box<dyn Journal>, World), String> {
+pub fn journal(path: &Path, catalog: Catalog) -> Result<(Box<dyn Journal>, World), String> {
     let _ = path;
     Ok((
         Box::new(temet_work_core::host::Memory::default()),
-        World::default(),
+        World {
+            catalog,
+            ..World::default()
+        },
     ))
 }
+
+/// What a build's families offer for the settings that name an adapter.
+pub type Catalog = std::collections::BTreeMap<String, temet_work_core::settings::Choice>;

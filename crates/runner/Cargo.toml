@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 temet-work-core.workspace = true
 sha2.workspace = true
+jiff.workspace = true
 
 [lints]
 workspace = true

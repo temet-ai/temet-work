@@ -86,10 +86,13 @@ impl World {
             .collect()
     }
 
-    /// Whether `issue` is ready for an author: refined, taken by a group, and
-    /// every issue it depends on done.
+    /// Whether `issue` is ready for an author: refined, taken by a group that
+    /// still covers it, and every issue it depends on done.
     fn waits_for_author(&self, issue: &Issue) -> bool {
-        issue.stage == Stage::Ready && issue.group.is_some() && self.ready_to_start(issue)
+        issue.stage == Stage::Ready
+            && issue.group.is_some()
+            && !self.paused(issue)
+            && self.ready_to_start(issue)
     }
 
     /// Whether an agent of `role` that holds no folder of its own has somewhere to
@@ -128,7 +131,7 @@ impl World {
     }
 
     /// Every issue whose next agent waits for a work folder on a set machine, and
-    /// for nothing else, such as an issue it depends on.
+    /// for nothing else, such as an issue it depends on or its group's scope.
     pub fn machine_waits(&self) -> Vec<Waiting> {
         self.issues
             .values()
@@ -137,6 +140,9 @@ impl World {
     }
 
     fn machine_wait(&self, i: &Issue) -> Option<Waiting> {
+        if self.paused(i) {
+            return None;
+        }
         let role = match i.stage {
             Stage::New if self.groups.values().any(|g| self.in_scope(g, i)) => Role::Refiner,
             Stage::Refining => Role::Refiner,

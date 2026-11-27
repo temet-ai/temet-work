@@ -39,6 +39,8 @@ fn working() -> World {
         milestones: Vec::new(),
         refining_at_once: 3,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     });
     for (n, (project, key)) in [("ankh", "1"), ("ankh", "2"), ("klatch", "1")]
         .into_iter()
@@ -168,6 +170,270 @@ fn a_model_on_a_project_reaches_the_brief_of_that_projects_issues_only() {
     assert_eq!(launch(&w, "1").as_deref(), Some("opus"));
 }
 
+/// The documented example, with stand-in runtimes: `alpha` is the build's
+/// default and set globally, with a model for every role; reviewers run `beta`;
+/// the project and a milestone of it have a plain model of their own. ankh#1 is
+/// in no milestone, ankh#2 is in "Clocks".
+fn two_runtimes() -> World {
+    let mut w = working();
+    w.catalog.insert(
+        "runtime".into(),
+        crate::settings::Choice {
+            key: "runtime".into(),
+            allowed: vec!["alpha".into(), "beta".into()],
+            default: Some("alpha".into()),
+        },
+    );
+    w.apply(&Event::IssueSynced {
+        issue: id("ankh", "2"),
+        title: "ankh 2".into(),
+        milestone: Some(crate::ids::MilestoneId::new("Clocks")),
+        depends_on: vec![],
+        order: 1,
+        closed: false,
+    });
+    let text = |t: &str| Value::Text(t.into());
+    let clocks = Scope::Milestone {
+        of: ProjectId::new("ankh"),
+        name: "Clocks".into(),
+    };
+    set(&mut w, Scope::Global, None, "runtime", text("alpha"));
+    set(&mut w, Scope::Global, None, "model", text("sonnet"));
+    set(
+        &mut w,
+        Scope::Global,
+        Some(Role::Reviewer),
+        "runtime",
+        text("beta"),
+    );
+    set(
+        &mut w,
+        Scope::Project(ProjectId::new("ankh")),
+        None,
+        "model",
+        text("haiku"),
+    );
+    set(&mut w, clocks, None, "model", text("opus"));
+    w
+}
+
+/// The model in the brief of an agent of `role` on ankh's issue `key`.
+fn briefed(w: &World, role: Role, key: &str) -> Option<String> {
+    w.launch(&GroupId::new("watch"), role, &id("ankh", key), None)
+        .expect("known")
+        .brief
+        .model
+}
+
+#[test]
+fn a_model_reaches_only_its_runtime() {
+    let mut w = two_runtimes();
+    for key in ["1", "2"] {
+        assert_eq!(briefed(&w, Role::Reviewer, key), None, "ankh#{key}");
+    }
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+    assert_eq!(briefed(&w, Role::Author, "2").as_deref(), Some("opus"));
+    // Nor does a plain model for the reviewers themselves, or for their task.
+    for (scope, role) in [
+        (Scope::Global, Some(Role::Reviewer)),
+        (Scope::Task(id("ankh", "1")), None),
+    ] {
+        set(&mut w, scope, role, "model", Value::Text("fable".into()));
+        assert_eq!(briefed(&w, Role::Reviewer, "1"), None);
+    }
+}
+
+#[test]
+fn a_plain_model_keeps_the_runtime_it_was_written_for() {
+    use crate::command::Command;
+    use crate::ids::AgentId;
+    use crate::settings::Target;
+    let ankh = ProjectId::new("ankh");
+    let issue = id("ankh", "1");
+    let mut w = World::default();
+    w.catalog.insert(
+        "runtime".into(),
+        crate::settings::Choice {
+            key: "runtime".into(),
+            allowed: vec!["alpha".into(), "beta".into()],
+            default: Some("alpha".into()),
+        },
+    );
+    let text = |t: &str| Value::Text(t.into());
+    for event in [
+        Event::ProjectAdded {
+            project: ankh.clone(),
+            tracker: "t".into(),
+            name: "city/ankh".into(),
+            code_host: None,
+            repo: None,
+        },
+        Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ankh.clone()],
+            areas: Vec::new(),
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        },
+        Event::SettingSet {
+            scope: Scope::Global,
+            role: None,
+            key: "runtime".into(),
+            value: text("alpha"),
+            by: "person".into(),
+        },
+        // ankh has model = "haiku" in the file.
+        Event::SettingSet {
+            scope: Scope::Project(ankh.clone()),
+            role: None,
+            key: "model".into(),
+            value: text("haiku"),
+            by: crate::settings::FILE.into(),
+        },
+        Event::IssueSynced {
+            issue: issue.clone(),
+            title: "Mend the clock".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        },
+        Event::AgentStarted {
+            agent: AgentId::new("refiner-1"),
+            group: GroupId::new("watch"),
+            role: Role::Refiner,
+            issue: Some(issue.clone()),
+            machine: MachineId::new("morpork"),
+            folder: None,
+            secret_digest: None,
+        },
+    ] {
+        w.apply(&event);
+    }
+    let run = |w: &mut World, by: Option<&str>, command: Command| {
+        let by = by.map(AgentId::new);
+        for event in w.events(by.as_ref(), &command).expect("accepted") {
+            w.apply(&event);
+        }
+    };
+    let plan = Command::Plan {
+        issue: issue.clone(),
+        plan: crate::model::Plan {
+            checks: vec![crate::model::Check {
+                done_when: "the clock strikes thirteen".into(),
+                proven_by: "listening at midnight".into(),
+            }],
+            repos: Vec::new(),
+            settings: [("model".to_string(), text("opus"))].into(),
+        },
+    };
+    run(&mut w, Some("refiner-1"), plan);
+    let author = |w: &World| {
+        w.launch(&GroupId::new("watch"), Role::Author, &issue, None)
+            .expect("known")
+            .brief
+            .model
+    };
+    assert_eq!(author(&w).as_deref(), Some("opus"));
+    let set = |role: Option<Role>, value: &str| Command::Set {
+        target: Target::Global,
+        role,
+        key: "runtime".into(),
+        value: value.into(),
+    };
+    run(&mut w, None, set(None, "beta"));
+    assert_eq!(
+        w.setting_text(&issue, Some(Role::Author), "runtime")
+            .as_deref(),
+        Some("beta")
+    );
+    assert_eq!(author(&w), None, "neither opus nor haiku is beta's");
+    // Both are still alpha's, and reach an alpha author again.
+    run(&mut w, None, set(Some(Role::Author), "alpha"));
+    assert_eq!(author(&w).as_deref(), Some("opus"));
+}
+
+#[test]
+fn a_runtimes_own_model_reaches_the_agents_of_that_runtime_only() {
+    let mut w = two_runtimes();
+    set(
+        &mut w,
+        Scope::Global,
+        Some(Role::Reviewer),
+        "model.beta",
+        Value::Text("gpt-x".into()),
+    );
+    for key in ["1", "2"] {
+        assert_eq!(briefed(&w, Role::Reviewer, key).as_deref(), Some("gpt-x"));
+    }
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+    assert_eq!(briefed(&w, Role::Author, "2").as_deref(), Some("opus"));
+    // The same for every role still leaves the other runtime's authors alone.
+    set(
+        &mut w,
+        Scope::Task(id("ankh", "1")),
+        None,
+        "model.beta",
+        Value::Text("gpt-y".into()),
+    );
+    assert_eq!(briefed(&w, Role::Reviewer, "1").as_deref(), Some("gpt-y"));
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+}
+
+#[test]
+fn a_runtimes_own_model_is_looked_up_level_by_level_and_a_plain_one_is_the_same_key() {
+    let mut w = two_runtimes();
+    let text = |t: &str| Value::Text(t.into());
+    let task = || Scope::Task(id("ankh", "1"));
+    set(&mut w, Scope::Global, None, "model.alpha", text("global"));
+    // The project's plain model is nearer than the global model.alpha.
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+    // So is a refiner's task-level model.
+    w.apply(&Event::SettingSet {
+        scope: task(),
+        role: Some(Role::Author),
+        key: "model".into(),
+        value: text("opus"),
+        by: "refiner-1".into(),
+    });
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("opus"));
+    // At one place a plain model and model.alpha are one key: the later wins.
+    set(
+        &mut w,
+        task(),
+        Some(Role::Author),
+        "model.alpha",
+        text("own"),
+    );
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("own"));
+    assert!(
+        !w.settings.keys().any(|(_, _, key)| key == "model"),
+        "every plain model was bound to alpha"
+    );
+    // And the role's own model before every role's.
+    let project = || Scope::Project(ProjectId::new("klatch"));
+    set(&mut w, project(), None, "model.alpha", text("everyone"));
+    set(
+        &mut w,
+        project(),
+        Some(Role::Author),
+        "model",
+        text("authors"),
+    );
+    let klatch = |w: &World, role| {
+        w.launch(&GroupId::new("watch"), role, &id("klatch", "1"), None)
+            .expect("known")
+            .brief
+            .model
+    };
+    assert_eq!(klatch(&w, Role::Author).as_deref(), Some("authors"));
+    assert_eq!(klatch(&w, Role::Arbiter).as_deref(), Some("everyone"));
+}
+
 #[test]
 fn a_reviewers_only_runtime_reaches_reviewers_and_not_authors() {
     let mut w = working();
@@ -273,6 +539,53 @@ fn with_no_settings_every_value_is_the_one_the_code_had() {
 }
 
 #[test]
+fn an_old_role_value_for_a_setting_not_read_per_role_replays_as_nothing() {
+    // The lines as an older daemon wrote them.
+    let old = [
+        r#"{"SettingSet":{"scope":{"Project":"ankh"},"role":"Reviewer","key":"review_rounds","value":1,"by":"person"}}"#,
+        r#"{"SettingSet":{"scope":"Global","role":"Reviewer","key":"review_rounds","value":1,"by":"file"}}"#,
+    ];
+    let mut w = working();
+    for line in old {
+        let event: Event = serde_json::from_str(line).expect("still read");
+        assert_eq!(w.apply(&event), vec![]);
+    }
+    assert!(w.settings.is_empty(), "{:?}", w.settings);
+    let issue = id("ankh", "1");
+    let r = w
+        .setting(&issue, Some(Role::Reviewer), "review_rounds")
+        .expect("built in");
+    assert_eq!((r.value, r.level), (Value::Number(3), Level::BuiltIn));
+    let listed = crate::text::settings(
+        &w,
+        &crate::settings::Target::parse("ankh"),
+        Some(Role::Reviewer),
+    )
+    .expect("known");
+    assert!(
+        listed.lines().any(|l| l
+            .split_whitespace()
+            .eq(["review_rounds", "3", "built", "in"])),
+        "{listed}"
+    );
+    let status = crate::text::text(&w, &Default::default());
+    assert!(!status.contains("review_rounds"), "{status}");
+    // Three rounds still.
+    for round in 1..3 {
+        let sent = blocked(&mut w, &issue, round);
+        assert!(sent.iter().any(|e| matches!(e, Effect::RequestFix { .. })));
+    }
+    let last = blocked(&mut w, &issue, 3);
+    assert!(last.iter().any(|e| matches!(
+        e,
+        Effect::StartAgent {
+            role: Role::Arbiter,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn an_older_log_with_commands_and_a_group_model_reads_as_settings() {
     let mut w = working();
     w.apply(&Event::ProjectCommandsSet {
@@ -290,6 +603,8 @@ fn an_older_log_with_commands_and_a_group_model_reads_as_settings() {
         milestones: Vec::new(),
         refining_at_once: 1,
         model: Some("haiku".into()),
+        queue_low: None,
+        investigate_every: None,
     });
     let i = id("ankh", "1");
     assert_eq!(
@@ -325,6 +640,8 @@ fn machines(folders: &[(&str, &str)]) -> World {
         milestones: Vec::new(),
         refining_at_once: 3,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     });
     events.extend(["1", "2"].map(|key| Event::IssueSynced {
         issue: id("ankh", key),
@@ -438,6 +755,8 @@ fn pinned_below_unpinned(held: Option<&str>) -> World {
         milestones: Vec::new(),
         refining_at_once: 4,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     });
     let blocker = id("watch", "WATCH-11");
     events.extend(
@@ -784,6 +1103,8 @@ fn an_issue_across_repositories_takes_all_its_folders_on_its_machine_or_none() {
             milestones: Vec::new(),
             refining_at_once: 1,
             model: None,
+            queue_low: None,
+            investigate_every: None,
         },
         Event::IssueSynced {
             issue: issue.clone(),

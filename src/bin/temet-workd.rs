@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use temet_work::config::Config;
 use temet_work::socket;
-use temet_work_core::{Event, Host};
+use temet_work_core::Event;
 
 const EVERY: Duration = Duration::from_secs(2);
 
@@ -89,16 +89,14 @@ fn run() -> Result<(), String> {
     if let Some(dir) = log_path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    let (journal, world) = temet_work::journal(&log_path)?;
-    let mut host = Host::new(
-        world,
+    let mut host = temet_work::start(
+        &log_path,
         // A deploy that restarts this daemon leaves its note next to the log.
         temet_work::parts_with(
             config.daemon_host.clone(),
             Some(log_path.with_file_name("deploy-handoff")),
         ),
-        journal,
-    );
+    )?;
     if host.world().log.is_none() {
         // A new log: its id labels the terminals its agents run in.
         let id = format!("{:x}{:x}", now_ms(), std::process::id());
@@ -145,17 +143,9 @@ fn run() -> Result<(), String> {
         match requests.recv_timeout(next_round.saturating_duration_since(Instant::now())) {
             Ok(pending) => {
                 let reply = socket::answer(&mut host, now_ms(), &pending.request, &pending.peer)?;
-                // Who sent what, and what came of it: a request log on stderr.
-                let debug = format!("{:?}", pending.request.command);
-                eprintln!(
-                    "request: by={} {} -> {}",
-                    pending.request.by.as_ref().map_or("none", |a| a.0.as_str()),
-                    debug.split([' ', '{', '(']).next().unwrap_or_default(),
-                    match &reply {
-                        socket::Reply::Done { .. } => "done".to_string(),
-                        socket::Reply::Refused { why } => format!("refused: {why}"),
-                    }
-                );
+                if let Some(line) = socket::request_line(&pending.request, &reply) {
+                    eprintln!("{line}");
+                }
                 pending.answer(reply);
             }
             Err(RecvTimeoutError::Timeout) => {}

@@ -130,6 +130,14 @@ pub enum Event {
         /// it is read as a model setting on the group's projects and areas.
         #[serde(default)]
         model: Option<String>,
+        /// Below how many issues in its work queue it starts an investigator;
+        /// the default (twice its work folders) when left out, as in older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_low: Option<usize>,
+        /// Minutes from the end of its last investigation before another may
+        /// start; 120 when left out, as in older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        investigate_every: Option<u64>,
     },
     /// The tracker reported an issue, new or changed.
     IssueSynced {
@@ -171,6 +179,14 @@ pub enum Event {
         agent: AgentId,
         /// Its new state.
         state: AgentState,
+    },
+    /// The daemon typed `continue` into an agent whose turn ended on a limit,
+    /// once that limit had reset; the agent is working again.
+    Continued {
+        /// The agent.
+        agent: AgentId,
+        /// When the limit it waited on reset, in milliseconds since 1970.
+        resets_ms: u64,
     },
     /// The refiner wrote an issue's plan.
     PlanWritten {
@@ -282,6 +298,46 @@ pub enum Event {
         /// The repository whose pull request conflicts.
         #[serde(default)]
         repo: Option<ProjectId>,
+    },
+    /// A group short of work began an investigation, to be carried out by
+    /// `agent`, its investigator.
+    InvestigationStarted {
+        /// The group.
+        group: GroupId,
+        /// The investigator.
+        agent: AgentId,
+        /// When, in milliseconds since the Unix epoch.
+        at_ms: u64,
+    },
+    /// An investigator filed an issue in a tracker.
+    IssueFiled {
+        /// Its group.
+        group: GroupId,
+        /// The investigator.
+        agent: AgentId,
+        /// The new issue.
+        issue: IssueId,
+        /// Its title.
+        title: String,
+        /// The milestone it was filed in, if any.
+        milestone: Option<MilestoneId>,
+    },
+    /// An investigator said its investigation is done.
+    Investigated {
+        /// Its group.
+        group: GroupId,
+        /// The investigator.
+        agent: AgentId,
+    },
+    /// A group's investigation ended: its investigator said it is done, or its
+    /// session ended.
+    InvestigationEnded {
+        /// The group.
+        group: GroupId,
+        /// When, in milliseconds since the Unix epoch.
+        at_ms: u64,
+        /// How many issues it filed.
+        filed: usize,
     },
     /// The code host would not merge the pull request as it stands, such as for a
     /// conflict with the target branch.

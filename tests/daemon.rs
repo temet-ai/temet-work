@@ -146,11 +146,30 @@ fn host_from(
     daemon_host: Option<&str>,
     issues: Vec<(String, TrackedIssue)>,
 ) -> (Host, Starts) {
+    host_tracking(
+        world,
+        journal,
+        runtimes,
+        config,
+        daemon_host,
+        FakeTracker {
+            issues,
+            ..FakeTracker::default()
+        },
+    )
+}
+
+/// A host on `world`, with every family's fake and `tracker` as its tracker.
+fn host_tracking(
+    world: World,
+    journal: Box<dyn temet_work_core::Journal>,
+    runtimes: temet_work_runtime::Runtimes,
+    config: &str,
+    daemon_host: Option<&str>,
+    tracker: FakeTracker,
+) -> (Host, Starts) {
     let mut trackers = temet_work_tracker::Trackers::default();
-    trackers.add(Box::new(FakeTracker {
-        issues,
-        ..FakeTracker::default()
-    }));
+    trackers.add(Box::new(tracker));
     let mut runners = temet_work_runner::Runners::default();
     let fake = FakeRunner::default();
     let starts = fake.starts();
@@ -211,6 +230,93 @@ fn a_synced_issue_gets_a_refiner_in_a_labelled_terminal() {
     );
 }
 
+/// An older log holds plain models and sets no global runtime. The daemon puts
+/// its build's runtimes in the world before it replays the log, so each plain
+/// model is the build's default runtime's.
+#[cfg(feature = "store")]
+#[test]
+fn a_start_over_a_log_with_no_global_runtime_binds_its_plain_models_to_the_builds_default() {
+    use temet_work_core::event::Event;
+    use temet_work_core::ids::{GroupId, ProjectId};
+    use temet_work_core::model::Role;
+    use temet_work_core::settings::{Scope, Value};
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("plain-model-start");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let log = dir.join("events.jsonl");
+    let ankh = ProjectId::new("ankh");
+    let issue = IssueId::new("ankh", "1");
+    let model = |scope: Scope, role: Option<Role>, value: &str, by: &str| Event::SettingSet {
+        scope,
+        role,
+        key: "model".into(),
+        value: Value::Text(value.into()),
+        by: by.into(),
+    };
+    {
+        let (mut written, _) = temet_work_store::Log::open(&log).expect("log");
+        for event in [
+            Event::ProjectAdded {
+                project: ankh.clone(),
+                tracker: "fake".into(),
+                name: "city/ankh".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::GroupCreated {
+                group: GroupId::new("watch"),
+                name: "Night watch".into(),
+                projects: vec![ankh.clone()],
+                areas: Vec::new(),
+                milestones: Vec::new(),
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+            Event::IssueSynced {
+                issue: issue.clone(),
+                title: "Mend the clock".into(),
+                milestone: None,
+                depends_on: vec![],
+                order: 1,
+                closed: false,
+            },
+            model(Scope::Task(issue.clone()), None, "opus", "refiner-1"),
+            model(
+                Scope::Project(ankh.clone()),
+                Some(Role::Reviewer),
+                "haiku",
+                "person",
+            ),
+        ] {
+            written.append(0, &event).expect("logged");
+        }
+    }
+    let host = temet_work::start(&log, vec![Box::new(fake_runtimes())]).expect("start");
+    let w = host.world();
+    let kept: Vec<(Option<Role>, &str, String)> = w
+        .settings
+        .iter()
+        .map(|((_, role, key), e)| (*role, key.as_str(), e.value.to_string()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (Some(Role::Reviewer), "model.fake", "haiku".to_string()),
+            (Some(Role::Author), "model.fake", "opus".to_string()),
+        ]
+    );
+    let brief = |role| {
+        w.launch(&GroupId::new("watch"), role, &issue, None)
+            .expect("known")
+            .brief
+            .model
+    };
+    assert_eq!(brief(Role::Author).as_deref(), Some("opus"));
+    assert_eq!(brief(Role::Reviewer).as_deref(), Some("haiku"));
+}
+
 /// A reviewer set to run Codex starts as the Codex program in a labelled
 /// terminal; the author of the same issue keeps the build's default runtime.
 #[cfg(feature = "runtime-codex")]
@@ -229,6 +335,7 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
         match answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     };
     run(
@@ -310,6 +417,7 @@ fn a_refiners_plan_naming_runtime_is_refused_and_the_author_runs_claude_in_plan_
     let done = |reply: Reply| match reply {
         Reply::Done { text } => text,
         Reply::Refused { why } => panic!("refused: {why}"),
+        Reply::View { view } => panic!("a view: {view:?}"),
     };
     done(run(
         &mut host,
@@ -410,7 +518,14 @@ fn a_folder_on_another_machine_needs_daemon_host_before_an_agent_starts_there() 
         Some("omit"),
     );
     host.tick(0).expect("tick");
-    assert_eq!(host.world().agents.len(), 1, "{:?}", host.problems());
+    // The refiner, and the investigator of a group short of work: both on mac.
+    let machines: Vec<&str> = host
+        .world()
+        .agents
+        .values()
+        .map(|a| a.machine.0.as_str())
+        .collect();
+    assert_eq!(machines, ["mac", "mac"], "{:?}", host.problems());
 }
 
 #[test]
@@ -460,6 +575,99 @@ fn commands_reach_the_daemon_over_its_socket() {
     );
 }
 
+/// A plan of one check, as `temet-work plan` reads it.
+const ONE_CHECK: &str =
+    "checks:\n  - done_when: the clock strikes on time\n    proven_by: listening at noon\n";
+
+/// Sends [`ONE_CHECK`] for ankh#1 as its refiner.
+fn plan_one_check(host: &mut Host, starts: &Starts) {
+    use temet_work::socket::{self, Reply};
+
+    let command = Command::Plan {
+        issue: IssueId::new("ankh", "1"),
+        plan: temet_work::cli::plan(ONE_CHECK).expect("plan"),
+    };
+    let request = from(starts, Some("refiner-1"), command);
+    let reply = socket::answer(host, 1, &request, &Peer::Unchecked).expect("answer");
+    assert!(matches!(reply, Reply::Done { .. }), "{reply:?}");
+}
+
+/// The reply to a person's `temet-work issue ankh#1`.
+fn issue_view(host: &mut Host) -> String {
+    use temet_work::socket::{self, Reply};
+
+    let command = Command::Issue {
+        issue: IssueId::new("ankh", "1"),
+    };
+    let request = Request::new(None, command);
+    match socket::answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
+        Reply::Done { text } => text,
+        Reply::Refused { why } => panic!("refused: {why}"),
+        Reply::View { view } => panic!("a view: {view:?}"),
+    }
+}
+
+#[test]
+fn the_issue_command_shows_the_text_the_last_sync_read_above_the_plan() {
+    let body = "The clock in the square is slow.\n\nDone is a clock that strikes on time.";
+    let (name, mut issue) = tracked("city/ankh", "1", 1);
+    issue.body = body.into();
+    let (mut host, starts) = host_tracking(
+        World::default(),
+        Box::new(Memory::default()),
+        fake_runtimes(),
+        CONFIG,
+        None,
+        FakeTracker {
+            issues: vec![(name, issue)],
+            ..FakeTracker::default()
+        },
+    );
+    host.tick(0).expect("sync");
+    plan_one_check(&mut host, &starts);
+    let shown = issue_view(&mut host);
+    let want = format!(
+        "\nText of issue 1 of city/ankh, as the fake tracker returned it at the last sync that \
+         worked:\n{body}\nEnd of the issue's text.\nPlan:\n"
+    );
+    assert!(shown.contains(&want), "{shown}");
+    assert!(shown.starts_with("ankh#1  Mend the clock\n"), "{shown}");
+}
+
+#[test]
+fn the_issue_command_before_the_first_sync_says_the_text_was_not_read() {
+    // A daemon that restarted: its log holds the issue, and it has not synced.
+    let (world, _) = World::replay(&[temet_work_core::Event::IssueSynced {
+        issue: IssueId::new("ankh", "1"),
+        title: "Mend the clock".into(),
+        milestone: None,
+        depends_on: vec![],
+        order: 1,
+        closed: false,
+    }]);
+    let (mut host, starts) = host_from(
+        world,
+        Box::new(Memory::default()),
+        fake_runtimes(),
+        CONFIG,
+        None,
+        vec![tracked("city/ankh", "1", 1)],
+    );
+    plan_one_check(&mut host, &starts);
+    let shown = issue_view(&mut host);
+    for line in [
+        "ankh#1  Mend the clock\n",
+        "\nStage: ",
+        "\nGroup: watch\n",
+        "\nThe issue's text was not read: ankh has not synced since the daemon started\nPlan:\n",
+        "\n  - the clock strikes on time (shown by: listening at noon)\n",
+        "\nAgents:\n",
+    ] {
+        assert!(shown.contains(line), "missing {line:?} in:\n{shown}");
+    }
+    assert!(!shown.contains("Text of"), "{shown}");
+}
+
 #[test]
 fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     use temet_work::socket::{Reply, answer};
@@ -475,6 +683,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         match answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("{by}: refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     };
     let plan = Plan {
@@ -626,6 +835,7 @@ mod settings_commands {
         match reply {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     }
 
@@ -633,6 +843,7 @@ mod settings_commands {
         match reply {
             Reply::Refused { why } => why,
             Reply::Done { text } => panic!("done: {text}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     }
 
@@ -642,14 +853,16 @@ mod settings_commands {
         let kept = Kept::default();
         let (mut host, _) = host_with(Box::new(kept.clone()));
         host.tick(0).expect("sync");
+        // A plain model is the global runtime's, the build's default here, and
+        // the reply names the key it is recorded under.
         assert_eq!(
             done(ask(&mut host, None, set("ankh#1", None, "model", "opus"))),
-            "model is opus at ankh#1"
+            "model.fake is opus at ankh#1"
         );
         done(ask(
             &mut host,
             None,
-            set("ankh", Some(Role::Reviewer), "review_rounds", "1"),
+            set("ankh", Some(Role::Reviewer), "starts", "1"),
         ));
         let shown = done(ask(
             &mut host,
@@ -661,7 +874,7 @@ mod settings_commands {
         ));
         assert!(shown.starts_with("ankh#1, author\n"), "{shown}");
         assert_eq!(row(&shown, "model"), "opus task, set by person");
-        assert_eq!(row(&shown, "review_rounds"), "3 built in");
+        assert_eq!(row(&shown, "starts"), "3 built in");
         assert_eq!(row(&shown, "runtime"), "fake built in");
         assert_eq!(
             row(&shown, "deploy"),
@@ -676,10 +889,7 @@ mod settings_commands {
                 role: Some(Role::Reviewer),
             },
         ));
-        assert_eq!(
-            row(&for_reviewer, "review_rounds"),
-            "1 project, set by person"
-        );
+        assert_eq!(row(&for_reviewer, "starts"), "1 project, set by person");
         // `temet-work issue` shows the role at work on the issue: the refiner.
         let issue = done(ask(
             &mut host,
@@ -693,7 +903,7 @@ mod settings_commands {
         // The status lists the events' effect, with who made each.
         let status = done(ask(&mut host, None, Command::Status));
         assert!(
-            status.contains("ankh#1: model = opus, set by person"),
+            status.contains("ankh#1: model.fake = opus, set by person"),
             "{status}"
         );
 
@@ -704,7 +914,7 @@ mod settings_commands {
         };
         assert_eq!(
             done(ask(&mut host, None, unset.clone())),
-            "model is no longer set at ankh#1"
+            "model.fake is no longer set at ankh#1"
         );
         assert!(refused(ask(&mut host, None, unset)).contains("nothing to unset"));
 
@@ -720,7 +930,12 @@ mod settings_commands {
         ));
         assert!(matches!(
             settings[1],
-            Event::SettingSet { scope: Scope::Task(_), value: Value::Text(v), by, .. } if v == "opus" && by == "person"
+            Event::SettingSet { scope: Scope::Task(_), key, value: Value::Text(v), by, .. }
+                if key == "model.fake" && v == "opus" && by == "person"
+        ));
+        assert!(matches!(
+            settings[3],
+            Event::SettingUnset { key, .. } if key == "model.fake"
         ));
     }
 
@@ -743,7 +958,7 @@ mod settings_commands {
         for role in [None, Some(Role::Author)] {
             assert_eq!(
                 done(refiner(&mut host, set("ankh#1", role, "model", "haiku"))),
-                "model is haiku at ankh#1 for author"
+                "model.fake is haiku at ankh#1 for author"
             );
         }
         let why = refused(refiner(
@@ -758,7 +973,7 @@ mod settings_commands {
         };
         assert_eq!(
             done(refiner(&mut host, unset)),
-            "model is no longer set at ankh#1 for author"
+            "model.fake is no longer set at ankh#1 for author"
         );
         let plan = Command::Plan {
             issue: IssueId::new("ankh", "1"),
@@ -783,7 +998,7 @@ mod settings_commands {
         assert_eq!(shown(Role::Author), "sonnet task, set by refiner-1");
         let status = done(ask(&mut host, None, Command::Status));
         assert!(
-            status.contains("ankh#1, author: model = sonnet, set by refiner-1\n"),
+            status.contains("ankh#1, author: model.fake = sonnet, set by refiner-1\n"),
             "{status}"
         );
     }
@@ -919,7 +1134,7 @@ fn the_same_request_gets_equal_replies_through_the_socket_and_through_ssh() {
         let path = path.clone();
         std::thread::spawn(move || {
             let request = from(&starts, Some("refiner-1"), Command::Status);
-            let local = Local { path }.send(&request);
+            let local = Local { path: path.clone() }.send(&request);
             let ssh = Ssh {
                 target: "stub".into(),
                 port: None,
@@ -928,22 +1143,96 @@ fn the_same_request_gets_equal_replies_through_the_socket_and_through_ssh() {
                 deadline: socket::SSH_DEADLINE,
             }
             .send(&request);
-            (local, ssh)
+            let view = from(&starts, Some("refiner-1"), Command::View);
+            let ssh_view = Ssh {
+                target: "stub".into(),
+                port: None,
+                socket: None,
+                program: stub.display().to_string(),
+                deadline: socket::SSH_DEADLINE,
+            }
+            .send(&view);
+            let local_view = Local { path }.send(&view);
+            (local, ssh, local_view, ssh_view)
         })
     };
-    for _ in 0..2 {
+    for _ in 0..4 {
         let pending = requests
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("a request");
         let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
         pending.answer(reply);
     }
-    let (local, ssh) = client.join().expect("client");
+    let (local, ssh, local_view, ssh_view) = client.join().expect("client");
     assert!(
         matches!(&local, Ok(socket::Reply::Done { text }) if text.contains("refiner-1 on ankh#1")),
         "{local:?}"
     );
     assert_eq!(local, ssh);
+    assert!(
+        matches!(&local_view, Ok(socket::Reply::View { view })
+            if view.agents.iter().any(|a| a.id.0 == "refiner-1")),
+        "{local_view:?}"
+    );
+    assert_eq!(local_view, ssh_view);
+}
+
+#[test]
+fn status_json_prints_the_view() {
+    use temet_work::socket;
+
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("view.sock");
+    let requests = socket::listen(&path).expect("listen");
+    let client = std::thread::spawn(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+            .args(["status", "--json"])
+            .env("TEMET_WORK_SOCKET", &path)
+            .env_remove("TEMET_WORK_DAEMON")
+            .env_remove("TEMET_WORK_AGENT")
+            .env_remove(SECRET_VAR)
+            .output()
+            .expect("runs")
+    });
+    let (mut host, _) = host();
+    host.tick(0).expect("tick");
+    let pending = requests
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("a request");
+    assert_eq!(pending.request.command, Command::View);
+    let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
+    pending.answer(reply);
+    let out = client.join().expect("client");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let view: temet_work_core::View = serde_json::from_slice(&out.stdout).expect("a view");
+    assert_eq!(
+        view,
+        temet_work_core::View::new(host.world(), host.problems())
+    );
+    assert_eq!(view.issues[0].id, "ankh#1");
+}
+
+#[test]
+fn json_on_a_command_other_than_status_is_refused_with_the_usage() {
+    for args in [
+        &["parts", "--json"][..],
+        &["help", "--json"],
+        &["mcp", "--json"],
+        &["issue", "ankh#1", "--json"],
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+            .args(args)
+            .env("TEMET_WORK_SOCKET", "/nonexistent.sock")
+            .env_remove("TEMET_WORK_DAEMON")
+            .output()
+            .expect("runs");
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        let why = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            why.contains("temet-work status [--json]"),
+            "{args:?}: {why}"
+        );
+    }
 }
 
 #[test]
@@ -1129,10 +1418,10 @@ printf '{{"reply":"done","text":"all quiet"}}\n'
 }
 
 /// A stub `ssh` whose far end is the real `temet-work relay`, told that the
-/// caller is build `other` on the machine `lancre`.
-fn other_build_stub(name: &str, socket: &std::path::Path) -> std::path::PathBuf {
+/// caller is build `build` on the machine `lancre`.
+fn relay_stub(name: &str, socket: &std::path::Path, build: &str) -> std::path::PathBuf {
     let body = format!(
-        "#!/bin/sh\nTEMET_WORK_SOCKET={} exec {} relay --build other --host lancre\n",
+        "#!/bin/sh\nTEMET_WORK_SOCKET={} exec {} relay --build {build} --host lancre\n",
         socket.display(),
         env!("CARGO_BIN_EXE_temet-work")
     );
@@ -1153,7 +1442,7 @@ fn a_client_at_a_different_build_is_refused_and_nothing_reaches_the_daemon() {
 
     let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("other-build.sock");
     let requests = socket::listen(&path).expect("listen");
-    let stub = other_build_stub("other-build", &path);
+    let stub = relay_stub("other-build", &path, "other");
     let reply = Ssh {
         target: "stub".into(),
         port: None,
@@ -1173,8 +1462,9 @@ fn a_client_at_a_different_build_is_refused_and_nothing_reaches_the_daemon() {
 
 #[test]
 fn a_person_at_a_different_build_reads_one_line_and_exit_code_1() {
-    let nowhere = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("unused.sock");
-    let stub = other_build_stub("other-build-cli", &nowhere);
+    let sock = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("other-build-cli.sock");
+    let _requests = temet_work::socket::listen(&sock).expect("listen");
+    let stub = relay_stub("other-build-cli", &sock, "other");
     let path = format!(
         "{}:{}",
         stub.parent().expect("dir").display(),
@@ -1193,6 +1483,51 @@ fn a_person_at_a_different_build_reads_one_line_and_exit_code_1() {
         format!("refused: {}\n", other_build_refusal())
     );
     assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn the_relay_compares_the_client_with_the_daemons_build_not_its_own() {
+    use temet_work::socket::{self, Reply, Ssh, Transport};
+
+    assert_ne!("octarine", temet_work::BUILD);
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("daemon-build.sock");
+    let requests = socket::listen_as(&path, "octarine").expect("listen");
+    let send_as = |name: &str, build: &str| {
+        let stub = relay_stub(name, &path, build);
+        std::thread::spawn(move || {
+            Ssh {
+                target: "stub".into(),
+                port: None,
+                socket: None,
+                program: stub.display().to_string(),
+                deadline: socket::SSH_DEADLINE,
+            }
+            .send(&Request::new(None, Command::Status))
+        })
+    };
+
+    let client = send_as("at-the-daemons-build", "octarine");
+    let pending = requests
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("a request");
+    let (mut host, _) = host();
+    host.tick(0).expect("tick");
+    let answer = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
+    pending.answer(answer.clone());
+    assert!(matches!(answer, Reply::Done { .. }), "{answer:?}");
+    assert_eq!(client.join().expect("client"), Ok(answer));
+
+    let client = send_as("at-the-relays-build", temet_work::BUILD);
+    assert_eq!(
+        client.join().expect("client"),
+        Ok(Reply::Refused {
+            why: format!(
+                "temet-work on lancre is build {}, the daemon is build octarine: update it",
+                temet_work::BUILD
+            )
+        })
+    );
+    assert!(requests.try_recv().is_err(), "the request was forwarded");
 }
 
 #[test]
@@ -1524,6 +1859,7 @@ areas = ["guild"]
         match reply {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     }
 
@@ -1775,6 +2111,7 @@ projects = ["ankh"]
         match answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     };
     host.tick(0).expect("sync");
@@ -1876,13 +2213,24 @@ mod senders {
         requests: &Receiver<Pending>,
         client: std::thread::JoinHandle<T>,
     ) -> T {
+        serve_seeing(host, requests, client).0
+    }
+
+    /// [`serve`], also returning the peer the socket read for each request.
+    fn serve_seeing<T>(
+        host: &mut Host,
+        requests: &Receiver<Pending>,
+        client: std::thread::JoinHandle<T>,
+    ) -> (T, Vec<Peer>) {
+        let mut seen = Vec::new();
         while !client.is_finished() {
             if let Ok(p) = requests.recv_timeout(std::time::Duration::from_millis(2)) {
                 let reply = answer(host, 1, &p.request, &p.peer).expect("answer");
+                seen.push(p.peer.clone());
                 p.answer(reply);
             }
         }
-        client.join().expect("client")
+        (client.join().expect("client"), seen)
     }
 
     /// The exit code and both outputs, trimmed.
@@ -1944,6 +2292,20 @@ mod senders {
         args: &[&str],
         input: &str,
     ) -> (Option<i32>, String, String) {
+        let built = Path::new(env!("CARGO_BIN_EXE_temet-work"));
+        under_program(built, socket, parent, child, args, input)
+    }
+
+    /// [`under_with`], running `program` as the command.
+    #[cfg(target_os = "linux")]
+    fn under_program(
+        program: &Path,
+        socket: &Path,
+        parent: (&str, &str),
+        child: Option<(&str, &str)>,
+        args: &[&str],
+        input: &str,
+    ) -> (Option<i32>, String, String) {
         use std::io::Write;
         let set: Vec<String> = match child {
             None => ["-u", "TEMET_WORK_AGENT", "-u", SECRET_VAR]
@@ -1958,7 +2320,7 @@ mod senders {
         let mut child = std::process::Command::new("sh")
             .args(["-c", "env \"$@\"; exit $?", "sh"])
             .args(&set)
-            .arg(env!("CARGO_BIN_EXE_temet-work"))
+            .arg(program)
             .args(args)
             .env("TEMET_WORK_SOCKET", socket)
             .env_remove("TEMET_WORK_DAEMON")
@@ -2014,7 +2376,7 @@ refining_at_once = 2
     #[test]
     fn every_agent_gets_a_secret_of_its_own_and_none_is_logged_or_shown() {
         let log = scratch("log").join("events.jsonl");
-        let (journal, world) = temet_work::journal(&log).expect("log");
+        let (journal, world) = temet_work::journal(&log, Default::default()).expect("log");
         let (mut host, starts) = host_from(
             world,
             journal,
@@ -2058,20 +2420,21 @@ refining_at_once = 2
         ] {
             ask(&mut host, Request::new(None, command));
         }
-        // Two agents here and one on mac, each with its own secret.
+        // Three agents here (the group's investigator among them) and one on mac,
+        // each with its own secret.
         let started = starts.lock().expect("starts").clone();
         let machines: Vec<Option<&str>> = started.iter().map(|s| s.machine.as_deref()).collect();
-        assert_eq!(machines.len(), 3, "{machines:?}");
-        assert_eq!(machines.iter().filter(|m| m.is_none()).count(), 2);
+        assert_eq!(machines.len(), 4, "{machines:?}");
+        assert_eq!(machines.iter().filter(|m| m.is_none()).count(), 3);
         assert!(machines.contains(&Some("mac")), "{machines:?}");
-        let secrets: Vec<String> = ["refiner-1", "refiner-2", "author-1"]
+        let secrets: Vec<String> = ["refiner-1", "refiner-2", "author-1", "investigator-1"]
             .iter()
             .map(|a| secret(&starts, a))
             .collect();
         let mut distinct = secrets.clone();
         distinct.sort();
         distinct.dedup();
-        assert_eq!(distinct.len(), 3);
+        assert_eq!(distinct.len(), 4);
         drop(host);
         let written = std::fs::read_to_string(&log).expect("log");
         shown.push(temet_work_core::text::text(
@@ -2393,6 +2756,32 @@ refining_at_once = 2
         temet_work_core::Digest::from_bytes(&bytes).0
     }
 
+    /// A new folder in the temp dir that only this user can write, removed when
+    /// dropped, so a failed test leaves nothing in it either.
+    #[cfg(target_os = "linux")]
+    struct Private(PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl Private {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            // A random name, and `create` fails on a folder someone else made.
+            let dir = std::env::temp_dir().join(format!("temet-work-test-{}", &fresh()[..16]));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .expect("a new folder");
+            Self(dir)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for Private {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// The commands a person may run and an agent may not.
     const PERSONS: [&[&str]; 7] = [
         &["rule", "ankh#1", "approve", "the", "bell", "is", "fine"],
@@ -2520,6 +2909,71 @@ refining_at_once = 2
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn a_stolen_secret_from_a_sender_that_cannot_be_read_is_refused() {
+        let sock = scratch("unreadable").join("daemon.sock");
+        // A copy with no read bit runs non-dumpable, so its environ is root's.
+        // It goes to the temp dir: on a busy project disk the copy alone can
+        // take seconds. `install` writes it, so no thread here holds it open
+        // when it runs.
+        let copy = Private::new();
+        let hidden = copy.0.join("temet-work");
+        let installed = std::process::Command::new("install")
+            .args(["-m", "111", env!("CARGO_BIN_EXE_temet-work")])
+            .arg(&hidden)
+            .status()
+            .expect("install runs");
+        assert!(installed.success(), "{installed}");
+        let requests = socket::listen(&sock).expect("listen");
+        let (author, reviewer) = (fresh(), fresh());
+        let mut host = tree_host(
+            &[
+                ("author-1", Role::Author, &author),
+                ("reviewer-1", Role::Reviewer, &reviewer),
+            ],
+            Stage::InReview { round: 1 },
+        );
+        let approve = ["review", "ankh#1", "approve"];
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            let (author, reviewer) = (author.clone(), reviewer.clone());
+            move || {
+                under_program(
+                    &hidden,
+                    &sock,
+                    ("author-1", &author),
+                    Some(("reviewer-1", &reviewer)),
+                    &approve,
+                    "",
+                )
+            }
+        });
+        let (stolen, seen) = serve_seeing(&mut host, &requests, client);
+        // Run as root the copy would be readable, and this test would prove nothing.
+        assert!(
+            matches!(&seen[..], [Peer::Unreadable { .. }]),
+            "the daemon read the sender: {seen:?}"
+        );
+        assert_eq!(stolen.0, Some(1), "{stolen:?}");
+        assert!(
+            stolen.2.contains(
+                "names reviewer-1 but comes from inside author-1's process tree, which holds author-1's secret"
+            ),
+            "{stolen:?}"
+        );
+        let issue = IssueId::new("ankh", "1");
+        assert!(!host.world().issues[&issue].review_ok, "still in review");
+        // The reviewer's own temet-work sends the same command, and it counts.
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            move || as_agent(&sock, "reviewer-1", Some(&reviewer), &approve)
+        });
+        let own = serve(&mut host, &requests, client);
+        assert_eq!(own.0, Some(0), "{own:?}");
+        assert!(host.world().issues[&issue].review_ok, "approved");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn a_stolen_secret_sent_through_a_local_relay_is_refused_all_the_same() {
         let sock = scratch("stolen-relay").join("daemon.sock");
         let requests = socket::listen(&sock).expect("listen");
@@ -2603,5 +3057,189 @@ refining_at_once = 2
             );
         }
         assert_eq!(status.0, Some(0), "{status:?}");
+    }
+}
+
+mod investigations {
+    use super::*;
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::Event;
+    use temet_work_core::ids::GroupId;
+    use temet_work_tracker::TrackedMilestone;
+
+    const SHORT: &str = r#"
+[[project]]
+id = "ankh"
+tracker = "fake"
+name = "city/ankh"
+
+[[folder]]
+id = "ankh-1"
+project = "ankh"
+path = "."
+
+[[group]]
+id = "watch"
+name = "Night watch"
+projects = ["ankh"]
+milestones = ["First"]
+refining_at_once = 2
+"#;
+
+    /// A host whose group, with one issue to refine and a free slot, is short of work.
+    fn short() -> (Host, Starts, Kept) {
+        let kept = Kept::default();
+        let mut one = tracked("city/ankh", "1", 1);
+        one.1.milestone = Some("First".into());
+        let (host, starts) = host_tracking(
+            World::default(),
+            Box::new(kept.clone()),
+            fake_runtimes(),
+            SHORT,
+            None,
+            FakeTracker {
+                issues: vec![one],
+                milestones: vec![(
+                    "city/ankh".into(),
+                    TrackedMilestone {
+                        title: "First".into(),
+                        open: 1,
+                    },
+                )],
+                ..FakeTracker::default()
+            },
+        );
+        (host, starts, kept)
+    }
+
+    fn ask(host: &mut Host, request: Request) -> Reply {
+        answer(host, 1_000, &request, &Peer::Unchecked).expect("answer")
+    }
+
+    fn file(title: &str) -> Command {
+        Command::File {
+            project: temet_work_core::ids::ProjectId::new("ankh"),
+            title: title.into(),
+            body: "Wind it nightly.\nDepends on #1".into(),
+            milestone: None,
+        }
+    }
+
+    fn starts_on(kept: &Kept, issue: &IssueId) -> usize {
+        kept.0
+            .lock()
+            .expect("journal")
+            .iter()
+            .filter(|e| matches!(e, Event::AgentStarted { issue: Some(i), .. } if i == issue))
+            .count()
+    }
+
+    #[test]
+    fn an_issue_the_investigator_files_gets_a_refiner_at_once_and_the_next_sync_adds_nothing() {
+        let (mut host, starts, kept) = short();
+        host.tick(0).expect("tick");
+        let investigator = &host.world().agents[&AgentId::new("investigator-1")];
+        assert_eq!(
+            (investigator.issue.as_ref(), investigator.folder.as_ref()),
+            (None, None),
+            "{:?}",
+            host.problems()
+        );
+        // Cloned, so the lock is not held while the investigator's requests read it.
+        let labels = starts.lock().expect("starts")[1].labels.clone();
+        assert_eq!(labels.get("role").map(String::as_str), Some("investigator"));
+        assert_eq!(labels.get("issue"), None);
+
+        let reply = ask(
+            &mut host,
+            from(&starts, Some("investigator-1"), file("Wind the clock")),
+        );
+        let Reply::Done { text } = reply else {
+            panic!("{reply:?}");
+        };
+        assert_eq!(
+            text,
+            "filed ankh#2 in milestone First; an issue of ankh that waits for it says: Depends on #2"
+        );
+        let filed = IssueId::new("ankh", "2");
+        let issue = &host.world().issues[&filed];
+        assert_eq!(issue.stage, Stage::Refining, "in the loop at once");
+        assert_eq!(issue.depends_on, [IssueId::new("ankh", "1")]);
+        assert_eq!(starts_on(&kept, &filed), 1, "a refiner on it");
+        let g = host.world().groups[&GroupId::new("watch")].clone();
+        assert_eq!(
+            host.world().queue(&g),
+            2,
+            "it counts toward the queue at once"
+        );
+        assert!(
+            kept.0
+                .lock()
+                .expect("journal")
+                .contains(&Event::IssueFiled {
+                    group: GroupId::new("watch"),
+                    agent: AgentId::new("investigator-1"),
+                    issue: filed.clone(),
+                    title: "Wind the clock".into(),
+                    milestone: Some(temet_work_core::ids::MilestoneId::new("First")),
+                })
+        );
+
+        // The next sync finds the issue as filed: nothing changes, nobody else starts.
+        let before = kept.0.lock().expect("journal").len();
+        assert_eq!(host.tick(60_000), Ok(0), "no events from the sync");
+        assert_eq!(starts_on(&kept, &filed), 1);
+        assert_eq!(
+            kept.0.lock().expect("journal").len(),
+            before,
+            "nothing logged"
+        );
+
+        // The same title again is the plainest duplicate.
+        let again = ask(
+            &mut host,
+            from(&starts, Some("investigator-1"), file("Wind the clock")),
+        );
+        assert!(
+            matches!(&again, Reply::Refused { why } if why.contains("ankh#2 is open with the title")),
+            "{again:?}"
+        );
+        let person = ask(&mut host, Request::new(None, file("Ring the bell")));
+        assert!(matches!(person, Reply::Refused { .. }), "{person:?}");
+
+        // Its word ends the investigation and stops its session.
+        let done = ask(
+            &mut host,
+            from(
+                &starts,
+                Some("investigator-1"),
+                Command::Investigated {
+                    group: GroupId::new("watch"),
+                },
+            ),
+        );
+        assert!(
+            matches!(&done, Reply::Done { text } if text.contains("ended with 1 issue filed")),
+            "{done:?}"
+        );
+        assert_eq!(
+            host.world().agents[&AgentId::new("investigator-1")].state,
+            temet_work_core::model::AgentState::Ended
+        );
+        assert_eq!(
+            kept.0.lock().expect("journal").last(),
+            Some(&Event::InvestigationEnded {
+                group: GroupId::new("watch"),
+                at_ms: 1_000,
+                filed: 1,
+            })
+        );
+        let Reply::Done { text } = ask(&mut host, Request::new(None, Command::Status)) else {
+            panic!("status");
+        };
+        assert!(
+            text.contains("; last investigated 1970-01-01 00:00 UTC, filed 1 issue"),
+            "{text}"
+        );
     }
 }
