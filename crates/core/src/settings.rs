@@ -833,6 +833,33 @@ impl World {
         }
     }
 
+    /// Takes away the plain `model` an older log set at `scope` for `role`,
+    /// under the `model.<runtime>` it was bound to, which may be another
+    /// runtime's than the global one now, and says which key that was. A plain
+    /// change by a person or the file for every role also takes away an agent's
+    /// plain model for the author there, as when both were the one key `model`.
+    pub(crate) fn drop_plain_model(
+        &mut self,
+        scope: &Scope,
+        role: Option<Role>,
+        by: &str,
+    ) -> Option<String> {
+        let author = (scope.clone(), Some(Role::Author));
+        let agents = self
+            .plain_models
+            .get(&author)
+            .filter(|key| role.is_none() && !is_agent(by) && self.agents_author_value(scope, key))
+            .cloned();
+        if let Some(key) = agents {
+            self.plain_models.remove(&author);
+            self.settings
+                .remove(&(scope.clone(), Some(Role::Author), key));
+        }
+        let key = self.plain_models.remove(&(scope.clone(), role))?;
+        self.settings.remove(&(scope.clone(), role, key.clone()));
+        Some(key)
+    }
+
     /// Records a value as `by`, as `SettingSet` does.
     pub(crate) fn put(
         &mut self,
@@ -1550,6 +1577,45 @@ mod replay {
         }
     }
 
+    /// `events` replayed onto a build with the runtimes alpha, its default, and
+    /// beta, as the daemon replays its log.
+    fn on_two_runtimes(events: &[Event]) -> World {
+        World {
+            catalog: [(
+                "runtime".to_string(),
+                Choice {
+                    key: "runtime".into(),
+                    allowed: vec!["alpha".into(), "beta".into()],
+                    default: Some("alpha".into()),
+                },
+            )]
+            .into(),
+            ..World::default()
+        }
+        .replay_onto(events)
+        .0
+    }
+
+    /// Every model value kept, as its scope, role, key and value.
+    fn models(w: &World) -> Vec<(Scope, Option<Role>, &str, String)> {
+        w.settings
+            .iter()
+            .filter(|((_, _, key), _)| key.starts_with("model"))
+            .map(|((scope, role, key), e)| {
+                (scope.clone(), *role, key.as_str(), e.value.to_string())
+            })
+            .collect()
+    }
+
+    fn unset(scope: Scope, role: Option<Role>, key: &str, by: &str) -> Event {
+        Event::SettingUnset {
+            scope,
+            role,
+            key: key.into(),
+            by: by.into(),
+        }
+    }
+
     #[test]
     fn an_older_logs_plain_model_replays_as_the_model_of_the_runtime_global_at_that_point() {
         let radar = || Scope::Project(ProjectId::new("radar"));
@@ -1569,12 +1635,7 @@ mod replay {
         });
         let guild = || Scope::Area(ProjectId::new("guild"));
         events.push(set(guild(), None, "model", "haiku", "person"));
-        events.push(Event::SettingUnset {
-            scope: guild(),
-            role: None,
-            key: "model".into(),
-            by: "person".into(),
-        });
+        events.push(unset(guild(), None, "model", "person"));
         // Before #93 this was the only way to give reviewers on beta a model.
         events.push(set(
             Scope::Global,
@@ -1600,49 +1661,24 @@ mod replay {
             "gpt-y",
             "person",
         ));
-        events.push(Event::SettingUnset {
-            scope: Scope::Global,
-            role: Some(Role::Reviewer),
-            key: "model".into(),
-            by: "person".into(),
-        });
-        let (w, _) = World {
-            catalog: [(
-                "runtime".to_string(),
-                Choice {
-                    key: "runtime".into(),
-                    allowed: vec!["alpha".into(), "beta".into()],
-                    default: Some("alpha".into()),
-                },
-            )]
-            .into(),
-            ..World::default()
-        }
-        .replay_onto(&events);
+        // The person takes gpt-x away: it was bound to alpha when it was set.
+        events.push(unset(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "person",
+        ));
+        let w = on_two_runtimes(&events);
         let read = |role| {
             w.setting(&IssueId::new("radar", "44"), Some(role), "model")
                 .map(|r| r.value.to_string())
         };
         assert_eq!(read(Role::Author), None, "opus and sonnet are alpha's");
-        assert_eq!(read(Role::Reviewer), None, "gpt-x is alpha's");
+        assert_eq!(read(Role::Reviewer), None, "gpt-x was taken away");
         assert_eq!(read(Role::Arbiter).as_deref(), Some("gpt-y"));
-        let kept: Vec<(Scope, Option<Role>, &str, String)> = w
-            .settings
-            .iter()
-            .filter(|((_, _, key), _)| key.starts_with("model"))
-            .map(|((scope, role, key), e)| {
-                (scope.clone(), *role, key.as_str(), e.value.to_string())
-            })
-            .collect();
         assert_eq!(
-            kept,
+            models(&w),
             [
-                (
-                    Scope::Global,
-                    Some(Role::Reviewer),
-                    "model.alpha",
-                    "gpt-x".into()
-                ),
                 (radar(), None, "model.alpha", "sonnet".into()),
                 (radar(), Some(Role::Arbiter), "model.beta", "gpt-y".into()),
                 (task(), Some(Role::Author), "model.alpha", "opus".into()),
@@ -1650,8 +1686,163 @@ mod replay {
         );
         let status = crate::text::text(&w, &Default::default());
         assert!(
-            status.contains("  global, reviewer: model.alpha = gpt-x, set by person\n"),
+            !status.contains("  global, reviewer: model.alpha = gpt-x, set by person\n"),
             "{status}"
+        );
+    }
+
+    #[test]
+    fn an_older_logs_plain_unset_removes_the_model_its_set_was_bound_to() {
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "gpt-x",
+            "person",
+        ));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(unset(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "person",
+        ));
+        let w = on_two_runtimes(&events);
+        assert_eq!(models(&w), []);
+        let status = crate::text::text(&w, &Default::default());
+        assert!(
+            !status.contains("global, reviewer: model.alpha = gpt-x"),
+            "{status}"
+        );
+        // Reviewers put back on alpha do not get it again.
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "runtime",
+            "alpha",
+            "person",
+        ));
+        let w = on_two_runtimes(&events);
+        assert_eq!(
+            w.setting(&IssueId::new("radar", "44"), Some(Role::Reviewer), "model"),
+            None
+        );
+        // Where the log set no plain model, the unset is the global runtime's now.
+        events.push(set(
+            radar(),
+            Some(Role::Reviewer),
+            "model.beta",
+            "gpt-z",
+            "person",
+        ));
+        events.push(unset(radar(), Some(Role::Reviewer), "model", "person"));
+        assert_eq!(models(&on_two_runtimes(&events)), []);
+    }
+
+    #[test]
+    fn an_older_logs_plain_set_after_a_runtime_change_replaces_the_earlier_model() {
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "gpt-x",
+            "person",
+        ));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "gpt-y",
+            "person",
+        ));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(
+                Scope::Global,
+                Some(Role::Reviewer),
+                "model.beta",
+                "gpt-y".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn an_older_logs_plain_unset_removes_a_groups_old_model() {
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        let guild = || Scope::Area(ProjectId::new("guild"));
+        let mut events = base();
+        // No global runtime yet, so the build's default: alpha.
+        events.push(Event::GroupCreated {
+            group: crate::ids::GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ProjectId::new("radar")],
+            areas: vec![ProjectId::new("guild")],
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: Some("sonnet".into()),
+            queue_low: None,
+            investigate_every: None,
+        });
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(unset(radar(), None, "model", "person"));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(guild(), None, "model.alpha", "sonnet".into())]
+        );
+        events.push(unset(guild(), None, "model", "person"));
+        assert_eq!(models(&on_two_runtimes(&events)), []);
+    }
+
+    #[test]
+    fn an_older_logs_plain_unset_leaves_another_runtimes_model() {
+        let reviewers = || Some(Role::Reviewer);
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(radar(), reviewers(), "model", "gpt-x", "person"));
+        events.push(set(radar(), reviewers(), "model.beta", "gpt-y", "person"));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(unset(radar(), reviewers(), "model", "person"));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(radar(), reviewers(), "model.beta", "gpt-y".into())]
+        );
+        // A model.alpha written by name over the plain one there is that model.
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(radar(), reviewers(), "model", "gpt-x", "person"));
+        events.push(set(radar(), reviewers(), "model.alpha", "gpt-w", "person"));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        events.push(unset(radar(), reviewers(), "model", "person"));
+        assert_eq!(models(&on_two_runtimes(&events)), []);
+    }
+
+    #[test]
+    fn an_older_logs_plain_unset_by_a_person_takes_the_refiners_earlier_model_away() {
+        let task = || Scope::Task(IssueId::new("radar", "44"));
+        let mut events = base();
+        events.push(set(Scope::Global, None, "runtime", "alpha", "person"));
+        events.push(set(task(), None, "model", "opus", "refiner-3"));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(task(), Some(Role::Author), "model.alpha", "opus".into())],
+            "the refiner's model is the author's"
+        );
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        let mut unset_it = events.clone();
+        unset_it.push(unset(task(), None, "model", "person"));
+        assert_eq!(models(&on_two_runtimes(&unset_it)), []);
+        // A person's plain model for every role takes it away too.
+        events.push(set(task(), None, "model", "gpt-y", "person"));
+        assert_eq!(
+            models(&on_two_runtimes(&events)),
+            [(task(), None, "model.beta", "gpt-y".into())]
         );
     }
 
