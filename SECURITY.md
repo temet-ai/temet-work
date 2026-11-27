@@ -36,6 +36,9 @@ what it does not). The daemon makes the secret when it starts the agent and pass
 the agent's environment, over herdr-core's local socket; herdr-core passes it to the other
 machine for an agent there, and that agent sends it back with each command over SSH. The
 event log keeps the secret's SHA-256 digest, and the secret is in no log or reply.
+herdr-core's socket is a same-user control channel for every terminal: any process of the
+user, an agent included, can type into any terminal and start processes outside every
+agent tree through it, and `docs/commands.md` lists what that gets past.
 
 The event log (`docs/privacy.md`) records the text `gh` or `glab` returns when it refuses
 a merge and the output of each verify command, so a command that prints a secret puts it
