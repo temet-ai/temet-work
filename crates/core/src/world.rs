@@ -445,7 +445,9 @@ impl World {
                                 i.stage = Stage::Arbitration { round: *round };
                                 // One arbiter at a time. One still running, because
                                 // a stop failed or an older log left it, is reminded
-                                // like any idle agent and replaced once it is stopped.
+                                // and stopped like any idle agent, or, once it has
+                                // ruled, asked again to stop by `World::missing`. A
+                                // fresh one starts once it has ended.
                                 if !arbiter_running {
                                     out.push(Effect::StartAgent {
                                         group,
@@ -852,7 +854,8 @@ impl World {
     /// needs neither while its checks run. This brings back an agent whose session
     /// ended, or one the daemon decided on and did not start before it stopped. A
     /// running author or reviewer that has not heard its fixes or its new round is
-    /// told again. After the `starts` setting's number of agents of one role have
+    /// told again, and an arbiter that ruled in an earlier arbitration and still
+    /// runs is asked again to stop. After the `starts` setting's number of agents of one role have
     /// ended while one issue waited on them it gives up, and says so. A paused
     /// issue gets nothing until it is back in its group's scope, and then what its
     /// stage needs. A running investigation whose investigator never started gets
@@ -920,6 +923,26 @@ impl World {
                 _ => continue,
             };
             if self.running(&i.id, role).is_some() {
+                // An arbiter whose ruling is in has finished its step, so nothing
+                // reminds or stops it. One still running when the issue waits on an
+                // arbiter again is one whose stop failed, or that an older log left
+                // running: ask for its stop again, and a fresh one starts once it
+                // has ended.
+                if role == Role::Arbiter {
+                    out.start.extend(
+                        self.agents
+                            .values()
+                            .filter(|a| {
+                                a.issue.as_ref() == Some(&i.id)
+                                    && a.role == Role::Arbiter
+                                    && a.state != AgentState::Ended
+                                    && !self.waiting_on(a)
+                            })
+                            .map(|a| Effect::StopAgent {
+                                agent: a.id.clone(),
+                            }),
+                    );
+                }
                 // Running, but not yet told what its stage needs: say it again.
                 // The part that delivers it drops a message already waiting.
                 if !i.told {

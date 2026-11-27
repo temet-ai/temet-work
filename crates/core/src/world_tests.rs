@@ -1199,24 +1199,42 @@ fn every_send_back_from_the_arbiter_stops_it_and_the_next_block_starts_one() {
 
 #[test]
 fn a_last_round_block_while_an_arbiter_still_runs_starts_no_second_one() {
-    let mut w = arbitrating();
-    w.apply(&started("arbiter-1", Role::Arbiter, "1"));
-    // The stop this asks for fails, as an older log that never stopped it would
-    // leave it: arbiter-1 runs on.
-    w.apply(&Event::PullConflicts {
+    let conflict = Event::PullConflicts {
         issue: issue("1"),
         repo: None,
-    });
-    w.apply(&pull_ready());
-    let effects = w.apply(&block(3));
-    assert!(!starts_an_arbiter(&effects), "{effects:?}");
-    assert_eq!(stage(&w, "1"), Stage::Arbitration { round: 3 });
-    let missing = w.missing();
-    assert!(!starts_an_arbiter(&missing.start), "{missing:?}");
-    assert!(waited_on(&w, "arbiter-1"), "reminded like any idle agent");
-    // Stopped after sitting idle: a fresh one takes over.
-    w.apply(&ended("arbiter-1"));
-    assert_eq!(w.missing().start, vec![arbiter()]);
+    };
+    // The send-back whose stop fails, as an older log that never stopped
+    // arbiter-1 would leave it; the round of the next arbitration; whether the
+    // issue waits on arbiter-1 then; and what `World::missing` asks for while it
+    // runs. One that has not ruled is reminded and stopped like any idle agent.
+    // One that ruled is not, so the loop asks again for its stop.
+    let rows: [(&str, Event, u8, bool, Vec<Effect>); 2] = [
+        ("a conflict", conflict, 3, true, vec![]),
+        (
+            "a fix-first ruling",
+            ruling(false),
+            4,
+            false,
+            vec![stop("arbiter-1")],
+        ),
+    ];
+    for (path, send_back, round, waits, asked) in rows {
+        let mut w = arbitrating();
+        w.apply(&started("arbiter-1", Role::Arbiter, "1"));
+        w.apply(&send_back);
+        w.apply(&pull_ready());
+        let effects = w.apply(&block(round));
+        assert!(!starts_an_arbiter(&effects), "{path}: {effects:?}");
+        assert_eq!(stage(&w, "1"), Stage::Arbitration { round }, "{path}");
+        assert_eq!(waited_on(&w, "arbiter-1"), waits, "{path}");
+        let missing = w.missing();
+        assert_eq!(missing.start, asked, "{path}");
+        // Once it has ended, a fresh one takes over.
+        w.apply(&ended("arbiter-1"));
+        let missing = w.missing();
+        assert_eq!(missing.start, vec![arbiter()], "{path}");
+        assert_eq!(missing.given_up, Vec::<String>::new(), "{path}");
+    }
 }
 
 #[test]

@@ -133,9 +133,10 @@ waited on while the checks run: it is not reminded, no other is started in its p
 until the merge, so after a failed check a reviewer still running hears the next round. A refiner
 stops once its plan is in and an arbiter once its ruling is in. The arbiter also stops when its
 issue goes back to the author by a failed check, a conflict, a refused merge or a person's
-overturn, so a later arbitration on the issue starts a fresh arbiter that hears that dispute;
-while one still runs, no second is started. An approval by ruling is not replaced while the checks
-run. The author and reviewer stop once the issue's last pull request merges. A group has no
+overturn, so a later arbitration on the issue starts a fresh arbiter that hears that dispute.
+No second arbiter starts as long as one whose stop failed still runs. The daemon asks again each
+round to stop one that has ruled, since nothing reminds it, and starts a fresh one once it has
+ended. An approval by ruling is not replaced while the checks run. The author and reviewer stop once the issue's last pull request merges. A group has no
 coordinator agent: in the research fleet the standing seat waited 25 of its 28 minutes, and in
 mike's larger runs such seats were where the token and turn costs came from
 (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
