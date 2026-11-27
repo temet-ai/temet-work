@@ -139,7 +139,7 @@ const shadow = (layers) =>
     .join(", ")}]`;
 
 /** The export's unit for each token, as this script's kinds. */
-const UNITS = { colour: "colour", px: "px", ms: "duration", curve: "curve", number: "number", fonts: "font", shadow: "shadow" };
+const UNITS = { color: "colour", px: "px", ms: "duration", curve: "curve", number: "number", "font-stack": "font", shadow: "shadow" };
 
 /** A token's value as Rust, by the unit the export gives it; null when the value does not fit it. */
 function classify(name, value, unit) {

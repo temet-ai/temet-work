@@ -1,4 +1,4 @@
-//! The design system's tokens, from @temet-ai/design 0.2.0, commit 17531b8 (looks measured at 205c73c).
+//! The design system's tokens, from @temet-ai/design 0.2.0, commit fa59c68 (looks measured at 205c73c).
 //! Written by `scripts/sync-tokens` from the design system's dist/tokens.json; do not edit, run
 //! the script again.
 //!
