@@ -845,6 +845,25 @@ fn a_ci_failure_or_a_refused_merge_does_not_use_up_a_review_round() {
 }
 
 #[test]
+fn a_conflict_seen_in_review_or_arbitration_goes_back_with_the_same_round() {
+    let mut w = in_review();
+    w.apply(&Event::PullConflicts { issue: issue("1") });
+    assert_eq!(stage(&w, "1"), Stage::Fixing { round: 1 });
+    assert_eq!(
+        w.issues[&issue("1")].fix,
+        ["the pull request conflicts with the branch it merges into"]
+    );
+    let mut w = in_review();
+    w.issues.get_mut(&issue("1")).expect("issue").stage = Stage::Arbitration { round: 2 };
+    w.apply(&Event::PullConflicts { issue: issue("1") });
+    assert_eq!(stage(&w, "1"), Stage::Fixing { round: 2 });
+    let mut w = in_review();
+    w.issues.get_mut(&issue("1")).expect("issue").stage = Stage::Merging;
+    w.apply(&Event::PullConflicts { issue: issue("1") });
+    assert_eq!(stage(&w, "1"), Stage::Merging);
+}
+
+#[test]
 fn a_lost_merge_deploy_or_verify_is_asked_for_again() {
     let mut w = in_review();
     for (s, want) in [

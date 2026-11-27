@@ -261,6 +261,12 @@ pub enum Event {
         /// The issue.
         issue: IssueId,
     },
+    /// The code host reports that the pull request under review conflicts with the
+    /// branch it merges into. It goes back to its author at once.
+    PullConflicts {
+        /// The issue.
+        issue: IssueId,
+    },
     /// The code host would not merge the pull request as it stands, such as for a
     /// conflict with the target branch.
     MergeRefused {
