@@ -64,7 +64,7 @@ itself is in no log, reply, status or issue text.
   (`SO_PEERCRED`), and that process's parents in `/proc`, and looks in each one's
   environment for a secret it issued. A command that names agent A from inside agent B's
   process tree is refused, even with A's own secret, so an agent that reads another
-  agent's secret from `/proc` cannot use it. The tree is read for a command that came
+  agent's secret from `/proc` cannot use it from inside its own process tree. The tree is read for a command that came
   through `temet-work relay` too: the relay's mark only adds refusals.
 - A command that names no agent is a person's. It may read from anywhere. A command that
   changes something (`rule`, `overturn`, `retry`, `proposal`, `set` and `unset`) is
