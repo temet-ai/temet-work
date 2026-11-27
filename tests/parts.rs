@@ -4,7 +4,9 @@
 //! - an adapter depends on its family crate only;
 //! - no part names another, and the core names no tool or service;
 //! - no UI library is named outside a front end;
-//! - the root package registers each part behind its own feature.
+//! - the root package registers each part behind its own feature;
+//! - the desktop app, `app/`, is a workspace of its own and depends on the core
+//!   and the style part only.
 //!
 //! A part is a workspace crate `temet-work-<id>` other than the core and the
 //! front ends. An adapter is `temet-work-<family>-<x>`: it belongs to its family
@@ -15,7 +17,9 @@ use std::process::Command;
 
 const APP: &str = env!("CARGO_PKG_NAME");
 
-/// Front ends draw the view data and may name UI libraries. None exists yet.
+/// Front ends draw the view data and may name UI libraries. None is a member of
+/// this workspace: the desktop app is `app/`, a workspace of its own, checked by
+/// `the_app_depends_on_core_and_style_only`.
 const FRONT_ENDS: [&str; 0] = [];
 
 /// Tools and services only parts know. The core names none of them, in code,
@@ -312,4 +316,42 @@ fn the_root_registers_each_part_behind_its_feature() {
             "src/lib.rs: {part} is not registered behind `#[cfg(feature = \"{id}\")]`"
         );
     }
+}
+
+#[test]
+fn the_app_depends_on_core_and_style_only() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(root.join("app/Cargo.toml")).expect("app/Cargo.toml");
+    let manifest: toml::Table = text.parse().expect("app/Cargo.toml is TOML");
+    assert!(
+        manifest.contains_key("workspace"),
+        "app/Cargo.toml needs its own [workspace] table, so the main workspace does not build its UI library"
+    );
+    let members: Vec<String> = workspace().into_iter().map(|k| k.name).collect();
+    let allowed = [core(), format!("{APP}-style")];
+    let mut found = Vec::new();
+    for table in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        let Some(deps) = manifest.get(table).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for (name, spec) in deps {
+            let package = spec
+                .get("package")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(name);
+            let path = spec.get("path").and_then(toml::Value::as_str);
+            let ours = members.iter().any(|m| m == package)
+                || package.starts_with(&format!("{APP}-"))
+                || path.is_some();
+            if ours && !allowed.iter().any(|a| a == package) {
+                found.push(format!("[{table}] {name}"));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "the app may depend on {} only:\n{}",
+        allowed.join(" and "),
+        found.join("\n")
+    );
 }

@@ -63,8 +63,14 @@ fn the_app_keeps_the_layer_map() {
 fn the_check_catches_the_spikes_hand_styling() {
     let map = std::fs::read_to_string(root().join("docs/ui.md")).expect("docs/ui.md reads");
     let spike = files(&root().join("spikes/gpui-shell/src"));
-    let findings: Vec<String> = review(&spike, &map).iter().map(ToString::to_string).collect();
-    for want in ["a text size from the library's scale: `text_xs(`", "draws its own `div()`"] {
+    let findings: Vec<String> = review(&spike, &map)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    for want in [
+        "a text size from the library's scale: `text_xs(`",
+        "draws its own `div()`",
+    ] {
         assert!(
             findings.iter().any(|f| f.contains(want)),
             "no finding with {want:?} in:\n{}",
