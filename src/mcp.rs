@@ -106,7 +106,7 @@ fn tools() -> Vec<Tool> {
                 "checks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
                     "done_when": {"type": "string"}, "proven_by": {"type": "string"}}, "required": ["done_when", "proven_by"]}},
                 "repos": {"type": "array", "items": {"type": "string"}, "description": "For an issue of an area: the repositories the change needs, in the order they merge."},
-                "settings": {"type": "object", "description": "Task-level settings for this issue, such as {\"model\": \"opus\"} for a hard one. Recorded as set by you; a person can overturn them."}
+                "settings": {"type": "object", "description": "Task-level settings for this issue, such as {\"model\": \"opus\"} for a hard one. A model or runtime you set is the author's only: those of reviewers, arbiters and refiners are a person's to set. Recorded as set by you; a person can overturn them."}
             }, "required": ["issue", "checks"]}),
         },
         Tool {
@@ -160,7 +160,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "set",
-            description: "Gives a setting a value at one level, for one role or for every role. A refiner may set task-level values of the issue it is refining; a wider level is a person's.",
+            description: "Gives a setting a value at one level, for one role or for every role. A refiner may set task-level values of the issue it is refining, where its model and runtime are the author's only; a wider level is a person's.",
             acts: true,
             schema: json!({"type": "object", "properties": {
                 "target": target_field(), "role": role_field(),
@@ -656,6 +656,25 @@ mod tests {
         assert_eq!(plan.settings["model"], Setting::Text("opus".into()));
         assert_eq!(plan.settings["review_rounds"], Setting::Number(5));
         assert_eq!(plan.settings["ci"], Setting::Flag(false));
+    }
+
+    #[test]
+    fn the_plan_tool_says_a_model_is_the_authors() {
+        let plan = tools()
+            .into_iter()
+            .find(|t| t.name == "plan")
+            .expect("offered");
+        let said = plan.schema["properties"]["settings"]["description"]
+            .as_str()
+            .expect("described");
+        assert!(
+            said.contains("A model or runtime you set is the author's only"),
+            "{said}"
+        );
+        assert!(
+            said.contains("reviewers, arbiters and refiners are a person's to set"),
+            "{said}"
+        );
     }
 
     #[test]

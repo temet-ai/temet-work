@@ -148,6 +148,19 @@ can set and unset the task level of the issue it is refining, and only while tha
 refining: once its plan is in, a `set` or `unset` from it is refused with the stage the
 issue is at. No other agent can set anything, and a wider level is a person's.
 
+A refiner's `model` and `runtime` are for the author. How hard the code is to write is
+what the refiner judges; how strong the review is belongs to the person, so the models of
+reviewers, arbiters and refiners are a person's to set, and so are their runtimes and the
+investigators'. A value from a plan, or from a refiner's `set` with no role or with
+`--role author`, is recorded for the author, and its `unset` removes the author's value.
+A `set` or `unset` of either key that names another role is refused. The refiner's other
+keys, such as `merge` or `review_rounds`, are recorded for every role.
+
+A person overturns the refiner's value with a `set` on the task that names no role, such
+as `temet-work set radar#44 model haiku`: it holds for every role, and the refiner's value
+for the author is dropped. A person's `unset` with no role drops it too, so the author
+takes the wider level's value. A value a person set with `--role author` stays.
+
 Five settings only a person sets, at any level and for any role. An agent's plan, `set` or
 `unset` that names one is refused with the reason, and a refused plan is not recorded:
 
@@ -163,6 +176,11 @@ A log written before agents were refused may hold one of these set or unset for 
 an agent. The daemon reads such a log and leaves that change out, so the issue takes the
 value of the next level, or the built-in one, and `temet-work settings` does not list the
 agent's.
+
+Likewise, a log written before a refiner's `model` and `runtime` were the author's may
+hold one set for an issue for every role, which is read as the author's, or for another
+role, which is left out. An issue refined before the upgrade is then reviewed on the
+person's model.
 
 Every change, from the file, a command or a plan, is a `SettingSet` or `SettingUnset`
 event in the log with who made it: `file`, `person`, or the agent's id. A later event
@@ -199,8 +217,9 @@ level. `temet-work status` lists every value with the level it is set at and who
   (`World::resolve`) answers "what is this setting for this issue and role, and which
   level set it". Parts ask the world for a setting instead of reading their own fields
   or constants.
-- Each setting's `Spec` says whether an agent may set it. The plan check, `set`, `unset`
-  and the replay of a log all read that, so a new key has to say which it is.
+- Each setting's `Spec` says whether an agent may set it: `May`, `ForAuthor` (a refiner
+  may, for the author only: `model` and `runtime`) or `MayNot`. The plan check, `set`,
+  `unset` and the replay of a log all read that, so a new key has to say which it is.
 - A family reports the adapters in its build and its default one; the host puts them in
   the world, which is how a value naming an adapter the build lacks is refused. The
   runtime family picks its adapter by `runtime`, the runner family by `runner`. The Codex

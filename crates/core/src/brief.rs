@@ -157,6 +157,8 @@ pub fn write(
              Where the issue leaves a choice open, pick the default you would defend and say why in done_when.\n\
              For an issue that is hard, add a settings: map beside checks: with task-level values, such as model: opus; \
              they are recorded as yours and a person can overturn them. \
+             A model or runtime you set is the author's only: the models and runtimes of reviewers, arbiters \
+             and refiners are a person's to set. \
              Only a person sets {persons}: a plan that names one is refused.",
             title = issue.title,
             persons = only_a_persons().join(", "),
@@ -210,7 +212,7 @@ pub fn write(
 /// The settings no agent may set.
 fn only_a_persons() -> Vec<&'static str> {
     crate::settings::specs()
-        .filter(|s| s.agents != crate::settings::Agents::May)
+        .filter(|s| matches!(s.agents, crate::settings::Agents::MayNot(_)))
         .map(|s| s.key)
         .collect()
 }
