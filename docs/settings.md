@@ -134,7 +134,14 @@ picks the checkout, and the entry's own field still says where that checkout is
   higher-ranked of the two takes it.
 - A refiner, reviewer or arbiter holds no checkout of its own and may share a held one on
   its machine. If the project has none there, the agent waits. It is not moved to another
-  machine. An issue whose refiner cannot start stays new and takes no refining slot.
+  machine. An issue whose refiner cannot start stays new and takes no refining slot. An
+  author can also be given the folder such an agent already runs in, since that folder is
+  not recorded and does not count as held. So each of the three is told in its brief,
+  whether or not the folder is held, and a reviewer again on each later round, not to
+  switch the folder's branch or change any file in it. It reads a pull request's changes
+  from its code host. To run checks it makes a separate checkout of the pull request (with
+  none, of the commit it needs) outside the folder, and removes it afterwards. That way
+  each folder stays as its last author left it.
 - An author that already holds a folder keeps it when the setting changes. The new value
   applies the next time a folder is picked.
 - A name no folder uses is accepted, because a folder may be listed later. An empty value

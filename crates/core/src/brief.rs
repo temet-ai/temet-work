@@ -26,8 +26,9 @@ pub struct Held {
 pub struct Workplace {
     /// The folder it runs in.
     pub folder: Option<PathBuf>,
-    /// Whether another issue's author holds that folder, so the agent must not
-    /// change it.
+    /// Whether another issue's author holds that folder. An investigator is told
+    /// so; a refiner, reviewer or arbiter is told to leave its folder alone
+    /// either way.
     pub shared: bool,
     /// An author's work folders, one per repository the plan names.
     pub held: Vec<Held>,
@@ -60,6 +61,15 @@ fn pull_list(pulls: &[Pulled]) -> String {
         })
         .collect()
 }
+
+/// What a refiner, reviewer and arbiter are told about the folder they run in.
+/// They hold none, and an author may be given it while they work, so each hears
+/// this whether or not the folder was held at its start.
+const LEAVE_THE_FOLDER: &str = "\
+This folder is not yours: an author may be changing files in it or be given it while you work, and \
+it may be on another issue's branch. Do not switch its branch or change any file in it. Read a \
+pull request's changes from its code host. To run checks, make a separate checkout of the pull \
+request (with none, of the commit you need) outside this folder, and remove it when you are done.";
 
 /// What a refiner's plain `model` becomes (`docs/settings.md`, "A model belongs
 /// to a runtime").
@@ -124,11 +134,7 @@ pub fn write(
     pulls: &[Pulled],
     rules: &[String],
 ) -> Brief {
-    let Workplace {
-        folder,
-        shared,
-        held,
-    } = place;
+    let Workplace { folder, held, .. } = place;
     let id = &issue.id;
     let source = source.map_or_else(
         || format!("issue {} of project {}", id.key, id.project),
@@ -168,12 +174,6 @@ pub fn write(
         };
         format!("Earlier work on it came back with these to fix first:\n{list}{reply}")
     };
-    let folder_note = if shared {
-        "Another issue's author is changing files in this folder: do not switch its branch or change \
-         anything here; read the pull request's changes from its code host.\n"
-    } else {
-        ""
-    };
     let several = held.len() > 1;
     let folders = if several {
         let list: String = held
@@ -208,7 +208,7 @@ pub fn write(
     let task = match role {
         Role::Refiner => format!(
             "Refine {id}: {title}. It is {source}.\n\
-             {folder_note}{area_note}Read the issue and the code it touches in this folder. Change no file here.\n\
+             {LEAVE_THE_FOLDER}\n{area_note}Read the issue and the code it touches in this folder. Change no file here.\n\
              Then send the plan, one entry per check, as YAML on standard input:\n\
              temet-work plan {id} - <<'PLAN'\n\
              checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\
@@ -243,7 +243,9 @@ pub fn write(
         Role::Reviewer => format!(
             "Review the pull request for {id}: {title}. It is {source}.\n\
              {pulls}The plan's checks:\n{checks}\
-             {folder_note}Read the whole change, not only the last commit. Run the checks yourself where you can.\n\
+             {LEAVE_THE_FOLDER}\n\
+             Read the whole change, not only the last commit. Run the checks yourself where you can, \
+             in that separate checkout.\n\
              {hold}\n\
              {BLOCK_WHAT_IS_NOT_MET}\n\
              Then run: temet-work review {id} approve\n\
@@ -254,6 +256,7 @@ pub fn write(
         Role::Arbiter => format!(
             "Review rounds on {id} ({title}) ran out. It is {source}.\n\
              {pulls}The plan's checks:\n{checks}\
+             {LEAVE_THE_FOLDER}\n\
              Read the pull request, the review points and the author's answers. Decide whether it merges.\n\
              {hold}\n\
              {FIX_WHAT_IS_NOT_MET}\n\
@@ -488,6 +491,7 @@ pub fn next_round(issue: &IssueId, round: u8) -> String {
     format!(
         "The author pushed fixes for {issue}; this is review round {round}. Review the whole change again, \
          not only the new commits. The issue's text may have changed since the last round, so read it again.\n\
+         {LEAVE_THE_FOLDER}\n\
          {hold}\n\
          {BLOCK_WHAT_IS_NOT_MET}\n\
          Then run: temet-work review {issue} approve\n\
@@ -562,6 +566,43 @@ mod tests {
             "{}",
             brief.task
         );
+    }
+
+    #[test]
+    fn a_reader_is_told_to_leave_its_folder_alone_held_or_not() {
+        let issue = lamp_issue();
+        let told = [
+            "an author may be changing files in it or be given it while you work",
+            "Do not switch its branch or change any file in it.",
+            "Read a pull request's changes from its code host.",
+            "To run checks, make a separate checkout of the pull request (with none, of the commit \
+             you need) outside this folder, and remove it when you are done.",
+        ];
+        for role in [Role::Refiner, Role::Reviewer, Role::Arbiter] {
+            for shared in [false, true] {
+                let place = Workplace {
+                    shared,
+                    ..Workplace::default()
+                };
+                let task = write(role, &issue, None, &[], place, &[], &[]).task;
+                for line in told {
+                    assert!(
+                        task.contains(line),
+                        "{role:?}, shared {shared}: missing {line:?} in:\n{task}"
+                    );
+                }
+            }
+        }
+        let reviewer = lamp_task(Role::Reviewer, &issue);
+        assert!(
+            reviewer.contains("Run the checks yourself where you can, in that separate checkout."),
+            "{reviewer}"
+        );
+        // A running reviewer hears it again on each later round.
+        let again = next_round(&issue.id, 2);
+        for line in told {
+            assert!(again.contains(line), "missing {line:?} in:\n{again}");
+        }
     }
 
     #[test]
