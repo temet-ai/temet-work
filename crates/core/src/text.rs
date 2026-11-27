@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use crate::IssueText;
 use crate::model::{AgentState, Role, Stage};
 use crate::world::World;
 
@@ -284,9 +285,13 @@ fn lines(
     out
 }
 
-/// One issue in full: where it is, its plan, its pull request, what it is to fix,
-/// and its agents.
-pub fn issue(world: &World, id: &crate::ids::IssueId) -> Option<String> {
+/// One issue in full: where it is, its own text (`read`, or why there is none to
+/// show), its plan, its pull request, what it is to fix, and its agents.
+pub fn issue(
+    world: &World,
+    id: &crate::ids::IssueId,
+    read: &Result<IssueText, String>,
+) -> Option<String> {
     let i = world.issues.get(id)?;
     let mut out = String::new();
     let _ = writeln!(out, "{}  {}", i.id, i.title);
@@ -340,6 +345,7 @@ pub fn issue(world: &World, id: &crate::ids::IssueId) -> Option<String> {
             let _ = writeln!(out, "Pull request: {repo} #{number}{state}");
         }
     }
+    own_text(&mut out, read);
     if let Some(plan) = &i.plan {
         let _ = writeln!(out, "Plan:");
         for c in &plan.checks {
@@ -375,6 +381,27 @@ pub fn issue(world: &World, id: &crate::ids::IssueId) -> Option<String> {
         role,
     ));
     Some(out)
+}
+
+/// An issue's own text between a line that says where it came from and a line
+/// that ends it. Text that is empty, or was not read, is one line saying so: a
+/// reader must not take the rest of the output for the issue's text.
+fn own_text(out: &mut String, read: &Result<IssueText, String>) {
+    let _ = match read {
+        Ok(t) if t.text.trim().is_empty() => {
+            writeln!(out, "The issue's text is empty: {}.", t.from)
+        }
+        Ok(t) => writeln!(
+            out,
+            "Text of {}:\n{}\nEnd of the issue's text.",
+            t.from,
+            t.text.trim_end()
+        ),
+        Err(why) => {
+            let why: Vec<&str> = why.split_whitespace().collect();
+            writeln!(out, "The issue's text was not read: {}", why.join(" "))
+        }
+    };
 }
 
 #[cfg(test)]
@@ -515,7 +542,7 @@ radar#44, author
         w.issues.get_mut(&id).expect("synced").stage = Stage::InReview { round: 1 };
         let target = Target::parse("radar");
         let listed = settings(&w, &target, Some(Role::Reviewer)).expect("known");
-        let view = issue(&w, &id).expect("known");
+        let view = issue(&w, &id, &unread()).expect("known");
         assert!(view.contains("Settings for the reviewer:\n"), "{view}");
         for (key, for_all, _) in &every {
             let want = Some(format!("{for_all} global"));
@@ -747,10 +774,56 @@ Problems
         );
     }
 
+    /// What a build that reads no issue text gives the view.
+    fn unread() -> Result<IssueText, String> {
+        Err("not read here".into())
+    }
+
+    #[test]
+    fn the_issue_view_shows_its_text_above_the_plan_or_one_line_saying_why_not() {
+        let mut w = world();
+        let id = IssueId::new("radar", "44");
+        w.issues.get_mut(&id).expect("synced").plan = Some(crate::model::Plan::default());
+        let view = |text: &str| {
+            let read = Ok(IssueText {
+                from: "issue 44 of city/radar at the last sync".into(),
+                text: text.into(),
+            });
+            issue(&w, &id, &read).expect("known")
+        };
+        let shown = view("Sign in once.\n\nPlan:\nnone yet\n");
+        assert!(
+            shown.contains(
+                "\nText of issue 44 of city/radar at the last sync:\n\
+                 Sign in once.\n\nPlan:\nnone yet\nEnd of the issue's text.\nPlan:\n"
+            ),
+            "{shown}"
+        );
+        let empty = view(" \n");
+        assert!(
+            empty.contains(
+                "\nThe issue's text is empty: issue 44 of city/radar at the last sync.\n"
+            ),
+            "{empty}"
+        );
+        assert!(!empty.contains("Text of"), "{empty}");
+        let why = Err("city/radar: signed out\n  run the sign-in again".into());
+        let missed = issue(&w, &id, &why).expect("known");
+        assert!(
+            missed.contains(
+                "\nThe issue's text was not read: city/radar: signed out run the sign-in again\n\
+                 Plan:\n"
+            ),
+            "{missed}"
+        );
+        assert!(!missed.contains("Text of"), "{missed}");
+        assert!(missed.starts_with("radar#44  Sign in\n"), "{missed}");
+    }
+
     #[test]
     fn the_issue_view_shows_the_settings_of_the_role_at_work_on_it() {
         let w = world();
-        let text = issue(&w, &IssueId::new("radar", "44")).expect("known");
+        let text = issue(&w, &IssueId::new("radar", "44"), &unread()).expect("known");
         assert!(text.contains("Settings for the refiner:\n"), "{text}");
         assert!(
             !text.contains("  model "),

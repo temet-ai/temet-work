@@ -8,6 +8,7 @@ session_id:
   - 48c80237-558e-4a4a-a82d-bd96b37f1f46
   - 29b5659a-5fe0-4f00-806c-b1db18d91396
   - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
+  - 0645e4e2-33bd-43f8-980f-503649da2f15
 ---
 
 # Commands
@@ -19,7 +20,7 @@ reports its step done.
 | Command | Who runs it | Accepted when the issue is |
 |---|---|---|
 | `temet-work status` | anyone | any |
-| `temet-work issue ISSUE` | anyone: the issue in full, with its plan, pull requests, fixes and agents | any |
+| `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes and agents. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise) | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
 | `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...` | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL` | working, or fixing |

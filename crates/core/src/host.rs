@@ -140,6 +140,15 @@ impl Host {
             .unwrap_or_else(|| Err(format!("no part in this build shows {agent}'s terminal")))
     }
 
+    /// The text of `issue`, from the part that reads it, or why there is none to
+    /// show.
+    pub fn issue_text(&self, issue: &crate::ids::IssueId) -> Result<crate::IssueText, String> {
+        self.parts
+            .iter()
+            .find_map(|p| p.issue_text(&self.world, issue))
+            .unwrap_or_else(|| Err("no part in this build reads issue text".into()))
+    }
+
     /// Logs and applies `event`, then carries out everything it leads to, and
     /// ends the investigations that it ended (`World::investigation_events`).
     pub fn handle(&mut self, now_ms: u64, event: Event) -> Result<(), String> {

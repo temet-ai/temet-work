@@ -12,7 +12,7 @@ pub use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 /// How to call `temet-work`.
 pub const USAGE: &str = "\
 temet-work status
-temet-work issue ISSUE                      one issue in full
+temet-work issue ISSUE                      one issue in full, with its text from the last sync
 temet-work screen AGENT                     what an agent's terminal shows now
 temet-work plan ISSUE FILE                  a refiner's plan, as YAML; FILE - reads it from standard input
 temet-work ready ISSUE PULL|REPO=PULL...     the pull request is open and the checks hold;

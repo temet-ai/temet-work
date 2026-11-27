@@ -15,6 +15,11 @@
 | A project's `deploy` and `verify` commands | Whatever those commands send; temet-work runs them with `sh -c` | After a merge, and after a deploy |
 | Nothing else | No telemetry. The daemon has no network client of its own. | |
 
+The daemon keeps each open issue's text from its tracker's last sync in memory. It prints that
+text to whoever runs `temet-work issue` for the issue, or calls the MCP server's `issue` tool.
+It does not write the text to `events.jsonl`. An agent that runs the command sends the text to
+Anthropic or OpenAI as part of its session.
+
 Each agent gets `TEMET_WORK_AGENT`, `TEMET_WORK_AGENT_TOKEN` (a random secret of its own,
 `docs/commands.md`), `TEMET_WORK_DAEMON` when it is on another machine, and these from the
 daemon's environment when they are set: `CLAUDE_CONFIG_DIR`, `HTTPS_PROXY`, `NO_PROXY`,

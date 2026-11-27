@@ -573,6 +573,98 @@ fn commands_reach_the_daemon_over_its_socket() {
     );
 }
 
+/// A plan of one check, as `temet-work plan` reads it.
+const ONE_CHECK: &str =
+    "checks:\n  - done_when: the clock strikes on time\n    proven_by: listening at noon\n";
+
+/// Sends [`ONE_CHECK`] for ankh#1 as its refiner.
+fn plan_one_check(host: &mut Host, starts: &Starts) {
+    use temet_work::socket::{self, Reply};
+
+    let command = Command::Plan {
+        issue: IssueId::new("ankh", "1"),
+        plan: temet_work::cli::plan(ONE_CHECK).expect("plan"),
+    };
+    let request = from(starts, Some("refiner-1"), command);
+    let reply = socket::answer(host, 1, &request, &Peer::Unchecked).expect("answer");
+    assert!(matches!(reply, Reply::Done { .. }), "{reply:?}");
+}
+
+/// The reply to a person's `temet-work issue ankh#1`.
+fn issue_view(host: &mut Host) -> String {
+    use temet_work::socket::{self, Reply};
+
+    let command = Command::Issue {
+        issue: IssueId::new("ankh", "1"),
+    };
+    let request = Request::new(None, command);
+    match socket::answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
+        Reply::Done { text } => text,
+        Reply::Refused { why } => panic!("refused: {why}"),
+    }
+}
+
+#[test]
+fn the_issue_command_shows_the_text_the_last_sync_read_above_the_plan() {
+    let body = "The clock in the square is slow.\n\nDone is a clock that strikes on time.";
+    let (name, mut issue) = tracked("city/ankh", "1", 1);
+    issue.body = body.into();
+    let (mut host, starts) = host_tracking(
+        World::default(),
+        Box::new(Memory::default()),
+        fake_runtimes(),
+        CONFIG,
+        None,
+        FakeTracker {
+            issues: vec![(name, issue)],
+            ..FakeTracker::default()
+        },
+    );
+    host.tick(0).expect("sync");
+    plan_one_check(&mut host, &starts);
+    let shown = issue_view(&mut host);
+    let want = format!(
+        "\nText of issue 1 of city/ankh, as the fake tracker returned it at the last sync that \
+         worked:\n{body}\nEnd of the issue's text.\nPlan:\n"
+    );
+    assert!(shown.contains(&want), "{shown}");
+    assert!(shown.starts_with("ankh#1  Mend the clock\n"), "{shown}");
+}
+
+#[test]
+fn the_issue_command_before_the_first_sync_says_the_text_was_not_read() {
+    // A daemon that restarted: its log holds the issue, and it has not synced.
+    let (world, _) = World::replay(&[temet_work_core::Event::IssueSynced {
+        issue: IssueId::new("ankh", "1"),
+        title: "Mend the clock".into(),
+        milestone: None,
+        depends_on: vec![],
+        order: 1,
+        closed: false,
+    }]);
+    let (mut host, starts) = host_from(
+        world,
+        Box::new(Memory::default()),
+        fake_runtimes(),
+        CONFIG,
+        None,
+        vec![tracked("city/ankh", "1", 1)],
+    );
+    plan_one_check(&mut host, &starts);
+    let shown = issue_view(&mut host);
+    for line in [
+        "ankh#1  Mend the clock\n",
+        "\nStage: ",
+        "\nGroup: watch\n",
+        "\nThe issue's text was not read: ankh has not synced since the daemon started\nPlan:\n",
+        "\n  - the clock strikes on time (shown by: listening at noon)\n",
+        "\nAgents:\n",
+    ] {
+        assert!(shown.contains(line), "missing {line:?} in:\n{shown}");
+    }
+    assert!(!shown.contains("Text of"), "{shown}");
+}
+
 #[test]
 fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     use temet_work::socket::{Reply, answer};

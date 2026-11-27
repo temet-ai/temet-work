@@ -67,17 +67,32 @@ const PLAIN_MODEL: &str = "A plain model is recorded as the global runtime's, as
 model.<that runtime>, when you write it, and is refused when the author runs another runtime; \
 model.<runtime> names the runtime a model is for.";
 
-/// What a reviewer holds a change against, in its brief and again on each later
-/// round. The issue's text stays in its tracker; the reviewer reads it there.
-const HOLD_TO_THE_ISSUE: &str = "\
-Read the issue's own text in its tracker. Check each of its points and its \"Done is\" line against \
-the change, not only the plan's checks. Block on any point that is not met, and name that point in \
-the block.
-For each of the plan's checks, confirm that the test or evidence named under \"shown by\" shows the \
-whole of what the check states, including any failure or persistent case it names. A test that \
-shows only part of it is a block.
-A real run the issue asks for must have happened, with its evidence in the pull request. A plan \
-that leaves it out does not excuse it.";
+/// What a change is held against: by a reviewer in its brief and again on each
+/// later round, and by an arbiter. Each adds what it does with a point that is
+/// not met.
+fn hold_to_the_issue(issue: &IssueId) -> String {
+    format!(
+        "Read the issue's own text: run temet-work issue {issue}, which prints the issue's text \
+         from its tracker. Check each of its points and its \"Done is\" line against the change, not \
+         only the plan's checks.\n\
+         For each of the plan's checks, confirm that the test or evidence named under \"shown by\" \
+         shows the whole of what the check states, including any failure or persistent case it \
+         names.\n\
+         A real run the issue asks for must have happened, with its evidence in the pull request. \
+         A plan that leaves it out does not excuse it."
+    )
+}
+
+/// What a reviewer does with a point that is not met.
+const BLOCK_WHAT_IS_NOT_MET: &str = "\
+Block on any point that is not met, and name that point in the block. A test that shows only part \
+of its check is a block.";
+
+/// What an arbiter does with a point that is not met.
+const FIX_WHAT_IS_NOT_MET: &str = "\
+Where a point is not met, rule fix and name that point in the ruling. A test that shows only part \
+of its check is a fix. An author's answer that the plan does not list the point is no reason to \
+approve.";
 
 /// Writes the brief for an agent of `role` on `issue`, run in `place`.
 /// `rules` are the kept rules from overturned decisions; each brief ends with them.
@@ -193,17 +208,23 @@ pub fn write(
             "Review the pull request for {id}: {title}. It is {source}.\n\
              {pulls}The plan's checks:\n{checks}\
              {folder_note}Read the whole change, not only the last commit. Run the checks yourself where you can.\n\
-             {HOLD_TO_THE_ISSUE}\n\
+             {hold}\n\
+             {BLOCK_WHAT_IS_NOT_MET}\n\
              Then run: temet-work review {id} approve\n\
              or: temet-work review {id} block \"<what to fix>\" [\"<what else>\" ...]",
             title = issue.title,
+            hold = hold_to_the_issue(id),
         ),
         Role::Arbiter => format!(
             "Review rounds on {id} ({title}) ran out. It is {source}.\n\
-             {pulls}Read the pull request, the review points and the author's answers. Decide whether it merges.\n\
+             {pulls}The plan's checks:\n{checks}\
+             Read the pull request, the review points and the author's answers. Decide whether it merges.\n\
+             {hold}\n\
+             {FIX_WHAT_IS_NOT_MET}\n\
              Then run: temet-work rule {id} approve \"<why>\"\n\
              or: temet-work rule {id} fix \"<what must change, and why>\"",
             title = issue.title,
+            hold = hold_to_the_issue(id),
         ),
         Role::Investigator => format!(
             "Answer questions about {id}: {title}. It is {source}. Change no file.",
@@ -402,9 +423,11 @@ pub fn next_round(issue: &IssueId, round: u8) -> String {
     format!(
         "The author pushed fixes for {issue}; this is review round {round}. Review the whole change again, \
          not only the new commits. The issue's text may have changed since the last round, so read it again.\n\
-         {HOLD_TO_THE_ISSUE}\n\
+         {hold}\n\
+         {BLOCK_WHAT_IS_NOT_MET}\n\
          Then run: temet-work review {issue} approve\n\
-         or: temet-work review {issue} block \"<what is still wrong>\" [\"<what else>\" ...]"
+         or: temet-work review {issue} block \"<what is still wrong>\" [\"<what else>\" ...]",
+        hold = hold_to_the_issue(issue),
     )
 }
 
@@ -523,20 +546,25 @@ mod tests {
         );
         let again = next_round(&id, 2);
         for line in [
-            "Read the issue's own text in its tracker.",
+            "run temet-work issue watch#7, which prints the issue's text from its tracker.",
             "Check each of its points and its \"Done is\" line against the change, not only the \
              plan's checks.",
             "Block on any point that is not met, and name that point in the block.",
             "confirm that the test or evidence named under \"shown by\" shows the whole of what \
              the check states, including any failure or persistent case it names.",
-            "A test that shows only part of it is a block.",
+            "A test that shows only part of its check is a block.",
             "A real run the issue asks for must have happened, with its evidence in the pull \
              request. A plan that leaves it out does not excuse it.",
         ] {
             assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
         }
-        assert!(brief.contains(HOLD_TO_THE_ISSUE), "{brief}");
-        assert!(again.contains(HOLD_TO_THE_ISSUE), "{again}");
+        let shared = hold_to_the_issue(&id);
+        assert!(brief.contains(&shared), "{brief}");
+        assert!(again.contains(&shared), "{again}");
+        assert!(
+            again.contains("run temet-work issue watch#7, which prints"),
+            "{again}"
+        );
         assert!(again.contains("review round 2"), "{again}");
         assert!(
             again.contains("may have changed since the last round, so read it again."),
@@ -548,6 +576,89 @@ mod tests {
                  or: temet-work review watch#7 block \"<what is still wrong>\" [\"<what else>\" ...]"
             ),
             "{again}"
+        );
+    }
+
+    #[test]
+    fn an_arbiter_holds_the_change_against_the_issue_not_only_the_plan() {
+        let id = IssueId::new("watch", "12");
+        let mut world = World::default();
+        // The issue's own text stays in ankh-morpork/watch. Its Done line there is
+        // "Done is a real run in which the gate is shut at dusk".
+        world.apply(&Event::IssueSynced {
+            issue: id.clone(),
+            title: "Shut the gate at dusk".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let mut issue = world.issues[&id].clone();
+        // Neither check names a run.
+        issue.plan = Some(Plan {
+            checks: vec![
+                Check {
+                    done_when: "the gate shuts at dusk".into(),
+                    proven_by: "the dusk test".into(),
+                },
+                Check {
+                    done_when: "a gate that sticks is tried again and then reported".into(),
+                    proven_by: "the stuck gate test".into(),
+                },
+            ],
+            ..Plan::default()
+        });
+        let task = |role| {
+            write(
+                role,
+                &issue,
+                Some("ankh-morpork/watch"),
+                &[],
+                Workplace::default(),
+                &[],
+                &[],
+            )
+            .task
+        };
+        let brief = task(Role::Arbiter);
+        for line in [
+            "It is issue 12 of ankh-morpork/watch in its tracker.",
+            "The plan's checks:\n\
+             - the gate shuts at dusk (shown by: the dusk test)\n\
+             - a gate that sticks is tried again and then reported (shown by: the stuck gate \
+             test)\n",
+            "run temet-work issue watch#12, which prints the issue's text from its tracker.",
+            "Check each of its points and its \"Done is\" line against the change, not only the \
+             plan's checks.",
+            "confirm that the test or evidence named under \"shown by\" shows the whole of what \
+             the check states, including any failure or persistent case it names.",
+            "A real run the issue asks for must have happened, with its evidence in the pull \
+             request. A plan that leaves it out does not excuse it.",
+            "Where a point is not met, rule fix and name that point in the ruling.",
+            "A test that shows only part of its check is a fix.",
+            "An author's answer that the plan does not list the point is no reason to approve.",
+        ] {
+            assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
+        }
+        assert!(
+            !brief.contains("block"),
+            "an arbiter cannot block:\n{brief}"
+        );
+        let again = next_round(&id, 2);
+        assert!(
+            again.contains("run temet-work issue watch#12, which prints"),
+            "{again}"
+        );
+        let shared = hold_to_the_issue(&id);
+        for text in [&task(Role::Reviewer), &again, &brief] {
+            assert!(text.contains(&shared), "{text}");
+        }
+        assert!(
+            brief.ends_with(
+                "Then run: temet-work rule watch#12 approve \"<why>\"\n\
+                 or: temet-work rule watch#12 fix \"<what must change, and why>\""
+            ),
+            "{brief}"
         );
     }
 

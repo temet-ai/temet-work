@@ -240,6 +240,16 @@ fn an_effect_no_part_takes_is_a_problem() {
 }
 
 #[test]
+fn issue_text_no_part_reads_is_refused_with_the_reason() {
+    let mut h = host(vec![Box::new(Terms::default())], Shared::default());
+    h.handle(1, synced("1")).expect("handle");
+    assert_eq!(
+        h.issue_text(&IssueId::new("ankh", "1")),
+        Err("no part in this build reads issue text".into())
+    );
+}
+
+#[test]
 fn a_failed_poll_is_a_problem_until_a_poll_succeeds() {
     let terms = Terms {
         polls: vec![
