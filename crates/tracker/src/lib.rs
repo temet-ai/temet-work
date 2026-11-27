@@ -476,11 +476,14 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
     }
     for i in world.issues.values() {
         // An issue merging, deploying or verifying may close on merge; the loop
-        // closes it itself once it passes, so its close here is not news.
-        let finishing = matches!(
-            i.stage,
-            Stage::Merging | Stage::Deploying | Stage::Verifying
-        );
+        // closes it itself once it passes, so its close here is not news. Nor is
+        // it for one with merged work: after a failed verify the tracker still
+        // has it closed by that merge, and it is to be fixed.
+        let finishing = i.has_merged
+            || matches!(
+                i.stage,
+                Stage::Merging | Stage::Deploying | Stage::Verifying
+            );
         if &i.id.project == project
             && i.stage != Stage::Done
             && !finishing
@@ -840,6 +843,9 @@ impl Part for Trackers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use temet_work_core::event::Verdict;
+    use temet_work_core::ids::{AgentId, FolderId, GroupId, MachineId};
+    use temet_work_core::model::{AgentState, Plan, Role, Stage};
 
     fn issue(key: &str, milestone: Option<&str>) -> TrackedIssue {
         TrackedIssue {
@@ -1035,6 +1041,176 @@ mod tests {
         );
     }
 
+    /// A world that synced issue 2 and then took it to `stage`.
+    fn with_issue_two(stage: Stage, has_merged: bool) -> World {
+        let mut w = configured();
+        let t = issue("2", None);
+        w.apply(&super::synced(&w, &ProjectId::new("ankh"), &t));
+        if let Some(i) = w.issues.get_mut(&IssueId::new("ankh", "2")) {
+            i.stage = stage;
+            i.has_merged = has_merged;
+        }
+        w
+    }
+
+    const NOT_DONE: [Stage; 10] = [
+        Stage::New,
+        Stage::Refining,
+        Stage::Ready,
+        Stage::Working,
+        Stage::InReview { round: 1 },
+        Stage::Fixing { round: 1 },
+        Stage::Arbitration { round: 3 },
+        Stage::Merging,
+        Stage::Deploying,
+        Stage::Verifying,
+    ];
+
+    #[test]
+    fn changes_leaves_out_the_close_of_an_issue_with_merged_work_that_is_not_done() {
+        for stage in NOT_DONE {
+            let w = with_issue_two(stage, true);
+            assert_eq!(changes(&w, &ProjectId::new("ankh"), &[]), [], "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn changes_reports_the_close_of_an_issue_that_merged_nothing() {
+        let w = with_issue_two(Stage::Working, false);
+        let events = changes(&w, &ProjectId::new("ankh"), &[]);
+        assert!(
+            matches!(events.as_slice(), [Event::IssueSynced { issue, closed: true, .. }] if issue.key == "2"),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_verify_then_two_syncs_with_the_issue_closed_leaves_it_to_be_fixed() {
+        let ankh = ProjectId::new("ankh");
+        let (one, two) = (IssueId::new("ankh", "1"), IssueId::new("ankh", "2"));
+        let group = GroupId::new("watch");
+        // Issue 2 depends on issue 1.
+        let tracker = |one_closed: bool| {
+            let mut t = fake();
+            t.issues[0].1.closed = one_closed;
+            t.issues[1].1.milestone = Some("Watch".into());
+            t.issues[1].1.depends_on = vec!["1".into()];
+            let mut part = Trackers::default().every(0);
+            part.add(Box::new(t));
+            part
+        };
+        let mut w = configured();
+        for f in ["f1", "f2"] {
+            w.apply(&Event::FolderAdded {
+                folder: FolderId::new(f),
+                project: ankh.clone(),
+                machine: MachineId::new("morpork"),
+                path: format!("/srv/ankh/{f}"),
+            });
+        }
+        w.apply(&Event::GroupCreated {
+            group: group.clone(),
+            name: "Night watch".into(),
+            projects: vec![ankh.clone()],
+            areas: Vec::new(),
+            milestones: vec![MilestoneId::new("Watch")],
+            refining_at_once: 1,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        });
+        let first = tracker(false).poll(&w, 0).events;
+        apply(&mut w, &first);
+        for issue in [&one, &two] {
+            w.apply(&Event::PlanWritten {
+                issue: issue.clone(),
+                plan: Plan::default(),
+            });
+        }
+        apply(
+            &mut w,
+            &[
+                Event::PullRequestReady {
+                    issue: one.clone(),
+                    pull: Some("57".into()),
+                    pulls: Default::default(),
+                    replies: Vec::new(),
+                },
+                Event::ReviewFinished {
+                    issue: one.clone(),
+                    round: 1,
+                    verdict: Verdict::Approve,
+                },
+                Event::ChecksFinished {
+                    issue: one.clone(),
+                    passed: true,
+                    failing: Vec::new(),
+                },
+                Event::Merged {
+                    issue: one.clone(),
+                    repo: None,
+                },
+                Event::Deployed { issue: one.clone() },
+                Event::Verified {
+                    issue: one.clone(),
+                    passed: false,
+                    output: "the clock struck twelve".into(),
+                },
+                Event::AgentStarted {
+                    agent: AgentId::new("author-2"),
+                    group,
+                    role: Role::Author,
+                    issue: Some(one.clone()),
+                    machine: MachineId::new("morpork"),
+                    folder: None,
+                    secret_digest: None,
+                    runtime: None,
+                    model: None,
+                },
+            ],
+        );
+        let folder = w.issues[&one].folder.clone().expect("a folder for the fix");
+
+        // The merge closed issue 1 in the tracker.
+        let mut part = tracker(true);
+        let mut effects = Vec::new();
+        for now in [1, 2] {
+            let events = part.poll(&w, now).events;
+            assert_eq!(events, [], "poll {now}");
+            for e in &events {
+                effects.extend(w.apply(e));
+            }
+        }
+
+        let i = &w.issues[&one];
+        assert!(
+            matches!(i.stage, Stage::Ready | Stage::Working),
+            "{:?}",
+            i.stage
+        );
+        assert!(i.fix[0].ends_with("the clock struck twelve"), "{:?}", i.fix);
+        assert_eq!(effects, []);
+        assert_ne!(w.agents[&AgentId::new("author-2")].state, AgentState::Ended);
+        assert_eq!(i.folder.as_ref(), Some(&folder));
+        assert_eq!(w.folders[&folder].holder.as_ref(), Some(&one));
+        // Issue 2 waits, though a folder is free.
+        assert_eq!(w.issues[&two].stage, Stage::Ready);
+        assert!(w.folders.values().any(|f| f.holder.is_none()));
+        assert!(
+            !w.missing()
+                .start
+                .iter()
+                .any(|e| matches!(e, Effect::StartAgent { issue, .. } if issue == &two)),
+        );
+        let read = part.issue_text(&w, &one).expect("the tracker part answers");
+        let shown = temet_work_core::text::issue(&w, &one, &read).expect("a known issue");
+        let to_fix = shown.split_once("To fix:").map(|(_, rest)| rest);
+        assert!(
+            to_fix.is_some_and(|t| t.contains("the clock struck twelve")),
+            "{shown}"
+        );
+    }
+
     #[test]
     fn a_dependency_counts_as_done_only_when_the_tracker_says_it_is_closed() {
         let mut tracker = fake();
@@ -1097,7 +1273,7 @@ mod tests {
         // Issue 1 closed in the tracker earlier (so not by the loop); issue 2 the loop closed.
         for (key, by_loop) in [("1", false), ("2", true)] {
             if let Some(i) = w.issues.get_mut(&IssueId::new("ankh", key)) {
-                i.stage = temet_work_core::model::Stage::Done;
+                i.stage = Stage::Done;
                 i.closed_by_loop = by_loop;
             }
         }
@@ -1135,7 +1311,6 @@ mod tests {
 
     #[test]
     fn a_filed_issue_is_reported_at_once_and_the_next_sync_finds_nothing_changed() {
-        use temet_work_core::ids::{AgentId, GroupId};
         let mut w = configured();
         let mut part = Trackers::default().every(0);
         part.add(Box::new(fake()));

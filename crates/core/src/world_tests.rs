@@ -625,6 +625,34 @@ fn closing_an_issue_in_the_tracker_frees_its_folder() {
 }
 
 #[test]
+fn a_person_closing_an_issue_that_merged_nothing_finishes_it() {
+    let mut w = working_on_one();
+    w.apply(&started("author-1", Role::Author, "1"));
+    assert!(!w.issues[&issue("1")].has_merged);
+    let effects = w.apply(&Event::IssueSynced {
+        issue: issue("1"),
+        title: "issue 1".into(),
+        milestone: Some(MilestoneId::new("m1")),
+        depends_on: vec![],
+        order: 1,
+        closed: true,
+    });
+    assert_eq!(
+        effects,
+        [
+            Effect::StopAgent {
+                agent: AgentId::new("author-1")
+            },
+            Effect::ReleaseFolder {
+                folder: FolderId::new("f1")
+            }
+        ]
+    );
+    assert_eq!(stage(&w, "1"), Stage::Done);
+    assert_eq!(w.folders[&FolderId::new("f1")].holder, None);
+}
+
+#[test]
 fn the_same_events_give_the_same_state_and_effects() {
     let events = [
         group(&["m2", "m1"], 2),
@@ -1346,6 +1374,42 @@ fn a_failed_verify_sends_the_issue_back_with_why_and_without_the_merged_pull_req
         )
         .expect("launch");
     assert!(launch.brief.task.contains("the clock struck twelve"));
+}
+
+#[test]
+fn an_older_log_with_a_close_after_a_failed_verify_replays_as_done() {
+    // The tracker part no longer writes this close; a log that holds one keeps
+    // the state it gave, so what came after it in the log still fits.
+    let (w, _) = World::replay(&[
+        group(&["m1"], 1),
+        folder("f1"),
+        sync("1", "m1", 1, &[]),
+        planned("1"),
+        pull_ready(),
+        verdict(1, Verdict::Approve),
+        checks(true),
+        Event::Merged {
+            issue: issue("1"),
+            repo: None,
+        },
+        Event::Deployed { issue: issue("1") },
+        Event::Verified {
+            issue: issue("1"),
+            passed: false,
+            output: "the clock struck twelve".into(),
+        },
+        Event::IssueSynced {
+            issue: issue("1"),
+            title: "issue 1".into(),
+            milestone: Some(MilestoneId::new("m1")),
+            depends_on: vec![],
+            order: 1,
+            closed: true,
+        },
+    ]);
+    assert_eq!(stage(&w, "1"), Stage::Done);
+    assert!(w.issues[&issue("1")].has_merged);
+    assert_eq!(w.folders[&FolderId::new("f1")].holder, None);
 }
 
 #[test]
