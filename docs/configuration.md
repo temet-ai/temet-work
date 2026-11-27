@@ -115,6 +115,12 @@ It refines `refining_at_once` issues at a time. It starts an author on a refined
 when one of the project's folders is free and every issue in the issue's "Depends on"
 lines is done. A project with two folders has at most two authors working at once.
 
+A project's `deploy` and `verify` commands run through `sh -c` in its `run_in` folder (your
+home folder when left out), with `TEMET_WORK_ISSUE` (the issue, such as `radar#44`),
+`TEMET_WORK_PROJECT` (the project's id) and `TEMET_WORK_REPO` (the code host's name for its
+repository) set. The daemon reaches herdr-core at `HC_TERMINAL_SOCKET`, else at
+`$XDG_RUNTIME_DIR/herdr-core/default.sock`.
+
 Settings at every level, from global down to one task, are in `docs/settings.md`. The
 tables `[settings]` (with `[settings.<role>]` inside it), `[project.settings]`,
 `[area.settings]` and `[[milestone]]` become `SettingSet` events recorded as set by

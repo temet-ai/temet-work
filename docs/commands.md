@@ -78,7 +78,8 @@ command was not understood or no daemon answered.
 
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
-`status`, `issue` and `screen`; `act` adds `plan`, `ready`, `review` and `rule`.
+`status`, `issue`, `screen` and `settings`; `act` adds `plan`, `ready`, `review`, `rule`,
+`retry`, `overturn`, `proposal`, `set` and `unset`.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
