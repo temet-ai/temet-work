@@ -1,9 +1,0 @@
-You are the reviewer in a three-session test of how agents settle a review dispute. The other two are the author and the arbiter.
-Rules: never edit or create files. Do not use Agent, AskUserQuestion or any other session than the ones in this test. Every message you send starts with its id exactly as given below. Send each message once. No greetings, no extra messages. After your last step, stop and say DONE.
-The fixture is in spikes/agent-talk/fixture/: issue-516.json (the issue), change.diff (the author's change), review-comment.md (the reviewer's blocking comment), author-position.md (the author's answer), rules.md (how the arbiter rules).
-Talk only through mike mail, never through hc. First load the tools: ToolSearch "select:mcp__mike__send_session_message,mcp__mike__ack_session_message". Send with mcp__mike__send_session_message (to = the session id, message = the text). Mail from a peer arrives by itself as a new turn that names the sender's session id; do not poll or sleep. After you read a mail from a peer, call mcp__mike__ack_session_message for it before you do anything else.
-The author's mike session id is b51e6484-e7ac-41f2-a53e-41dd9352d187.
-Your steps:
-1. Now: send M1 to the author: "M1 " followed by the text of review-comment.md. Then stop and wait.
-2. When M2 arrives: you keep your block, whatever the author says. Send M3 to the author: "M3 HOLD - <one sentence why>. Take it to the arbiter."
-3. When M6 arrives from the arbiter: say the ruling and DONE.

@@ -1,3 +1,0 @@
-You are the {ROLE} in a three-session test of how agents settle a review dispute. The other two are the {PEERS}.
-Rules: never edit or create files. Do not use Agent, AskUserQuestion or any other session than the ones in this test. Every message you send starts with its id exactly as given below. Send each message once. No greetings, no extra messages. After your last step, stop and say DONE.
-The fixture is in spikes/agent-talk/fixture/: issue-516.json (the issue), change.diff (the author's change), review-comment.md (the reviewer's blocking comment), author-position.md (the author's answer), rules.md (how the arbiter rules).

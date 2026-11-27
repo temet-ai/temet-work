@@ -1,6 +1,6 @@
 ---
 name: agent-sessions-developer
-description: Specialist for how temet-work starts Claude Code sessions as agents and has them talk to each other - author, reviewer, arbiter and similar roles in herdr-core terminals, captured by mike, messaging over mike mail (send_session_message) and `hc send`, with send and receive times measured. Use for any temet-work work that launches agent sessions, wires them together, settles disputes between them, or measures message delivery, including spikes/agent-talk/.
+description: Specialist for how temet-work starts Claude Code sessions as agents and has them talk to each other - author, reviewer, arbiter and similar roles in herdr-core terminals, captured by mike, messaging over mike mail (send_session_message) and `hc send`, with send and receive times measured. Use for any temet-work work that launches agent sessions, wires them together, settles disputes between them, or measures message delivery, including the runner and runtime crates (crates/runner, crates/runner-herdr, crates/runtime, crates/runtime-claude).
 skills:
   - hc-terminals
   - plain-writing

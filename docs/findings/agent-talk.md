@@ -1,13 +1,14 @@
 ---
 session_id:
   - cc29fbec-3b84-4b78-9ebc-6fe866b89227
+  - e4a814a9-1735-455e-9162-778decf89d5b
 ---
 
 # Agents settling a review dispute over mike mail and hc send
 
 What happened on 26 November 2026 when an author, a reviewer and an arbiter, all Claude Code on
 haiku, disputed one review comment on omit. Times are SAST. The script, fixture and raw records
-are in [spikes/agent-talk/](../../spikes/agent-talk/README.md).
+are in [spikes/agent-talk/ at commit 88a79e6](https://github.com/temet-ai/temet-work/tree/88a79e6e7e11f4c9805d821a4d7ebf91c1a3ffc3/spikes/agent-talk).
 
 ## Result
 
@@ -112,7 +113,7 @@ include loading tools or reading a fixture file).
 
 One session per case (`probe.py`, one try each). `probe.py` logged the `hc` sends. The mails and
 G1 were sent by hand, and their results are in
-[runs/by-hand.md](../../spikes/agent-talk/runs/by-hand.md).
+[runs/by-hand.md](https://github.com/temet-ai/temet-work/blob/88a79e6e7e11f4c9805d821a4d7ebf91c1a3ffc3/spikes/agent-talk/runs/by-hand.md).
 
 | Case | id | Channel | Sent | What happened |
 |---|---|---|---|---|

@@ -1,16 +1,17 @@
 ---
 session_id:
   - d8b56904-12b7-4f79-b22a-277694261d14
+  - e4a814a9-1735-455e-9162-778decf89d5b
 ---
 
 # herdr-core: what a daemon can rely on
 
 herdr-core 0.1.22 on omit, 26 November 2026. Everything below comes from one run of
-[`spikes/herdr-core/probe.py`](../../spikes/herdr-core/probe.py) unless it says otherwise; its
-output is [`spikes/herdr-core/run.log`](../../spikes/herdr-core/run.log). Each log line is the local
+[`spikes/herdr-core/probe.py`](https://github.com/temet-ai/temet-work/blob/88a79e6e7e11f4c9805d821a4d7ebf91c1a3ffc3/spikes/herdr-core/probe.py) unless it says otherwise; its
+output is [`spikes/herdr-core/run.log`](https://github.com/temet-ai/temet-work/blob/88a79e6e7e11f4c9805d821a4d7ebf91c1a3ffc3/spikes/herdr-core/run.log). Each log line is the local
 time (SAST), seconds since the probe started, the connection, and the message. Quoted lines are cut
-at the right where marked `…`. To run it again: `python3 spikes/herdr-core/probe.py` (it overwrites
-`run.log`, takes about two minutes and removes what it started).
+at the right where marked `…`. Both files are kept at commit 88a79e6; to run the probe again, check that commit out and
+run `python3 spikes/herdr-core/probe.py` (it overwrites `run.log`, takes about two minutes and removes what it started).
 
 The probe started a plain `bash`, Claude Code 2.1.332 on haiku with `prompt.txt` ("List the files in
 this folder, then stop."), and three `sleep` terminals, all labelled
