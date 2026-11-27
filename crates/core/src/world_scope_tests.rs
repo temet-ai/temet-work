@@ -373,7 +373,8 @@ fn an_issue_that_left_its_groups_scope_shows_its_stage_and_out_of_scope() {
         "{status}"
     );
     assert!(!status.contains("Waiting"), "{status}");
-    let shown = crate::text::issue(&w, &issue("2")).unwrap_or_default();
+    let unread = Err("not read here".into());
+    let shown = crate::text::issue(&w, &issue("2"), &unread).unwrap_or_default();
     assert!(shown.contains("\nStage: ready, out of scope\n"), "{shown}");
 }
 

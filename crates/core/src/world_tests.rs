@@ -1895,7 +1895,8 @@ fn an_old_single_pull_event_is_the_first_repositorys_and_an_old_merged_is_all_of
 fn the_issue_text_lists_each_pull_request_with_its_repository_and_merge_state() {
     let mut w = merging_two();
     merged(&mut w, "ui");
-    let text = crate::text::issue(&w, &gld()).expect("text");
+    let unread = Err("not read here".into());
+    let text = crate::text::issue(&w, &gld(), &unread).expect("text");
     assert!(text.contains("Pull request: ui #12, merged"), "{text}");
     assert!(text.contains("Pull request: api #34\n"), "{text}");
     assert!(text.contains("Folders: ui-1, api-1"), "{text}");

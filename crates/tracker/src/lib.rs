@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use temet_work_core::ids::{IssueId, MilestoneId, ProjectId};
-use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
+use temet_work_core::{Effect, Event, IssueText, Outcome, Part, Polled, World};
 
 /// An issue as a tracker reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -386,8 +386,9 @@ pub mod contract {
 /// The tracker part: the trackers compiled into this build, in the order they were added.
 ///
 /// It syncs each project from the tracker its configuration names, as often as
-/// its `sync_every` setting says (a minute by default), and reports only what changed. It closes an issue in its tracker when
-/// the loop has verified it.
+/// its `sync_every` setting says (a minute by default), and reports only what
+/// changed. It keeps each open issue's text from the last sync in memory. It closes
+/// an issue in its tracker when the loop has verified it.
 #[derive(Default)]
 pub struct Trackers {
     adapters: Vec<Box<dyn Tracker>>,
@@ -395,6 +396,9 @@ pub struct Trackers {
     every_ms: Option<u64>,
     synced_at: BTreeMap<ProjectId, u64>,
     errors: BTreeMap<ProjectId, String>,
+    /// For each source that has synced, the text of each open issue by key, as
+    /// its last sync that worked listed it.
+    texts: BTreeMap<ProjectId, BTreeMap<String, String>>,
 }
 
 /// The events that bring the loop's view of `project` up to `open`, the issues
@@ -552,6 +556,45 @@ impl Trackers {
         self.every_ms = Some(ms);
         self
     }
+
+    /// The text of `issue` from the last sync of its project or area, or why
+    /// there is none.
+    fn read(&self, world: &World, issue: &IssueId) -> Result<IssueText, String> {
+        let source = &issue.project;
+        let Some((_, tracker_id, name)) =
+            sources(world).into_iter().find(|(id, _, _)| id == source)
+        else {
+            return Err(format!("{source} has no tracker configured"));
+        };
+        if !self.adapters.iter().any(|a| a.id() == tracker_id) {
+            return Err(format!(
+                "no tracker \"{tracker_id}\" in this build reads {source}"
+            ));
+        }
+        let Some(texts) = self.texts.get(source) else {
+            let failed = self
+                .errors
+                .get(source)
+                .map_or_else(String::new, |e| format!(": {e}"));
+            return Err(format!(
+                "{source} has not synced since the daemon started{failed}"
+            ));
+        };
+        let key = &issue.key;
+        let Some(text) = texts.get(key) else {
+            return Err(format!(
+                "the last sync of {name} that worked did not list issue {key}; a sync lists open \
+                 issues only"
+            ));
+        };
+        Ok(IssueText {
+            from: format!(
+                "issue {key} of {name}, as the {tracker_id} tracker returned it at the last sync \
+                 that worked"
+            ),
+            text: text.clone(),
+        })
+    }
 }
 
 impl Part for Trackers {
@@ -618,6 +661,8 @@ impl Part for Trackers {
                             .insert(source.clone(), format!("{}: {}", name, unsure.join("; ")));
                     }
                     events.extend(changes(world, &source, &open));
+                    let texts = open.into_iter().map(|t| (t.key, t.body)).collect();
+                    self.texts.insert(source, texts);
                 }
                 Err(e) => {
                     self.errors.insert(source.clone(), format!("{}: {e}", name));
@@ -627,6 +672,10 @@ impl Part for Trackers {
         let problem = (!self.errors.is_empty())
             .then(|| self.errors.values().cloned().collect::<Vec<_>>().join("; "));
         Polled { events, problem }
+    }
+
+    fn issue_text(&self, world: &World, issue: &IssueId) -> Option<Result<IssueText, String>> {
+        Some(self.read(world, issue))
     }
 
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
@@ -951,6 +1000,139 @@ mod tests {
             milestone: None,
         };
         assert!(matches!(part.carry_out(&elsewhere, &w), Outcome::Failed(_)));
+    }
+
+    /// A part whose one tracker is the fake with `body` as issue 1's text.
+    fn reading(body: &str) -> Trackers {
+        let mut tracker = fake();
+        tracker.issues[0].1.body = body.into();
+        let mut part = Trackers::default();
+        part.add(Box::new(tracker));
+        part
+    }
+
+    /// What `part` gives for issue `key` of ankh: its text, or why not.
+    fn text_of(part: &Trackers, w: &World, key: &str) -> Result<String, String> {
+        part.issue_text(w, &IssueId::new("ankh", key))
+            .expect("a tracker part reads issue text")
+            .map(|t| t.text)
+    }
+
+    #[test]
+    fn an_issues_text_is_the_one_the_last_sync_listed() {
+        let w = configured();
+        let mut part = reading("Wind it.\nDone is a clock that strikes.");
+        part.poll(&w, 0);
+        let read = part.issue_text(&w, &IssueId::new("ankh", "1"));
+        assert_eq!(
+            read,
+            Some(Ok(IssueText {
+                from: "issue 1 of ankh/morpork, as the fake tracker returned it at the last \
+                       sync that worked"
+                    .into(),
+                text: "Wind it.\nDone is a clock that strikes.".into(),
+            }))
+        );
+        // Edited in the tracker.
+        part.adapters = reading("Wind it twice.").adapters;
+        part.poll(&w, 60_000 - 1);
+        assert_eq!(
+            text_of(&part, &w, "1").as_deref(),
+            Ok("Wind it.\nDone is a clock that strikes."),
+            "not synced since the edit"
+        );
+        part.poll(&w, 60_000);
+        assert_eq!(text_of(&part, &w, "1").as_deref(), Ok("Wind it twice."));
+    }
+
+    #[test]
+    fn an_issue_asked_about_before_any_sync_has_not_been_read() {
+        let w = configured();
+        let part = reading("Wind it.");
+        assert_eq!(
+            text_of(&part, &w, "1"),
+            Err("ankh has not synced since the daemon started".into())
+        );
+        // A first sync that fails says why.
+        let mut part = Trackers::default();
+        part.add(Box::new(FakeTracker::default()));
+        part.poll(&w, 0);
+        assert_eq!(
+            text_of(&part, &w, "1"),
+            Err(
+                "ankh has not synced since the daemon started: ankh/morpork: not found: \
+                 ankh/morpork"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn an_issue_the_last_sync_did_not_list_has_no_text() {
+        let w = configured();
+        let mut part = reading("Wind it.");
+        part.poll(&w, 0);
+        assert_eq!(
+            text_of(&part, &w, "9"),
+            Err(
+                "the last sync of ankh/morpork that worked did not list issue 9; a sync lists \
+                 open issues only"
+                    .into()
+            )
+        );
+        // Closed in the tracker, so the next sync leaves it out.
+        let mut gone = fake();
+        gone.issues.retain(|(_, i)| i.key != "1");
+        part.adapters = vec![Box::new(gone)];
+        part.poll(&w, 60_000);
+        assert!(text_of(&part, &w, "1").is_err_and(|why| why.contains("did not list issue 1")));
+    }
+
+    #[test]
+    fn a_sync_that_fails_keeps_the_text_of_the_last_one_that_worked() {
+        let w = configured();
+        let mut part = reading("Wind it.");
+        part.poll(&w, 0);
+        part.adapters = vec![Box::new(FakeTracker::default())];
+        assert!(part.poll(&w, 60_000).problem.is_some(), "the sync failed");
+        assert_eq!(text_of(&part, &w, "1").as_deref(), Ok("Wind it."));
+    }
+
+    #[test]
+    fn an_empty_text_is_read_as_empty() {
+        let w = configured();
+        let mut part = reading("");
+        part.poll(&w, 0);
+        assert_eq!(text_of(&part, &w, "1").as_deref(), Ok(""));
+    }
+
+    #[test]
+    fn a_project_no_tracker_in_the_build_reads_has_no_text() {
+        let mut w = two_sources();
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new("klatch"),
+            tracker: "nonesuch".into(),
+            name: "desert/klatch".into(),
+            code_host: None,
+            repo: None,
+        });
+        let mut part = two();
+        part.poll(&w, 0);
+        let read = |source: &str| part.issue_text(&w, &IssueId::new(source, "1"));
+        assert_eq!(
+            read("klatch"),
+            Some(Err(
+                "no tracker \"nonesuch\" in this build reads klatch".into()
+            ))
+        );
+        assert_eq!(
+            read("uberwald"),
+            Some(Err("uberwald has no tracker configured".into()))
+        );
+        // An area's issue is read from the area's own tracker.
+        assert!(read("guild").is_some_and(|r| {
+            r.is_ok_and(|t| t.from.starts_with("issue 1 of GLD, as the other tracker"))
+        }));
     }
 
     #[test]

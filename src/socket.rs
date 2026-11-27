@@ -596,7 +596,8 @@ pub fn answer(
                 }
             }
             temet_work_core::Command::Issue { issue } => Reply::Done {
-                text: temet_work_core::text::issue(host.world(), issue).unwrap_or_default(),
+                text: temet_work_core::text::issue(host.world(), issue, &host.issue_text(issue))
+                    .unwrap_or_default(),
             },
             temet_work_core::Command::Screen { agent } => match host.screen(agent) {
                 Ok(text) => Reply::Done { text },
