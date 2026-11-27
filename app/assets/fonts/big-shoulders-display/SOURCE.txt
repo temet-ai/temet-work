@@ -1,0 +1,3 @@
+Big Shoulders Display by the Big Shoulders Project Authors, SIL Open Font License 1.1 (OFL.txt).
+From https://github.com/xotypeco/big_shoulders at commit 8ba99c9e347396d828b263b8b818269cb99eb27c:
+  Big-Shoulders/fonts/ttf/BigShouldersDisplay-{SemiBold,Bold}.ttf

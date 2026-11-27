@@ -1,0 +1,9 @@
+The faces in this folder are the temet design system's type faces, as TTF files from its
+ui/build/fonts (pushed commit 6cbc790). Each family's folder holds its licence and a SOURCE.txt
+naming the upstream repository and commit.
+
+- Archivo, by the Archivo Project Authors: SIL Open Font License 1.1 (archivo/OFL.txt).
+- Big Shoulders Display, by the Big Shoulders Project Authors: SIL Open Font License 1.1
+  (big-shoulders-display/OFL.txt).
+- IBM Plex Mono, by IBM Corp.: SIL Open Font License 1.1, the IBM Plex licence
+  (ibm-plex-mono/LICENSE.txt).

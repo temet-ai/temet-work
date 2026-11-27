@@ -85,7 +85,7 @@ design system's Theme pages. Nothing in the app bakes a token's value in.
 | Intents | `--bp-intent-{success,warning,danger}-{rest,hover,active}` and `--bp-typography-color-{success,warning,danger}-rest` | success blue, warning yellow, danger red |
 | Attention | `--tm-attention` | a theme setting the user can change |
 | Selected row | `--tm-selected-fill`, `--tm-selected-line` | accent wash, accent line |
-| Type | `--tm-font-text`, `--tm-font-figure`, `--tm-font-code`; `--tm-text-page`, `-pane`, `-section`, `-body`, `-small`, `-code`; `--tm-weight-heading`; Blueprint's `--bp-typography-*`, which read them | Archivo for text, Big Shoulders Display for figures, IBM Plex Mono for code; controls and page text at 13 px |
+| Type | `--tm-font-text`, `--tm-font-figure`, `--tm-font-code`; `--tm-text-page`, `-pane`, `-section`, `-body`, `-small`, `-code`; `--tm-weight-heading`; Blueprint's `--bp-typography-*`, which read them | Archivo for text, Big Shoulders Display for figures, IBM Plex Mono for code, embedded in the app as TTF (`app/assets/fonts`) and registered at startup; controls and page text at 13 px |
 | Spacing and sizes | `--bp-surface-spacing` | |
 | Shape | `--bp-surface-border-radius` (2 px), `--tm-cut` (8 px) | |
 | Icons | `@blueprintjs/icons`, 16 and 20 px | SVG files embedded in the app |
@@ -98,6 +98,13 @@ design system's Theme pages. Nothing in the app bakes a token's value in.
 Each row is a design-system part temet-work uses or will need. The GPUI basis is the
 gpui-component 0.11 module a part is drawn with, where one fits; the look still comes from the
 tokens.
+
+Some composites in the design system style their own markup with a class of their own, such as
+GroupList's group head (`tm-groups-head`) or IssueTable's key cell (`tm-mono tm-issue-key`). A
+composite here reads no colour or type, so `app/src/components/mod.rs` holds these classes as
+`Class`, and the component layer draws them: `classed(Class::GroupsHead, cx)` for plain markup,
+or `class_name(Class::Issues)` on a component, as the design system passes `className`. A class
+draws what its rule in the design system's `temet.css` or `blueprint-overrides.css` says.
 
 | Part | Design system id | Variants temet-work uses | GPUI basis |
 |---|---|---|---|
@@ -182,10 +189,6 @@ has not merged to its main yet, and `crates/style/src/tokens.rs` is synced from 
   state, and the movements as data. `scripts/sync-tokens` then reads
   that file in place of the running Storybook.
 - Which tokens a user may change, such as `--tm-attention`, marked in the token export.
-- The faces' font files as TTF or OTF, which the app embeds. The design system ships them as
-  woff2, and GPUI's Linux text system (cosmic-text, reading fonts through fontdb and
-  ttf-parser) parses TrueType and OpenType only. Until then the app falls back to the system's
-  fonts.
 - The design system's part list in the token export, so the review check can confirm every id
   in this map.
 - TerminalView and AgentPane, once temet-work sends their definitions.

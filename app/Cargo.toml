@@ -15,6 +15,8 @@ description = "temet-work's desktop app: draws the daemon's view data from the t
 # gpui-component 0.11.0 is built on `gpui-pre`, a crates.io snapshot of zed@f126950, not on
 # `gpui` 0.2.2. Pin the same snapshot under the same name (docs/findings/gpui.md).
 gpui = { package = "gpui-pre", version = "=0.3.14" }
+# The windowing backend: `application()` opens the window on Wayland.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", features = ["wayland"] }
 gpui-component = "=0.11.0"
 # Motion types (Easing, Spring) that gpui-component uses and does not re-export.
 gpui-base = "=0.11.0"

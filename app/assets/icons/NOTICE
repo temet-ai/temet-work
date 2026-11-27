@@ -1,0 +1,6 @@
+The SVG files in 16/ and 20/ are icons from @blueprintjs/icons 6.17.0, the icon set of
+Palantir's Blueprint, written out from its path data (src/generated/16px/paths and
+src/generated/20px/paths) without change.
+
+Copyright Palantir Technologies, Inc.
+Licensed under the Apache License, Version 2.0; the licence text is in LICENSE beside this file.
