@@ -273,7 +273,15 @@ or to the build's default when none was set. A group's old `model` is bound the 
 `temet-work status` then lists each under `model.<runtime>`. A refiner's `model: opus`
 logged while `claude` was global stays `model.claude` after a later
 `temet-work set global runtime codex`, so a Codex author on that issue runs Codex's
-default. Before models were keyed by runtime, a plain `model` was the only way to give Codex reviewers a model
+default. As it replays, the daemon remembers which `model.<runtime>` the last plain `model`
+at each scope and role was bound to, a group's old `model` included. An older log's plain
+unset takes away the value its earlier plain set at that scope and role was bound to, and a
+later plain set there replaces it, even after the global runtime changed: a log with
+`set radar --role reviewer model opus` while `claude` was global, then
+`set global runtime codex` and `unset radar --role reviewer model`, leaves radar's
+reviewers with no model. A plain unset where the log set no plain model is bound to the
+runtime global at that point.
+Before models were keyed by runtime, a plain `model` was the only way to give Codex reviewers a model
 (`[settings.reviewer] runtime = "codex"` with `model = "gpt-5-codex"`, or
 `temet-work set radar --role reviewer model gpt-5-codex`). A logged one is now listed under
 the runtime that was global then, usually `model.claude`, and reaches no reviewer. Set it
@@ -365,6 +373,10 @@ level. `temet-work status` lists every value with the level it is set at and who
   point. Binding it to the role's runtime was left out: the global one is the runtime it was
   read for when it was written, and the role's would hand a refiner's Claude model to a
   Codex author.
+- An older log's plain unset takes away the key its plain set at that place was bound to,
+  and a `model.claude` written by name over that plain value goes with it, because a plain
+  model and the global runtime's `model.<runtime>` are one key. Keeping the plain value
+  apart from the named one was left out: it would undo that one key for older logs only.
 - Only a person sets `runtime`. The Codex adapter ignores `permission`, so an agent that
   chose the runtime could undo what a person set there. Refusing the change only when
   `permission` is not `auto` and the runtime named ignores it was left out: the core

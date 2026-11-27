@@ -60,6 +60,10 @@ pub struct World {
     pub investigations: BTreeMap<GroupId, Investigation>,
     /// Settings by level, role and key (`docs/settings.md`).
     pub settings: BTreeMap<crate::settings::Key, crate::settings::Entry>,
+    /// The `model.<runtime>` an older log's last plain `model` at each scope and
+    /// role was bound to, so its next plain change there takes that value away
+    /// after the global runtime has changed. Built from the log as it replays.
+    pub plain_models: BTreeMap<(Scope, Option<Role>), String>,
     /// What the build's adapters offer for the settings that name one, put in by
     /// the host. It is not built from events.
     pub catalog: BTreeMap<String, crate::settings::Choice>,
@@ -190,11 +194,17 @@ impl World {
                 value,
                 by,
             } => {
-                // Older logs hold plain models: each is the global runtime's here.
-                let key = &self.bound_key(key);
-                if let Some(role) = settings::kept_role(scope, *role, key, by) {
-                    self.overturn_agents_value(scope, role, key, by);
-                    self.put(scope, role, key, value, by);
+                // Older logs hold plain models: each is the global runtime's here,
+                // and replaces the plain model set before at that place.
+                let bound = self.bound_key(key);
+                if let Some(role) = settings::kept_role(scope, *role, &bound, by) {
+                    if key == "model" {
+                        self.drop_plain_model(scope, role, by);
+                        self.plain_models
+                            .insert((scope.clone(), role), bound.clone());
+                    }
+                    self.overturn_agents_value(scope, role, &bound, by);
+                    self.put(scope, role, &bound, value, by);
                 }
             }
             Event::SettingUnset {
@@ -203,10 +213,16 @@ impl World {
                 key,
                 by,
             } => {
-                let key = &self.bound_key(key);
-                if let Some(role) = settings::kept_role(scope, *role, key, by) {
-                    self.overturn_agents_value(scope, role, key, by);
-                    self.settings.remove(&(scope.clone(), role, key.clone()));
+                // An older log's plain unset takes away the model its plain set
+                // there was bound to; with none, the global runtime's here.
+                let bound = self.bound_key(key);
+                if let Some(role) = settings::kept_role(scope, *role, &bound, by) {
+                    let plain = (key == "model")
+                        .then(|| self.drop_plain_model(scope, role, by))
+                        .flatten();
+                    self.overturn_agents_value(scope, role, &bound, by);
+                    self.settings
+                        .remove(&(scope.clone(), role, plain.unwrap_or(bound)));
                 }
             }
             Event::GroupCreated {
@@ -220,8 +236,8 @@ impl World {
                 queue_low,
                 investigate_every,
             } => {
-                // Older logs: a group's model, as a setting on what it works on,
-                // for the runtime that is global here.
+                // Older logs: a group's model, as a plain model on what it works
+                // on, for the runtime that is global here.
                 if let Some(m) = model {
                     let key = self.bound_key("model");
                     let scopes = projects
@@ -234,6 +250,7 @@ impl World {
                             .contains_key(&(scope.clone(), None, key.clone()))
                         {
                             self.put(&scope, None, &key, &Value::Text(m.clone()), FILE);
+                            self.plain_models.insert((scope, None), key.clone());
                         }
                     }
                 }
