@@ -976,7 +976,11 @@ fn an_ended_agent_stays_ended_when_a_late_update_arrives() {
 /// An area `sc` of projects `ui` and `api`, its issues from its own tracker, a
 /// folder in each project, and a group that takes the whole area.
 fn area_world() -> World {
-    let (w, _) = World::replay(&[
+    World::replay(&area_events()).0
+}
+
+fn area_events() -> Vec<Event> {
+    vec![
         Event::AreaDefined {
             area: ProjectId::new("guild"),
             name: "Thieves' Guild".into(),
@@ -1019,8 +1023,7 @@ fn area_world() -> World {
             refining_at_once: 2,
             model: None,
         },
-    ]);
-    w
+    ]
 }
 
 fn area_issue(source: &str, key: &str) -> Event {
@@ -1412,15 +1415,45 @@ fn a_refused_merge_after_the_first_keeps_it_on_record_and_tells_the_author() {
 
 #[test]
 fn replaying_mid_sequence_resumes_at_the_second_repository() {
-    let mut events = vec![group(&[], 1)];
-    events.clear();
-    let mut w = merging_two();
-    merged(&mut w, "ui");
-    // A restart replays the log and asks for what is missing: the merge. The
-    // code-host part skips the merged repository.
+    let mut log = area_events();
+    log.extend([
+        area_issue("guild", "GLD-12"),
+        Event::PlanWritten {
+            issue: gld(),
+            plan: two_repo_plan(),
+        },
+        Event::PullRequestReady {
+            issue: gld(),
+            pull: None,
+            pulls: [
+                (pid("ui"), "12".to_string()),
+                (pid("api"), "34".to_string()),
+            ]
+            .into(),
+        },
+        Event::ReviewFinished {
+            issue: gld(),
+            round: 1,
+            verdict: Verdict::Approve,
+        },
+        Event::ChecksFinished {
+            issue: gld(),
+            passed: true,
+            failing: vec![],
+        },
+        Event::Merged {
+            issue: gld(),
+            repo: Some(pid("ui")),
+        },
+    ]);
+    // A restarted daemon has the log only. It asks for the merge again, with ui's
+    // on record, and keeps both folders.
+    let (w, _) = World::replay(&log);
+    let i = &w.issues[&gld()];
+    assert_eq!(i.stage, Stage::Merging);
+    assert_eq!(i.merged.iter().collect::<Vec<_>>(), [&pid("ui")]);
     assert_eq!(w.missing().start, vec![Effect::Merge { issue: gld() }]);
-    assert!(w.issues[&gld()].merged.contains(&pid("ui")));
-    assert!(!w.issues[&gld()].merged.contains(&pid("api")));
+    assert!(w.folders.values().all(|f| f.holder == Some(gld())));
 }
 
 #[test]
