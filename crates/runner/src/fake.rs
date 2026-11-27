@@ -69,6 +69,14 @@ impl FakeRunner {
             self.update(terminal, None);
         }
     }
+
+    /// Lets a terminal at a prompt go on: its prompt was answered.
+    pub fn unblock(&mut self, terminal: &TerminalId) {
+        if let Some(t) = self.terms.get_mut(terminal) {
+            t.status = Status::Between;
+            self.update(terminal, None);
+        }
+    }
 }
 
 impl Runner for FakeRunner {

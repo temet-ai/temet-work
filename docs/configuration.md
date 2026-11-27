@@ -95,6 +95,14 @@ not have stops the daemon at start, with the ones it has listed, and so does a b
 no default runtime or runner and no global value for it. What a person or an agent has
 set since is not overwritten by the file; a value taken out of the file is unset.
 
+Listing a folder under `[[folder]]` is your choice to let agents work in it. Before an
+agent starts in a folder on this machine, the `claude` runtime marks the folder trusted
+(`hasTrustDialogAccepted`) in Claude Code's own user file, `.claude.json` in the folder
+`CLAUDE_CONFIG_DIR` names, else in your home folder. It changes only that folder's entry
+and leaves a folder already trusted alone. A folder on another machine cannot be trusted
+from here. An agent stopped at a prompt the daemon cannot answer is listed under Problems
+with its name, its folder and the prompt, and the line goes when the agent goes on or ends.
+
 Each project, folder and group in the file becomes an event in the log the first time the
 daemon reads it, and again whenever it changes. Removing one from the file does not
 remove it from the daemon yet.
