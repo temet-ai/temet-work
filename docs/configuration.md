@@ -146,6 +146,14 @@ when one of the project's folders is free (on the issue's `machine`, when that s
 names one) and every issue in the issue's "Depends on" lines is done. A project with two
 folders has at most two authors working at once.
 
+A merged pull request named in a "Depends on" line counts as done. In such a line, `#491` is
+number 491 of the same project. An issue of another project or area has that project's or
+area's id, or its tracker's name for it, before the number: `klatch#4` or `owner/repo#4`.
+For a dependency the daemon has not synced, a sync asks the tracker of its project or area
+whether it is closed. When no configured tracker can be asked about it, or the tracker answers
+with an error, `temet-work status` lists the dependency under Problems with the reason, and
+the issue waits.
+
 An issue leaves a group's scope when the group no longer lists its milestone, project or
 area, because the issue moved or the group changed. An agent already working on it
 finishes its step: a refiner its plan, an author its change or the fixes it has heard, a
@@ -178,8 +186,9 @@ lists such an issue under Waiting, with a line for each of those dependencies, s
 say `no group covers it` for a dependency with no milestone the group leaves out, and
 `through radar#47` follows the dependency when radar#44 reaches it through radar#47. The issue
 counts again once the dependency is done or back in scope, or its "Depends on" line is gone.
-A dependency on a repository that no project or area matches is one no group covers: no sync
-looks it up, and the line shows it as the issue's text writes it, such as `nowhere#5`.
+A dependency on a repository that no project or area matches is one no group covers: no
+tracker is asked about it, and the line shows it as the issue's text writes it, such as
+`nowhere#5`.
 Refining and new issues count whatever they depend on, and so does a ready issue whose
 dependency in a known project or area the daemon has never synced.
 

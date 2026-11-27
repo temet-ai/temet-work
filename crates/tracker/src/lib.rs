@@ -118,7 +118,8 @@ pub trait Tracker: Send {
 }
 
 /// The keys an issue's text says it depends on: on each line that starts with
-/// "Depends on" (any case), every `#123` or `KEY-123`.
+/// "Depends on" (any case), every `#123` or `KEY-123`, and every `other#12` or
+/// `owner/repo#12`, an issue in another project or area.
 pub fn depends_on(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in body.lines() {
@@ -126,33 +127,45 @@ pub fn depends_on(body: &str) -> Vec<String> {
         if !trimmed.to_lowercase().starts_with("depends on") {
             continue;
         }
-        for word in trimmed["depends on".len()..]
-            .split(|c: char| c.is_whitespace() || c == ',' || c == '.' || c == ';')
+        for word in
+            trimmed["depends on".len()..].split(|c: char| c.is_whitespace() || c == ',' || c == ';')
         {
-            let key = word.trim_start_matches('#');
-            let is_number = !key.is_empty() && key.chars().all(|c| c.is_ascii_digit());
-            let is_jira = key.split_once('-').is_some_and(|(p, n)| {
-                !p.is_empty()
-                    && p.chars().all(|c| c.is_ascii_uppercase())
-                    && !n.is_empty()
-                    && n.chars().all(|c| c.is_ascii_digit())
-            });
-            // `other#12` or `owner/repo#12`: an issue in another project or area.
-            let elsewhere = word.split_once('#').is_some_and(|(p, n)| {
-                !p.is_empty()
-                    && p.chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
-                    && !n.is_empty()
-                    && n.chars().all(|c| c.is_ascii_digit())
-            });
-            if (word.starts_with('#') && is_number) || is_jira {
-                out.push(key.to_string());
-            } else if elsewhere {
+            // A full stop ends a sentence, and a repository's name may hold one.
+            let word = word.trim_end_matches('.');
+            if names_elsewhere(word) {
                 out.push(word.to_string());
+                continue;
+            }
+            for word in word.split('.') {
+                let key = word.trim_start_matches('#');
+                let is_number = !key.is_empty() && key.chars().all(|c| c.is_ascii_digit());
+                let is_jira = key.split_once('-').is_some_and(|(p, n)| {
+                    !p.is_empty()
+                        && p.chars().all(|c| c.is_ascii_uppercase())
+                        && !n.is_empty()
+                        && n.chars().all(|c| c.is_ascii_digit())
+                });
+                if (word.starts_with('#') && is_number) || is_jira {
+                    out.push(key.to_string());
+                } else if names_elsewhere(word) {
+                    out.push(word.to_string());
+                }
             }
         }
     }
     out
+}
+
+/// Whether `word` is `other#12` or `owner/repo#12`.
+fn names_elsewhere(word: &str) -> bool {
+    word.split_once('#').is_some_and(|(p, n)| {
+        !p.is_empty()
+            && !p.ends_with('.')
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+            && !n.is_empty()
+            && n.chars().all(|c| c.is_ascii_digit())
+    })
 }
 
 /// A tracker in memory, for tests.
@@ -544,25 +557,28 @@ pub fn milestone_changes(
 
 /// The open issue `t` of `project` as the loop takes it in.
 pub fn synced(world: &World, project: &ProjectId, t: &TrackedIssue) -> Event {
-    let id = |key: &str| IssueId::new(project.0.clone(), key);
     let depends_on: Vec<IssueId> = t
         .depends_on
         .iter()
-        .map(|k| {
-            // `other#12`: the project or area by id, or by its tracker's name for it.
-            k.split_once('#')
-                .and_then(|(source, n)| resolve(world, source).map(|s| IssueId::new(s.0, n)))
-                .unwrap_or_else(|| id(k))
-        })
+        .map(|k| dependency(world, project, k))
         .collect();
     Event::IssueSynced {
-        issue: id(&t.key),
+        issue: IssueId::new(project.0.clone(), t.key.as_str()),
         title: t.title.clone(),
         milestone: t.milestone.clone().map(MilestoneId::new),
         depends_on,
         order: t.order,
         closed: false,
     }
+}
+
+/// The issue a dependency written `key` in an issue of `project` names:
+/// `other#12` is in the project or area `other`, and any other key is in
+/// `project`. A name nothing matches stays in the key, so the issue waits.
+fn dependency(world: &World, project: &ProjectId, key: &str) -> IssueId {
+    key.split_once('#')
+        .and_then(|(source, n)| resolve(world, source).map(|s| IssueId::new(s.0, n)))
+        .unwrap_or_else(|| IssueId::new(project.0.clone(), key))
 }
 
 /// The project or area a dependency names: by its id, or by its tracker's or code
@@ -598,32 +614,53 @@ fn sources(world: &World) -> Vec<(ProjectId, String, String)> {
     projects.chain(areas).collect()
 }
 
-/// The keys open issues depend on that are neither open nor known to the loop.
-/// Each may have been closed before syncing began; only the tracker can say.
+/// The issues that `open`, the open issues of `project`, depend on and that are
+/// neither among them nor known to the loop, each with how a line writes it. Each
+/// may have been closed before syncing began; only its tracker can say.
 pub fn unknown_dependencies(
     world: &World,
     project: &ProjectId,
     open: &[TrackedIssue],
-) -> Vec<String> {
+) -> BTreeMap<IssueId, String> {
     let open_keys: BTreeSet<&str> = open.iter().map(|t| t.key.as_str()).collect();
-    let mut out: Vec<String> = open
-        .iter()
+    open.iter()
         .flat_map(|t| &t.depends_on)
-        .filter(|k| {
-            !k.contains('#')
-                && !open_keys.contains(k.as_str())
-                && !world
-                    .issues
-                    .contains_key(&IssueId::new(project.0.clone(), k.as_str()))
+        .map(|written| (dependency(world, project, written), written.clone()))
+        .filter(|(id, _)| {
+            !(&id.project == project && open_keys.contains(id.key.as_str()))
+                && !world.issues.contains_key(id)
         })
-        .cloned()
-        .collect();
-    out.sort();
-    out.dedup();
-    out
+        .collect()
 }
 
 impl Trackers {
+    /// Whether `issue` is closed, as the tracker of its project or area says, or
+    /// why that cannot be known, to follow "an issue depends on KEY".
+    fn ask(
+        &mut self,
+        sources: &[(ProjectId, String, String)],
+        issue: &IssueId,
+    ) -> Result<bool, String> {
+        // A dependency on a name nothing matches keeps that name in its key.
+        if let Some((name, _)) = issue.key.split_once('#') {
+            return Err(format!(
+                ", and no configured project or area is named {name}"
+            ));
+        }
+        let source = &issue.project;
+        let Some((_, tracker_id, name)) = sources.iter().find(|(id, _, _)| id == source) else {
+            return Err(format!(", and {source} has no tracker configured"));
+        };
+        let Some(tracker) = self.adapters.iter_mut().find(|a| a.id() == tracker_id) else {
+            return Err(format!(
+                ", and no tracker \"{tracker_id}\" in this build reads {source}"
+            ));
+        };
+        tracker
+            .closed(name, &issue.key)
+            .map_err(|e| format!(", which the {tracker_id} tracker cannot confirm closed: {e}"))
+    }
+
     /// Adds a tracker. The root package calls this once per compiled-in adapter.
     pub fn add(&mut self, adapter: Box<dyn Tracker>) {
         self.adapters.push(adapter);
@@ -687,7 +724,8 @@ impl Part for Trackers {
 
     fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
         let mut events = Vec::new();
-        for (source, tracker_id, name) in sources(world) {
+        let sources = sources(world);
+        for (source, tracker_id, name) in sources.iter().cloned() {
             let every = self
                 .every_ms
                 .unwrap_or_else(|| world.source_number(&source, "sync_every") * 1000);
@@ -709,27 +747,7 @@ impl Part for Trackers {
             match tracker.issues(&name) {
                 Ok(open) => {
                     self.errors.remove(&source);
-                    // A dependency counts as done only once its tracker says it is
-                    // closed; until then the issue waits, and the reason is shown.
                     let mut unsure = Vec::new();
-                    for key in unknown_dependencies(world, &source, &open) {
-                        match tracker.closed(&name, &key) {
-                            Ok(true) => events.push(Event::IssueSynced {
-                                issue: IssueId::new(source.0.clone(), key),
-                                title: String::new(),
-                                milestone: None,
-                                depends_on: Vec::new(),
-                                order: 0,
-                                closed: true,
-                            }),
-                            Ok(false) => unsure.push(format!(
-                                "an issue depends on {key}, which is open but was not listed"
-                            )),
-                            Err(e) => unsure.push(format!(
-                                "an issue depends on {key}, which the tracker cannot confirm closed: {e}"
-                            )),
-                        }
-                    }
                     // Closed by the loop, still open in the tracker: the close failed; try again.
                     for t in &open {
                         let id = IssueId::new(source.0.clone(), t.key.as_str());
@@ -746,6 +764,27 @@ impl Part for Trackers {
                             Vec::new()
                         }
                     };
+                    // A dependency counts as done only once its tracker says it is
+                    // closed; until then the issue waits.
+                    for (issue, written) in unknown_dependencies(world, &source, &open) {
+                        let own = issue.project == source;
+                        match self.ask(&sources, &issue) {
+                            Ok(true) => events.push(Event::IssueSynced {
+                                issue,
+                                title: String::new(),
+                                milestone: None,
+                                depends_on: Vec::new(),
+                                order: 0,
+                                closed: true,
+                            }),
+                            // Another project's open issue is listed by its own sync.
+                            Ok(false) if !own => {}
+                            Ok(false) => unsure.push(format!(
+                                "an issue depends on {written}, which is open but was not listed"
+                            )),
+                            Err(why) => unsure.push(format!("an issue depends on {written}{why}")),
+                        }
+                    }
                     if !unsure.is_empty() {
                         self.errors
                             .insert(source.clone(), format!("{}: {}", name, unsure.join("; ")));
@@ -1237,6 +1276,152 @@ mod tests {
         assert!(polled.problem.is_some_and(|p| p.contains("ENG-41")));
     }
 
+    /// Adds project `id`, whose issues `tracker` holds as `name`.
+    fn add_project(w: &mut World, id: &str, tracker: &str, name: &str) {
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new(id),
+            tracker: tracker.into(),
+            name: name.into(),
+            code_host: None,
+            repo: None,
+        });
+    }
+
+    /// The fake with `line` as what issue 1 of ankh depends on.
+    fn depending(line: &str) -> FakeTracker {
+        let mut tracker = fake();
+        tracker.issues[0].1.depends_on = depends_on(line);
+        tracker
+    }
+
+    /// Closed issue `key` of `name`: never listed, as GitHub has a merged pull
+    /// request.
+    fn closed_issue(name: &str, key: &str) -> (String, TrackedIssue) {
+        let closed = TrackedIssue {
+            closed: true,
+            ..issue(key, None)
+        };
+        (name.into(), closed)
+    }
+
+    /// The issues `events` sync as closed.
+    fn synced_closed(events: &[Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::IssueSynced {
+                    issue,
+                    closed: true,
+                    ..
+                } => Some(issue.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Asserts that ankh#1 depends on `on` alone, and that it is done.
+    fn depends_on_done(w: &World, on: &IssueId) {
+        assert_eq!(
+            w.issues[&IssueId::new("ankh", "1")].depends_on,
+            std::slice::from_ref(on)
+        );
+        assert_eq!(w.issues[on].stage, Stage::Done);
+    }
+
+    #[test]
+    fn a_dependency_on_a_merged_pull_request_is_synced_as_closed() {
+        for line in ["Depends on #57.", "Depends on ankh/morpork#57."] {
+            let mut tracker = depending(line);
+            tracker.issues.push(closed_issue("ankh/morpork", "57"));
+            let mut part = Trackers::default().every(0);
+            part.add(Box::new(tracker));
+            let mut w = configured();
+            let polled = part.poll(&w, 0);
+            assert_eq!(polled.problem, None, "{line}");
+            assert_eq!(synced_closed(&polled.events), ["ankh#57"], "{line}");
+            apply(&mut w, &polled.events);
+            depends_on_done(&w, &IssueId::new("ankh", "57"));
+            assert_eq!(part.poll(&w, 1).events, [], "{line}");
+        }
+    }
+
+    #[test]
+    fn a_dependency_on_another_projects_closed_issue_is_asked_of_its_tracker() {
+        for (line, closed) in [
+            ("Depends on klatch#4", true),
+            ("Depends on desert/klatch#4", true),
+            ("Depends on klatch#4", false),
+        ] {
+            let mut w = configured();
+            add_project(&mut w, "klatch", "other", "desert/klatch");
+            // The depending issue's tracker has an open issue of the same name
+            // and key, so asking it gives the wrong answer.
+            let mut ankh = depending(line);
+            ankh.issues.push(("desert/klatch".into(), issue("4", None)));
+            let mut klatch = FakeTracker::named("other");
+            let mut four = closed_issue("desert/klatch", "4");
+            four.1.closed = closed;
+            klatch.issues.push(four);
+            let mut part = Trackers::default().every(0);
+            part.add(Box::new(ankh));
+            part.add(Box::new(klatch));
+            let polled = part.poll(&w, 0);
+            // An open one is listed by klatch's own sync, and is no problem.
+            assert_eq!(polled.problem, None, "{line} {closed}");
+            let expected: &[&str] = if closed { &["klatch#4"] } else { &[] };
+            assert_eq!(synced_closed(&polled.events), expected, "{line} {closed}");
+            apply(&mut w, &polled.events);
+            if closed {
+                depends_on_done(&w, &IssueId::new("klatch", "4"));
+            } else {
+                assert_ne!(w.issues[&IssueId::new("klatch", "4")].stage, Stage::Done);
+            }
+            assert_eq!(part.poll(&w, 1).events, [], "{line} {closed}");
+        }
+    }
+
+    #[test]
+    fn a_dependency_no_tracker_can_be_asked_about_is_a_problem() {
+        let mut w = configured();
+        add_project(&mut w, "uberwald", "", "ankh/uberwald");
+        add_project(&mut w, "klatch", "nonesuch", "desert/klatch");
+        add_project(&mut w, "quirm", "other", "ankh/quirm");
+        let mut ankh = depending(
+            "Depends on nowhere#5, ankh/ramtops#6, uberwald#7, klatch#8 and ankh/quirm#9",
+        );
+        // The depending issue's tracker would call each of these closed.
+        for (name, key) in [
+            ("ankh/ramtops", "6"),
+            ("ankh/uberwald", "7"),
+            ("desert/klatch", "8"),
+            ("ankh/quirm", "9"),
+        ] {
+            ankh.issues.push(closed_issue(name, key));
+        }
+        // Quirm's tracker has the project and no issue 9.
+        let mut quirm = FakeTracker::named("other");
+        quirm.issues.push(("ankh/quirm".into(), issue("1", None)));
+        let mut part = Trackers::default();
+        part.add(Box::new(ankh));
+        part.add(Box::new(quirm));
+        let polled = part.poll(&w, 0);
+        assert_eq!(synced_closed(&polled.events), Vec::<String>::new());
+        let problem = polled.problem.expect("problems");
+        for line in [
+            "nowhere#5, and no configured project or area is named nowhere",
+            "ankh/ramtops#6, and no configured project or area is named ankh/ramtops",
+            "uberwald#7, and uberwald has no tracker configured",
+            "klatch#8, and no tracker \"nonesuch\" in this build reads klatch",
+            "ankh/quirm#9, which the other tracker cannot confirm closed: not found: ankh/quirm#9",
+        ] {
+            let line = format!("an issue depends on {line}");
+            assert!(problem.contains(&line), "{line}\nnot in: {problem}");
+        }
+        apply(&mut w, &polled.events);
+        assert!(!w.issues.values().any(|i| i.stage == Stage::Done));
+        assert!(part.poll(&w, 1).problem.is_some(), "still shown");
+    }
+
     #[test]
     fn a_failing_project_stays_a_problem_until_it_syncs() {
         let mut w = configured();
@@ -1661,6 +1846,10 @@ mod tests {
     fn reads_dependencies_from_depends_on_lines() {
         let body = "Change the codes.\n\nDepends on #491.\n- depends on #12, #13 and ENG-41\nSee #77 for context.";
         assert_eq!(depends_on(body), ["491", "12", "13", "ENG-41"]);
+        assert_eq!(
+            depends_on("Depends on ankh/morpork.watch#4, klatch#5.#6 and e.g.#7."),
+            ["ankh/morpork.watch#4", "klatch#5", "6", "7"]
+        );
         assert_eq!(
             depends_on("No dependencies here, see #5."),
             Vec::<String>::new()
