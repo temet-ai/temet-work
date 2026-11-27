@@ -667,7 +667,7 @@ impl World {
 
     /// The runtime a plain `model` is for: the global `runtime` for every role,
     /// else the build's default.
-    fn global_runtime(&self) -> Option<Value> {
+    pub fn global_runtime(&self) -> Option<Value> {
         self.resolve(&Scope::Global, None, "runtime")
             .map(|r| r.value)
     }
@@ -719,6 +719,24 @@ impl World {
             }
             _ => Ok(bound),
         }
+    }
+
+    /// The runtime in effect at `scope` for `role` (none: for every role), with
+    /// who set it, when it is neither `bound`, the runtime a plain `model` there
+    /// was bound to, nor the global runtime. A model bound to the runtime in
+    /// effect reaches its agents. One bound before a change of the global
+    /// runtime carries the old runtime's name, so naming the new runtime's key
+    /// would point at the wrong fix.
+    pub fn runtime_unlike_model(
+        &self,
+        scope: &Scope,
+        role: Option<Role>,
+        bound: &str,
+    ) -> Option<Resolved> {
+        let here = self.resolve(scope, role, "runtime")?;
+        let runs = here.value.to_string();
+        let global = self.global_runtime().map(|g| g.to_string());
+        (runs != bound && global.as_deref() != Some(runs.as_str())).then_some(here)
     }
 
     /// The setting for an issue and role.

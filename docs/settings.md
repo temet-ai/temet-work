@@ -196,9 +196,17 @@ gives that table's scope and role, which has to be the file's global one (its
 not move it, so after `temet-work set global runtime codex` a restart on the same file
 keeps its `model = "sonnet"` as `model.claude`; changing the file's own `[settings]`
 `runtime` to `codex` makes it `model.codex` on the next start. The daemon does not start
-on a plain `model` where the file gives that scope and role another runtime, such as
-`[settings.reviewer]` with `runtime = "codex"` and `model = "gpt-5-codex"`, and it names
-`model.codex`: write `codex = "gpt-5-codex"` under `[settings.reviewer.model]` instead.
+on a plain `model` where that scope and role run another runtime, such as
+`model = "gpt-5-codex"` under `[settings.reviewer]` with reviewers on `codex`, and it names
+`model.codex`: write `codex = "gpt-5-codex"` under `[settings.reviewer.model]` instead. The
+reviewers' runtime counts whether the file sets it (`runtime = "codex"` under
+`[settings.reviewer]`) or a person did (`temet-work set global --role reviewer runtime
+codex`), and for a person's the error says a person set it. A runtime a person set by
+command counts the same way, except a global runtime a person moved, as in the restart
+above, which does not stop the start. The start reads the runtimes as it will leave
+them, so a runtime that only an earlier version of the file set no longer counts. A group's
+`model` is bound to the file's global runtime too and never stops the start; under a
+project on another runtime, that project's agents run their runtime's default.
 
 By command, the same way a person or an agent runs any other:
 
@@ -279,7 +287,8 @@ default. Before models were keyed by runtime, a plain `model` was the only way t
 the runtime that was global then, usually `model.claude`, and reaches no reviewer. Set it
 again as `model.codex` (`temet-work set radar --role reviewer model.codex gpt-5-codex`), and
 `temet-work unset radar --role reviewer model.claude` takes the old one away. The file's
-form of it stops the start until it is moved under `[settings.reviewer.model]`.
+form of it stops the start until it is moved under `[settings.reviewer.model]`, whether the
+file or a person's command gives the reviewers codex.
 
 Every change, from the file, a command or a plan, is a `SettingSet` or `SettingUnset`
 event in the log with who made it: `file`, `person`, or the agent's id. A later event
@@ -333,7 +342,11 @@ level. `temet-work status` lists every value with the level it is set at and who
   cannot come back unnoticed.
 - The group's `model` and the project's `ci`, `deploy`, `verify` and `run_in` are read as
   settings at their level, so configuration written today keeps working. A group's model
-  becomes the model of the projects and areas it works on, bound like any plain `model`.
+  becomes the model of the projects and areas it works on, bound to the file's global
+  runtime and never refused (`Config::bound`).
+- `Config::check_build` refuses a plain model of the file's tables against the runtimes the
+  file gives (`Config::bound`), then against the replayed log with the file's events
+  applied (`Config::check_live`), before anything is logged.
 - A plain `model` is bound where its event is made: `World::model_key` for `set` and a
   plan's settings, `World::bound_key` for `unset` and for a logged event as it is applied,
   and the configuration's own reading of the file. The log then says which runtime each
@@ -361,6 +374,18 @@ level. `temet-work status` lists every value with the level it is set at and who
 - The file's plain `model` is bound by the file alone. Binding it against the live
   settings was left out: it would make the file's `sonnet` Codex's on the first restart
   after a person's `set global runtime codex`.
+- A plain `model` in the file stops the start where its scope and role run, as the start
+  leaves the settings, neither the runtime it is bound to nor the global runtime. Listing
+  it under Problems and starting was left out: the fix is an edit to the file, the file's
+  own runtimes are refused the same way before anything is logged, and a daemon that
+  started would run those agents on their runtime's default model. Refusing it after a
+  person moved the global runtime was left out too: the model's name is the old
+  runtime's there, so an error asking for `model.<new runtime>` would point at the wrong
+  fix.
+- A group's `model` is bound to the file's global runtime and never refused, at start or
+  against the live runtimes. Refusing it was left out: it predates models per runtime, an
+  existing file is meant to behave as before, and the error would name a
+  `[project.settings.model]` table the person never wrote.
 - An older log's plain `model` replays as the model of the runtime that was global at that
   point. Binding it to the role's runtime was left out: the global one is the runtime it was
   read for when it was written, and the role's would hand a refiner's Claude model to a

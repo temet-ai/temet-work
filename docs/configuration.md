@@ -213,9 +213,13 @@ next start. A `model` table in any of them, or in a role's table, gives a model 
 runtime: `[settings.model]` with `claude = "sonnet"` is the setting `model.claude`. A
 plain `model = "..."` is recorded as `model.<runtime>` of the file's global runtime (its
 `[settings]` `runtime`, else the build's default), and stops the daemon at start, naming
-`model.<runtime>`, in a table whose scope and role the file gives another runtime. A
-group's `model` and a project's `ci`, `deploy`, `verify` and `run_in` are still accepted
-and are read as settings at their level, so an existing file behaves as before. A key the
+`model.<runtime>`, in a table whose scope and role run another runtime. A runtime a person
+set by command counts for that as well as one the file gives, except where it is the
+global runtime a person moved. A group's `model` and a project's `ci`, `deploy`, `verify`
+and `run_in` are still accepted and are read as settings at their level, so an existing
+file behaves as before. A group's `model` is bound to the file's global runtime and never
+stops the start; under a project on another runtime, that project's agents run their
+runtime's default. A key the
 daemon does not know is an error naming the key, and so is a key in a role's table that
 takes no role (`docs/settings.md`, Roles). A value that names a runtime or runner the
 build does not have, or a model for such a runtime, stops the daemon at start, with the
