@@ -61,6 +61,18 @@ fn pull_list(pulls: &[Pulled]) -> String {
         .collect()
 }
 
+/// What a reviewer holds a change against, in its brief and again on each later
+/// round. The issue's text stays in its tracker; the reviewer reads it there.
+const HOLD_TO_THE_ISSUE: &str = "\
+Read the issue's own text in its tracker. Check each of its points and its \"Done is\" line against \
+the change, not only the plan's checks. Block on any point that is not met, and name that point in \
+the block.
+For each of the plan's checks, confirm that the test or evidence named under \"shown by\" shows the \
+whole of what the check states, including any failure or persistent case it names. A test that \
+shows only part of it is a block.
+A real run the issue asks for must have happened, with its evidence in the pull request. A plan \
+that leaves it out does not excuse it.";
+
 /// Writes the brief for an agent of `role` on `issue`, run in `place`.
 /// `rules` are the kept rules from overturned decisions; each brief ends with them.
 /// `source` is the tracker's name for where the issue comes from, and `repos`
@@ -176,6 +188,7 @@ pub fn write(
             "Review the pull request for {id}: {title}. It is {source}.\n\
              {pulls}The plan's checks:\n{checks}\
              {folder_note}Read the whole change, not only the last commit. Run the checks yourself where you can.\n\
+             {HOLD_TO_THE_ISSUE}\n\
              Then run: temet-work review {id} approve\n\
              or: temet-work review {id} block \"<what to fix>\" [\"<what else>\" ...]",
             title = issue.title,
@@ -383,7 +396,9 @@ pub fn fixes(issue: &IssueId, points: &[String]) -> String {
 pub fn next_round(issue: &IssueId, round: u8) -> String {
     format!(
         "The author pushed fixes for {issue}; this is review round {round}. Review the whole change again, \
-         not only the new commits. Then run: temet-work review {issue} approve\n\
+         not only the new commits. The issue's text may have changed since the last round, so read it again.\n\
+         {HOLD_TO_THE_ISSUE}\n\
+         Then run: temet-work review {issue} approve\n\
          or: temet-work review {issue} block \"<what is still wrong>\" [\"<what else>\" ...]"
     )
 }
@@ -410,6 +425,7 @@ mod tests {
     use super::*;
     use crate::event::Event;
     use crate::ids::{AgentId, FolderId, GroupId, MachineId, MilestoneId, ProjectId};
+    use crate::model::{Check, Plan};
     use crate::world::World;
 
     #[test]
@@ -442,6 +458,83 @@ mod tests {
         for key in ["runtime", "runner", "review_rounds"] {
             assert!(named.contains(&key), "{key} is not in {named:?}");
         }
+    }
+
+    #[test]
+    fn a_reviewer_holds_the_change_against_the_issue_not_only_the_plan() {
+        let id = IssueId::new("watch", "7");
+        let mut world = World::default();
+        // The issue's own text stays in ankh-morpork/watch. Its Done line there is
+        // "Done is a real run in which the bell rings at midnight".
+        world.apply(&Event::IssueSynced {
+            issue: id.clone(),
+            title: "Ring the bell at midnight".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let mut issue = world.issues[&id].clone();
+        // Neither check names a run.
+        issue.plan = Some(Plan {
+            checks: vec![
+                Check {
+                    done_when: "the bell rings at midnight".into(),
+                    proven_by: "the midnight test".into(),
+                },
+                Check {
+                    done_when: "a bell that jams is rung again and then reported".into(),
+                    proven_by: "the jammed bell test".into(),
+                },
+            ],
+            ..Plan::default()
+        });
+        let brief = write(
+            Role::Reviewer,
+            &issue,
+            Some("ankh-morpork/watch"),
+            &[],
+            Workplace::default(),
+            &[],
+            &[],
+        )
+        .task;
+        assert!(
+            brief.contains("It is issue 7 of ankh-morpork/watch in its tracker."),
+            "{brief}"
+        );
+        assert!(
+            brief.contains("- a bell that jams is rung again and then reported (shown by: "),
+            "{brief}"
+        );
+        let again = next_round(&id, 2);
+        for line in [
+            "Read the issue's own text in its tracker.",
+            "Check each of its points and its \"Done is\" line against the change, not only the \
+             plan's checks.",
+            "Block on any point that is not met, and name that point in the block.",
+            "confirm that the test or evidence named under \"shown by\" shows the whole of what \
+             the check states, including any failure or persistent case it names.",
+            "A test that shows only part of it is a block.",
+            "A real run the issue asks for must have happened, with its evidence in the pull \
+             request. A plan that leaves it out does not excuse it.",
+        ] {
+            assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
+        }
+        assert!(brief.contains(HOLD_TO_THE_ISSUE), "{brief}");
+        assert!(again.contains(HOLD_TO_THE_ISSUE), "{again}");
+        assert!(again.contains("review round 2"), "{again}");
+        assert!(
+            again.contains("may have changed since the last round, so read it again."),
+            "{again}"
+        );
+        assert!(
+            again.ends_with(
+                "Then run: temet-work review watch#7 approve\n\
+                 or: temet-work review watch#7 block \"<what is still wrong>\" [\"<what else>\" ...]"
+            ),
+            "{again}"
+        );
     }
 
     /// A world where the group watch, over ankh and the area guild (whose tracker
