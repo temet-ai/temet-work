@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, Verdict};
-use crate::ids::{AgentId, DecisionId, IssueId};
-use crate::model::{Decision, DecisionKind, Plan, Role, Stage};
+use crate::ids::{AgentId, DecisionId, IssueId, RuleId};
+use crate::model::{Decision, DecisionKind, Plan, Role, Rule, RuleState, Stage};
 use crate::settings::{self, Scope, Target};
 use crate::text::stage;
 use crate::world::World;
@@ -95,6 +95,22 @@ pub enum Command {
         /// Why, or what must change.
         reason: String,
     },
+    /// A person's overturn of a decision an agent made.
+    Overturn {
+        /// The decision, as `status` lists it.
+        decision: DecisionId,
+        /// The option now preferred, counted from 1 as `status` lists them.
+        option: usize,
+        /// Why; required.
+        reason: String,
+    },
+    /// A person's answer on a rule proposed from an overturn.
+    Proposal {
+        /// The rule, as `status` lists it.
+        rule: RuleId,
+        /// True to keep it, false to drop it.
+        keep: bool,
+    },
 }
 
 impl Command {
@@ -105,7 +121,9 @@ impl Command {
             | Self::Screen { .. }
             | Self::Set { .. }
             | Self::Unset { .. }
-            | Self::Settings { .. } => None,
+            | Self::Settings { .. }
+            | Self::Overturn { .. }
+            | Self::Proposal { .. } => None,
             Self::Issue { issue } => Some(issue),
             Self::Plan { issue, .. }
             | Self::Ready { issue, .. }
@@ -148,8 +166,39 @@ impl World {
                 });
             }
         }
+        // An overturn proposes a rule, once for the decision.
+        let rule = match &event {
+            Event::DecisionOverturned {
+                decision,
+                to,
+                reason,
+                by,
+            } => self.propose(*decision, *to, reason, by),
+            _ => None,
+        };
         out.push(event);
+        out.extend(rule.map(|rule| Event::RuleProposed { rule }));
         Ok(out)
+    }
+
+    /// The rule an overturn of `decision` to option index `to` proposes, unless the
+    /// decision already has one.
+    fn propose(&self, decision: DecisionId, to: usize, reason: &str, by: &str) -> Option<Rule> {
+        let d = self.decisions.get(&decision)?;
+        if self.rules.values().any(|r| r.decision == decision) {
+            return None;
+        }
+        let preferred = d.options.get(to)?;
+        let id = self.rules.keys().next_back().map_or(1, |r| r.0 + 1);
+        Some(Rule {
+            id: RuleId(id),
+            text: format!("{} Prefer: {preferred}. Why: {}", d.question, reason.trim()),
+            decision,
+            issue: d.issue.clone(),
+            decided_by: d.by.clone(),
+            overturned_by: by.to_string(),
+            state: RuleState::Proposed,
+        })
     }
 
     /// Why `by` may not change a setting at `scope`: an agent may only give the
@@ -362,6 +411,72 @@ impl World {
                     now => return refuse(issue, now, "deploying or verifying"),
                 }
             }
+            Command::Overturn {
+                decision,
+                option,
+                reason,
+            } => {
+                if let Some(by) = by {
+                    return Err(format!(
+                        "overturn is a person's: agents are the ones overturned, and {by} is an agent"
+                    ));
+                }
+                let d = self
+                    .decisions
+                    .get(decision)
+                    .ok_or_else(|| format!("there is no decision {}", decision.0))?;
+                if *option == 0 || *option > d.options.len() {
+                    return Err(format!(
+                        "decision {} has options 1 to {}, not {option}",
+                        decision.0,
+                        d.options.len()
+                    ));
+                }
+                let to = option - 1;
+                if to == d.chosen {
+                    return Err(format!(
+                        "option {option} ({}) is the one already chosen for decision {}",
+                        d.options[to], decision.0
+                    ));
+                }
+                if d.overturned_to == Some(to) {
+                    return Err(format!(
+                        "decision {} is already overturned to option {option}",
+                        decision.0
+                    ));
+                }
+                if reason.trim().is_empty() {
+                    return Err("an overturn needs a reason".into());
+                }
+                Event::DecisionOverturned {
+                    decision: *decision,
+                    to,
+                    reason: reason.trim().to_string(),
+                    by: PERSON.to_string(),
+                }
+            }
+            Command::Proposal { rule, keep } => {
+                if let Some(by) = by {
+                    return Err(format!(
+                        "proposal is a person's: {by} is an agent; kept rules reach its brief only through a person"
+                    ));
+                }
+                let r = self
+                    .rules
+                    .get(rule)
+                    .ok_or_else(|| format!("there is no rule {}", rule.0))?;
+                if r.state != RuleState::Proposed {
+                    return Err(format!(
+                        "rule {} is {}, not proposed; only a proposed rule can be kept or dropped",
+                        rule.0,
+                        r.state.name()
+                    ));
+                }
+                Event::RuleAnswered {
+                    rule: *rule,
+                    keep: *keep,
+                }
+            }
             Command::Rule {
                 issue,
                 approve,
@@ -386,6 +501,7 @@ impl World {
                         chosen: usize::from(!approve),
                         reason: reason.clone(),
                         overturned_to: None,
+                        overturn_reason: String::new(),
                     },
                 }
             }
@@ -1067,5 +1183,231 @@ mod plan_settings {
             w.events(Some(&AgentId::new("author-1")), &retry)
                 .is_err_and(|e| e.contains("a person's"))
         );
+    }
+
+    /// A world with decision 1: refiner-1 chose option 2 of 3 for ankh#1.
+    fn decided() -> World {
+        let mut w = refining();
+        w.apply(&Event::DecisionMade {
+            decision: Decision {
+                id: DecisionId(1),
+                issue: issue(),
+                by: AgentId::new("refiner-1"),
+                kind: DecisionKind::Choice,
+                question: "Which connection?".into(),
+                options: vec!["second".into(), "legacy".into(), "none".into()],
+                chosen: 1,
+                reason: "easiest to undo".into(),
+                overturned_to: None,
+                overturn_reason: String::new(),
+            },
+        });
+        w
+    }
+
+    fn overturn(decision: u64, option: usize, reason: &str) -> Command {
+        Command::Overturn {
+            decision: DecisionId(decision),
+            option,
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn overturn_is_accepted_from_a_person_and_records_who_and_why() {
+        let w = decided();
+        let events = w
+            .events(None, &overturn(1, 1, "legacy breaks channels"))
+            .expect("a person may");
+        assert!(matches!(
+            &events[0],
+            Event::DecisionOverturned { decision, to: 0, reason, by }
+                if *decision == DecisionId(1) && reason == "legacy breaks channels" && by == PERSON
+        ));
+        assert_eq!(events.len(), 2, "and a proposed rule");
+    }
+
+    #[test]
+    fn overturn_is_refused_with_the_reason_for_each_bad_request() {
+        let w = decided();
+        let why = |c: Command, by: Option<&AgentId>| w.events(by, &c).expect_err("refused");
+        assert!(why(overturn(9, 1, "x"), None).contains("no decision 9"));
+        assert!(why(overturn(1, 0, "x"), None).contains("options 1 to 3"));
+        assert!(why(overturn(1, 4, "x"), None).contains("options 1 to 3"));
+        assert!(why(overturn(1, 2, "x"), None).contains("already chosen"));
+        assert!(why(overturn(1, 1, "  "), None).contains("needs a reason"));
+        let agent = AgentId::new("author-1");
+        assert!(why(overturn(1, 1, "x"), Some(&agent)).contains("a person's"));
+        let mut w = decided();
+        let events = w.events(None, &overturn(1, 1, "x")).expect("first");
+        for e in &events {
+            w.apply(e);
+        }
+        let again = w.events(None, &overturn(1, 1, "x")).expect_err("twice");
+        assert!(again.contains("already overturned"), "{again}");
+    }
+
+    #[test]
+    fn rule_proposed_carries_text_origin_and_state_and_is_made_once_per_decision() {
+        let mut w = decided();
+        for e in w
+            .events(None, &overturn(1, 1, "legacy breaks channels"))
+            .expect("ok")
+        {
+            w.apply(&e);
+        }
+        let rule = w.rules[&RuleId(1)].clone();
+        assert_eq!(
+            rule.text,
+            "Which connection? Prefer: second. Why: legacy breaks channels"
+        );
+        assert_eq!(rule.state, RuleState::Proposed);
+        assert_eq!(
+            (
+                rule.decision,
+                &rule.issue,
+                rule.decided_by.0.as_str(),
+                rule.overturned_by.as_str()
+            ),
+            (DecisionId(1), &issue(), "refiner-1", "person")
+        );
+        // Overturned again, to another option: no second rule.
+        let events = w.events(None, &overturn(1, 3, "or none")).expect("ok");
+        assert_eq!(events.len(), 1);
+        for e in &events {
+            w.apply(e);
+        }
+        assert_eq!(w.rules.len(), 1);
+        // And a replayed RuleProposed for the same decision is ignored.
+        let dup = Event::RuleProposed { rule };
+        w.apply(&dup);
+        assert_eq!(w.rules.len(), 1);
+    }
+
+    #[test]
+    fn rule_proposed_shows_in_the_rules_section_of_status() {
+        let mut w = decided();
+        for e in w
+            .events(None, &overturn(1, 1, "legacy breaks channels"))
+            .expect("ok")
+        {
+            w.apply(&e);
+        }
+        let text = crate::text::text(&w, &Default::default());
+        let rules = text.split("Rules\n").nth(1).expect("a Rules section");
+        assert!(
+            rules.contains("1 proposed: Which connection? Prefer: second."),
+            "{rules}"
+        );
+        assert!(
+            rules.contains("from decision 1 on ankh#1, decided by refiner-1, overturned by person")
+        );
+        assert!(text.contains("1=second, 2=legacy, 3=none"));
+        assert!(text.contains("overturned to option 1 (second): legacy breaks channels"));
+    }
+
+    fn proposal(rule: u64, keep: bool) -> Command {
+        Command::Proposal {
+            rule: RuleId(rule),
+            keep,
+        }
+    }
+
+    fn with_rule() -> World {
+        let mut w = decided();
+        for e in w
+            .events(None, &overturn(1, 1, "legacy breaks channels"))
+            .expect("ok")
+        {
+            w.apply(&e);
+        }
+        w
+    }
+
+    #[test]
+    fn proposal_keep_and_drop_move_the_rule_and_refuse_the_rest_with_why() {
+        let mut w = with_rule();
+        let agent = AgentId::new("author-1");
+        assert!(
+            w.events(Some(&agent), &proposal(1, true))
+                .expect_err("agent")
+                .contains("a person's")
+        );
+        assert!(
+            w.events(None, &proposal(7, true))
+                .expect_err("unknown")
+                .contains("no rule 7")
+        );
+        let events = w.events(None, &proposal(1, true)).expect("keep");
+        assert_eq!(
+            events,
+            vec![Event::RuleAnswered {
+                rule: RuleId(1),
+                keep: true
+            }]
+        );
+        w.apply(&events[0]);
+        assert_eq!(w.rules[&RuleId(1)].state, RuleState::Kept);
+        let again = w
+            .events(None, &proposal(1, false))
+            .expect_err("not proposed");
+        assert!(again.contains("kept, not proposed"), "{again}");
+        let mut w = with_rule();
+        w.apply(&Event::RuleAnswered {
+            rule: RuleId(1),
+            keep: false,
+        });
+        assert_eq!(w.rules[&RuleId(1)].state, RuleState::Dropped);
+        let text = crate::text::text(&w, &Default::default());
+        assert!(
+            !text.contains("Prefer: second"),
+            "a dropped rule is not in status"
+        );
+    }
+
+    #[test]
+    fn brief_ends_with_the_kept_rules_for_every_role_and_omits_proposed_and_dropped() {
+        let roles = [
+            Role::Refiner,
+            Role::Author,
+            Role::Reviewer,
+            Role::Arbiter,
+            Role::Investigator,
+        ];
+        let task = |w: &World, role| {
+            w.launch(&GroupId::new("watch"), role, &issue(), None)
+                .expect("launch")
+                .brief
+                .task
+        };
+        let mut w = with_rule();
+        for role in roles {
+            assert!(
+                !task(&w, role).contains("Rules from overturned"),
+                "proposed: {role:?}"
+            );
+        }
+        w.apply(&Event::RuleAnswered {
+            rule: RuleId(1),
+            keep: true,
+        });
+        for role in roles {
+            let t = task(&w, role);
+            assert!(
+                t.ends_with("Rules from overturned decisions:\n- Which connection? Prefer: second. Why: legacy breaks channels\n"),
+                "{role:?}: {t}"
+            );
+        }
+        let mut w = with_rule();
+        w.apply(&Event::RuleAnswered {
+            rule: RuleId(1),
+            keep: false,
+        });
+        for role in roles {
+            assert!(
+                !task(&w, role).contains("Prefer: second"),
+                "dropped: {role:?}"
+            );
+        }
     }
 }

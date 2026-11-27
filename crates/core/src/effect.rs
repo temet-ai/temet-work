@@ -1,7 +1,7 @@
 //! What the loop asks the daemon to do. The daemon does the I/O and reports
 //! back with events.
 
-use crate::ids::{DecisionId, FolderId, GroupId, IssueId};
+use crate::ids::{FolderId, GroupId, IssueId};
 use crate::launch::{Launch, Program};
 use crate::model::Role;
 
@@ -64,16 +64,6 @@ pub enum Effect {
         /// The folder.
         folder: FolderId,
     },
-    /// Carry out a person's overturn of a decision.
-    ApplyOverturn {
-        /// The decision.
-        decision: DecisionId,
-    },
-    /// Propose a rule change from an overturned decision, to be measured.
-    ProposeRule {
-        /// The decision it comes from.
-        from: DecisionId,
-    },
     /// Stop an agent's session: its issue was closed while it worked.
     StopAgent {
         /// The agent.
@@ -102,10 +92,6 @@ impl Effect {
             Self::Retry { issue } => format!("retry the deploy or verify of {issue}"),
             Self::Close { issue } => format!("close {issue} in its tracker"),
             Self::ReleaseFolder { folder } => format!("release folder {folder}"),
-            Self::ApplyOverturn { decision } => {
-                format!("apply the overturn of decision {}", decision.0)
-            }
-            Self::ProposeRule { from } => format!("propose a rule from decision {}", from.0),
             Self::Run { launch, .. } => format!("run {}", launch.agent),
             Self::StopAgent { agent } => format!("stop {agent}"),
         }

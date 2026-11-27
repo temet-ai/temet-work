@@ -86,3 +86,9 @@ impl fmt::Display for IssueId {
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub struct DecisionId(pub u64);
+
+/// A rule proposed from an overturned decision, numbered in the order they were proposed.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct RuleId(pub u64);

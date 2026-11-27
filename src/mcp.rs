@@ -4,12 +4,12 @@
 //!
 //! The server has two levels. At `read`, the default, it offers the views:
 //! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
-//! that move work and change settings: `plan`, `ready`, `review`, `retry`, `rule`, `set` and
+//! that move work and change settings: `plan`, `ready`, `review`, `retry`, `rule`, `overturn`, `proposal`, `set` and
 //! `unset`. A tool above the server's level is
 //! not listed, and calling it is refused.
 
 use serde_json::{Value, json};
-use temet_work_core::ids::{AgentId, IssueId};
+use temet_work_core::ids::{AgentId, DecisionId, IssueId, RuleId};
 use temet_work_core::model::{Check, Plan, Role};
 use temet_work_core::settings::{Target, Value as Setting};
 use temet_work_core::{Command, Request, Verdict};
@@ -140,6 +140,25 @@ fn tools() -> Vec<Tool> {
             }, "required": ["issue", "approve", "reason"]}),
         },
         Tool {
+            name: "overturn",
+            description: "A person's: choose another option of a decision an agent made. The option is its number as status lists it, counted from 1; the reason is required. It sends an approved issue back to its author before it merges, and proposes a rule.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "decision": {"type": "integer", "description": "The decision's number, as status lists it."},
+                "option": {"type": "integer", "description": "The option now preferred, counted from 1."},
+                "reason": {"type": "string"}
+            }, "required": ["decision", "option", "reason"]}),
+        },
+        Tool {
+            name: "proposal",
+            description: "A person's: keep or drop a rule proposed from an overturned decision. A kept rule ends every brief written afterwards.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "rule": {"type": "integer", "description": "The rule's number, as status lists it under Rules."},
+                "action": {"type": "string", "enum": ["keep", "drop"]}
+            }, "required": ["rule", "action"]}),
+        },
+        Tool {
             name: "set",
             description: "Gives a setting a value at one level, for one role or for every role. A refiner may set task-level values of the issue it is refining; a wider level is a person's.",
             acts: true,
@@ -165,6 +184,12 @@ fn text(args: &Value, key: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(String::from)
         .ok_or_else(|| format!("{key} is missing"))
+}
+
+fn number(args: &Value, key: &str) -> Result<u64, String> {
+    args.get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{key} is missing or not a whole number"))
 }
 
 fn issue(args: &Value) -> Result<IssueId, String> {
@@ -252,6 +277,20 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                 .and_then(Value::as_bool)
                 .ok_or("approve is missing")?,
             reason: text(args, "reason")?,
+        },
+        "overturn" => Command::Overturn {
+            decision: DecisionId(number(args, "decision")?),
+            option: usize::try_from(number(args, "option")?)
+                .map_err(|_| "option is too large".to_string())?,
+            reason: text(args, "reason")?,
+        },
+        "proposal" => Command::Proposal {
+            rule: RuleId(number(args, "rule")?),
+            keep: match text(args, "action")?.as_str() {
+                "keep" => true,
+                "drop" => false,
+                other => return Err(format!("action is keep or drop, not {other}")),
+            },
         },
         "settings" => Command::Settings {
             target: target(args)?,
@@ -390,7 +429,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 11);
+        assert_eq!(names(Level::Act).len(), 13);
     }
 
     #[test]
@@ -423,6 +462,40 @@ mod tests {
                 }
             }]
         );
+    }
+
+    #[test]
+    fn overturn_and_proposal_become_the_same_requests_the_command_line_sends() {
+        let mut sent = Vec::new();
+        call(
+            Level::Act,
+            "overturn",
+            json!({"decision": 7, "option": 1, "reason": "too slow"}),
+            &mut sent,
+        );
+        call(
+            Level::Act,
+            "proposal",
+            json!({"rule": 2, "action": "drop"}),
+            &mut sent,
+        );
+        let commands: Vec<_> = sent.iter().map(|r| r.command.clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::Overturn {
+                    decision: DecisionId(7),
+                    option: 1,
+                    reason: "too slow".into()
+                },
+                Command::Proposal {
+                    rule: RuleId(2),
+                    keep: false
+                }
+            ]
+        );
+        assert!(names(Level::Act).contains(&"overturn".to_string()));
+        assert!(!names(Level::Read).contains(&"proposal".to_string()));
     }
 
     #[test]

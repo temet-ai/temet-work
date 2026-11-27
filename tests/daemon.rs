@@ -1000,3 +1000,82 @@ fn a_deploy_that_restarts_the_daemon_is_recorded_by_the_new_one() {
     );
     assert!(!handoff.exists());
 }
+
+#[test]
+fn an_overturn_and_a_keep_go_through_the_daemon_and_reach_the_next_brief() {
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::ids::GroupId;
+    use temet_work_core::model::{Decision, DecisionKind, Role};
+    use temet_work_core::{Command, Event, Request};
+
+    let kept = Kept::default();
+    let mut host = host_with(Box::new(kept.clone()));
+    host.tick(0).expect("sync");
+    let issue = IssueId::new("ankh", "1");
+    host.handle(
+        0,
+        Event::DecisionMade {
+            decision: Decision {
+                id: temet_work_core::ids::DecisionId(1),
+                issue: issue.clone(),
+                by: AgentId::new("refiner-1"),
+                kind: DecisionKind::Choice,
+                question: "Which connection?".into(),
+                options: vec!["second".into(), "legacy".into()],
+                chosen: 1,
+                reason: "easiest to undo".into(),
+                overturned_to: None,
+                overturn_reason: String::new(),
+            },
+        },
+    )
+    .expect("decision");
+    let mut ask = |by: Option<&str>, command| {
+        let request = Request {
+            by: by.map(AgentId::new),
+            command,
+        };
+        answer(&mut host, 1, &request).expect("answer")
+    };
+    let overturn = Command::Overturn {
+        decision: temet_work_core::ids::DecisionId(1),
+        option: 1,
+        reason: "legacy breaks channels".into(),
+    };
+    assert!(matches!(
+        ask(Some("refiner-1"), overturn.clone()),
+        Reply::Refused { why } if why.contains("a person's")
+    ));
+    assert!(matches!(ask(None, overturn), Reply::Done { .. }));
+    let Reply::Done { text } = ask(None, Command::Status) else {
+        panic!("status refused");
+    };
+    assert!(
+        text.contains("overturned to option 1 (second): legacy breaks channels"),
+        "{text}"
+    );
+    assert!(
+        text.contains("1 proposed: Which connection? Prefer: second."),
+        "{text}"
+    );
+    let keep = Command::Proposal {
+        rule: temet_work_core::ids::RuleId(1),
+        keep: true,
+    };
+    assert!(matches!(ask(None, keep), Reply::Done { .. }));
+    assert!(host.problems().is_empty(), "{:?}", host.problems());
+    let brief = host
+        .world()
+        .launch(&GroupId::new("watch"), Role::Author, &issue, None)
+        .expect("launch")
+        .brief
+        .task;
+    assert!(
+        brief.contains("Rules from overturned decisions:\n- Which connection? Prefer: second."),
+        "{brief}"
+    );
+    // The log alone rebuilds the same rules.
+    let events = kept.0.lock().expect("log").clone();
+    let (replayed, _) = temet_work_core::World::replay(&events);
+    assert_eq!(replayed.rules, host.world().rules);
+}
