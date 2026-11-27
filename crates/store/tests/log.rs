@@ -422,3 +422,126 @@ fn an_older_logs_group_replays_with_the_default_queue_low_and_investigate_every(
     let text = serde_json::to_string(&entry).expect("json");
     assert!(!text.contains("queue_low"), "{text}");
 }
+
+#[test]
+fn replaying_the_log_gives_the_same_check_states_replies_and_point_states_as_applying_them() {
+    use temet_work_core::Command;
+    use temet_work_core::Verdict;
+    use temet_work_core::ids::AgentId;
+    use temet_work_core::model::{Check, CheckState, PointState, Role};
+
+    let issue = IssueId::new("ankh", "1");
+    let started = |agent: &str, role| Event::AgentStarted {
+        agent: AgentId::new(agent),
+        group: GroupId::new("watch"),
+        role,
+        issue: Some(issue.clone()),
+        machine: MachineId::new("morpork"),
+        folder: None,
+        secret_digest: None,
+        runtime: None,
+        model: None,
+    };
+    let mut setup = events();
+    // The issue is being refined; its plan comes from the refiner's command.
+    setup.pop();
+    setup.push(started("refiner-1", Role::Refiner));
+    let ready = |replies: &[&str]| Command::Ready {
+        issue: issue.clone(),
+        pull: Some("57".into()),
+        pulls: Default::default(),
+        replies: replies.iter().map(ToString::to_string).collect(),
+    };
+    let block = |points: &[&str], failed: Vec<usize>, open: Vec<usize>| Command::Review {
+        issue: issue.clone(),
+        verdict: Verdict::Block {
+            points: points.iter().map(ToString::to_string).collect(),
+        },
+        failed,
+        open,
+    };
+    let steps = [
+        (
+            "refiner-1",
+            Command::Plan {
+                issue: issue.clone(),
+                plan: Plan {
+                    checks: vec![
+                        Check::new("the clock strikes thirteen", "listening at midnight"),
+                        Check::new("the hands point up", "looking at the face"),
+                    ],
+                    ..Plan::default()
+                },
+            },
+        ),
+        ("author-1", ready(&[])),
+        (
+            "reviewer-1",
+            block(
+                &["the spring is weak", "the face is dusty"],
+                vec![2],
+                vec![],
+            ),
+        ),
+        ("author-1", ready(&["a new spring", "dusted it"])),
+        ("reviewer-1", block(&[], vec![1], vec![2])),
+    ];
+
+    // The lines are written as the log writes them, in one write: syncing each
+    // of them would take most of a second.
+    let mut written = Vec::new();
+    let mut live = World::default();
+    let mut record = |live: &mut World, e: &Event| {
+        let entry = temet_work_store::Entry {
+            seq: written.len() as u64 + 1,
+            at_ms: 1_795_000_000_000 + 60_000 * written.len() as u64,
+            event: e.clone(),
+        };
+        live.apply_at(entry.at_ms, e);
+        written.push(serde_json::to_string(&entry).expect("a line"));
+    };
+    for e in &setup {
+        record(&mut live, e);
+    }
+    for (by, command) in steps {
+        if by == "refiner-1" {
+            record(&mut live, &started("author-1", Role::Author));
+            record(&mut live, &started("reviewer-1", Role::Reviewer));
+        }
+        if matches!(command, Command::Review { .. }) {
+            record(
+                &mut live,
+                &Event::Told {
+                    issue: issue.clone(),
+                },
+            );
+        }
+        let made = live
+            .events(Some(&AgentId::new(by)), &command)
+            .unwrap_or_else(|e| panic!("{by} is refused: {e}"));
+        for e in &made {
+            record(&mut live, e);
+        }
+    }
+    let p = path("states");
+    std::fs::write(&p, written.join("\n") + "\n").expect("write");
+    let (_, entries) = Log::open(&p).expect("open");
+    let replayed = replay(&entries);
+    assert_eq!(replayed, live);
+    // What the loop learned is all there after the restart.
+    let i = &replayed.issues[&issue];
+    let states: Vec<_> = i
+        .plan
+        .iter()
+        .flat_map(|p| &p.checks)
+        .map(|c| c.state)
+        .collect();
+    assert_eq!(states, [Some(CheckState::Failed), Some(CheckState::Passed)]);
+    assert_eq!(i.reviews[0].replies, ["a new spring", "dusted it"]);
+    assert_eq!(
+        i.reviews[0].states,
+        [PointState::Resolved, PointState::Open]
+    );
+    assert_eq!(i.reviews[1].points, ["the face is dusty"]);
+    assert_eq!(i.reviews[1].states, [PointState::Open]);
+}

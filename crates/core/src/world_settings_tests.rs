@@ -89,6 +89,8 @@ fn blocked(w: &mut World, issue: &IssueId, round: u8) -> Vec<Effect> {
         verdict: Verdict::Block {
             points: vec!["fix it".into()],
         },
+        failed: None,
+        open: None,
     })
 }
 
@@ -329,6 +331,7 @@ fn a_plain_model_keeps_the_runtime_it_was_written_for() {
             checks: vec![crate::model::Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
+                state: None,
             }],
             repos: Vec::new(),
             settings: [("model".to_string(), text("opus"))].into(),
@@ -1021,6 +1024,8 @@ fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
         verdict: Verdict::Block {
             points: vec!["fix it".into()],
         },
+        failed: None,
+        open: None,
     });
     assert!(
         !ruled.iter().any(|e| matches!(e, Effect::StartAgent { .. })),
@@ -1069,6 +1074,8 @@ fn an_approved_issue_waits_for_its_checks_not_for_a_reviewers_machine() {
         issue,
         round: 1,
         verdict: Verdict::Approve,
+        failed: None,
+        open: None,
     });
     assert_eq!(w.machine_waits(), vec![]);
 }

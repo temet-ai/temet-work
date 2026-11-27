@@ -8,10 +8,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::brief::{numbered, reply_flags};
 use crate::effect::Effect;
 use crate::event::{Event, Verdict};
 use crate::ids::{AgentId, DecisionId, GroupId, IssueId, MilestoneId, ProjectId, RuleId};
-use crate::model::{Decision, DecisionKind, Plan, Role, Rule, RuleState, Stage};
+use crate::model::{CheckState, Decision, DecisionKind, Plan, Role, Rule, RuleState, Stage};
 use crate::settings::{self, Agents, Scope, Target};
 use crate::text::stage;
 use crate::world::World;
@@ -52,8 +53,9 @@ pub enum Command {
         /// for an issue that changes several repositories.
         #[serde(default)]
         pulls: std::collections::BTreeMap<crate::ids::ProjectId, String>,
-        /// The author's replies to the points of the review round its fix
-        /// answers, one for each point it answers.
+        /// The author's replies to the points of the block this ready answers
+        /// ([`crate::model::Issue::block_to_answer`]), one for each point, in
+        /// their order; none for any other ready.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         replies: Vec<String>,
     },
@@ -63,6 +65,15 @@ pub enum Command {
         issue: IssueId,
         /// The verdict.
         verdict: Verdict,
+        /// On a block, the plan's checks that do not hold, counted from 1 in the
+        /// plan's order; every check left out counts as passed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        failed: Vec<usize>,
+        /// On a block after round 1, the points of the round before that are
+        /// still not dealt with, counted from 1 in its order: each stays open
+        /// and joins this block's points. Every point left out is resolved.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        open: Vec<usize>,
     },
     /// Gives a setting a value at one level, for a role or for every role.
     Set {
@@ -222,6 +233,17 @@ impl std::fmt::Debug for Request {
 /// Who a decision is recorded as made by when a person makes it.
 pub const PERSON: &str = "person";
 
+/// What a reviewer's verdict names besides approve or block, as the daemon
+/// takes it.
+struct Judged {
+    /// The plan's checks that do not hold, counted from 1.
+    failed: Vec<usize>,
+    /// The points of the round before that stay open, counted from 1.
+    open: Vec<usize>,
+    /// Those points' text, in that order, for the block to end with.
+    kept: Vec<String>,
+}
+
 impl World {
     /// The events a command becomes, in the order they are applied: a plan's
     /// settings come before the plan, so they hold when its author starts.
@@ -342,28 +364,127 @@ impl World {
     }
 
     /// The author's replies `ready` sends for `issue`, trimmed, or why they are
-    /// refused: a reply that is empty, or an issue whose fix answers no finished
-    /// review round ([`World::answered_round`]), since there is no round to put
-    /// them on.
+    /// refused. The first ready after a block
+    /// ([`crate::model::Issue::block_to_answer`]) carries exactly one reply for
+    /// each of its points, none of them empty, so every point it answers has its
+    /// reply on record; any other ready carries none.
     fn replies(&self, issue: &IssueId, replies: &[String]) -> Result<Vec<String>, String> {
-        if replies.is_empty() {
-            return Ok(Vec::new());
-        }
         let replies: Vec<String> = replies.iter().map(|r| r.trim().to_string()).collect();
-        if replies.iter().any(String::is_empty) {
-            return Err("a reply is empty; give each --reply its text".into());
-        }
-        let reviewed = self.issues.get(issue).is_some_and(|i| {
-            World::answered_round(i).is_some_and(|round| i.reviews.iter().any(|r| r.round == round))
-        });
-        if !reviewed {
+        let Some(block) = self.issues.get(issue).and_then(|i| i.block_to_answer()) else {
+            if replies.is_empty() {
+                return Ok(replies);
+            }
             return Err(format!(
-                "{issue} has no review round to reply to: it has not been reviewed yet, or its \
-                 fixes come from the checks, a conflict or a refused merge. Run temet-work ready \
-                 {issue} without --reply"
+                "{issue} has no review point to reply to: replies answer the points of the block \
+                 that sent the change back, once, with the first ready after it. Run temet-work \
+                 ready {issue} without --reply"
             ));
+        };
+        if replies.len() == block.points.len() && !replies.iter().any(String::is_empty) {
+            return Ok(replies);
         }
-        Ok(replies)
+        let got = if replies.iter().any(String::is_empty) {
+            "one of its replies is empty".to_string()
+        } else {
+            match replies.len() {
+                0 => "it has none".to_string(),
+                1 => "it has 1 reply".to_string(),
+                n => format!("it has {n} replies"),
+            }
+        };
+        Err(format!(
+            "this ready answers review round {round} of {issue}, so it needs exactly one reply for \
+             each of the round's points below, in this order, saying what you did about it or why \
+             you did not; {got}:\n{points}Run: temet-work ready {issue} {flags}\n\
+             In the MCP ready tool, give replies with one entry for each point, in this order.",
+            round = block.round,
+            points = numbered(&block.points),
+            flags = reply_flags(block.points.len()),
+        ))
+    }
+
+    /// The `review` command's `failed` and `open` for `issue` in review round
+    /// `round`, sorted and each named once, with the points they keep open; or
+    /// why they are refused: either on an approve, a check the plan does not
+    /// have, a point in round 1, or one the round before does not have.
+    fn judged(
+        &self,
+        issue: &IssueId,
+        round: u8,
+        verdict: &Verdict,
+        failed: &[usize],
+        open: &[usize],
+    ) -> Result<Judged, String> {
+        let tidy = |list: &[usize]| {
+            let mut list = list.to_vec();
+            list.sort_unstable();
+            list.dedup();
+            list
+        };
+        let (failed, open) = (tidy(failed), tidy(open));
+        if matches!(verdict, Verdict::Approve) {
+            if !failed.is_empty() {
+                return Err(format!(
+                    "an approve passes every check of {issue}; to name a check that does not hold \
+                     with --failed, block"
+                ));
+            }
+            if !open.is_empty() {
+                return Err(
+                    "an approve resolves every point of the round before; to keep a point of it \
+                     open with --open, block"
+                        .into(),
+                );
+            }
+        }
+        let i = self.issues.get(issue);
+        let checks = i
+            .and_then(|i| i.plan.as_ref())
+            .map_or(0, |p| p.checks.len());
+        if let Some(n) = failed.iter().find(|n| **n == 0 || **n > checks) {
+            return Err(match checks {
+                0 => format!("{issue}'s plan has no checks, so --failed {n} names none"),
+                1 => format!("{issue}'s plan has 1 check, numbered 1, not {n}"),
+                _ => format!("{issue}'s plan has checks 1 to {checks}, not {n}"),
+            });
+        }
+        let before = i.and_then(|i| i.round_before(round));
+        let kept = match (open.first(), before) {
+            (None, _) => Vec::new(),
+            (Some(_), _) if round <= 1 => {
+                return Err(format!(
+                    "review round 1 of {issue} has no round before it, so --open names no point; \
+                     put what is wrong in the block's points"
+                ));
+            }
+            (Some(n), None) => {
+                return Err(format!(
+                    "review round {round} of {issue} has no round before it on record, so --open \
+                     {n} names no point"
+                ));
+            }
+            (Some(_), Some(before)) => {
+                let count = before.points.len();
+                if let Some(n) = open.iter().find(|n| **n == 0 || **n > count) {
+                    return Err(match count {
+                        0 => format!(
+                            "review round {} of {issue} raised no points, so --open {n} names none",
+                            before.round
+                        ),
+                        1 => format!(
+                            "review round {} of {issue} has 1 point, numbered 1, not {n}",
+                            before.round
+                        ),
+                        _ => format!(
+                            "review round {} of {issue} has points 1 to {count}, not {n}",
+                            before.round
+                        ),
+                    });
+                }
+                open.iter().map(|n| before.points[n - 1].clone()).collect()
+            }
+        };
+        Ok(Judged { failed, open, kept })
     }
 
     /// Why `by` may not run a step command of `role` on `issue`. An agent must
@@ -602,9 +723,14 @@ impl World {
                         c.done_when, c.proven_by
                     ));
                 }
+                // No change has been checked yet.
+                let mut plan = plan.clone();
+                for c in &mut plan.checks {
+                    c.state = Some(CheckState::Waiting);
+                }
                 Event::PlanWritten {
                     issue: issue.clone(),
-                    plan: plan.clone(),
+                    plan,
                 }
             }
             Command::Ready {
@@ -671,7 +797,12 @@ impl World {
                     now => return refuse(issue, now, "being worked on"),
                 }
             }
-            Command::Review { issue, verdict } => {
+            Command::Review {
+                issue,
+                verdict,
+                failed,
+                open,
+            } => {
                 self.may_step(by, "review", Role::Reviewer, issue)?;
                 let Stage::InReview { round } = at(issue)? else {
                     return refuse(issue, at(issue)?, "in review");
@@ -685,14 +816,35 @@ impl World {
                          review the whole change again once its message reaches you"
                     ));
                 }
-                if matches!(verdict, Verdict::Block { points } if points.iter().all(|p| p.trim().is_empty()))
-                {
-                    return Err("a block needs at least one point to fix".into());
-                }
+                let Judged { failed, open, kept } =
+                    self.judged(issue, round, verdict, failed, open)?;
+                let verdict = match verdict {
+                    Verdict::Approve => Verdict::Approve,
+                    // A point kept open joins the block, so the author fixes it
+                    // again and the next round judges it again.
+                    Verdict::Block { points } => {
+                        let mut points: Vec<String> = points
+                            .iter()
+                            .filter(|p| !p.trim().is_empty())
+                            .cloned()
+                            .collect();
+                        points.extend(kept);
+                        if points.is_empty() {
+                            return Err(
+                                "a block needs at least one point to fix, or a point of the \
+                                 round before kept open with --open"
+                                    .into(),
+                            );
+                        }
+                        Verdict::Block { points }
+                    }
+                };
                 Event::ReviewFinished {
                     issue: issue.clone(),
                     round,
-                    verdict: verdict.clone(),
+                    verdict,
+                    failed: Some(failed),
+                    open: Some(open),
                 }
             }
             Command::Settings { target, .. } => {
@@ -904,6 +1056,7 @@ mod tests {
             checks: vec![Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
+                state: None,
             }],
         }
     }
@@ -976,6 +1129,22 @@ mod tests {
         Some(AgentId::new(format!("{}-1", role.name())))
     }
 
+    /// A ready from ankh#1's author, with a reply to each point of the block it
+    /// answers.
+    fn ready_replying(w: &World) -> Command {
+        let replies = w.issues[&issue()]
+            .block_to_answer()
+            .map_or_else(Vec::new, |b| {
+                b.points.iter().map(|p| format!("fixed: {p}")).collect()
+            });
+        Command::Ready {
+            issue: issue(),
+            pull: Some("57".into()),
+            pulls: Default::default(),
+            replies,
+        }
+    }
+
     fn run(w: &mut World, command: Command) -> Result<(), String> {
         if matches!(command, Command::Review { .. }) {
             // The reviewer has heard of the round.
@@ -1017,6 +1186,8 @@ mod tests {
         let approve = Command::Review {
             issue: issue(),
             verdict: Verdict::Approve,
+            failed: Vec::new(),
+            open: Vec::new(),
         };
         run(&mut w, approve).expect("review");
         w.apply(&Event::ChecksFinished {
@@ -1123,9 +1294,23 @@ mod tests {
             verdict: Verdict::Block {
                 points: vec!["no test for a stopped clock".into()],
             },
+            failed: Vec::new(),
+            open: Vec::new(),
         };
         run(&mut w, block).expect("block");
-        run(&mut w, bare).expect("the pull request is on record");
+        let Command::Ready {
+            issue, pull, pulls, ..
+        } = bare
+        else {
+            unreachable!("a ready")
+        };
+        let replied = Command::Ready {
+            issue,
+            pull,
+            pulls,
+            replies: vec!["added one that stops the clock".into()],
+        };
+        run(&mut w, replied).expect("the pull request is on record");
     }
 
     #[test]
@@ -1150,8 +1335,8 @@ mod tests {
             w.check(owner(&command).as_ref(), &command)
                 .expect_err("refused")
         };
-        // The first pull request answers no round.
-        assert!(refused(&w, &["early"]).contains("no review round to reply to"));
+        // The first pull request answers no block.
+        assert!(refused(&w, &["early"]).contains("no review point to reply to"));
         run(&mut w, ready(&[])).expect("ready");
         run(
             &mut w,
@@ -1160,10 +1345,12 @@ mod tests {
                 verdict: Verdict::Block {
                     points: vec!["no test for a stopped clock".into()],
                 },
+                failed: Vec::new(),
+                open: Vec::new(),
             },
         )
         .expect("block");
-        assert!(refused(&w, &[" "]).contains("a reply is empty"));
+        assert!(refused(&w, &[" "]).contains("one of its replies is empty"));
         run(&mut w, ready(&[" added one that stops the clock "])).expect("ready");
         assert_eq!(
             w.issues[&issue()].reviews[0].replies,
@@ -1176,7 +1363,7 @@ mod tests {
             passed: false,
             failing: vec!["lint".into()],
         });
-        assert!(refused(&w, &["fixed the lint"]).contains("no review round to reply to"));
+        assert!(refused(&w, &["fixed the lint"]).contains("no review point to reply to"));
         run(&mut w, ready(&[])).expect("ready without replies");
     }
 
@@ -1205,6 +1392,8 @@ mod tests {
         let approve = Command::Review {
             issue: issue(),
             verdict: Verdict::Approve,
+            failed: Vec::new(),
+            open: Vec::new(),
         };
         let reviewer = AgentId::new("reviewer-1");
         assert!(
@@ -1256,6 +1445,8 @@ mod tests {
                 Command::Review {
                     issue: issue(),
                     verdict: Verdict::Approve,
+                    failed: Vec::new(),
+                    open: Vec::new(),
                 },
             ),
             (
@@ -1342,6 +1533,8 @@ mod tests {
             Command::Review {
                 issue: issue(),
                 verdict: Verdict::Approve,
+                failed: Vec::new(),
+                open: Vec::new(),
             },
         ] {
             let why = w.check(None, &command).expect_err("a person is refused");
@@ -1356,21 +1549,15 @@ mod tests {
         )
         .expect("plan");
         for _ in 0..3 {
-            run(
-                &mut w,
-                Command::Ready {
-                    issue: issue(),
-                    pull: Some("57".into()),
-                    pulls: Default::default(),
-                    replies: Vec::new(),
-                },
-            )
-            .expect("ready");
+            let ready = ready_replying(&w);
+            run(&mut w, ready).expect("ready");
             let block = Command::Review {
                 issue: issue(),
                 verdict: Verdict::Block {
                     points: vec!["x".into()],
                 },
+                failed: Vec::new(),
+                open: Vec::new(),
             };
             run(&mut w, block).expect("block");
         }
@@ -1399,21 +1586,15 @@ mod tests {
         )
         .expect("plan");
         for _ in 0..3 {
-            run(
-                &mut w,
-                Command::Ready {
-                    issue: issue(),
-                    pull: Some("57".into()),
-                    pulls: Default::default(),
-                    replies: Vec::new(),
-                },
-            )
-            .expect("ready");
+            let ready = ready_replying(&w);
+            run(&mut w, ready).expect("ready");
             let block = Command::Review {
                 issue: issue(),
                 verdict: Verdict::Block {
                     points: vec!["no test for a stopped clock".into()],
                 },
+                failed: Vec::new(),
+                open: Vec::new(),
             };
             run(&mut w, block).expect("block");
         }
@@ -1498,6 +1679,7 @@ mod plan_settings {
                 checks: vec![Check {
                     done_when: "the clock strikes thirteen".into(),
                     proven_by: "listening at midnight".into(),
+                    state: None,
                 }],
             },
         }
@@ -2668,7 +2850,15 @@ mod ready_in_several_repositories {
             verdict: Verdict::Block {
                 points: vec!["x".into()],
             },
+            failed: None,
+            open: None,
         });
-        assert!(check(&w, &ready(None, &[])).is_ok());
+        let replied = Command::Ready {
+            issue: gld(),
+            pull: None,
+            pulls: Default::default(),
+            replies: vec!["done as asked".into()],
+        };
+        assert!(check(&w, &replied).is_ok());
     }
 }

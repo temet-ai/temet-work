@@ -135,11 +135,11 @@
       "id": "watch#4",
       "title": "Ring the bells",
       "stage": "in_review",
-      "stage_text": "in review, round 2",
+      "stage_text": "in review, round 3",
       "milestone": "The Clacks",
       "group": "night-watch",
       "depends_on": [],
-      "round": 2,
+      "round": 3,
       "pulls": [
         {
           "repo": "watch",
@@ -156,7 +156,8 @@
       "checks": [
         {
           "done_when": "the clock strikes thirteen",
-          "proven_by": "listening at midnight"
+          "proven_by": "listening at midnight",
+          "state": "running"
         }
       ],
       "reviews": [
@@ -165,20 +166,29 @@
           "reviewer": "reviewer-3",
           "verdict": "block",
           "points": [
-            "the bell is cracked",
-            "the rope is frayed"
-          ],
-          "replies": [
-            "recast the bell",
-            "the rope stays: it was checked"
+            {
+              "text": "the bell is cracked",
+              "reply": "recast the bell",
+              "state": "resolved"
+            },
+            {
+              "text": "the rope is frayed",
+              "reply": "the rope stays: it was checked",
+              "state": "open"
+            }
           ]
         },
         {
           "round": 2,
           "reviewer": "reviewer-3",
-          "verdict": "approve",
-          "points": [],
-          "replies": []
+          "verdict": "block",
+          "points": [
+            {
+              "text": "the rope is frayed",
+              "reply": "a new rope is on order",
+              "state": "open"
+            }
+          ]
         }
       ]
     },
@@ -206,8 +216,24 @@
       "updated_ms": 1795000720000,
       "checks": [
         {
-          "done_when": "the clock strikes thirteen",
-          "proven_by": "listening at midnight"
+          "done_when": "the cobbles are clear",
+          "proven_by": "walking the yard at dawn",
+          "state": "passed"
+        },
+        {
+          "done_when": "the drains run",
+          "proven_by": "pouring a bucket",
+          "state": "running"
+        },
+        {
+          "done_when": "the leaves are bagged",
+          "proven_by": "counting the bags",
+          "state": "waiting"
+        },
+        {
+          "done_when": "the corner smells of nothing",
+          "proven_by": "sniffing the corner",
+          "state": "failed"
         }
       ],
       "reviews": []

@@ -2012,6 +2012,7 @@ mod unknown_adapter {
                 checks: vec![Check {
                     done_when: "it works".into(),
                     proven_by: "a test".into(),
+                    state: None,
                 }],
                 repos: Vec::new(),
                 settings: [(key.to_string(), Value::Text("x".into()))].into(),

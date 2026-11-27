@@ -157,23 +157,25 @@ pub fn write(
             .map(|c| format!("- {} (shown by: {})\n", c.done_when, c.proven_by))
             .collect()
     });
-    // An author started on an issue that came back hears what to fix first.
+    // An author started on an issue that came back hears what to fix first, and
+    // the points its ready replies to.
     let fixes = if issue.fix.is_empty() {
         String::new()
     } else {
         let list: String = issue.fix.iter().map(|p| format!("- {p}\n")).collect();
-        let reply = if crate::World::answered_round(issue).is_some() {
+        let reply = issue.block_to_answer().map_or_else(String::new, |block| {
             format!(
-                "They came from a review or a ruling: when you run temet-work ready, reply to each, \
-                 in their order, with what you did about it or why you did not, as in \
-                 temet-work ready {} --reply \"<reply to the first>\" [--reply \"<reply to the next>\" ...]\n",
-                issue.id
+                "Your ready answers review round {}, so it takes one reply for each of that \
+                 round's points, in this order, {SAYING}:\n{}",
+                block.round,
+                numbered(&block.points)
             )
-        } else {
-            String::new()
-        };
+        });
         format!("Earlier work on it came back with these to fix first:\n{list}{reply}")
     };
+    let replies = issue.block_to_answer().map_or_else(String::new, |block| {
+        format!(" {}", reply_flags(block.points.len()))
+    });
     let several = held.len() > 1;
     let folders = if several {
         let list: String = held
@@ -236,22 +238,23 @@ pub fn write(
              describes in place. Where a point cannot be met, say so in the pull request.\n\
              This folder is yours until the change merges. Make a branch, change the code and open a pull request.\n\
              {folders}{fixes}The plan's checks, each to hold before you finish:\n{checks}\
-             When the pull request is open and every check holds, run: temet-work ready {id} {ready}",
+             When the pull request is open and every check holds, run: temet-work ready {id} {ready}{replies}",
             title = issue.title,
             read = read_the_issue(id),
         ),
         Role::Reviewer => format!(
             "Review the pull request for {id}: {title}. It is {source}.\n\
-             {pulls}The plan's checks:\n{checks}\
+             {pulls}{judged}\
              {LEAVE_THE_FOLDER}\n\
              Read the whole change, not only the last commit. Run the checks yourself where you can, \
              in that separate checkout.\n\
              {hold}\n\
              {BLOCK_WHAT_IS_NOT_MET}\n\
-             Then run: temet-work review {id} approve\n\
-             or: temet-work review {id} block \"<what to fix>\" [\"<what else>\" ...]",
+             {verdict}",
             title = issue.title,
+            judged = to_judge(issue, under_review(issue)),
             hold = hold_to_the_issue(id),
+            verdict = how_to_judge(issue, under_review(issue), "<what to fix>"),
         ),
         Role::Arbiter => format!(
             "Review rounds on {id} ({title}) ran out. It is {source}.\n\
@@ -475,28 +478,142 @@ fn only_a_persons() -> Vec<&'static str> {
         .collect()
 }
 
-/// What an author is told when the review or the checks found things to fix.
-pub fn fixes(issue: &IssueId, points: &[String]) -> String {
-    let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
+/// How an author is to reply to each point of a block.
+const SAYING: &str = "saying what you did about it or why you did not";
+
+/// `items` as a list numbered from 1, one to a line.
+pub(crate) fn numbered(items: &[String]) -> String {
+    (1..)
+        .zip(items)
+        .map(|(n, p)| format!("{n}. {p}\n"))
+        .collect()
+}
+
+/// One `--reply` for each of `count` points, as `temet-work ready` takes them.
+pub(crate) fn reply_flags(count: usize) -> String {
+    (1..=count)
+        .map(|n| format!("--reply \"<reply to point {n}>\""))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What an author is told when the review or the checks found things to fix
+/// (`points`) on `issue`. When its next ready answers a block, it is told that
+/// block's points, numbered, and to reply to each.
+pub fn fixes(issue: &Issue, points: &[String]) -> String {
+    let id = &issue.id;
+    let Some(block) = issue.block_to_answer() else {
+        let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
+        return format!(
+            "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready {id}"
+        );
+    };
+    let run = format!(
+        "temet-work ready {id} {}\nA ready without one reply for each point is refused.",
+        reply_flags(block.points.len())
+    );
+    if points == block.points.as_slice() {
+        format!(
+            "Review round {round} blocked {id}. Fix each of its points:\n{list}\
+             Then push and run this, with one reply for each point, in this order, {SAYING}:\n{run}",
+            round = block.round,
+            list = numbered(points),
+        )
+    } else {
+        let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
+        format!(
+            "Fix these, from the review or the checks:\n{list}\
+             Then push and run this, with one reply for each point of review round {round}, in this \
+             order, {SAYING}:\n{points}{run}",
+            round = block.round,
+            points = numbered(&block.points),
+        )
+    }
+}
+
+/// The review round `issue` is in, or its latest.
+fn under_review(issue: &Issue) -> u8 {
+    match issue.stage {
+        crate::model::Stage::InReview { round } => round,
+        _ => issue.round,
+    }
+}
+
+/// What a reviewer of round `round` of `issue` judges besides the change: the
+/// plan's checks, numbered as `--failed` takes them, and the points of the round
+/// before with the author's reply to each, numbered as `--open` takes them.
+fn to_judge(issue: &Issue, round: u8) -> String {
+    let checks: String = issue
+        .plan
+        .iter()
+        .flat_map(|p| &p.checks)
+        .zip(1..)
+        .map(|(c, n)| format!("{n}. {} (shown by: {})\n", c.done_when, c.proven_by))
+        .collect();
+    let checks = format!("The plan's checks, numbered as --failed takes them:\n{checks}");
+    let Some(before) = issue.round_before(round).filter(|r| r.blocks()) else {
+        return checks;
+    };
+    let points: String = (1..)
+        .zip(&before.points)
+        .map(|(n, p)| {
+            let reply = before
+                .replies
+                .get(n - 1)
+                .map_or("none on record", String::as_str);
+            format!("{n}. {p}\n   The author's reply: {reply}\n")
+        })
+        .collect();
     format!(
-        "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready {issue}\n\
-         When the points came from a review or a ruling, reply to each, in their order, with what you \
-         did about it or why you did not: temet-work ready {issue} --reply \"<reply to the first>\" \
-         [--reply \"<reply to the next>\" ...]"
+        "{checks}Review round {} blocked on these points, numbered as --open takes them:\n{points}",
+        before.round
     )
 }
 
-/// What a running reviewer is told when the author is ready again.
-pub fn next_round(issue: &IssueId, round: u8) -> String {
+/// How a reviewer of round `round` of `issue` gives its verdict, with
+/// `what` as the placeholder for a block's first point.
+fn how_to_judge(issue: &Issue, round: u8, what: &str) -> String {
+    let id = &issue.id;
+    let before = issue
+        .round_before(round)
+        .filter(|r| r.blocks())
+        .map(|r| r.round);
+    let (open_flag, open, neither) = match before {
+        Some(before) => (
+            " [--open N ...]",
+            format!(
+                " Give --open N for each point of review round {before} that is still not dealt \
+                 with: it stays open and joins your block's points, so the author fixes it again \
+                 and the next round judges it again. Every point you leave unnamed counts as \
+                 resolved, and a block may consist of kept points alone."
+            ),
+            " and resolves every point, and takes neither --failed nor --open",
+        ),
+        None => ("", String::new(), " and takes no --failed"),
+    };
     format!(
-        "The author pushed fixes for {issue}; this is review round {round}. Review the whole change again, \
+        "Then run: temet-work review {id} approve\n\
+         or: temet-work review {id} block \"{what}\" [\"<what else>\" ...] [--failed N ...]{open_flag}\n\
+         On a block, give --failed N for each check that does not hold; a check you leave unnamed \
+         counts as passed.{open} An approve passes every check{neither}."
+    )
+}
+
+/// What a running reviewer is told when the author is ready again for round
+/// `round` of `issue`.
+pub fn next_round(issue: &Issue, round: u8) -> String {
+    let id = &issue.id;
+    format!(
+        "The author pushed fixes for {id}; this is review round {round}. Review the whole change again, \
          not only the new commits. The issue's text may have changed since the last round, so read it again.\n\
+         {judged}\
          {LEAVE_THE_FOLDER}\n\
          {hold}\n\
          {BLOCK_WHAT_IS_NOT_MET}\n\
-         Then run: temet-work review {issue} approve\n\
-         or: temet-work review {issue} block \"<what is still wrong>\" [\"<what else>\" ...]",
-        hold = hold_to_the_issue(issue),
+         {verdict}",
+        judged = to_judge(issue, round),
+        hold = hold_to_the_issue(id),
+        verdict = how_to_judge(issue, round, "<what is still wrong>"),
     )
 }
 
@@ -599,7 +716,7 @@ mod tests {
             "{reviewer}"
         );
         // A running reviewer hears it again on each later round.
-        let again = next_round(&issue.id, 2);
+        let again = next_round(&issue, 2);
         for line in told {
             assert!(again.contains(line), "missing {line:?} in:\n{again}");
         }
@@ -626,10 +743,12 @@ mod tests {
                 Check {
                     done_when: "the bell rings at midnight".into(),
                     proven_by: "the midnight test".into(),
+                    state: None,
                 },
                 Check {
                     done_when: "a bell that jams is rung again and then reported".into(),
                     proven_by: "the jammed bell test".into(),
+                    state: None,
                 },
             ],
             ..Plan::default()
@@ -649,10 +768,10 @@ mod tests {
             "{brief}"
         );
         assert!(
-            brief.contains("- a bell that jams is rung again and then reported (shown by: "),
+            brief.contains("2. a bell that jams is rung again and then reported (shown by: "),
             "{brief}"
         );
-        let again = next_round(&id, 2);
+        let again = next_round(&issue, 2);
         for line in [
             "run temet-work issue watch#7, which prints the issue's text from its tracker.",
             "Check each of its points and its \"Done is\" line against the change, not only the \
@@ -681,9 +800,61 @@ mod tests {
         assert!(
             again.ends_with(
                 "Then run: temet-work review watch#7 approve\n\
-                 or: temet-work review watch#7 block \"<what is still wrong>\" [\"<what else>\" ...]"
+                 or: temet-work review watch#7 block \"<what is still wrong>\" [\"<what else>\" ...] \
+                 [--failed N ...]\n\
+                 On a block, give --failed N for each check that does not hold; a check you leave \
+                 unnamed counts as passed. An approve passes every check and takes no --failed."
             ),
             "{again}"
+        );
+    }
+
+    #[test]
+    fn a_reviewer_is_told_the_checks_and_the_points_of_the_round_before_by_number() {
+        let mut issue = lamp_issue();
+        issue.plan = Some(Plan {
+            checks: vec![
+                Check::new("a lamp with no oil is refused", "the dry lamp test"),
+                Check::new(
+                    "a refused lamp is listed under Problems",
+                    "the problems test",
+                ),
+            ],
+            ..Plan::default()
+        });
+        issue.stage = crate::model::Stage::InReview { round: 2 };
+        issue.round = 2;
+        issue.reviews = vec![crate::model::Review {
+            round: 1,
+            reviewer: Some(AgentId::new("reviewer-3")),
+            approve: false,
+            points: vec!["the wick is untrimmed".into(), "the glass is sooty".into()],
+            replies: vec!["trimmed it".into()],
+            states: Vec::new(),
+        }];
+        let numbered = "The plan's checks, numbered as --failed takes them:\n\
+                        1. a lamp with no oil is refused (shown by: the dry lamp test)\n\
+                        2. a refused lamp is listed under Problems (shown by: the problems test)\n\
+                        Review round 1 blocked on these points, numbered as --open takes them:\n\
+                        1. the wick is untrimmed\n   The author's reply: trimmed it\n\
+                        2. the glass is sooty\n   The author's reply: none on record\n";
+        let how = "or: temet-work review watch#31 block \"<what is still wrong>\" [\"<what else>\" ...] \
+                   [--failed N ...] [--open N ...]\n\
+                   On a block, give --failed N for each check that does not hold; a check you leave \
+                   unnamed counts as passed. Give --open N for each point of review round 1 that is \
+                   still not dealt with: it stays open and joins your block's points, so the author \
+                   fixes it again and the next round judges it again. Every point you leave unnamed \
+                   counts as resolved, and a block may consist of kept points alone. An approve passes \
+                   every check and resolves every point, and takes neither --failed nor --open.";
+        let again = next_round(&issue, 2);
+        assert!(again.contains(numbered), "{again}");
+        assert!(again.ends_with(how), "{again}");
+        // A reviewer started on round 2 hears the same in its brief.
+        let brief = lamp_task(Role::Reviewer, &issue);
+        assert!(brief.contains(numbered), "{brief}");
+        assert!(
+            brief.ends_with(&how.replace("<what is still wrong>", "<what to fix>")),
+            "{brief}"
         );
     }
 
@@ -708,10 +879,12 @@ mod tests {
                 Check {
                     done_when: "the gate shuts at dusk".into(),
                     proven_by: "the dusk test".into(),
+                    state: None,
                 },
                 Check {
                     done_when: "a gate that sticks is tried again and then reported".into(),
                     proven_by: "the stuck gate test".into(),
+                    state: None,
                 },
             ],
             ..Plan::default()
@@ -758,7 +931,7 @@ mod tests {
             "an arbiter cannot block:\n{brief}"
         );
         assert!(!brief.contains("failure scenario"), "{brief}");
-        let again = next_round(&id, 2);
+        let again = next_round(&issue, 2);
         assert!(
             again.contains("run temet-work issue watch#12, which prints"),
             "{again}"
@@ -807,19 +980,72 @@ mod tests {
 
     #[test]
     fn an_author_fixing_a_review_round_is_told_to_reply_to_each_point() {
-        let reply = "--reply \"<reply to the first>\" [--reply \"<reply to the next>\" ...]";
-        let told = fixes(&IssueId::new("watch", "31"), &["light it at dusk".into()]);
-        assert!(told.contains(reply), "{told}");
-        // A new author on an issue sent back by a review hears it in its brief.
+        let reply = "--reply \"<reply to point 1>\" --reply \"<reply to point 2>\"";
+        let points = vec!["light it at dusk".to_string(), "trim the wick".into()];
         let mut issue = lamp_issue();
         issue.stage = crate::model::Stage::Fixing { round: 1 };
-        issue.fix = vec!["light it at dusk".into()];
+        issue.fix = points.clone();
+        issue.reviews = vec![crate::model::Review {
+            round: 1,
+            reviewer: Some(AgentId::new("reviewer-3")),
+            approve: false,
+            points: points.clone(),
+            replies: Vec::new(),
+            states: Vec::new(),
+        }];
+        // The running author hears the points numbered, once, and how to reply.
+        let told = fixes(&issue, &points);
+        assert!(
+            told.starts_with(
+                "Review round 1 blocked watch#31. Fix each of its points:\n\
+                 1. light it at dusk\n\
+                 2. trim the wick\n\
+                 Then push and run this, with one reply for each point, in this order, saying \
+                 what you did about it or why you did not:\n"
+            ),
+            "{told}"
+        );
+        assert!(
+            told.ends_with(&format!(
+                "temet-work ready watch#31 {reply}\nA ready without one reply for each point is refused."
+            )),
+            "{told}"
+        );
+        // A new author hears them in its brief.
         let brief = lamp_task(Role::Author, &issue);
-        assert!(brief.contains(reply), "{brief}");
-        // A fix for a failed check answers no review round.
+        for line in [
+            "Your ready answers review round 1, so it takes one reply for each of that round's \
+             points, in this order, saying what you did about it or why you did not:\n\
+             1. light it at dusk\n2. trim the wick\n",
+            &format!("run: temet-work ready watch#31 <pull request number> {reply}"),
+        ] {
+            assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
+        }
+        // After an arbiter's fix ruling, the author fixes what the ruling says and
+        // replies to the reviewer's last block.
+        let ruling = ["the wick must be trimmed by hand".to_string()];
+        let told = fixes(&issue, &ruling);
+        assert!(
+            told.contains(
+                "Fix these, from the review or the checks:\n\
+                 - the wick must be trimmed by hand\n\
+                 Then push and run this, with one reply for each point of review round 1, in this \
+                 order, saying what you did about it or why you did not:\n\
+                 1. light it at dusk\n2. trim the wick\n"
+            ),
+            "{told}"
+        );
+        // Once the author has replied, a later fix answers no block.
+        issue.reviews[0].replies = vec!["lit".into(), "trimmed".into()];
         issue.fix_keeps_round = true;
         let brief = lamp_task(Role::Author, &issue);
         assert!(!brief.contains("--reply"), "{brief}");
+        let told = fixes(&issue, &["CI check lint failed".into()]);
+        assert_eq!(
+            told,
+            "Fix these, from the review or the checks:\n- CI check lint failed\n\
+             Then push and run: temet-work ready watch#31"
+        );
     }
 
     #[test]
@@ -897,6 +1123,7 @@ mod tests {
                             nor listed under Problems"
                     .into(),
                 proven_by: "the Watch House lamp test".into(),
+                state: None,
             }],
             ..Plan::default()
         });
@@ -907,13 +1134,13 @@ mod tests {
         );
         assert!(
             brief.contains(
-                "The plan's checks:\n\
-                 - Chosen rule: lamps on the Watch House's own oil are neither refused nor listed \
+                "The plan's checks, numbered as --failed takes them:\n\
+                 1. Chosen rule: lamps on the Watch House's own oil are neither refused nor listed \
                  under Problems (shown by: the Watch House lamp test)\n"
             ),
             "{brief}"
         );
-        let again = next_round(&issue.id, 2);
+        let again = next_round(&issue, 2);
         for line in [
             "A plan check or a recorded decision that departs from a point the issue states, or \
              that leaves any failure the issue describes happening, is a block, even when the plan \

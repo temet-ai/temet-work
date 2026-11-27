@@ -1,9 +1,12 @@
 //! The loop's state as data, for a front end: what the text form lists, in the
 //! same order, as plain fields that need none of the loop's logic to draw, and
 //! what the desktop window shows beside it: when each issue last changed, its
-//! plan's checks and its review rounds with the author's replies, each agent's
+//! plan's checks with each one's state, its review rounds with the author's
+//! reply to each point and whether the next round resolved it, each agent's
 //! runtime and model, milestones with their progress and due dates, what
 //! overturning a decision costs, and where each project's issues and code are.
+//! A state the log does not hold, as in a log from before states were kept, is
+//! null: the window then draws no status tag, and no word stands in for it.
 //! Times are in milliseconds since 1970 and dates are `YYYY-MM-DD`; the window
 //! works out "4 min ago" with its own clock.
 //!
@@ -20,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::host;
 use crate::ids::{AgentId, FolderId, GroupId, MachineId, MilestoneId, ProjectId};
-use crate::model::{self, AgentState, Check, Cost, Point, Stage};
+use crate::model::{self, AgentState, CheckState, Cost, Point, PointState, Stage};
 use crate::text;
 use crate::world::World;
 
@@ -131,8 +134,8 @@ pub struct Issue {
     pub pulls: Vec<Pull>,
     /// Whether the review approved the current change.
     pub review_ok: bool,
-    /// Whether CI and the checks passed on the current change; none until they
-    /// finish. Its checks have no state of their own: this is theirs.
+    /// Whether CI passed on the current change; none until it finishes. CI's
+    /// job names are not the plan's checks, so this marks no check.
     pub checks_ok: Option<bool>,
     /// The agents on it, ended ones too.
     pub agents: Vec<AgentId>,
@@ -145,6 +148,18 @@ pub struct Issue {
     pub reviews: Vec<Review>,
 }
 
+/// One of a plan's checks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Check {
+    /// The line from the issue.
+    pub done_when: String,
+    /// The test or command that proves it.
+    pub proven_by: String,
+    /// Where it stands, as `passed`, `running`, `waiting` or `failed`; null when
+    /// the log holds none, as for a plan from an older log.
+    pub state: Option<CheckState>,
+}
+
 /// One finished review round.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Review {
@@ -154,11 +169,22 @@ pub struct Review {
     pub reviewer: Option<AgentId>,
     /// What it said.
     pub verdict: VerdictWord,
-    /// What a block asked to change; empty for an approval.
-    pub points: Vec<String>,
-    /// The author's replies, sent with the fix that answered this round; empty
-    /// until then, or when the author sent none.
-    pub replies: Vec<String>,
+    /// What a block asked to change, in its order; empty for an approval.
+    pub points: Vec<ReviewPoint>,
+}
+
+/// One thing a block asked to change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewPoint {
+    /// What to change.
+    pub text: String,
+    /// The author's reply, sent with the first ready after the block; null
+    /// until then, and in an older log.
+    pub reply: Option<String>,
+    /// Whether the next round counts it as dealt with, as `open` or
+    /// `resolved`: open until that round judges it. Null for a round from an
+    /// older log.
+    pub state: Option<PointState>,
 }
 
 /// A review round's verdict, as one word.
@@ -493,7 +519,16 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
             .map(|a| a.id.clone())
             .collect(),
         updated_ms: world.updated.at(&i.id),
-        checks: i.plan.iter().flat_map(|p| p.checks.clone()).collect(),
+        checks: i
+            .plan
+            .iter()
+            .flat_map(|p| &p.checks)
+            .map(|c| Check {
+                done_when: c.done_when.clone(),
+                proven_by: c.proven_by.clone(),
+                state: c.state,
+            })
+            .collect(),
         reviews: i
             .reviews
             .iter()
@@ -505,8 +540,16 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
                 } else {
                     VerdictWord::Block
                 },
-                points: r.points.clone(),
-                replies: r.replies.clone(),
+                points: r
+                    .points
+                    .iter()
+                    .enumerate()
+                    .map(|(n, text)| ReviewPoint {
+                        text: text.clone(),
+                        reply: r.replies.get(n).cloned(),
+                        state: r.states.get(n).copied(),
+                    })
+                    .collect(),
             })
             .collect(),
     }
@@ -553,6 +596,7 @@ fn decision(world: &World, d: &model::Decision) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::Command;
     use crate::event::Event;
     use crate::event::Verdict;
     use crate::host::{Host, Memory};
@@ -808,23 +852,59 @@ mod tests {
         at(watch("1"), Stage::New, 0);
         at(watch("2"), Stage::Refining, 0);
         at(watch("3"), Stage::Working, 0);
-        at(watch("4"), Stage::InReview { round: 2 }, 2);
+        at(watch("4"), Stage::InReview { round: 3 }, 3);
         at(watch("5"), Stage::Fixing { round: 1 }, 1);
         at(watch("6"), Stage::Done, 1);
         at(watch("7"), Stage::Done, 0);
         at(IssueId::new("unseen", "1"), Stage::Ready, 0);
-        for (key, number) in [("4", "41"), ("5", "52")] {
+        // Within one round the loop moves all of an issue's checks together, so
+        // watch#5's four states are put in the world directly.
+        let check = |done_when: &str, proven_by: &str, state| model::Check {
+            state: Some(state),
+            ..model::Check::new(done_when, proven_by)
+        };
+        let checks = [
+            (
+                "4",
+                vec![check(
+                    "the clock strikes thirteen",
+                    "listening at midnight",
+                    CheckState::Running,
+                )],
+            ),
+            (
+                "5",
+                vec![
+                    check(
+                        "the cobbles are clear",
+                        "walking the yard at dawn",
+                        CheckState::Passed,
+                    ),
+                    check("the drains run", "pouring a bucket", CheckState::Running),
+                    check(
+                        "the leaves are bagged",
+                        "counting the bags",
+                        CheckState::Waiting,
+                    ),
+                    check(
+                        "the corner smells of nothing",
+                        "sniffing the corner",
+                        CheckState::Failed,
+                    ),
+                ],
+            ),
+        ];
+        for ((key, checks), number) in checks.into_iter().zip(["41", "52"]) {
             let i = w.issues.get_mut(&watch(key)).expect("synced");
             i.pulls.insert(ProjectId::new("watch"), number.into());
             i.plan = Some(Plan {
-                checks: vec![model::Check {
-                    done_when: "the clock strikes thirteen".into(),
-                    proven_by: "listening at midnight".into(),
-                }],
+                checks,
                 settings: [("model".to_string(), Value::Text("the-luggage".into()))].into(),
                 ..Plan::default()
             });
         }
+        // Round 2 kept the rope open, and the author replied to it with the ready
+        // that started round 3.
         let reviewed = w.issues.get_mut(&watch("4")).expect("synced");
         reviewed.review_ok = true;
         reviewed.checks_ok = Some(false);
@@ -838,13 +918,15 @@ mod tests {
                     "recast the bell".into(),
                     "the rope stays: it was checked".into(),
                 ],
+                states: vec![PointState::Resolved, PointState::Open],
             },
             model::Review {
                 round: 2,
                 reviewer: Some(AgentId::new("reviewer-3")),
-                approve: true,
-                points: Vec::new(),
-                replies: Vec::new(),
+                approve: false,
+                points: vec!["the rope is frayed".into()],
+                replies: vec!["a new rope is on order".into()],
+                states: vec![PointState::Open],
             },
         ];
         // The addresses the tracker and code host give, put in each round.
@@ -1140,21 +1222,38 @@ mod tests {
     }
 
     #[test]
-    fn an_issue_lists_its_plans_checks() {
+    fn each_check_shows_its_state() {
         let view = View::new(&world(), &BTreeMap::new());
+        let states: Vec<(&str, Option<CheckState>)> = issue_of(&view, "watch#5")
+            .checks
+            .iter()
+            .map(|c| (c.done_when.as_str(), c.state))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("the cobbles are clear", Some(CheckState::Passed)),
+                ("the drains run", Some(CheckState::Running)),
+                ("the leaves are bagged", Some(CheckState::Waiting)),
+                ("the corner smells of nothing", Some(CheckState::Failed)),
+            ]
+        );
         assert_eq!(
             issue_of(&view, "watch#4").checks,
             [Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
+                state: Some(CheckState::Running),
             }]
         );
         // No plan yet.
         assert_eq!(issue_of(&view, "watch#1").checks, []);
     }
 
-    #[test]
-    fn an_issue_shows_its_review_rounds_from_the_review_events() {
+    /// Events that bring `watch#4` to its first ready, with its refiner, author
+    /// and reviewer started: `older` lines for a log from before checks and points
+    /// had states, or else a plan with two checks sent by its refiner.
+    fn to_the_first_ready(older: bool) -> World {
         let watch4 = IssueId::new("watch", "4");
         let started = |agent: &str, role| Event::AgentStarted {
             agent: AgentId::new(agent),
@@ -1167,20 +1266,6 @@ mod tests {
             runtime: None,
             model: None,
         };
-        let ready = |replies: &[&str]| Event::PullRequestReady {
-            issue: watch4.clone(),
-            pull: None,
-            pulls: [(ProjectId::new("watch"), "41".to_string())].into(),
-            replies: replies.iter().map(ToString::to_string).collect(),
-        };
-        let points = vec![
-            "the bell is cracked".to_string(),
-            "the rope is frayed".into(),
-        ];
-        let replies = vec![
-            "recast the bell".to_string(),
-            "the rope stays: it was checked".into(),
-        ];
         let events = [
             added("watch", "fake", "ankh-morpork/watch"),
             Event::FolderAdded {
@@ -1200,50 +1285,166 @@ mod tests {
                 queue_low: None,
                 investigate_every: None,
             },
-            synced("watch", "3", "Wind the clock", vec![]),
             synced("watch", "4", "Ring the bells", vec![]),
-            Event::PlanWritten {
-                issue: watch4.clone(),
-                plan: Plan::default(),
-            },
-            started("author-1", Role::Author),
-            // The first pull request answers no round: a reply has nowhere to go.
-            ready(&["nothing to answer yet"]),
-            started("reviewer-3", Role::Reviewer),
-            Event::ReviewFinished {
-                issue: watch4.clone(),
-                round: 1,
-                verdict: Verdict::Block {
-                    points: points.clone(),
-                },
-            },
-            ready(&["recast the bell", "the rope stays: it was checked"]),
-            Event::ReviewFinished {
-                issue: watch4.clone(),
-                round: 2,
-                verdict: Verdict::Approve,
-            },
+            started("refiner-1", Role::Refiner),
         ];
-        let (w, _) = World::replay(&events);
+        let (mut w, _) = World::replay(&events);
+        if older {
+            w.apply(&older_line(
+                r#"{"PlanWritten":{"issue":{"project":"watch","key":"4"},"plan":{"checks":[{"done_when":"the bell rings at midnight","proven_by":"listening at the tower"}]}}}"#,
+            ));
+        } else {
+            let plan = Plan {
+                checks: vec![
+                    model::Check::new("the bell rings at midnight", "listening at the tower"),
+                    model::Check::new("the rope holds", "hanging a troll from it"),
+                ],
+                ..Plan::default()
+            };
+            command(
+                &mut w,
+                "refiner-1",
+                Command::Plan {
+                    issue: watch4.clone(),
+                    plan,
+                },
+            );
+        }
+        for (agent, role) in [("author-2", Role::Author), ("reviewer-3", Role::Reviewer)] {
+            w.apply(&started(agent, role));
+        }
+        w
+    }
+
+    /// An event line as a log from before checks and points had states holds it.
+    fn older_line(line: &str) -> Event {
+        serde_json::from_str(line).expect("an older line reads")
+    }
+
+    /// Runs `command` as agent `by`, applying the events it becomes. A reviewer
+    /// hears of its round first.
+    fn command(w: &mut World, by: &str, command: Command) {
+        if matches!(command, Command::Review { .. }) {
+            w.apply(&Event::Told {
+                issue: IssueId::new("watch", "4"),
+            });
+        }
+        for e in w
+            .events(Some(&AgentId::new(by)), &command)
+            .unwrap_or_else(|e| panic!("{by}'s command is refused: {e}"))
+        {
+            w.apply(&e);
+        }
+    }
+
+    fn ready(replies: &[&str]) -> Command {
+        Command::Ready {
+            issue: IssueId::new("watch", "4"),
+            pull: Some("41".into()),
+            pulls: BTreeMap::new(),
+            replies: replies.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn block(points: &[&str], open: Vec<usize>) -> Command {
+        Command::Review {
+            issue: IssueId::new("watch", "4"),
+            verdict: Verdict::Block {
+                points: points.iter().map(ToString::to_string).collect(),
+            },
+            failed: Vec::new(),
+            open,
+        }
+    }
+
+    #[test]
+    fn a_point_shows_the_authors_reply_and_whether_the_next_round_resolved_it() {
+        let mut w = to_the_first_ready(false);
+        command(&mut w, "author-2", ready(&[]));
+        command(
+            &mut w,
+            "reviewer-3",
+            block(&["the bell is cracked", "the rope is frayed"], Vec::new()),
+        );
+        command(
+            &mut w,
+            "author-2",
+            ready(&["recast the bell", "the rope stays: it was checked"]),
+        );
+        // Round 2 keeps the rope open and raises nothing new.
+        command(&mut w, "reviewer-3", block(&[], vec![2]));
         let view = View::new(&w, &BTreeMap::new());
-        let round = |round, verdict, points, replies| Review {
+        let point = |text: &str, reply: Option<&str>, state| ReviewPoint {
+            text: text.into(),
+            reply: reply.map(String::from),
+            state: Some(state),
+        };
+        let round = |round, points| Review {
             round,
             reviewer: Some(AgentId::new("reviewer-3")),
-            verdict,
+            verdict: VerdictWord::Block,
             points,
-            replies,
         };
-        // The block has the replies the fix that answered it sent; the approval,
-        // which no fix answered yet, has none.
         assert_eq!(
             issue_of(&view, "watch#4").reviews,
             [
-                round(1, VerdictWord::Block, points, replies),
-                round(2, VerdictWord::Approve, Vec::new(), Vec::new())
+                round(
+                    1,
+                    vec![
+                        point(
+                            "the bell is cracked",
+                            Some("recast the bell"),
+                            PointState::Resolved
+                        ),
+                        point(
+                            "the rope is frayed",
+                            Some("the rope stays: it was checked"),
+                            PointState::Open
+                        ),
+                    ]
+                ),
+                // The kept point is open until round 3 judges it, and has no reply
+                // until the author's next ready.
+                round(2, vec![point("the rope is frayed", None, PointState::Open)]),
             ]
         );
-        // Never reviewed.
-        assert_eq!(issue_of(&view, "watch#3").reviews, []);
+    }
+
+    #[test]
+    fn an_older_log_gives_no_check_or_point_a_state_and_no_point_a_reply() {
+        let mut w = to_the_first_ready(true);
+        for line in [
+            r#"{"PullRequestReady":{"issue":{"project":"watch","key":"4"},"pull":"41"}}"#,
+            r#"{"ReviewFinished":{"issue":{"project":"watch","key":"4"},"round":1,"verdict":{"Block":{"points":["the bell is cracked","the rope is frayed"]}}}}"#,
+            r#"{"PullRequestReady":{"issue":{"project":"watch","key":"4"},"pull":"41"}}"#,
+            // A send-back gives a state to no check that had none.
+            r#"{"ChecksFinished":{"issue":{"project":"watch","key":"4"},"passed":false}}"#,
+            r#"{"PullRequestReady":{"issue":{"project":"watch","key":"4"},"pull":"41"}}"#,
+            r#"{"ReviewFinished":{"issue":{"project":"watch","key":"4"},"round":2,"verdict":"Approve"}}"#,
+        ] {
+            w.apply(&older_line(line));
+        }
+        let view = View::new(&w, &BTreeMap::new());
+        let i = issue_of(&view, "watch#4");
+        assert_eq!(i.reviews.len(), 2, "{i:?}");
+        assert!(i.checks.iter().all(|c| c.state.is_none()), "{i:?}");
+        let points = &i.reviews[0].points;
+        assert_eq!(points.len(), 2, "{i:?}");
+        assert!(
+            points
+                .iter()
+                .all(|p| p.reply.is_none() && p.state.is_none()),
+            "{i:?}"
+        );
+        // The view writes null for each, and no word stands in for it.
+        let json = serde_json::to_value(i).expect("json");
+        assert_eq!(json["checks"][0]["state"], serde_json::Value::Null);
+        for field in ["reply", "state"] {
+            assert_eq!(
+                json["reviews"][0]["points"][1][field],
+                serde_json::Value::Null
+            );
+        }
     }
 
     #[test]
@@ -1350,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn every_stage_and_agent_state_has_a_word_of_its_own() {
+    fn every_stage_agent_state_check_state_and_point_state_has_a_word_of_its_own() {
         fn words<T: Serialize>(all: impl IntoIterator<Item = T>) -> Vec<String> {
             all.into_iter()
                 .map(|w| serde_json::to_string(&w).expect("a word"))
@@ -1403,6 +1604,19 @@ mod tests {
         assert_eq!(
             words(states.iter().map(StateWord::from)),
             ["working", "idle", "blocked", "errored", "ended"]
+        );
+        assert_eq!(
+            words([
+                CheckState::Passed,
+                CheckState::Running,
+                CheckState::Waiting,
+                CheckState::Failed
+            ]),
+            ["passed", "running", "waiting", "failed"]
+        );
+        assert_eq!(
+            words([PointState::Open, PointState::Resolved]),
+            ["open", "resolved"]
         );
     }
 

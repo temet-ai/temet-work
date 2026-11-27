@@ -179,6 +179,8 @@ fn review_blocks_go_back_to_the_author_then_to_an_arbiter_after_three_rounds() {
         verdict: Verdict::Block {
             points: vec!["no test for an invalid document".into()],
         },
+        failed: None,
+        open: None,
     };
     for round in 1..3 {
         assert_eq!(
@@ -222,6 +224,8 @@ fn a_verdict_for_an_old_round_changes_nothing() {
         issue: issue("1"),
         round: 2,
         verdict: Verdict::Approve,
+        failed: None,
+        open: None,
     };
     assert_eq!(w.apply(&stale), vec![]);
     assert_eq!(stage(&w, "1"), Stage::InReview { round: 1 });
@@ -241,6 +245,8 @@ fn merges_once_review_and_checks_pass_in_either_order() {
             issue: issue("1"),
             round: 1,
             verdict: Verdict::Approve,
+            failed: None,
+            open: None,
         };
         let checks = Event::ChecksFinished {
             issue: issue("1"),
@@ -295,6 +301,8 @@ fn merged_deployed_and_checked_closes_the_issue_and_frees_the_folder_for_the_nex
             issue: issue("1"),
             round: 1,
             verdict: Verdict::Approve,
+            failed: None,
+            open: None,
         },
         Event::ChecksFinished {
             issue: issue("1"),
@@ -347,6 +355,8 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
                 issue: issue("1"),
                 round,
                 verdict: Verdict::Block { points: vec![] },
+                failed: None,
+                open: None,
             });
             if round < 3 {
                 w.apply(&Event::PullRequestReady {
@@ -408,6 +418,8 @@ fn arbitrating() -> World {
             issue: issue("1"),
             round,
             verdict: Verdict::Block { points: vec![] },
+            failed: None,
+            open: None,
         });
         if round < 3 {
             w.apply(&Event::PullRequestReady {
@@ -547,6 +559,8 @@ fn overturning_after_the_merge_changes_no_stage() {
                 issue: issue("1"),
                 round: 4,
                 verdict: Verdict::Approve,
+                failed: None,
+                open: None,
             });
             w.apply(&Event::ChecksFinished {
                 issue: issue("1"),
@@ -801,6 +815,8 @@ fn an_author_that_has_not_heard_its_fixes_is_told_again_until_it_has() {
         verdict: Verdict::Block {
             points: points.clone(),
         },
+        failed: None,
+        open: None,
     });
     let fix = Effect::RequestFix {
         issue: issue("1"),
@@ -830,6 +846,8 @@ fn a_new_author_on_an_issue_being_fixed_hears_the_fixes_in_its_brief() {
         verdict: Verdict::Block {
             points: vec!["no test for a stopped clock".into()],
         },
+        failed: None,
+        open: None,
     });
     let launch = w
         .launch(
@@ -918,6 +936,8 @@ fn a_ci_failure_or_a_refused_merge_does_not_use_up_a_review_round() {
         issue: issue("1"),
         round: 1,
         verdict: Verdict::Approve,
+        failed: None,
+        open: None,
     });
     w.apply(&Event::ChecksFinished {
         issue: issue("1"),
@@ -977,7 +997,7 @@ fn a_conflict_fix_names_the_rebase_the_push_and_ready_in_that_order() {
     let [Effect::RequestFix { points, .. }] = effects.as_slice() else {
         panic!("{effects:?}");
     };
-    let told = crate::brief::fixes(&issue("1"), points);
+    let told = crate::brief::fixes(&w.issues[&issue("1")], points);
     let steps = [
         "rebase onto that branch",
         "git push --force-with-lease",
@@ -996,6 +1016,8 @@ fn verdict(round: u8, verdict: Verdict) -> Event {
         issue: issue("1"),
         round,
         verdict,
+        failed: None,
+        open: None,
     }
 }
 
@@ -1096,6 +1118,8 @@ fn a_repeated_round_1_lost_to_a_restart_is_sent_to_its_running_reviewer_again() 
     let approve = Command::Review {
         issue: issue("1"),
         verdict: Verdict::Approve,
+        failed: Vec::new(),
+        open: Vec::new(),
     };
     for (path, events) in paths {
         let mut w = in_review();
@@ -1651,6 +1675,8 @@ fn a_retry_asks_again_for_the_deploy_or_verify_and_survives_a_restart() {
             issue: issue("1"),
             round: 1,
             verdict: Verdict::Approve,
+            failed: None,
+            open: None,
         },
         Event::ChecksFinished {
             issue: issue("1"),
@@ -1740,6 +1766,8 @@ fn merging_two() -> World {
         issue: gld(),
         round: 1,
         verdict: Verdict::Approve,
+        failed: None,
+        open: None,
     });
     w.apply(&Event::ChecksFinished {
         issue: gld(),
@@ -1958,6 +1986,8 @@ fn a_refused_merge_after_the_first_keeps_it_on_record_and_tells_the_author() {
         issue: gld(),
         round: 1,
         verdict: Verdict::Approve,
+        failed: None,
+        open: None,
     });
     let effects = w.apply(&Event::ChecksFinished {
         issue: gld(),
@@ -1994,6 +2024,8 @@ fn replaying_mid_sequence_resumes_at_the_second_repository() {
             issue: gld(),
             round: 1,
             verdict: Verdict::Approve,
+            failed: None,
+            open: None,
         },
         Event::ChecksFinished {
             issue: gld(),
@@ -2048,6 +2080,8 @@ fn an_old_single_pull_event_is_the_first_repositorys_and_an_old_merged_is_all_of
         issue: gld(),
         round: 1,
         verdict: Verdict::Approve,
+        failed: None,
+        open: None,
     });
     w.apply(&Event::ChecksFinished {
         issue: gld(),

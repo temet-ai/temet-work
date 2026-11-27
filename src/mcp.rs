@@ -111,18 +111,20 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ready",
-            description: "The author's pull requests are open and every check of the plan holds. Their numbers are needed the first time: pull for an issue that changes one repository, pulls (repository to number) for each repository of one that changes several. With a fix for a review round or a ruling, replies holds the author's reply to each of its points, in their order.",
+            description: "The author's pull requests are open and every check of the plan holds. Their numbers are needed the first time: pull for an issue that changes one repository, pulls (repository to number) for each repository of one that changes several. The first ready after a review's block takes replies, one for each of the block's points, in their order; any other ready takes none.",
             acts: true,
-            schema: json!({"type": "object", "properties": {"issue": issue_field(), "pull": {"type": "string"}, "pulls": {"type": "object", "additionalProperties": {"type": "string"}}, "replies": {"type": "array", "items": {"type": "string"}, "description": "What you did about each point of the review round your fix answers, or why you did not, in the points' order."}}, "required": ["issue"]}),
+            schema: json!({"type": "object", "properties": {"issue": issue_field(), "pull": {"type": "string"}, "pulls": {"type": "object", "additionalProperties": {"type": "string"}}, "replies": {"type": "array", "items": {"type": "string"}, "description": "One entry for each point of the block this ready answers, in the points' order: what you did about it, or why you did not."}}, "required": ["issue"]}),
         },
         Tool {
             name: "review",
-            description: "A reviewer's verdict on the round under review: approve, or block with each thing to fix.",
+            description: "A reviewer's verdict on the round under review: approve, or block with each thing to fix. An approve passes every check of the plan and resolves every point of the round before. A block names in failed_checks each check that does not hold, and in open_points each point of the round before still not dealt with; every check it leaves out counts as passed, and every point it leaves out as resolved. A point kept open joins the block's points.",
             acts: true,
             schema: json!({"type": "object", "properties": {
                 "issue": issue_field(),
                 "verdict": {"type": "string", "enum": ["approve", "block"]},
-                "points": {"type": "array", "items": {"type": "string"}}
+                "points": {"type": "array", "items": {"type": "string"}},
+                "failed_checks": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "On a block: the number of each check of the plan that does not hold, counted from 1 in the plan's order."},
+                "open_points": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "On a block after round 1: the number of each point of the round before that is still not dealt with, counted from 1 in its order."}
             }, "required": ["issue", "verdict"]}),
         },
         Tool {
@@ -211,6 +213,22 @@ fn number(args: &Value, key: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{key} is missing or not a whole number"))
 }
 
+/// The whole numbers in the list `key`, or none when it is left out.
+fn numbers(args: &Value, key: &str) -> Result<Vec<usize>, String> {
+    let Some(list) = args.get(key) else {
+        return Ok(Vec::new());
+    };
+    list.as_array()
+        .ok_or_else(|| format!("{key} is a list of numbers"))?
+        .iter()
+        .map(|n| {
+            n.as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| format!("{key} holds whole numbers counted from 1, not {n}"))
+        })
+        .collect()
+}
+
 fn issue(args: &Value) -> Result<IssueId, String> {
     let s = text(args, "issue")?;
     IssueId::parse(&s).ok_or_else(|| format!("{s} is not an issue; write project#key"))
@@ -258,6 +276,7 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                         Ok(Check {
                             done_when: text(c, "done_when")?,
                             proven_by: text(c, "proven_by")?,
+                            state: None,
                         })
                     })
                     .collect::<Result<_, String>>()?,
@@ -315,6 +334,8 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                 },
                 other => return Err(format!("verdict is approve or block, not {other}")),
             },
+            failed: numbers(args, "failed_checks")?,
+            open: numbers(args, "open_points")?,
         },
         "retry" => Command::Retry {
             issue: issue(args)?,
@@ -520,7 +541,7 @@ mod tests {
         let answer = call(
             Level::Act,
             "review",
-            json!({"issue": "ankh#1", "verdict": "block", "points": ["no test for a stopped clock"]}),
+            json!({"issue": "ankh#1", "verdict": "block", "points": ["no test for a stopped clock"], "failed_checks": [2], "open_points": [1, 3]}),
             &mut sent,
         );
         assert_eq!(answer["result"]["isError"], false);
@@ -534,10 +555,22 @@ mod tests {
                     issue: IssueId::new("ankh", "1"),
                     verdict: Verdict::Block {
                         points: vec!["no test for a stopped clock".into()]
-                    }
+                    },
+                    failed: vec![2],
+                    open: vec![1, 3],
                 }
             }]
         );
+        // A number that is not a whole number is refused before it is sent.
+        let mut sent = Vec::new();
+        let answer = call(
+            Level::Act,
+            "review",
+            json!({"issue": "ankh#1", "verdict": "block", "points": ["x"], "failed_checks": ["two"]}),
+            &mut sent,
+        );
+        assert_eq!(answer["result"]["isError"], true);
+        assert!(sent.is_empty());
     }
 
     #[test]
