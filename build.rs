@@ -15,8 +15,10 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=TEMET_WORK_BUILD={id}");
     // Without a rerun-if line, cargo reruns this when any file in the package
-    // changes; a commit that changes no file is caught by the head below.
+    // changes; a commit that changes no file moves a ref, which is caught below.
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=crates");
     println!("cargo:rerun-if-changed=Cargo.toml");
