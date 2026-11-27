@@ -404,11 +404,10 @@ impl World {
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == (Stage::InReview { round: *round })
                 {
+                    // The latest verdict counts: a block takes an approval back.
+                    i.review_ok = matches!(verdict, Verdict::Approve);
                     match verdict {
-                        Verdict::Approve => {
-                            i.review_ok = true;
-                            Self::try_merge(i, &mut out);
-                        }
+                        Verdict::Approve => Self::try_merge(i, &mut out),
                         Verdict::Block { points } if u64::from(*round) < rounds => {
                             Self::send_back(i, *round, points.clone(), false, &mut out);
                         }
@@ -557,7 +556,8 @@ impl World {
                         .filter(|_| i.pulls.len() > 1)
                         .map_or_else(String::new, |r| format!(" in {r}"));
                     let points = vec![format!(
-                        "the pull request{which} conflicts with the branch it merges into"
+                        "the pull request{which} conflicts with the branch it merges into: rebase \
+                         onto that branch, then push your own branch with `git push --force-with-lease`"
                     )];
                     Self::send_back(i, round, points, true, &mut out);
                 }
@@ -701,16 +701,18 @@ impl World {
 
     /// Whether `agent`'s issue is waiting on it to finish its step: a refiner while
     /// its issue is refining, an author while it is worked on, a reviewer that has
-    /// heard its round, an arbiter while the issue is with the arbiter.
+    /// heard its round, an arbiter while the issue is with the arbiter. Once a
+    /// reviewer's or arbiter's approval is in, the issue waits on the checks, not
+    /// on that agent.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
         let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
             return false;
         };
         match (i.stage, agent.role) {
             (Stage::Refining, Role::Refiner)
-            | (Stage::Working | Stage::Fixing { .. }, Role::Author)
-            | (Stage::Arbitration { .. }, Role::Arbiter) => true,
-            (Stage::InReview { .. }, Role::Reviewer) => i.told,
+            | (Stage::Working | Stage::Fixing { .. }, Role::Author) => true,
+            (Stage::Arbitration { .. }, Role::Arbiter) => !i.review_ok,
+            (Stage::InReview { .. }, Role::Reviewer) => i.told && !i.review_ok,
             _ => false,
         }
     }
@@ -728,12 +730,12 @@ impl World {
 
     /// The agents each issue needs now and does not have: a refiner while it is
     /// refining, an author while it is worked on, a reviewer in review, an arbiter
-    /// with the arbiter. This brings back an agent whose session ended, or one
-    /// the daemon decided on and did not start before it stopped. A running
-    /// author or reviewer that has not heard its fixes or its new round is told
-    /// again. After
-    /// the `starts` setting's number of agents of one role on one issue it gives
-    /// up, and says so.
+    /// with the arbiter. An issue in review or with the arbiter whose approval is in
+    /// needs neither while its checks run. This brings back an agent whose session
+    /// ended, or one the daemon decided on and did not start before it stopped. A
+    /// running author or reviewer that has not heard its fixes or its new round is
+    /// told again. After the `starts` setting's number of agents of one role on one
+    /// issue it gives up, and says so.
     pub fn missing(&self) -> Missing {
         let mut out = Missing::default();
         for i in self.issues.values() {
@@ -772,7 +774,9 @@ impl World {
                         folder: i.folder.clone(),
                     },
                 ),
-                Stage::InReview { .. } if i.review_waived => continue,
+                // Approved, by a verdict, a ruling or a person's overturn: only the
+                // checks are left.
+                Stage::InReview { .. } | Stage::Arbitration { .. } if i.review_ok => continue,
                 Stage::InReview { round } => (
                     Role::Reviewer,
                     Effect::StartReview {

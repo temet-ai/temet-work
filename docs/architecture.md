@@ -109,12 +109,15 @@ whose session ended, or one it decided on and did not start before it stopped. A
 agents of one role have ended on one issue it stops and lists the issue as a problem. It
 also asks again for a merge, deploy or verify that was lost; the parts that do them do not
 repeat work already done or running; a deploy that restarts the daemon is recorded by
-the new daemon, which finds the build in the handoff file (`docs/configuration.md`). An agent its issue waits on that sits idle is
-reminded after ten minutes and again after twenty, and its session is stopped after thirty
-so a fresh one takes over. A refiner stops once its plan is in; the author, reviewer and
-arbiter stop once the issue's last pull request merges. A group has no coordinator agent: in the research fleet the standing seat waited 25
-of its 28 minutes, and in mike's larger runs such seats were where the token and turn costs
-came from (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
+the new daemon, which finds the build in the handoff file (`docs/configuration.md`). An agent its
+issue waits on that sits idle is reminded after ten minutes and again after twenty, and its session
+is stopped after thirty so a fresh one takes over. A reviewer or arbiter whose approval is in is not
+waited on while the checks run: it is not reminded, no other is started in its place, and it stays
+until the merge, so after a failed check a reviewer still running hears the next round. A refiner
+stops once its plan is in; the author, reviewer and arbiter stop once the issue's last pull request
+merges. A group has no coordinator agent: in the research fleet the standing seat waited 25 of its
+28 minutes, and in mike's larger runs such seats were where the token and turn costs came from
+(`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
 
 ## How parts meet
 

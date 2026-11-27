@@ -1088,6 +1088,45 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_reviewer_that_approved_is_neither_reminded_nor_stopped() {
+        let mut w = world();
+        let mut part = runners();
+        let id = IssueId::new("ankh", "1");
+        // ankh#1 is in review; the reviewer started here has heard the round.
+        w.issues.get_mut(&id).expect("there").stage =
+            temet_work_core::model::Stage::InReview { round: 1 };
+        let launch = w
+            .launch(&GroupId::new("watch"), Role::Reviewer, &id, None)
+            .expect("launch");
+        let reviewer = launch.agent.clone();
+        let run = Effect::Run {
+            launch: Box::new(launch),
+            before: None,
+            program: Program {
+                argv: vec!["cat".into()],
+                env: vec![],
+            },
+        };
+        let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
+            panic!("not started");
+        };
+        apply(&mut w, &events);
+        // It approved, and the checks are still running.
+        w.issues.get_mut(&id).expect("there").review_ok = true;
+        for n in 0..=4 {
+            let polled = part.poll(&w, n * 600_000).events;
+            let ended = Event::AgentChanged {
+                agent: reviewer.clone(),
+                state: AgentState::Ended,
+            };
+            assert!(!polled.contains(&ended), "stopped at {n}0 minutes");
+            apply(&mut w, &polled);
+            let screen = part.screen(&reviewer.0).expect("screen");
+            assert!(!screen.contains("is still waiting on you"), "{screen}");
+        }
+    }
+
+    #[test]
     fn a_fix_with_no_author_running_is_left_to_the_next_authors_brief() {
         let fix = Effect::RequestFix {
             issue: IssueId::new("ankh", "1"),

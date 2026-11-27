@@ -381,8 +381,9 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
     }
 }
 
-/// A world where the arbiter ruled on issue 1 after three review rounds.
-fn ruled(approve: bool) -> World {
+/// A world where issue 1 is with the arbiter after three review rounds, its
+/// checks still running.
+fn arbitrating() -> World {
     let mut w = working_on_one();
     w.apply(&Event::PullRequestReady {
         issue: issue("1"),
@@ -403,12 +404,12 @@ fn ruled(approve: bool) -> World {
             });
         }
     }
-    w.apply(&Event::ChecksFinished {
-        issue: issue("1"),
-        passed: true,
-        failing: vec![],
-    });
-    w.apply(&Event::DecisionMade {
+    w
+}
+
+/// The arbiter's ruling on issue 1.
+fn ruling(approve: bool) -> Event {
+    Event::DecisionMade {
         decision: Decision {
             id: DecisionId(1),
             issue: issue("1"),
@@ -421,7 +422,18 @@ fn ruled(approve: bool) -> World {
             overturned_to: None,
             overturn_reason: String::new(),
         },
+    }
+}
+
+/// A world where the arbiter ruled on issue 1 after its checks passed.
+fn ruled(approve: bool) -> World {
+    let mut w = arbitrating();
+    w.apply(&Event::ChecksFinished {
+        issue: issue("1"),
+        passed: true,
+        failing: vec![],
     });
+    w.apply(&ruling(approve));
     w
 }
 
@@ -877,7 +889,10 @@ fn a_conflict_seen_in_review_or_arbitration_goes_back_with_the_same_round() {
     assert_eq!(stage(&w, "1"), Stage::Fixing { round: 1 });
     assert_eq!(
         w.issues[&issue("1")].fix,
-        ["the pull request conflicts with the branch it merges into"]
+        [
+            "the pull request conflicts with the branch it merges into: rebase onto that branch, \
+             then push your own branch with `git push --force-with-lease`"
+        ]
     );
     let mut w = in_review();
     w.issues.get_mut(&issue("1")).expect("issue").stage = Stage::Arbitration { round: 2 };
@@ -893,6 +908,149 @@ fn a_conflict_seen_in_review_or_arbitration_goes_back_with_the_same_round() {
         repo: None,
     });
     assert_eq!(stage(&w, "1"), Stage::Merging);
+}
+
+#[test]
+fn a_conflict_fix_names_the_rebase_the_push_and_ready_in_that_order() {
+    let mut w = in_review();
+    let effects = w.apply(&Event::PullConflicts {
+        issue: issue("1"),
+        repo: None,
+    });
+    let [Effect::RequestFix { points, .. }] = effects.as_slice() else {
+        panic!("{effects:?}");
+    };
+    let told = crate::brief::fixes(&issue("1"), points);
+    let steps = [
+        "rebase onto that branch",
+        "git push --force-with-lease",
+        "temet-work ready ankh#1",
+    ];
+    let at: Vec<usize> = steps
+        .iter()
+        .map(|s| told.find(s).unwrap_or_else(|| panic!("no {s:?} in {told}")))
+        .collect();
+    assert!(at.is_sorted(), "{told}");
+}
+
+/// The review's verdict on issue 1.
+fn verdict(round: u8, verdict: Verdict) -> Event {
+    Event::ReviewFinished {
+        issue: issue("1"),
+        round,
+        verdict,
+    }
+}
+
+fn checks(passed: bool) -> Event {
+    Event::ChecksFinished {
+        issue: issue("1"),
+        passed,
+        failing: vec![],
+    }
+}
+
+fn waited_on(w: &World, agent: &str) -> bool {
+    w.waiting_on(&w.agents[&AgentId::new(agent)])
+}
+
+#[test]
+fn an_approving_reviewer_is_not_waited_on_while_checks_run() {
+    let mut w = in_review();
+    assert!(waited_on(&w, "reviewer-1"), "before its verdict");
+    w.apply(&verdict(1, Verdict::Approve));
+    assert_eq!(stage(&w, "1"), Stage::InReview { round: 1 });
+    assert_eq!(w.issues[&issue("1")].checks_ok, None);
+    assert!(!waited_on(&w, "reviewer-1"));
+}
+
+#[test]
+fn an_approving_reviewer_that_ends_is_not_replaced_while_checks_run() {
+    let mut w = in_review();
+    w.apply(&verdict(1, Verdict::Approve));
+    w.apply(&ended("reviewer-1"));
+    assert_eq!(w.missing(), crate::world::Missing::default());
+}
+
+#[test]
+fn a_round_approved_before_its_running_reviewer_heard_of_it_is_not_told_again() {
+    let mut w = in_review();
+    w.apply(&verdict(
+        1,
+        Verdict::Block {
+            points: vec!["no test for a stopped clock".into()],
+        },
+    ));
+    w.apply(&Event::PullRequestReady {
+        issue: issue("1"),
+        pull: None,
+        pulls: Default::default(),
+    });
+    // A person's verdict does not wait for the reviewer to have heard the round.
+    w.apply(&verdict(2, Verdict::Approve));
+    assert!(!w.issues[&issue("1")].told);
+    assert_eq!(w.missing().start, vec![]);
+}
+
+#[test]
+fn after_a_ci_failure_the_next_round_waits_on_its_reviewer_again() {
+    let mut w = in_review();
+    w.apply(&verdict(1, Verdict::Approve));
+    w.apply(&checks(false));
+    let ready = Event::PullRequestReady {
+        issue: issue("1"),
+        pull: None,
+        pulls: Default::default(),
+    };
+    let next = Effect::StartReview {
+        issue: issue("1"),
+        round: 1,
+    };
+    assert_eq!(w.apply(&ready), vec![next.clone()], "the reviewer hears it");
+    w.apply(&Event::Told { issue: issue("1") });
+    assert!(waited_on(&w, "reviewer-1"));
+    w.apply(&ended("reviewer-1"));
+    assert_eq!(w.missing().start, vec![next]);
+}
+
+#[test]
+fn an_approving_arbiter_is_not_waited_on_or_replaced_while_checks_run() {
+    let mut w = arbitrating();
+    w.apply(&started("arbiter-1", Role::Arbiter, "1"));
+    assert!(waited_on(&w, "arbiter-1"), "before its ruling");
+    w.apply(&ruling(true));
+    assert_eq!(stage(&w, "1"), Stage::Arbitration { round: 3 });
+    assert!(!waited_on(&w, "arbiter-1"));
+    w.apply(&ended("arbiter-1"));
+    assert_eq!(w.missing(), crate::world::Missing::default());
+    assert_eq!(
+        w.apply(&checks(true)),
+        vec![Effect::Merge { issue: issue("1") }]
+    );
+}
+
+#[test]
+fn a_block_after_an_approval_in_the_last_round_leaves_the_arbiter_to_rule() {
+    let block = |round| verdict(round, Verdict::Block { points: vec![] });
+    let mut w = in_review();
+    for round in 1..3 {
+        w.apply(&block(round));
+        w.apply(&Event::PullRequestReady {
+            issue: issue("1"),
+            pull: None,
+            pulls: Default::default(),
+        });
+    }
+    w.apply(&verdict(3, Verdict::Approve));
+    w.apply(&block(3));
+    w.apply(&started("arbiter-1", Role::Arbiter, "1"));
+    assert!(waited_on(&w, "arbiter-1"));
+    assert_eq!(
+        w.apply(&checks(true)),
+        vec![],
+        "the approval was taken back"
+    );
+    assert_eq!(stage(&w, "1"), Stage::Arbitration { round: 3 });
 }
 
 #[test]
@@ -1349,6 +1507,24 @@ fn checks_pass_only_when_every_pull_request_passed_and_a_failure_names_its_repos
     assert_eq!(i.checks_ok, Some(false));
     assert!(matches!(i.stage, Stage::Fixing { .. }));
     assert_eq!(i.fix, vec!["CI check rust (api) failed".to_string()]);
+}
+
+#[test]
+fn a_conflict_in_one_of_several_pull_requests_names_its_repository() {
+    let mut w = two_repos_planned();
+    plan_two(&mut w);
+    ready_both(&mut w);
+    w.apply(&Event::PullConflicts {
+        issue: gld(),
+        repo: Some(pid("api")),
+    });
+    assert_eq!(
+        w.issues[&gld()].fix,
+        [
+            "the pull request in api conflicts with the branch it merges into: rebase onto that \
+             branch, then push your own branch with `git push --force-with-lease`"
+        ]
+    );
 }
 
 #[test]

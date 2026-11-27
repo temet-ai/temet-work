@@ -99,8 +99,8 @@ impl World {
             Stage::New if self.groups.values().any(|g| self.in_scope(g, i)) => Role::Refiner,
             Stage::Refining => Role::Refiner,
             Stage::Ready if i.group.is_some() && self.ready_to_start(i) => Role::Author,
-            Stage::InReview { .. } if !i.review_waived => Role::Reviewer,
-            Stage::Arbitration { .. } => Role::Arbiter,
+            Stage::InReview { .. } if !i.review_ok => Role::Reviewer,
+            Stage::Arbitration { .. } if !i.review_ok => Role::Arbiter,
             _ => return None,
         };
         let machine = self.machine_for(&i.id, role)?;

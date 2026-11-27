@@ -1062,17 +1062,15 @@ mod tests {
 
         #[test]
         fn a_conflict_in_the_second_repository_names_it() {
-            let mut w = world(Stage::InReview { round: 1 });
+            let w = world(Stage::InReview { round: 1 });
             let mut fake = host(Checks::Passed, Checks::Passed);
             fake.pulls[1].1.conflicting = true;
             let events = part(fake).poll(&w, 0).events;
-            for e in &events {
-                w.apply(e);
-            }
-            assert_eq!(
-                w.issues[&gld()].fix,
-                ["the pull request in svc conflicts with the branch it merges into"]
-            );
+            let conflict = Event::PullConflicts {
+                issue: gld(),
+                repo: Some(pid("svc")),
+            };
+            assert!(events.contains(&conflict), "{events:?}");
         }
 
         #[test]

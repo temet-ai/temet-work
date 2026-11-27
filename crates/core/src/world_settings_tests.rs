@@ -597,6 +597,25 @@ fn an_issue_waiting_for_something_else_is_not_waiting_for_a_machine() {
 }
 
 #[test]
+fn an_approved_issue_waits_for_its_checks_not_for_a_reviewers_machine() {
+    let mut w = working();
+    let issue = id("ankh", "1");
+    machine(&mut w, task("1"), Some(Role::Reviewer), "klatch");
+    w.apply(&Event::PullRequestReady {
+        issue: issue.clone(),
+        pull: Some("1".into()),
+        pulls: Default::default(),
+    });
+    assert_eq!(w.machine_waits()[0].role, Role::Reviewer);
+    w.apply(&Event::ReviewFinished {
+        issue,
+        round: 1,
+        verdict: Verdict::Approve,
+    });
+    assert_eq!(w.machine_waits(), vec![]);
+}
+
+#[test]
 fn an_issue_across_repositories_takes_all_its_folders_on_its_machine_or_none() {
     let project = |id: &str| Event::ProjectAdded {
         project: ProjectId::new(id),
