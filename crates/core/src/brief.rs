@@ -71,6 +71,92 @@ it may be on another issue's branch. Do not switch its branch or change any file
 pull request's changes from its code host. To run checks, make a separate checkout of the pull \
 request (with none, of the commit you need) outside this folder, and remove it when you are done.";
 
+/// What an author is told about making its change, and the end of its brief: the
+/// `ready` command for `issue`. An author on an issue with pull requests is given
+/// each one, and opens one only in a repository that has none.
+fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, String) {
+    let several = held.len() > 1;
+    let folders = if several {
+        let list: String = held
+            .iter()
+            .map(|h| format!("- {} ({}): {}\n", h.project, h.repo, h.path))
+            .collect();
+        format!(
+            "This change spans several repositories. You hold a folder in each; you start in the first:\n{list}"
+        )
+    } else {
+        String::new()
+    };
+    // The repositories with no pull request: `ready` has to name one in each.
+    let lacking: Vec<&Held> = held
+        .iter()
+        .filter(|h| !pulls.iter().any(|p| p.project == h.project))
+        .collect();
+    let numbers = if several {
+        lacking
+            .iter()
+            .map(|h| format!(" {}=<pull request number>", h.project))
+            .collect()
+    } else if pulls.is_empty() || !lacking.is_empty() {
+        " <pull request number>".to_string()
+    } else {
+        String::new()
+    };
+    if pulls.is_empty() {
+        let open = if several {
+            "Make the branch and open the pull requests yourself: use the same branch name in every repository \
+             and open one pull request in each.\n"
+        } else {
+            ""
+        };
+        return (
+            format!(" Make a branch, change the code and open a pull request.\n{folders}{open}"),
+            format!(
+                "When the pull request is open and every check holds, run: temet-work ready {issue}{numbers}"
+            ),
+        );
+    }
+    let has = if pulls.len() > 1 {
+        "pull requests"
+    } else {
+        "a pull request"
+    };
+    let none_merged = pulls.iter().all(|p| !p.merged);
+    let push = match (none_merged, pulls.len()) {
+        (true, 1) => "Push your fixes to that pull request's branch.",
+        (true, _) => "Push your fixes to each pull request's branch.",
+        (false, _) => "Push your fixes to the branch of each one not marked (merged already).",
+    };
+    // A merged pull request's repository may need a new one for a further fix.
+    let no_other = if none_merged && lacking.is_empty() {
+        "Do not open another pull request."
+    } else {
+        "Do not open another pull request in a repository whose pull request has not merged."
+    };
+    let open = if lacking.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = lacking
+            .iter()
+            .map(|h| format!("{} ({})", h.project, h.repo))
+            .collect();
+        format!(
+            "Open a pull request only where the issue has none yet: {}. Use the same branch name there \
+             as in the other repositories.\n",
+            list.join(", ")
+        )
+    };
+    (
+        format!(
+            "\n{folders}The issue already has {has}:\n{list}{push} {no_other}\n{open}",
+            list = pull_list(pulls)
+        ),
+        format!(
+            "When your fixes are pushed and every check holds, run: temet-work ready {issue}{numbers}"
+        ),
+    )
+}
+
 /// What a refiner's plain `model` becomes (`docs/settings.md`, "A model belongs
 /// to a runtime").
 const PLAIN_MODEL: &str = "A plain model is recorded as the global runtime's, as \
@@ -176,30 +262,8 @@ pub fn write(
     let replies = issue.block_to_answer().map_or_else(String::new, |block| {
         format!(" {}", reply_flags(block.points.len()))
     });
-    let several = held.len() > 1;
-    let folders = if several {
-        let list: String = held
-            .iter()
-            .map(|h| format!("- {} ({}): {}\n", h.project, h.repo, h.path))
-            .collect();
-        format!(
-            "This change spans several repositories. You hold a folder in each; you start in the first:\n{list}\
-             Make the branch and open the pull requests yourself: use the same branch name in every repository \
-             and open one pull request in each.\n"
-        )
-    } else {
-        String::new()
-    };
-    let ready = if several {
-        let names: Vec<String> = held
-            .iter()
-            .map(|h| format!("{}=<pull request number>", h.project))
-            .collect();
-        names.join(" ")
-    } else {
-        "<pull request number>".to_string()
-    };
-    let pulls = if pulls.len() > 1 {
+    let (work, ready) = authors_work(id, &held, pulls);
+    let to_review = if pulls.len() > 1 {
         format!(
             "It changes several repositories; review every one of its pull requests:\n{}",
             pull_list(pulls)
@@ -236,15 +300,15 @@ pub fn write(
             "Work on {id}: {title}. It is {source}.\n\
              {read} A decision may not depart from a point the issue states or leave any failure it \
              describes in place. Where a point cannot be met, say so in the pull request.\n\
-             This folder is yours until the change merges. Make a branch, change the code and open a pull request.\n\
-             {folders}{fixes}The plan's checks, each to hold before you finish:\n{checks}\
-             When the pull request is open and every check holds, run: temet-work ready {id} {ready}{replies}",
+             This folder is yours until the change merges.{work}\
+             {fixes}The plan's checks, each to hold before you finish:\n{checks}\
+             {ready}{replies}",
             title = issue.title,
             read = read_the_issue(id),
         ),
         Role::Reviewer => format!(
             "Review the pull request for {id}: {title}. It is {source}.\n\
-             {pulls}{judged}\
+             {to_review}{judged}\
              {LEAVE_THE_FOLDER}\n\
              Read the whole change, not only the last commit. Run the checks yourself where you can, \
              in that separate checkout.\n\
@@ -258,7 +322,7 @@ pub fn write(
         ),
         Role::Arbiter => format!(
             "Review rounds on {id} ({title}) ran out. It is {source}.\n\
-             {pulls}The plan's checks:\n{checks}\
+             {to_review}The plan's checks:\n{checks}\
              {LEAVE_THE_FOLDER}\n\
              Read the pull request, the review points and the author's answers. Decide whether it merges.\n\
              {hold}\n\
@@ -1060,6 +1124,182 @@ mod tests {
         ] {
             assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
         }
+    }
+
+    /// The author's task on an issue of `held` folders and `pulls` pull requests,
+    /// with one check in its plan.
+    fn author_task(held: &[(&str, &str)], pulls: &[(&str, &str, &str, bool)]) -> String {
+        let mut issue = lamp_issue();
+        issue.plan = Some(Plan {
+            checks: vec![Check::new("a dry lamp is refused", "the dry lamp test")],
+            ..Plan::default()
+        });
+        if !pulls.is_empty() {
+            issue.stage = crate::model::Stage::Fixing { round: 1 };
+            issue.fix = vec!["CI check tests failed".into()];
+            issue.fix_keeps_round = true;
+        }
+        let held = held
+            .iter()
+            .map(|(project, repo)| Held {
+                project: ProjectId::new(*project),
+                repo: (*repo).into(),
+                path: format!("/srv/{project}"),
+            })
+            .collect();
+        let pulls: Vec<Pulled> = pulls
+            .iter()
+            .map(|(project, repo, number, merged)| Pulled {
+                project: ProjectId::new(*project),
+                repo: (*repo).into(),
+                number: (*number).into(),
+                merged: *merged,
+            })
+            .collect();
+        write(
+            Role::Author,
+            &issue,
+            Some("ankh-morpork/watch"),
+            &[],
+            Workplace {
+                held,
+                ..Workplace::default()
+            },
+            &pulls,
+            &[],
+        )
+        .task
+    }
+
+    const TWO_HELD: [(&str, &str); 2] = [
+        ("watch", "ankh-morpork/watch"),
+        ("clacks", "ankh-morpork/clacks"),
+    ];
+
+    #[test]
+    fn the_first_authors_brief_asks_for_a_new_pull_request() {
+        assert_eq!(
+            author_task(&TWO_HELD[..1], &[]),
+            "Work on watch#31: A lamp with no oil: refuse it, or list it under Problems. It is issue \
+             31 of ankh-morpork/watch in its tracker.\n\
+             Read the issue's own text: run temet-work issue watch#31, which prints the issue's text \
+             from its tracker. A decision may not depart from a point the issue states or leave any \
+             failure it describes in place. Where a point cannot be met, say so in the pull request.\n\
+             This folder is yours until the change merges. Make a branch, change the code and open a \
+             pull request.\n\
+             The plan's checks, each to hold before you finish:\n\
+             - a dry lamp is refused (shown by: the dry lamp test)\n\
+             When the pull request is open and every check holds, run: temet-work ready watch#31 \
+             <pull request number>"
+        );
+        assert_eq!(
+            author_task(&TWO_HELD, &[]),
+            "Work on watch#31: A lamp with no oil: refuse it, or list it under Problems. It is issue \
+             31 of ankh-morpork/watch in its tracker.\n\
+             Read the issue's own text: run temet-work issue watch#31, which prints the issue's text \
+             from its tracker. A decision may not depart from a point the issue states or leave any \
+             failure it describes in place. Where a point cannot be met, say so in the pull request.\n\
+             This folder is yours until the change merges. Make a branch, change the code and open a \
+             pull request.\n\
+             This change spans several repositories. You hold a folder in each; you start in the \
+             first:\n\
+             - watch (ankh-morpork/watch): /srv/watch\n\
+             - clacks (ankh-morpork/clacks): /srv/clacks\n\
+             Make the branch and open the pull requests yourself: use the same branch name in every \
+             repository and open one pull request in each.\n\
+             The plan's checks, each to hold before you finish:\n\
+             - a dry lamp is refused (shown by: the dry lamp test)\n\
+             When the pull request is open and every check holds, run: temet-work ready watch#31 \
+             watch=<pull request number> clacks=<pull request number>"
+        );
+    }
+
+    #[test]
+    fn a_new_author_is_given_the_issues_pull_request_and_told_not_to_open_another() {
+        for held in [&TWO_HELD[..0], &TWO_HELD[..1]] {
+            let task = author_task(held, &[("watch", "ankh-morpork/watch", "57", false)]);
+            assert!(
+                task.contains(
+                    "The issue already has a pull request:\n\
+                     - watch (ankh-morpork/watch): pull request 57\n\
+                     Push your fixes to that pull request's branch. Do not open another pull request.\n\
+                     Earlier work on it came back with these to fix first:\n\
+                     - CI check tests failed\n"
+                ),
+                "{task}"
+            );
+            assert!(!task.contains("open a pull request"), "{task}");
+            assert!(!task.contains("<pull request number>"), "{task}");
+            assert!(
+                task.ends_with(
+                    "When your fixes are pushed and every check holds, run: temet-work ready watch#31"
+                ),
+                "{task}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_author_is_given_every_pull_request_and_pushes_to_those_not_merged() {
+        let task = author_task(
+            &TWO_HELD,
+            &[
+                ("watch", "ankh-morpork/watch", "57", true),
+                ("clacks", "ankh-morpork/clacks", "12", false),
+            ],
+        );
+        assert!(
+            task.contains(
+                "The issue already has pull requests:\n\
+                 - watch (ankh-morpork/watch): pull request 57 (merged already)\n\
+                 - clacks (ankh-morpork/clacks): pull request 12\n\
+                 Push your fixes to the branch of each one not marked (merged already). Do not open \
+                 another pull request in a repository whose pull request has not merged.\n"
+            ),
+            "{task}"
+        );
+        assert!(!task.contains("open one pull request in each"), "{task}");
+        assert!(!task.contains("open a pull request"), "{task}");
+        assert!(!task.contains("<pull request number>"), "{task}");
+        assert!(task.ends_with("run: temet-work ready watch#31"), "{task}");
+
+        // Neither merged: it pushes to both and opens no other.
+        let task = author_task(
+            &TWO_HELD,
+            &[
+                ("watch", "ankh-morpork/watch", "57", false),
+                ("clacks", "ankh-morpork/clacks", "12", false),
+            ],
+        );
+        assert!(
+            task.contains(
+                "- watch (ankh-morpork/watch): pull request 57\n\
+                 - clacks (ankh-morpork/clacks): pull request 12\n\
+                 Push your fixes to each pull request's branch. Do not open another pull request.\n"
+            ),
+            "{task}"
+        );
+    }
+
+    #[test]
+    fn a_new_author_opens_a_pull_request_only_where_the_issue_has_none() {
+        let task = author_task(&TWO_HELD, &[("watch", "ankh-morpork/watch", "57", false)]);
+        assert!(
+            task.contains(
+                "- watch (ankh-morpork/watch): pull request 57\n\
+                 Push your fixes to that pull request's branch. Do not open another pull request in a \
+                 repository whose pull request has not merged.\n\
+                 Open a pull request only where the issue has none yet: clacks \
+                 (ankh-morpork/clacks). Use the same branch name there as in the other \
+                 repositories.\n"
+            ),
+            "{task}"
+        );
+        assert!(!task.contains("open one pull request in each"), "{task}");
+        assert!(
+            task.ends_with("run: temet-work ready watch#31 clacks=<pull request number>"),
+            "{task}"
+        );
     }
 
     #[test]

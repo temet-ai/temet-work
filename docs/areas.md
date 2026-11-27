@@ -63,7 +63,8 @@ Stage 2: an issue that changes several repositories.
   every one, and all or none, so two issues cannot each
   hold half of what the other needs. Its author starts in the first, and makes the branch
   and one pull request per repository itself, on one branch name; the daemon only holds the
-  folders.
+  folders. An author started again on the issue is given each pull request there is, and
+  opens one in a repository that has none.
 - `temet-work ready ISSUE REPO=NUMBER...` names the pull requests; a bare number works
   when the plan names one repository. `temet-work issue` lists each with its repository
   and whether it merged. Event logs from stage 1 replay: their single pull request is the

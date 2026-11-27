@@ -709,6 +709,123 @@ fn ended(agent: &str) -> Event {
     }
 }
 
+/// Ends `agent`, takes the author `missing` asks for in its place, and returns
+/// that author's task as it starts.
+fn replace_author(w: &mut World, agent: &str, next: &str) -> String {
+    w.apply(&ended(agent));
+    assert_eq!(w.missing().start, vec![author("1", "f1")]);
+    let launch = w
+        .launch(
+            &GroupId::new("watch"),
+            Role::Author,
+            &issue("1"),
+            Some(&FolderId::new("f1")),
+        )
+        .expect("launch");
+    assert_eq!(launch.agent, AgentId::new(next));
+    w.apply(&started(next, Role::Author, "1"));
+    launch.brief.task
+}
+
+/// Runs `temet-work ready` as `agent`, naming `pull` when there is one, with
+/// `replies` to the points of a block.
+fn run_ready(w: &mut World, agent: &str, pull: Option<&str>, replies: &[&str]) {
+    let ready = Command::Ready {
+        issue: issue("1"),
+        pull: pull.map(Into::into),
+        pulls: Default::default(),
+        replies: replies.iter().map(ToString::to_string).collect(),
+    };
+    for event in w.events(Some(&AgentId::new(agent)), &ready).expect("ready") {
+        w.apply(&event);
+    }
+}
+
+/// A world where author-1 works on issue 1 of a project whose code is
+/// ankh-morpork/watch, and has said pull request 57 is ready.
+fn pull_57_ready() -> World {
+    let mut w = World::default();
+    w.apply(&Event::ProjectAdded {
+        project: ProjectId::new("ankh"),
+        tracker: "fake".into(),
+        name: "city/ankh".into(),
+        code_host: Some("fake".into()),
+        repo: Some("ankh-morpork/watch".into()),
+    });
+    for event in [
+        group(&["m1"], 1),
+        folder("f1"),
+        sync("1", "m1", 1, &[]),
+        planned("1"),
+        started("author-1", Role::Author, "1"),
+    ] {
+        w.apply(&event);
+    }
+    run_ready(&mut w, "author-1", Some("57"), &[]);
+    w
+}
+
+/// What an author on issue 1 is told of its pull request 57.
+const GIVEN_57: &str = "- ankh (ankh-morpork/watch): pull request 57\n\
+                        Push your fixes to that pull request's branch. Do not open another pull \
+                        request.\n";
+
+#[test]
+fn an_author_replacing_one_that_ended_is_given_the_pull_request_to_fix() {
+    let mut w = pull_57_ready();
+    w.apply(&Event::ChecksFinished {
+        issue: issue("1"),
+        passed: false,
+        failing: vec!["tests".into()],
+    });
+
+    let task = replace_author(&mut w, "author-1", "author-2");
+    assert!(task.contains(GIVEN_57), "{task}");
+    assert!(task.contains("- CI check tests failed\n"), "{task}");
+    assert!(!task.contains("open a pull request"), "{task}");
+    assert!(
+        task.ends_with("run: temet-work ready ankh#1"),
+        "it names no number: {task}"
+    );
+    run_ready(&mut w, "author-2", None, &[]);
+    assert_eq!(stage(&w, "1"), Stage::InReview { round: 1 });
+    assert_eq!(w.issues[&issue("1")].pulls[&ProjectId::new("ankh")], "57");
+
+    w.apply(&Event::PullConflicts {
+        issue: issue("1"),
+        repo: Some(ProjectId::new("ankh")),
+    });
+    let task = replace_author(&mut w, "author-2", "author-3");
+    assert!(task.contains(GIVEN_57), "{task}");
+    assert!(
+        task.contains("push your own branch with `git push --force-with-lease`"),
+        "{task}"
+    );
+    assert!(task.ends_with("run: temet-work ready ankh#1"), "{task}");
+    run_ready(&mut w, "author-3", None, &[]);
+    assert_eq!(w.issues[&issue("1")].pulls[&ProjectId::new("ankh")], "57");
+}
+
+#[test]
+fn an_author_replacing_one_after_a_block_replies_and_names_no_pull_request() {
+    let mut w = pull_57_ready();
+    w.apply(&verdict(
+        1,
+        Verdict::Block {
+            points: vec!["no test for a stopped clock".into()],
+        },
+    ));
+    let task = replace_author(&mut w, "author-1", "author-2");
+    assert!(task.contains(GIVEN_57), "{task}");
+    assert!(
+        task.ends_with("run: temet-work ready ankh#1 --reply \"<reply to point 1>\""),
+        "{task}"
+    );
+    run_ready(&mut w, "author-2", None, &["tested it"]);
+    assert_eq!(stage(&w, "1"), Stage::InReview { round: 2 });
+    assert_eq!(w.issues[&issue("1")].pulls[&ProjectId::new("ankh")], "57");
+}
+
 #[test]
 fn an_issue_missing_its_agent_gets_one_until_three_have_ended() {
     let (mut w, _) = World::replay(&[group(&["m1"], 1), sync("1", "m1", 1, &[])]);
