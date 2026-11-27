@@ -1,6 +1,6 @@
 //! A deterministic runner for tests: terminals live in memory, a send echoes its
 //! text onto the screen and runs one turn, and tests can put a terminal at a
-//! prompt or end it.
+//! prompt, end its turn in an error, once or after every send, or end it.
 
 use std::collections::BTreeMap;
 
@@ -12,6 +12,21 @@ struct Term {
     labels: BTreeMap<String, String>,
     status: Status,
     screen: Vec<String>,
+    /// The line its turn last ended on in an error.
+    error: Option<String>,
+    /// Whether every send ends on that error again.
+    keeps_failing: bool,
+    /// The turn it is in, when that turn is going to fail.
+    failing: Option<Failing>,
+}
+
+/// How far a turn that is going to fail has come.
+#[derive(Clone, Copy, Debug)]
+enum Failing {
+    /// No call to `updates` has reported it working yet.
+    Unreported,
+    /// It has been reported working: the next call reports the error.
+    Reported,
 }
 
 /// An in-memory runner.
@@ -96,20 +111,27 @@ impl FakeRunner {
         }
     }
 
-    /// Puts a terminal at a prompt of the given kind.
-    pub fn block(&mut self, terminal: &TerminalId, kind: &str) {
+    /// Reports a terminal's new status. A turn that was going to fail will not.
+    fn set(&mut self, terminal: &TerminalId, status: Status) {
         if let Some(t) = self.terms.get_mut(terminal) {
-            t.status = Status::Blocked { kind: kind.into() };
+            t.status = status;
+            t.failing = None;
             self.update(terminal, None);
         }
     }
 
-    /// Lets a terminal at a prompt go on: its prompt was answered.
+    /// Puts a terminal at a prompt of the given kind.
+    pub fn block(&mut self, terminal: &TerminalId, kind: &str) {
+        self.set(terminal, Status::Blocked { kind: kind.into() });
+    }
+
+    /// Puts a terminal between turns: its prompt was answered, or its turn ended
+    /// well. It no longer keeps failing.
     pub fn unblock(&mut self, terminal: &TerminalId) {
         if let Some(t) = self.terms.get_mut(terminal) {
-            t.status = Status::Between;
-            self.update(terminal, None);
+            t.keeps_failing = false;
         }
+        self.set(terminal, Status::Between);
     }
 
     /// Ends a terminal's turn in an error that shows `line` on its screen, as a
@@ -118,8 +140,33 @@ impl FakeRunner {
     pub fn end_in_error(&mut self, terminal: &TerminalId, line: &str) {
         if let Some(t) = self.terms.get_mut(terminal) {
             t.screen.push(line.to_string());
-            t.status = Status::Error { message: None };
-            self.update(terminal, None);
+            t.error = Some(line.to_string());
+        }
+        self.set(terminal, Status::Error { message: None });
+    }
+
+    /// Makes a terminal that ended in an error keep failing, as a session does
+    /// while its API is overloaded: a send to it is working on the next call to
+    /// `updates`, and only the call after that reports the error it last ended
+    /// in, with its line on the screen again.
+    pub fn keep_failing(&mut self, terminal: &TerminalId) {
+        if let Some(t) = self.terms.get_mut(terminal) {
+            t.keeps_failing = t.error.is_some();
+        }
+    }
+
+    /// Moves each turn that is going to fail on by one call to `updates`.
+    fn fail_turns(&mut self) {
+        let mut over = Vec::new();
+        for (id, t) in &mut self.terms {
+            match t.failing {
+                Some(Failing::Unreported) => t.failing = Some(Failing::Reported),
+                Some(Failing::Reported) => over.extend(t.error.clone().map(|e| (id.clone(), e))),
+                None => {}
+            }
+        }
+        for (id, line) in over {
+            self.end_in_error(&id, &line);
         }
     }
 
@@ -173,6 +220,9 @@ impl Runner for FakeRunner {
                 labels: start.labels.clone(),
                 status,
                 screen: vec![format!("$ {}", start.program.argv.join(" "))],
+                error: None,
+                keeps_failing: false,
+                failing: None,
             },
         );
         self.update(&id, None);
@@ -215,11 +265,12 @@ impl Runner for FakeRunner {
         }
         t.screen.push(text.to_string());
         t.status = Status::Working;
+        let fails = t.keeps_failing;
+        t.failing = fails.then_some(Failing::Unreported);
         self.update(terminal, Some(format!("reading: {text}")));
-        if let Some(t) = self.terms.get_mut(terminal) {
-            t.status = Status::Between;
+        if !fails {
+            self.set(terminal, Status::Between);
         }
-        self.update(terminal, None);
         Ok(())
     }
 
@@ -234,14 +285,12 @@ impl Runner for FakeRunner {
         if !self.terms.contains_key(terminal) {
             return Err(RunnerError::Unknown(terminal.clone()));
         }
-        if let Some(t) = self.terms.get_mut(terminal) {
-            t.status = Status::Gone;
-        }
-        self.update(terminal, None);
+        self.set(terminal, Status::Gone);
         Ok(())
     }
 
     fn updates(&mut self) -> Vec<Update> {
+        self.fail_turns();
         std::mem::take(&mut self.pending)
     }
 }
