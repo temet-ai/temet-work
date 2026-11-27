@@ -248,7 +248,12 @@ fn a_folder_on_another_machine_needs_daemon_host_before_an_agent_starts_there() 
             && problems.contains("mac"),
         "{problems}"
     );
-    let mut host = host_on(Box::new(Memory::default()), fake_runtimes(), &config, Some("omit"));
+    let mut host = host_on(
+        Box::new(Memory::default()),
+        fake_runtimes(),
+        &config,
+        Some("omit"),
+    );
     host.tick(0).expect("tick");
     assert_eq!(host.world().agents.len(), 1, "{:?}", host.problems());
 }
