@@ -181,9 +181,12 @@ group's list unless it names another the group takes, and is in the loop as soon
 filed. A project's `investigate` setting adds lines to the investigator's brief
 (`docs/settings.md`). Closing an issue is how a person says no to it: the brief lists the
 issues a person closed in the group's projects and areas, and the investigator files none of
-them again. The list holds issues the daemon saw open while syncing, and any close in the
-tracker counts as a person's unless the daemon made it after verifying the issue. A person
-who wants one of them built reopens it.
+them again. The list holds issues the daemon saw open while syncing. A close in the tracker
+counts as a person's unless the daemon made it after verifying the issue, or one of the
+issue's pull requests had merged before it, since a pull request can close its issue as it
+merges. So a person's own close after such a merge does not count either, and the issue may
+be filed again; reopening the issue clears the merge. A person who wants a listed issue
+built reopens it.
 
 The investigation ends when the investigator runs `temet-work investigated GROUP` or its
 session ends. An idle investigator is reminded and then stopped after `remind_after` and

@@ -1,6 +1,6 @@
 use super::*;
 use crate::command::Command;
-use crate::event::Event;
+use crate::event::{Event, Verdict};
 use crate::ids::{FolderId, MachineId};
 use crate::model::{AgentState, Plan};
 
@@ -622,9 +622,10 @@ fn the_brief_lists_the_issues_a_person_closed() {
     assert_eq!(closed_line(&none), None, "{none}");
     assert!(!none.contains("a person closed"), "{none}");
 
-    // The tracker's order, not the keys': 12 is older than 3.
-    close_by_person(&mut w, "ankh", "3", "Wind the clock", 30);
-    close_by_person(&mut w, "ankh", "12", "Oil the gate", 20);
+    // The tracker's order, not the keys': 3 is older than 12, whose key sorts
+    // first as text.
+    close_by_person(&mut w, "ankh", "12", "Oil the gate", 30);
+    close_by_person(&mut w, "ankh", "3", "Wind the clock", 20);
     // Closed by the loop after verifying.
     titled(&mut w, "ankh", "4", "Sweep the yard", 40, false);
     close_by_loop(&mut w, "ankh", "4");
@@ -642,7 +643,7 @@ fn the_brief_lists_the_issues_a_person_closed() {
         Some(
             "A person closed these issues. Never file one of them again, because closing an \
              issue is how a person says no, and a person who wants it built reopens it: \
-             ankh#12 Oil the gate; ankh#3 Wind the clock"
+             ankh#3 Wind the clock; ankh#12 Oil the gate"
         ),
         "{brief}"
     );
@@ -722,6 +723,84 @@ fn file_is_refused_for_an_issue_a_person_closed() {
         w.filing(Some(&me), &file("ankh", "Roast the beans", None))
             .is_ok()
     );
+}
+
+#[test]
+fn an_issue_closed_after_its_pull_request_merged_is_not_a_persons_close() {
+    let mut w = short(None);
+    tick(&mut w, 0);
+    let me = AgentId::new("investigator-1");
+    let issue = IssueId::new("ankh", "7");
+    let sync = |w: &mut World, closed| {
+        titled(w, "ankh", "7", "Mend the bridge", 7, closed);
+    };
+    w.apply(&Event::IssueSynced {
+        issue: issue.clone(),
+        title: "Mend the bridge".into(),
+        milestone: Some(MilestoneId::new("First")),
+        depends_on: vec![],
+        order: 7,
+        closed: false,
+    });
+    for e in [
+        Event::PlanWritten {
+            issue: issue.clone(),
+            plan: Plan::default(),
+        },
+        Event::PullRequestReady {
+            issue: issue.clone(),
+            pull: Some("57".into()),
+            pulls: Default::default(),
+        },
+        Event::ReviewFinished {
+            issue: issue.clone(),
+            round: 1,
+            verdict: Verdict::Approve,
+        },
+        Event::ChecksFinished {
+            issue: issue.clone(),
+            passed: true,
+            failing: vec![],
+        },
+        Event::Merged {
+            issue: issue.clone(),
+            repo: None,
+        },
+        Event::Deployed {
+            issue: issue.clone(),
+        },
+    ] {
+        w.apply(&e);
+    }
+    assert_eq!(w.issues[&issue].stage, Stage::Verifying);
+    // The pull request closed the issue as it merged; the sync is ignored while
+    // the issue is verifying.
+    sync(&mut w, true);
+    assert_eq!(w.issues[&issue].stage, Stage::Verifying);
+    w.apply(&Event::Verified {
+        issue: issue.clone(),
+        passed: false,
+        output: "the bridge is still down".into(),
+    });
+    assert!(w.issues[&issue].merged.is_empty());
+    sync(&mut w, true);
+    assert_eq!(w.issues[&issue].stage, Stage::Done);
+    assert!(!w.issues[&issue].closed_by_loop);
+
+    let brief = brief_of(&w);
+    assert_eq!(closed_line(&brief), None, "{brief}");
+    assert!(!brief.contains("Mend the bridge"), "{brief}");
+    assert!(
+        w.filing(Some(&me), &file("ankh", "Mend the bridge", None))
+            .is_ok()
+    );
+
+    // Reopened, it starts again, and a close of it then is a person's.
+    sync(&mut w, false);
+    sync(&mut w, true);
+    let brief = brief_of(&w);
+    let line = closed_line(&brief).expect("listed");
+    assert!(line.ends_with(": ankh#7 Mend the bridge"), "{line}");
 }
 
 #[test]
