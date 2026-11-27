@@ -1,4 +1,4 @@
-//! The design system's tokens, from @temet-ai/design 0.2.0, commit 38c2dfb, with uncommitted changes.
+//! The design system's tokens, from @temet-ai/design 0.2.0, commit 21a1ca0.
 //! Written by `scripts/sync-tokens`; do not edit, run the script again.
 //!
 //! Each constant has its token's name and holds its value in the dark theme. Blueprint's ramp
@@ -416,30 +416,12 @@ pub const BP_TYPOGRAPHY_COLOR_WARNING_HOVER: Rgba = Rgba(0xf0d455ff);
 /// `--bp-typography-color-warning-rest`: #f0d455
 pub const BP_TYPOGRAPHY_COLOR_WARNING_REST: Rgba = Rgba(0xf0d455ff);
 
-/// `--bp-typography-family-default`: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", blueprint-icons-16, sans-serif
-pub const BP_TYPOGRAPHY_FAMILY_DEFAULT: &[&str] = &[
-    "-apple-system",
-    "BlinkMacSystemFont",
-    "Segoe UI",
-    "Roboto",
-    "Oxygen",
-    "Ubuntu",
-    "Cantarell",
-    "Open Sans",
-    "Helvetica Neue",
-    "blueprint-icons-16",
-    "sans-serif",
-];
+/// `--bp-typography-family-default`: "Archivo Variable", Archivo, system-ui, sans-serif
+pub const BP_TYPOGRAPHY_FAMILY_DEFAULT: &[&str] =
+    &["Archivo Variable", "Archivo", "system-ui", "sans-serif"];
 
-/// `--bp-typography-family-mono`: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace
-pub const BP_TYPOGRAPHY_FAMILY_MONO: &[&str] = &[
-    "ui-monospace",
-    "SF Mono",
-    "JetBrains Mono",
-    "Menlo",
-    "Consolas",
-    "monospace",
-];
+/// `--bp-typography-family-mono`: "IBM Plex Mono", ui-monospace, monospace
+pub const BP_TYPOGRAPHY_FAMILY_MONO: &[&str] = &["IBM Plex Mono", "ui-monospace", "monospace"];
 
 /// `--bp-typography-line-height-default`: 1.28581
 pub const BP_TYPOGRAPHY_LINE_HEIGHT_DEFAULT: f32 = 1.28581;
@@ -450,8 +432,8 @@ pub const BP_TYPOGRAPHY_LINE_HEIGHT_LARGE: f32 = 1.5;
 /// `--bp-typography-size-body-large`: 16px
 pub const BP_TYPOGRAPHY_SIZE_BODY_LARGE: Px = Px(16.0);
 
-/// `--bp-typography-size-body-medium`: 14px
-pub const BP_TYPOGRAPHY_SIZE_BODY_MEDIUM: Px = Px(14.0);
+/// `--bp-typography-size-body-medium`: 13px
+pub const BP_TYPOGRAPHY_SIZE_BODY_MEDIUM: Px = Px(13.0);
 
 /// `--bp-typography-size-body-small`: 12px
 pub const BP_TYPOGRAPHY_SIZE_BODY_SMALL: Px = Px(12.0);
@@ -489,8 +471,8 @@ pub const BP_TYPOGRAPHY_WEIGHT_BOLD: f32 = 600.0;
 /// `--bp-typography-weight-default`: 400
 pub const BP_TYPOGRAPHY_WEIGHT_DEFAULT: f32 = 400.0;
 
-/// `--tm-attention`: #f0d455
-pub const TM_ATTENTION: Rgba = Rgba(0xf0d455ff);
+/// `--tm-attention`: #ff9e4a
+pub const TM_ATTENTION: Rgba = Rgba(0xff9e4aff);
 
 /// `--tm-cut`: 8px
 pub const TM_CUT: Px = Px(8.0);
@@ -531,6 +513,15 @@ pub const TM_EDGE: Rgba = Rgba(0xffffff2e);
 /// `--tm-edge-quiet`: #ffffff at 8%
 pub const TM_EDGE_QUIET: Rgba = Rgba(0xffffff14);
 
+/// `--tm-font-code`: "IBM Plex Mono", ui-monospace, monospace
+pub const TM_FONT_CODE: &[&str] = &["IBM Plex Mono", "ui-monospace", "monospace"];
+
+/// `--tm-font-figure`: "Big Shoulders Display", "Archivo Variable", sans-serif
+pub const TM_FONT_FIGURE: &[&str] = &["Big Shoulders Display", "Archivo Variable", "sans-serif"];
+
+/// `--tm-font-text`: "Archivo Variable", Archivo, system-ui, sans-serif
+pub const TM_FONT_TEXT: &[&str] = &["Archivo Variable", "Archivo", "system-ui", "sans-serif"];
+
 /// `--tm-rise`: 4px
 pub const TM_RISE: Px = Px(4.0);
 
@@ -542,6 +533,27 @@ pub const TM_SELECTED_LINE: Rgba = Rgba(0xd41b6fff);
 
 /// `--tm-slide`: 24px
 pub const TM_SLIDE: Px = Px(24.0);
+
+/// `--tm-text-body`: 13px
+pub const TM_TEXT_BODY: Px = Px(13.0);
+
+/// `--tm-text-code`: 12px
+pub const TM_TEXT_CODE: Px = Px(12.0);
+
+/// `--tm-text-page`: 20px
+pub const TM_TEXT_PAGE: Px = Px(20.0);
+
+/// `--tm-text-pane`: 16px
+pub const TM_TEXT_PANE: Px = Px(16.0);
+
+/// `--tm-text-section`: 14px
+pub const TM_TEXT_SECTION: Px = Px(14.0);
+
+/// `--tm-text-small`: 12px
+pub const TM_TEXT_SMALL: Px = Px(12.0);
+
+/// `--tm-weight-heading`: 600
+pub const TM_WEIGHT_HEADING: f32 = 600.0;
 
 /// Every colour token, by name.
 pub const COLOURS: &[(&str, Rgba)] = &[
@@ -879,6 +891,12 @@ pub const SIZES: &[(&str, Px)] = &[
     ("--tm-cut", TM_CUT),
     ("--tm-rise", TM_RISE),
     ("--tm-slide", TM_SLIDE),
+    ("--tm-text-body", TM_TEXT_BODY),
+    ("--tm-text-code", TM_TEXT_CODE),
+    ("--tm-text-page", TM_TEXT_PAGE),
+    ("--tm-text-pane", TM_TEXT_PANE),
+    ("--tm-text-section", TM_TEXT_SECTION),
+    ("--tm-text-small", TM_TEXT_SMALL),
 ];
 
 /// Every duration token, by name.
@@ -927,6 +945,7 @@ pub const NUMBERS: &[(&str, f32)] = &[
         "--bp-typography-weight-default",
         BP_TYPOGRAPHY_WEIGHT_DEFAULT,
     ),
+    ("--tm-weight-heading", TM_WEIGHT_HEADING),
 ];
 
 /// Every font token, by name.
@@ -936,6 +955,9 @@ pub const FONTS: &[(&str, &[&str])] = &[
         BP_TYPOGRAPHY_FAMILY_DEFAULT,
     ),
     ("--bp-typography-family-mono", BP_TYPOGRAPHY_FAMILY_MONO),
+    ("--tm-font-code", TM_FONT_CODE),
+    ("--tm-font-figure", TM_FONT_FIGURE),
+    ("--tm-font-text", TM_FONT_TEXT),
 ];
 
 /// StatusTag's statuses, in the design system's order.
