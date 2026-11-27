@@ -4,8 +4,10 @@
 //! must do. After every event the loop places work: it takes the next issue for
 //! refining and starts an author on a ready issue when a work folder of its
 //! project is free, on the machine its `machine` setting names, and the issues it
-//! depends on are done. Nothing here reads a clock, a file or the network, so the
-//! same events always give the same state.
+//! depends on are done. An issue that leaves its group's scope gets no new agent,
+//! fix, review or merge until it comes back ([`World::paused`]). Nothing here
+//! reads a clock, a file or the network, so the same events always give the same
+//! state.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -471,10 +473,14 @@ impl World {
             }
             Event::DecisionMade { decision } => {
                 self.decisions.insert(decision.id, decision.clone());
+                // The arbiter's work is done once its ruling is in; a later
+                // arbitration starts a fresh one, which hears that dispute.
+                let done = self.stop(&decision.issue, &[Role::Arbiter]);
                 if let DecisionKind::Ruling { approve } = decision.kind
                     && let Some(i) = self.issues.get_mut(&decision.issue)
                     && let Stage::Arbitration { round } = i.stage
                 {
+                    out.extend(done);
                     if approve {
                         i.review_ok = true;
                         Self::try_merge(i, &mut out);
@@ -657,6 +663,8 @@ impl World {
                 }
             }
         }
+        out.retain(|e| !self.waits_for_scope(e));
+        self.follow_scope();
         out.extend(self.place());
         out.retain(|e| !self.waits_for_machine(e));
         out
@@ -718,15 +726,23 @@ impl World {
     /// its issue is refining, an author while it is worked on, a reviewer that has
     /// heard its round, an arbiter while the issue is with the arbiter. Once a
     /// reviewer's or arbiter's approval is in, the issue waits on the checks, not
-    /// on that agent.
+    /// on that agent. An arbiter that has ruled on the issue has finished its step,
+    /// and so has an author on a paused issue that has not heard its fixes.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
         let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
             return false;
         };
         match (i.stage, agent.role) {
-            (Stage::Refining, Role::Refiner)
-            | (Stage::Working | Stage::Fixing { .. }, Role::Author) => true,
-            (Stage::Arbitration { .. }, Role::Arbiter) => !i.review_ok,
+            (Stage::Refining, Role::Refiner) | (Stage::Working, Role::Author) => true,
+            (Stage::Fixing { .. }, Role::Author) => i.told || !self.paused(i),
+            (Stage::Arbitration { .. }, Role::Arbiter) => {
+                !i.review_ok
+                    && !self.decisions.values().any(|d| {
+                        d.issue == i.id
+                            && d.by == agent.id
+                            && matches!(d.kind, DecisionKind::Ruling { .. })
+                    })
+            }
             (Stage::InReview { .. }, Role::Reviewer) => i.told && !i.review_ok,
             _ => false,
         }
@@ -750,10 +766,11 @@ impl World {
     /// ended, or one the daemon decided on and did not start before it stopped. A
     /// running author or reviewer that has not heard its fixes or its new round is
     /// told again. After the `starts` setting's number of agents of one role on one
-    /// issue it gives up, and says so.
+    /// issue it gives up, and says so. A paused issue gets nothing until it is back
+    /// in its group's scope, and then what its stage needs.
     pub fn missing(&self) -> Missing {
         let mut out = Missing::default();
-        for i in self.issues.values() {
+        for i in self.issues.values().filter(|i| !self.paused(i)) {
             // A merge, deploy or verify lost to a restart or a failure is asked for
             // again; the parts that do them do not repeat work already done or running.
             let id = i.id.clone();
@@ -1082,6 +1099,75 @@ impl World {
         (milestone, issue.order, issue.id.key.clone())
     }
 
+    /// Whether `issue` has left the scope of the group that took it: the group no
+    /// longer lists its milestone, its project or its area. It is worked out each
+    /// time from the issue and the group, so nothing about it is stored. A done
+    /// issue has not left.
+    pub fn out_of_scope(&self, issue: &Issue) -> bool {
+        issue.stage != Stage::Done
+            && issue
+                .group
+                .as_ref()
+                .and_then(|g| self.groups.get(g))
+                .is_some_and(|g| !self.in_scope(g, issue))
+    }
+
+    /// Whether nothing new starts on `issue` because it left its group's scope
+    /// before any of its pull requests merged. One with a pull request merged, or
+    /// deploying or verifying, is past the agents and finishes.
+    pub fn paused(&self, issue: &Issue) -> bool {
+        self.out_of_scope(issue)
+            && issue.merged.is_empty()
+            && !matches!(issue.stage, Stage::Deploying | Stage::Verifying)
+    }
+
+    /// Whether `effect` starts or tells an agent, or asks for a merge, on a paused
+    /// issue. The loop drops it; [`World::missing`] asks again once the issue is
+    /// back in scope.
+    fn waits_for_scope(&self, effect: &Effect) -> bool {
+        match effect {
+            Effect::StartAgent { issue, .. }
+            | Effect::RequestFix { issue, .. }
+            | Effect::StartReview { issue, .. }
+            | Effect::Merge { issue } => self.issues.get(issue).is_some_and(|i| self.paused(i)),
+            _ => false,
+        }
+    }
+
+    /// Follows the issues whose group no longer covers them. A refining one
+    /// whose refiner has stopped goes back to new: it has no plan, and a refiner
+    /// started when it comes back must wait for a free slot like any other. A
+    /// ready one another group covers goes to that group: it has a plan and holds
+    /// no agent or folder, so nothing ties it to the group that refined it.
+    fn follow_scope(&mut self) {
+        let mut back = Vec::new();
+        let mut moved = Vec::new();
+        for i in self.issues.values().filter(|i| self.out_of_scope(i)) {
+            match i.stage {
+                Stage::Refining if self.running(&i.id, Role::Refiner).is_none() => {
+                    back.push(i.id.clone());
+                }
+                Stage::Ready => {
+                    if let Some(g) = self.groups.values().find(|g| self.in_scope(g, i)) {
+                        moved.push((i.id.clone(), g.id.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for id in back {
+            if let Some(i) = self.issues.get_mut(&id) {
+                i.stage = Stage::New;
+                i.group = None;
+            }
+        }
+        for (id, group) in moved {
+            if let Some(i) = self.issues.get_mut(&id) {
+                i.group = Some(group);
+            }
+        }
+    }
+
     /// Whether a group works on an issue: one of its projects, and one of its
     /// milestones when it names any.
     pub(crate) fn in_scope(&self, group: &Group, issue: &Issue) -> bool {
@@ -1169,6 +1255,7 @@ impl World {
                 .filter(|i| {
                     i.group.as_ref() == Some(&group.id)
                         && i.stage == Stage::Ready
+                        && self.in_scope(group, i)
                         && self.ready_to_start(i)
                 })
                 .collect();

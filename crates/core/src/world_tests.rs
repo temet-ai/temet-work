@@ -1781,3 +1781,6 @@ fn an_issue_takes_every_folder_on_the_first_repositorys_machine_or_none() {
         "{task}"
     );
 }
+
+#[path = "world_scope_tests.rs"]
+mod scope;
