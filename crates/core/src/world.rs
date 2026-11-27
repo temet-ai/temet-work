@@ -869,6 +869,23 @@ impl World {
         } else {
             Vec::new()
         };
+        // Every pull request with where to open it, in the order they merge.
+        let order = self.repos_of(i);
+        let pulls: Vec<brief::Pulled> = order
+            .iter()
+            .chain(i.pulls.keys().filter(|r| !order.contains(r)))
+            .filter_map(|r| {
+                Some(brief::Pulled {
+                    project: r.clone(),
+                    repo: self
+                        .projects
+                        .get(r)
+                        .map_or_else(String::new, |p| p.repo.clone()),
+                    number: i.pulls.get(r)?.clone(),
+                    merged: i.merged.contains(r),
+                })
+            })
+            .collect();
         Some(Launch {
             agent: AgentId::new(format!("{}-{n}", role.name())),
             group: group.clone(),
@@ -889,6 +906,7 @@ impl World {
                         shared,
                         held,
                     },
+                    &pulls,
                     &self.kept_rules(),
                 )
             },
@@ -1045,6 +1063,31 @@ impl World {
                     .is_some_and(|m| group.milestones.contains(m)))
     }
 
+    /// A free work folder in each of `repos`, in their order and all on one
+    /// machine, since one author has to reach every one: the machine of the first
+    /// repository's folder. `None` when no machine has them all, so two issues
+    /// cannot each hold half of what the other needs.
+    fn free_folders(&self, repos: &[ProjectId]) -> Option<Vec<FolderId>> {
+        let (first, others) = repos.split_first()?;
+        let free = |repo: &ProjectId, machine: &MachineId| {
+            self.folders
+                .values()
+                .find(|f| &f.project == repo && &f.machine == machine && f.holder.is_none())
+        };
+        self.folders
+            .values()
+            .filter(|f| &f.project == first && f.holder.is_none())
+            .find_map(|start| {
+                std::iter::once(Some(start.id.clone()))
+                    .chain(
+                        others
+                            .iter()
+                            .map(|r| free(r, &start.machine).map(|f| f.id.clone())),
+                    )
+                    .collect()
+            })
+    }
+
     /// Takes new issues for refining and starts authors on ready ones.
     fn place(&mut self) -> Vec<Effect> {
         let mut out = Vec::new();
@@ -1091,28 +1134,14 @@ impl World {
             ready.sort_by_key(|i| Self::rank(group, i));
             let ready: Vec<IssueId> = ready.iter().map(|i| i.id.clone()).collect();
             for id in ready {
-                // A folder in every repository the plan names, or none: two issues
-                // cannot each hold half of what the other needs.
                 let repos = self
                     .issues
                     .get(&id)
                     .map(|i| self.repos_of(i))
                     .unwrap_or_default();
-                let mut picked: Vec<FolderId> = Vec::new();
-                for repo in &repos {
-                    let free = self
-                        .folders
-                        .values()
-                        .find(|f| &f.project == repo && f.holder.is_none())
-                        .map(|f| f.id.clone());
-                    match free {
-                        Some(f) => picked.push(f),
-                        None => break,
-                    }
-                }
-                if picked.is_empty() || picked.len() < repos.len() {
+                let Some(mut picked) = self.free_folders(&repos) else {
                     continue;
-                }
+                };
                 for f in &picked {
                     if let Some(f) = self.folders.get_mut(f) {
                         f.holder = Some(id.clone());

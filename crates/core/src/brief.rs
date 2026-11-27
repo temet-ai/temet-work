@@ -33,18 +33,30 @@ pub struct Workplace {
     pub held: Vec<Held>,
 }
 
+/// One of an issue's pull requests: the project, the code host's name for its
+/// repository, the number there, and whether it has merged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pulled {
+    /// The project.
+    pub project: ProjectId,
+    /// The code host's name for the repository.
+    pub repo: String,
+    /// The pull request's number.
+    pub number: String,
+    /// Whether it has merged.
+    pub merged: bool,
+}
+
 /// The pull requests of an issue that changes several repositories, one per line.
-fn pull_list(issue: &Issue) -> String {
-    issue
-        .pulls
+fn pull_list(pulls: &[Pulled]) -> String {
+    pulls
         .iter()
-        .map(|(repo, number)| {
-            let merged = if issue.merged.contains(repo) {
-                " (merged already)"
-            } else {
-                ""
-            };
-            format!("- {repo}: pull request {number}{merged}\n")
+        .map(|p| {
+            let merged = if p.merged { " (merged already)" } else { "" };
+            format!(
+                "- {} ({}): pull request {}{merged}\n",
+                p.project, p.repo, p.number
+            )
         })
         .collect()
 }
@@ -52,13 +64,15 @@ fn pull_list(issue: &Issue) -> String {
 /// Writes the brief for an agent of `role` on `issue`, run in `place`.
 /// `rules` are the kept rules from overturned decisions; each brief ends with them.
 /// `source` is the tracker's name for where the issue comes from, and `repos`
-/// the repositories of its area when it comes from an area's tracker.
+/// the repositories of its area when it comes from an area's tracker. `pulls`
+/// are the issue's pull requests, in the order they merge.
 pub fn write(
     role: Role,
     issue: &Issue,
     source: Option<&str>,
     repos: &[ProjectId],
     place: Workplace,
+    pulls: &[Pulled],
     rules: &[String],
 ) -> Brief {
     let Workplace {
@@ -124,10 +138,10 @@ pub fn write(
     } else {
         "<pull request number>".to_string()
     };
-    let pulls = if issue.pulls.len() > 1 {
+    let pulls = if pulls.len() > 1 {
         format!(
             "It changes several repositories; review every one of its pull requests:\n{}",
-            pull_list(issue)
+            pull_list(pulls)
         )
     } else {
         String::new()

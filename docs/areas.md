@@ -58,10 +58,11 @@ one repository, the first in its plan's `repos`.
 
 Stage 2: an issue that changes several repositories.
 
-- The issue holds one free work folder in each repository its plan names, all or none, so
-  two issues cannot each hold half of what the other needs. Its author starts in the first,
-  and makes the branch and one pull request per repository itself, on one branch name; the
-  daemon only holds the folders.
+- The issue holds one free work folder in each repository its plan names, all on one
+  machine so that its author reaches every one, and all or none, so two issues cannot each
+  hold half of what the other needs. Its author starts in the first, and makes the branch
+  and one pull request per repository itself, on one branch name; the daemon only holds the
+  folders.
 - `temet-work ready ISSUE REPO=NUMBER...` names the pull requests; a bare number works
   when the plan names one repository. `temet-work issue` lists each with its repository
   and whether it merged. Event logs from stage 1 replay: their single pull request is the
@@ -69,8 +70,9 @@ Stage 2: an issue that changes several repositories.
 - CI must pass on every pull request, and a failure or a conflict names its repository.
   Each repository's own `ci` setting says whether it runs any.
 - They merge in the plan's order, each after the previous repository's main pipeline has
-  passed (with `ci = false` there, without waiting). A main branch that shows no run for
-  the merge is listed as a problem until it has one.
+  passed (with `ci = false` there, without waiting). A main branch that still shows no run
+  for the merge at a later read is listed as a problem until it has one, and so is a GitLab
+  pipeline held at a manual job.
 - Deploy and verify run once, after the last merge. The folders are released together,
   then or when the issue is closed.
 - Merged pull requests are recorded per repository, so a restart or a refused merge

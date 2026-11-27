@@ -1317,15 +1317,22 @@ fn closing_the_issue_in_the_tracker_releases_every_folder() {
 }
 
 #[test]
-fn the_reviewers_brief_names_every_pull_request() {
+fn the_reviewers_and_arbiters_briefs_name_every_pull_request_in_merge_order() {
     let mut w = two_repos_planned();
+    // The plan's order is not the alphabet's: ui merges before api.
     plan_two(&mut w);
     ready_both(&mut w);
-    let launch = w
-        .launch(&GroupId::new("watch"), Role::Reviewer, &gld(), None)
-        .expect("launch");
-    assert!(launch.brief.task.contains("ui: pull request 12"));
-    assert!(launch.brief.task.contains("api: pull request 34"));
+    for role in [Role::Reviewer, Role::Arbiter] {
+        let task = w
+            .launch(&GroupId::new("watch"), role, &gld(), None)
+            .expect("launch")
+            .brief
+            .task;
+        assert!(
+            task.contains("- ui (group/ui): pull request 12\n- api (group/api): pull request 34\n"),
+            "{role:?}: {task}"
+        );
+    }
 }
 
 #[test]
@@ -1551,4 +1558,49 @@ fn a_tracker_close_after_the_first_merge_does_not_drop_the_rest() {
     });
     assert!(matches!(w.issues[&gld()].stage, Stage::Fixing { .. }));
     assert!(w.folders.values().all(|f| f.holder.is_some()));
+}
+
+fn folder_on(id: &str, project: &str, machine: &str) -> Event {
+    Event::FolderAdded {
+        folder: FolderId::new(id),
+        project: pid(project),
+        machine: MachineId::new(machine),
+        path: format!("/srv/{id}"),
+    }
+}
+
+#[test]
+fn an_issue_takes_every_folder_on_the_first_repositorys_machine_or_none() {
+    // ui's folder is on morpork and api's only one on mac.
+    let mut w = area_world();
+    w.apply(&folder_on("api-1", "api", "mac"));
+    w.apply(&area_issue("guild", "GLD-12"));
+    plan_two(&mut w);
+    assert_eq!(w.issues[&gld()].stage, Stage::Ready);
+    assert!(w.folders.values().all(|f| f.holder.is_none()));
+
+    // A ui folder beside api's: both come from that machine, though ui-1 comes first.
+    let effects = w.apply(&folder_on("ui-2", "ui", "mac"));
+    assert!(effects.contains(&Effect::StartAgent {
+        group: GroupId::new("watch"),
+        role: Role::Author,
+        issue: gld(),
+        folder: Some(FolderId::new("ui-2")),
+    }));
+    assert_eq!(w.issues[&gld()].other_folders, [FolderId::new("api-1")]);
+    assert_eq!(w.folders[&FolderId::new("ui-1")].holder, None);
+    let task = w
+        .launch(
+            &GroupId::new("watch"),
+            Role::Author,
+            &gld(),
+            Some(&FolderId::new("ui-2")),
+        )
+        .expect("launch")
+        .brief
+        .task;
+    assert!(
+        task.contains("/srv/ui-2") && task.contains("/srv/api-1"),
+        "{task}"
+    );
 }

@@ -65,9 +65,9 @@ signed in (`glab auth login`) for the daemon's user, and no token goes in this f
 reaches the host `glab` uses by default; for another one, set `GITLAB_HOST` for the daemon.
 A pipeline reads as failed as soon as a job that may not fail has failed. A merge request is
 merged at once, in the way the `merge` setting says (`squash`, `merge` or `rebase`), and
-`glab` is not asked to remove its source branch. After one repository of
-an area's issue merges, the next waits for the newest pipeline of that commit on the target
-branch; one held at a manual job has not passed.
+`glab` is not asked to remove its source branch. After one repository of an area's issue
+merges, the next waits for the newest pipeline of that commit on the target branch; one held
+at a manual job has not passed and is listed as a problem until someone runs the job.
 
 ## Example
 

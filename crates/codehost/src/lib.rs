@@ -91,7 +91,9 @@ pub trait CodeHost: Send {
     fn merge(&mut self, repo: &str, number: &str, how: &str) -> Result<(), CodeHostError>;
 
     /// The CI of the repository's default branch at the commit the merged pull
-    /// request `number` made. An error when that pull request has not merged.
+    /// request `number` made; `None` when there is no run for it. An error when
+    /// that pull request has not merged, or when its run waits for a person, who
+    /// reads the error.
     fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError>;
 }
 
@@ -262,6 +264,8 @@ pub struct CodeHosts {
 enum Wait {
     /// The main pipeline is running.
     Running,
+    /// No run for the merge: `again` once a later read still found none.
+    NoRun { again: bool },
     /// Something a person may have to look at.
     Stuck(String),
 }
@@ -269,7 +273,11 @@ enum Wait {
 impl Wait {
     fn outcome(&self, issue: &IssueId, repo: &ProjectId) -> Outcome {
         match self {
-            Self::Running => Outcome::done(),
+            Self::Running | Self::NoRun { again: false } => Outcome::done(),
+            Self::NoRun { again: true } => Outcome::Failed(format!(
+                "{issue} waits to merge after {repo}: still no CI run on the main branch of \
+                 {repo} for its merge; set ci to false for {repo} if it runs none there"
+            )),
             Self::Stuck(why) => {
                 Outcome::Failed(format!("{issue} waits to merge after {repo}: {why}"))
             }
@@ -398,10 +406,10 @@ impl CodeHosts {
                 return None;
             }
             Ok(Checks::Pending) => Wait::Running,
-            Ok(Checks::None) => Wait::Stuck(format!(
-                "no CI run on the main branch of {repo} for its merge yet; set ci to false \
-                 for {repo} if it runs none there"
-            )),
+            // Read just after a merge, the run may not exist yet.
+            Ok(Checks::None) => Wait::NoRun {
+                again: matches!(self.main_read.get(&key), Some((_, Wait::NoRun { .. }))),
+            },
             Ok(Checks::Failed { failing }) => {
                 self.main_read.remove(&key);
                 return Some(refused(
@@ -1079,7 +1087,7 @@ mod tests {
         }
 
         #[test]
-        fn a_main_branch_with_no_run_is_listed_as_a_problem_until_it_has_one() {
+        fn a_main_branch_still_without_a_run_at_a_later_read_is_a_problem_until_it_has_one() {
             let mut w = world(Stage::Merging);
             let fake = host(Checks::Passed, Checks::Passed);
             let mains = fake.mains.clone();
@@ -1093,12 +1101,38 @@ mod tests {
                 issue: gld(),
                 repo: Some(pid("ui")),
             });
-            assert!(matches!(
+            assert_eq!(
                 part.carry_out(&merge(), &w),
-                Outcome::Failed(why) if why.contains("no CI run on the main branch of ui")
-            ));
+                Outcome::done(),
+                "just merged: the run may not exist yet"
+            );
+            for _ in 0..2 {
+                assert!(matches!(
+                    part.carry_out(&merge(), &w),
+                    Outcome::Failed(why) if why.contains("no CI run on the main branch of ui")
+                ));
+            }
             mains.lock().expect("lock").clear();
             assert_eq!(part.carry_out(&merge(), &w), merged("svc"));
+        }
+
+        #[test]
+        fn within_ci_every_a_first_read_with_no_run_lists_nothing() {
+            let mut w = world(Stage::Merging);
+            let fake = host(Checks::Passed, Checks::Passed);
+            fake.mains
+                .lock()
+                .expect("lock")
+                .insert("group/ui".into(), Checks::None);
+            let mut part = part(fake).every(60_000);
+            assert_eq!(part.carry_out(&merge(), &w), merged("ui"));
+            w.apply(&Event::Merged {
+                issue: gld(),
+                repo: Some(pid("ui")),
+            });
+            for _ in 0..2 {
+                assert_eq!(part.carry_out(&merge(), &w), Outcome::done());
+            }
         }
 
         #[test]

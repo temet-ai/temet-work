@@ -273,12 +273,21 @@ impl CodeHost for GitLab {
             (Some(_), "success" | "skipped") | (None, _) => Vec::new(),
             (Some(id), _) => self.failed_jobs(&project, id)?,
         };
-        Ok(match checks_of(status, &jobs, &pipeline_name(p, id)) {
+        let name = pipeline_name(p, id);
+        match checks_of(status, &jobs, &name) {
             // On the main branch a pipeline held at a manual job has not run what
-            // comes after it, such as tests of a deploy.
-            Checks::Passed if status == "manual" => Checks::Pending,
-            checks => checks,
-        })
+            // comes after it, such as tests of a deploy, and only a person moves it.
+            Checks::Passed if status == "manual" => {
+                let at = p
+                    .get("web_url")
+                    .and_then(Value::as_str)
+                    .map_or_else(String::new, |url| format!(" ({url})"));
+                Err(CodeHostError::Other(format!(
+                    "{name} on {branch}{at} is held at a manual job; it passes once someone runs it"
+                )))
+            }
+            checks => Ok(checks),
+        }
     }
 }
 
@@ -399,7 +408,14 @@ mod tests {
     fn a_main_pipeline_that_is_missing_held_or_failed_does_not_pass() {
         let read = |pipelines| GitLab::with(Box::new(Main(pipelines))).main_pipeline(REPO, "3");
         assert_eq!(read("[]"), Ok(Checks::None));
-        assert_eq!(read(r#"[{"id":1,"status":"manual"}]"#), Ok(Checks::Pending));
+        assert_eq!(
+            read(r#"[{"id":1,"status":"manual","web_url":"https://gitlab.example.com/p/1"}]"#),
+            Err(CodeHostError::Other(
+                "pipeline 1 on release/2 (https://gitlab.example.com/p/1) is held at a manual \
+                 job; it passes once someone runs it"
+                    .into()
+            ))
+        );
         assert_eq!(
             read(r#"[{"id":1,"status":"running"}]"#),
             Ok(Checks::Pending)
