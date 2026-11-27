@@ -9,7 +9,7 @@
 //! not listed, and calling it is refused.
 
 use serde_json::{Value, json};
-use temet_work_core::ids::{AgentId, DecisionId, IssueId, RuleId};
+use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
 use temet_work_core::model::{Check, Plan, Role};
 use temet_work_core::settings::{Target, Value as Setting};
 use temet_work_core::{Command, Request, Verdict};
@@ -111,9 +111,9 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ready",
-            description: "The author's pull request is open and every check of the plan holds. The pull request's number is needed the first time.",
+            description: "The author's pull requests are open and every check of the plan holds. Their numbers are needed the first time: pull for an issue that changes one repository, pulls (repository to number) for each repository of one that changes several.",
             acts: true,
-            schema: json!({"type": "object", "properties": {"issue": issue_field(), "pull": {"type": "string"}}, "required": ["issue"]}),
+            schema: json!({"type": "object", "properties": {"issue": issue_field(), "pull": {"type": "string"}, "pulls": {"type": "object", "additionalProperties": {"type": "string"}}}, "required": ["issue"]}),
         },
         Tool {
             name: "review",
@@ -247,6 +247,22 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
         "ready" => Command::Ready {
             issue: issue(args)?,
             pull: args.get("pull").and_then(Value::as_str).map(String::from),
+            pulls: args
+                .get("pulls")
+                .and_then(Value::as_object)
+                .map(|m| {
+                    m.iter()
+                        .map(|(repo, n)| {
+                            n.as_str()
+                                .map(String::from)
+                                .or_else(|| n.as_u64().map(|n| n.to_string()))
+                                .map(|n| (ProjectId::new(repo.as_str()), n))
+                                .ok_or_else(|| format!("pulls.{repo} is not a pull request number"))
+                        })
+                        .collect::<Result<_, String>>()
+                })
+                .transpose()?
+                .unwrap_or_default(),
         },
         "review" => Command::Review {
             issue: issue(args)?,
@@ -461,6 +477,29 @@ mod tests {
                     }
                 }
             }]
+        );
+    }
+
+    #[test]
+    fn ready_takes_the_pull_request_of_each_repository() {
+        let mut sent = Vec::new();
+        call(
+            Level::Act,
+            "ready",
+            json!({"issue": "guild#GLD-1", "pulls": {"ui": "12", "api": 34}}),
+            &mut sent,
+        );
+        assert_eq!(
+            sent.first().map(|r| &r.command),
+            Some(&Command::Ready {
+                issue: IssueId::new("guild", "GLD-1"),
+                pull: None,
+                pulls: [
+                    (ProjectId::new("ui"), "12".to_string()),
+                    (ProjectId::new("api"), "34".to_string())
+                ]
+                .into(),
+            })
         );
     }
 

@@ -81,16 +81,22 @@ pub struct Issue {
     pub stage: Stage,
     /// The group that took it.
     pub group: Option<GroupId>,
-    /// The work folder it holds while an author works on it.
+    /// The work folder it holds while an author works on it: the one of the
+    /// first repository its plan names.
     pub folder: Option<FolderId>,
+    /// The folders it holds in the plan's other repositories, in the plan's order.
+    pub other_folders: Vec<FolderId>,
     /// The refiner's plan.
     pub plan: Option<Plan>,
     /// Whether the reviewer approved the current change.
     pub review_ok: bool,
     /// Whether CI and the checks passed on the current change.
     pub checks_ok: Option<bool>,
-    /// Its pull request's number on the code host, once the author names it.
-    pub pull: Option<String>,
+    /// Its pull requests' numbers on the code host, by repository, once the
+    /// author names them.
+    pub pulls: std::collections::BTreeMap<ProjectId, String>,
+    /// The repositories whose pull request has merged.
+    pub merged: std::collections::BTreeSet<ProjectId>,
     /// What its author is to fix, while it is being fixed.
     pub fix: Vec<String>,
     /// Whether the agent its stage needs has heard what to do: the author what
@@ -109,6 +115,17 @@ pub struct Issue {
     /// asked again, and it merges once the checks pass.
     #[serde(default)]
     pub review_waived: bool,
+}
+
+impl Issue {
+    /// Takes every work folder the issue holds, the first one first.
+    pub fn take_folders(&mut self) -> Vec<FolderId> {
+        self.folder
+            .take()
+            .into_iter()
+            .chain(std::mem::take(&mut self.other_folders))
+            .collect()
+    }
 }
 
 /// What an agent does.

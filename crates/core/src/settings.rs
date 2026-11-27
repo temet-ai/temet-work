@@ -490,6 +490,25 @@ impl World {
         }
     }
 
+    /// A yes-or-no setting for one of the repositories an issue changes: the
+    /// task's and the milestone's values come first, then that repository's.
+    pub fn repo_flag(&self, issue: &IssueId, repo: &ProjectId, key: &str) -> bool {
+        let own = self
+            .chain(&Scope::Task(issue.clone()))
+            .into_iter()
+            .filter(|(level, _)| matches!(level, Level::Task | Level::Milestone))
+            .find_map(|(_, at)| self.settings.get(&(at, None, key.to_string())))
+            .map(|e| e.value.clone());
+        let value = own.or_else(|| {
+            self.resolve(&Scope::Project(repo.clone()), None, key)
+                .map(|r| r.value)
+        });
+        match value {
+            Some(Value::Flag(b)) => b,
+            _ => matches!(builtin(key), Some(Value::Flag(true))),
+        }
+    }
+
     /// The setting for a project or an area as a source of issues, such as how
     /// often it is synced.
     pub fn source_number(&self, source: &ProjectId, key: &str) -> u64 {

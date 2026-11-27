@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use temet_work_codehost::CodeHosts;
 use temet_work_core::ids::{IssueId, ProjectId};
 use temet_work_core::model::Stage;
-use temet_work_core::{Event, Part, World};
+use temet_work_core::{Effect, Event, Outcome, Part, World};
 
 type Seen = Arc<Mutex<Vec<String>>>;
 
@@ -58,7 +58,8 @@ fn world() -> World {
         });
         if let Some(i) = w.issues.get_mut(&issue) {
             i.stage = Stage::InReview { round: 1 };
-            i.pull = Some(if id == "watch" { "5" } else { "6" }.into());
+            let number = if id == "watch" { "5" } else { "6" };
+            i.pulls.insert(ProjectId::new(id), number.into());
         }
     }
     w
@@ -105,5 +106,73 @@ fn each_project_reads_its_pull_request_through_the_adapter_its_code_host_names()
             "api projects/ankh-morpork%2Fguilds%2Fthieves/merge_requests/6",
             "api projects/ankh-morpork%2Fguilds%2Fthieves/pipelines/1/jobs?scope[]=failed&per_page=100"
         ]
+    );
+}
+
+/// A merged request whose main pipeline waits at a manual job.
+struct Held;
+
+impl temet_work_codehost_gitlab::Transport for Held {
+    fn glab(&mut self, args: &[&str]) -> Result<String, String> {
+        Ok(if args[1].contains("/jobs") {
+            "[]".into()
+        } else if args[1].contains("/pipelines?") {
+            r#"[{"id":9,"status":"manual"}]"#.into()
+        } else {
+            r#"{"iid":1,"state":"merged","merge_commit_sha":"abc","target_branch":"main"}"#.into()
+        })
+    }
+}
+
+#[test]
+fn a_main_pipeline_held_at_a_manual_job_is_listed_while_the_next_repository_waits() {
+    let mut w = World::default();
+    let (ui, api, area) = (
+        ProjectId::new("ui"),
+        ProjectId::new("api"),
+        ProjectId::new("guild"),
+    );
+    w.apply(&Event::AreaDefined {
+        area: area.clone(),
+        name: "Guild".into(),
+        projects: vec![ui.clone(), api.clone()],
+        tracker: "jira".into(),
+        tracker_name: "GLD".into(),
+    });
+    for id in [&ui, &api] {
+        w.apply(&Event::ProjectAdded {
+            project: id.clone(),
+            tracker: String::new(),
+            name: format!("guild/{id}"),
+            code_host: Some("gitlab".into()),
+            repo: None,
+        });
+    }
+    let issue = IssueId::new("guild", "GLD-1");
+    w.apply(&Event::IssueSynced {
+        issue: issue.clone(),
+        title: "an issue".into(),
+        milestone: None,
+        depends_on: vec![],
+        order: 1,
+        closed: false,
+    });
+    if let Some(i) = w.issues.get_mut(&issue) {
+        i.stage = Stage::Merging;
+        i.plan = Some(temet_work_core::model::Plan {
+            repos: vec![ui.clone(), api.clone()],
+            ..Default::default()
+        });
+        i.pulls = [(ui.clone(), "1".to_string()), (api, "2".to_string())].into();
+        i.merged.insert(ui);
+    }
+    let mut part = CodeHosts::default();
+    part.add(Box::new(temet_work_codehost_gitlab::GitLab::with(
+        Box::new(Held),
+    )));
+    let outcome = part.carry_out(&Effect::Merge { issue }, &w);
+    assert!(
+        matches!(&outcome, Outcome::Failed(why) if why.contains("pipeline 9 on main is held at a manual job")),
+        "{outcome:?}"
     );
 }

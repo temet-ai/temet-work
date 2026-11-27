@@ -92,9 +92,24 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             .milestone
             .as_ref()
             .map_or_else(String::new, |m| format!(" [{m}]"));
+        // An issue that changes several repositories shows where each pull request is.
+        let pulls = if i.pulls.len() > 1 {
+            let each: Vec<String> = world
+                .repos_of(i)
+                .iter()
+                .filter_map(|r| i.pulls.get(r).map(|n| (r, n)))
+                .map(|(r, n)| {
+                    let merged = if i.merged.contains(r) { " merged" } else { "" };
+                    format!("{r} #{n}{merged}")
+                })
+                .collect();
+            format!(" ({})", each.join(", "))
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             out,
-            "  {}  {}  {}{milestone}",
+            "  {}  {}  {}{milestone}{pulls}",
             i.id,
             stage(i.stage),
             i.title
@@ -241,11 +256,34 @@ pub fn issue(world: &World, id: &crate::ids::IssueId) -> Option<String> {
             .collect();
         let _ = writeln!(out, "Depends on: {}", deps.join(", "));
     }
-    if let Some(f) = &i.folder {
-        let _ = writeln!(out, "Folder: {f}");
+    let folders: Vec<String> = i
+        .folder
+        .iter()
+        .chain(&i.other_folders)
+        .map(ToString::to_string)
+        .collect();
+    if !folders.is_empty() {
+        let label = if folders.len() > 1 {
+            "Folders"
+        } else {
+            "Folder"
+        };
+        let _ = writeln!(out, "{label}: {}", folders.join(", "));
     }
-    if let Some(p) = &i.pull {
-        let _ = writeln!(out, "Pull request: {p}");
+    // One line per repository, in the order they merge.
+    for repo in world
+        .repos_of(i)
+        .iter()
+        .chain(i.pulls.keys().filter(|r| !world.repos_of(i).contains(r)))
+    {
+        if let Some(number) = i.pulls.get(repo) {
+            let state = if i.merged.contains(repo) {
+                ", merged"
+            } else {
+                ""
+            };
+            let _ = writeln!(out, "Pull request: {repo} #{number}{state}");
+        }
     }
     if let Some(plan) = &i.plan {
         let _ = writeln!(out, "Plan:");

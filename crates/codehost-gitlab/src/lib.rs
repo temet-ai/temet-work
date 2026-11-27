@@ -127,6 +127,35 @@ fn parse_error(what: &str, e: impl std::fmt::Display) -> CodeHostError {
     CodeHostError::Other(format!("{what}: {e}"))
 }
 
+impl GitLab {
+    /// The merge request `number` of the project with API path segment `project`.
+    fn request(&mut self, project: &str, number: &str) -> Result<Value, CodeHostError> {
+        let out = self.run(&[
+            "api",
+            &format!("projects/{project}/merge_requests/{number}"),
+        ])?;
+        serde_json::from_str(&out).map_err(|e| parse_error("glab api", e))
+    }
+
+    /// The jobs of pipeline `id` that failed, run in the project `runs_in`.
+    fn failed_jobs(&mut self, runs_in: &str, id: u64) -> Result<Vec<Value>, CodeHostError> {
+        let out = self.run(&[
+            "api",
+            &format!("projects/{runs_in}/pipelines/{id}/jobs?scope[]=failed&per_page=100"),
+        ])?;
+        serde_json::from_str(&out).map_err(|e| parse_error("glab api jobs", e))
+    }
+}
+
+/// What a pipeline is called when it failed with no failed job to name.
+fn pipeline_name(pipeline: &Value, id: Option<u64>) -> String {
+    match (pipeline.get("name").and_then(Value::as_str), id) {
+        (Some(name), _) if !name.is_empty() => name.to_string(),
+        (_, Some(id)) => format!("pipeline {id}"),
+        _ => "the pipeline".into(),
+    }
+}
+
 impl CodeHost for GitLab {
     fn id(&self) -> &'static str {
         "gitlab"
@@ -134,11 +163,7 @@ impl CodeHost for GitLab {
 
     fn pull(&mut self, repo: &str, number: &str) -> Result<Pull, CodeHostError> {
         let project = encode(repo);
-        let out = self.run(&[
-            "api",
-            &format!("projects/{project}/merge_requests/{number}"),
-        ])?;
-        let v: Value = serde_json::from_str(&out).map_err(|e| parse_error("glab api", e))?;
+        let v = self.request(&project, number)?;
         let iid = v
             .get("iid")
             .and_then(Value::as_u64)
@@ -172,22 +197,10 @@ impl CodeHost for GitLab {
                             }
                             _ => project.clone(),
                         };
-                        let out = self.run(&[
-                            "api",
-                            &format!(
-                                "projects/{runs_in}/pipelines/{id}/jobs?scope[]=failed&per_page=100"
-                            ),
-                        ])?;
-                        serde_json::from_str::<Vec<Value>>(&out)
-                            .map_err(|e| parse_error("glab api jobs", e))?
+                        self.failed_jobs(&runs_in, id)?
                     }
                 };
-                let name = match (p.get("name").and_then(Value::as_str), id) {
-                    (Some(name), _) if !name.is_empty() => name.to_string(),
-                    (_, Some(id)) => format!("pipeline {id}"),
-                    _ => "the pipeline".into(),
-                };
-                checks_of(status, &jobs, &name)
+                checks_of(status, &jobs, &pipeline_name(p, id))
             }
         };
         Ok(Pull {
@@ -223,6 +236,59 @@ impl CodeHost for GitLab {
         args.extend(flag);
         self.run(&args).map(|_| ())
     }
+
+    fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
+        let project = encode(repo);
+        let v = self.request(&project, number)?;
+        if v.get("state").and_then(Value::as_str) != Some("merged") {
+            return Err(CodeHostError::Other(format!(
+                "merge request {number} has not merged"
+            )));
+        }
+        // The commit the target branch got: a merge commit, else the squashed
+        // one, else (a fast-forward) the request's own last commit.
+        let text = |k: &str| v.get(k).and_then(Value::as_str);
+        let sha = text("merge_commit_sha")
+            .or_else(|| text("squash_commit_sha"))
+            .or_else(|| text("sha"))
+            .ok_or_else(|| CodeHostError::Other("glab api gave no merged commit".into()))?;
+        let branch = text("target_branch")
+            .ok_or_else(|| CodeHostError::Other("glab api gave no target branch".into()))?;
+        let out = self.run(&[
+            "api",
+            &format!(
+                "projects/{project}/pipelines?sha={sha}&ref={}",
+                encode(branch)
+            ),
+        ])?;
+        let pipelines: Vec<Value> =
+            serde_json::from_str(&out).map_err(|e| parse_error("glab api pipelines", e))?;
+        // Newest first: a pipeline run again decides.
+        let Some(p) = pipelines.first() else {
+            return Ok(Checks::None);
+        };
+        let status = p.get("status").and_then(Value::as_str).unwrap_or("pending");
+        let id = p.get("id").and_then(Value::as_u64);
+        let jobs = match (id, status) {
+            (Some(_), "success" | "skipped") | (None, _) => Vec::new(),
+            (Some(id), _) => self.failed_jobs(&project, id)?,
+        };
+        let name = pipeline_name(p, id);
+        match checks_of(status, &jobs, &name) {
+            // On the main branch a pipeline held at a manual job has not run what
+            // comes after it, such as tests of a deploy, and only a person moves it.
+            Checks::Passed if status == "manual" => {
+                let at = p
+                    .get("web_url")
+                    .and_then(Value::as_str)
+                    .map_or_else(String::new, |url| format!(" ({url})"));
+                Err(CodeHostError::Other(format!(
+                    "{name} on {branch}{at} is held at a manual job; it passes once someone runs it"
+                )))
+            }
+            checks => Ok(checks),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +318,9 @@ mod tests {
                 ]
             {
                 return Ok(include_str!("../tests/fixtures/pipeline-9002-jobs.json").into());
+            }
+            if args == ["api", &format!("{base}/pipelines?sha=4b1d0c7e&ref=main")] {
+                return Ok(include_str!("../tests/fixtures/main-pipelines.json").into());
             }
             Err("glab: 404 Not Found".into())
         }
@@ -308,6 +377,55 @@ mod tests {
         assert_eq!(pull.state, PullState::Merged);
         assert_eq!(pull.checks, Checks::Passed);
         assert!(!pull.conflicting);
+    }
+
+    #[test]
+    fn reads_the_main_pipeline_of_the_commit_a_request_merged_as() {
+        let mut host = GitLab::with(Box::new(Recorded));
+        assert_eq!(host.main_pipeline(REPO, "7"), Ok(Checks::Passed));
+        assert!(host.main_pipeline(REPO, "8").is_err(), "8 has not merged");
+    }
+
+    /// A merged request, then the pipelines of its commit.
+    struct Main(&'static str);
+
+    impl Transport for Main {
+        fn glab(&mut self, args: &[&str]) -> Result<String, String> {
+            Ok(if args[1].contains("/jobs") {
+                "[]".into()
+            } else if args[1].contains("/pipelines?") {
+                assert!(args[1].ends_with("pipelines?sha=abc&ref=release%2F2"));
+                self.0.into()
+            } else {
+                json!({"iid": 3, "state": "merged", "merge_commit_sha": null,
+                    "squash_commit_sha": "abc", "sha": "head", "target_branch": "release/2"})
+                .to_string()
+            })
+        }
+    }
+
+    #[test]
+    fn a_main_pipeline_that_is_missing_held_or_failed_does_not_pass() {
+        let read = |pipelines| GitLab::with(Box::new(Main(pipelines))).main_pipeline(REPO, "3");
+        assert_eq!(read("[]"), Ok(Checks::None));
+        assert_eq!(
+            read(r#"[{"id":1,"status":"manual","web_url":"https://gitlab.example.com/p/1"}]"#),
+            Err(CodeHostError::Other(
+                "pipeline 1 on release/2 (https://gitlab.example.com/p/1) is held at a manual \
+                 job; it passes once someone runs it"
+                    .into()
+            ))
+        );
+        assert_eq!(
+            read(r#"[{"id":1,"status":"running"}]"#),
+            Ok(Checks::Pending)
+        );
+        assert_eq!(
+            read(r#"[{"id":1,"status":"failed"}]"#),
+            Ok(Checks::Failed {
+                failing: vec!["pipeline 1".into()]
+            })
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! project is free and the issues it depends on are done. Nothing here reads a
 //! clock, a file or the network, so the same events always give the same state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::brief;
 use crate::effect::Effect;
@@ -231,10 +231,12 @@ impl World {
                     stage: Stage::New,
                     group: None,
                     folder: None,
+                    other_folders: Vec::new(),
                     plan: None,
                     review_ok: false,
                     checks_ok: None,
-                    pull: None,
+                    pulls: BTreeMap::new(),
+                    merged: BTreeSet::new(),
                     fix: Vec::new(),
                     told: false,
                     fix_keeps_round: false,
@@ -253,19 +255,21 @@ impl World {
                     entry.plan = None;
                     entry.review_ok = false;
                     entry.checks_ok = None;
-                    entry.pull = None;
+                    entry.pulls.clear();
+                    entry.merged.clear();
                     entry.fix.clear();
                     entry.review_waived = false;
                 }
                 // A pull request that closes its issue on merge must not skip deploy
                 // and verify: the loop closes it itself when they pass.
+                // Nor must one that closes it when only the first of several merged.
                 let finishing = matches!(
                     entry.stage,
                     Stage::Merging | Stage::Deploying | Stage::Verifying
-                );
+                ) || !entry.merged.is_empty();
                 if *closed && entry.stage != Stage::Done && !finishing {
                     entry.stage = Stage::Done;
-                    let folder = entry.folder.take();
+                    let folders = entry.take_folders();
                     // Closed in the tracker while agents worked on it: stop them
                     // before the folder goes to the next issue.
                     out.extend(
@@ -278,7 +282,7 @@ impl World {
                                 agent: a.id.clone(),
                             }),
                     );
-                    self.release(folder, &mut out);
+                    self.release(folders, &mut out);
                 }
             }
             Event::AgentStarted {
@@ -339,10 +343,23 @@ impl World {
                     out.extend(done);
                 }
             }
-            Event::PullRequestReady { issue, pull } => {
+            Event::PullRequestReady { issue, pull, pulls } => {
+                let first = self
+                    .issues
+                    .get(issue)
+                    .and_then(|i| self.repos_of(i).into_iter().next());
                 if let Some(i) = self.issues.get_mut(issue) {
-                    if pull.is_some() {
-                        i.pull = pull.clone();
+                    // Older logs name one pull request: the first repository's.
+                    let old = pull.clone().zip(first).map(|(n, repo)| (repo, n));
+                    for (repo, number) in old
+                        .into_iter()
+                        .chain(pulls.iter().map(|(r, n)| (r.clone(), n.clone())))
+                    {
+                        // A new pull request where one merged is a fix that has yet
+                        // to merge.
+                        if i.pulls.insert(repo.clone(), number.clone()) != Some(number) {
+                            i.merged.remove(&repo);
+                        }
                     }
                     let round = match i.stage {
                         Stage::Working => Some(1),
@@ -481,38 +498,88 @@ impl World {
                     };
                 }
             }
-            Event::Merged { issue } => {
-                // Merged: the author, reviewer and arbiter are done.
-                let done = self.stop(issue, &[Role::Author, Role::Reviewer, Role::Arbiter]);
+            Event::Merged { issue, repo } => {
+                let repos = self
+                    .issues
+                    .get(issue)
+                    .map(|i| self.repos_of(i))
+                    .unwrap_or_default();
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Merging
                 {
-                    i.stage = Stage::Deploying;
-                    out.push(Effect::Deploy {
-                        issue: issue.clone(),
-                    });
-                    out.extend(done);
-                    let folder = i.folder.take();
-                    self.release(folder, &mut out);
+                    match repo {
+                        Some(r) => {
+                            i.merged.insert(r.clone());
+                        }
+                        None => i.merged.extend(repos.iter().cloned()),
+                    }
+                    // An issue from an older log may name repositories it has no
+                    // pull request in; only those it has one in merge.
+                    if repos
+                        .iter()
+                        .all(|r| i.merged.contains(r) || !i.pulls.contains_key(r))
+                    {
+                        // Merged everywhere: the author, reviewer and arbiter are done.
+                        i.stage = Stage::Deploying;
+                        let folders = i.take_folders();
+                        out.push(Effect::Deploy {
+                            issue: issue.clone(),
+                        });
+                        out.extend(
+                            self.stop(issue, &[Role::Author, Role::Reviewer, Role::Arbiter]),
+                        );
+                        self.release(folders, &mut out);
+                    } else {
+                        // The next repository's pull request merges after this one's.
+                        out.push(Effect::Merge {
+                            issue: issue.clone(),
+                        });
+                    }
                 }
             }
-            Event::PullConflicts { issue } => {
+            Event::PullConflicts { issue, repo } => {
                 if let Some(i) = self.issues.get_mut(issue)
                     && let Stage::InReview { round } | Stage::Arbitration { round } = i.stage
                 {
                     i.review_ok = false;
-                    let points =
-                        vec!["the pull request conflicts with the branch it merges into".into()];
+                    let which = repo
+                        .as_ref()
+                        .filter(|_| i.pulls.len() > 1)
+                        .map_or_else(String::new, |r| format!(" in {r}"));
+                    let points = vec![format!(
+                        "the pull request{which} conflicts with the branch it merges into"
+                    )];
                     Self::send_back(i, round, points, true, &mut out);
                 }
             }
             Event::MergeRefused { issue, reason } => {
+                let repos = self
+                    .issues
+                    .get(issue)
+                    .map(|i| self.repos_of(i))
+                    .unwrap_or_default();
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Merging
                 {
                     let round = i.round.max(1);
-                    let points = vec![format!("the pull request cannot merge: {reason}")];
-                    Self::send_back(i, round, points, true, &mut out);
+                    let merged: Vec<String> = repos
+                        .iter()
+                        .filter(|r| i.merged.contains(r))
+                        .map(ToString::to_string)
+                        .collect();
+                    let next = repos.iter().find(|r| !i.merged.contains(r));
+                    let point = match (next, repos.len()) {
+                        (Some(next), n) if n > 1 && merged.is_empty() => {
+                            format!("{next} cannot merge: {reason}")
+                        }
+                        (Some(next), n) if n > 1 => format!(
+                            "{} {} merged, {next} cannot merge: {reason}",
+                            merged.join(", "),
+                            if merged.len() == 1 { "is" } else { "are" },
+                        ),
+                        _ => format!("the pull request cannot merge: {reason}"),
+                    };
+                    Self::send_back(i, round, vec![point], true, &mut out);
                 }
             }
             Event::Retried { issue } => {
@@ -555,7 +622,8 @@ impl World {
                         i.stage = Stage::Ready;
                         i.review_ok = false;
                         i.checks_ok = None;
-                        i.pull = None;
+                        i.pulls.clear();
+                        i.merged.clear();
                         i.review_waived = false;
                         i.fix = vec![format!(
                             "after the last change merged and deployed, the verify check failed: {output}"
@@ -568,18 +636,35 @@ impl World {
         out
     }
 
-    /// The repository an issue is worked in: its own project, or for an issue of
-    /// an area, the first repository its plan names, else the area's first.
-    pub fn repo_of(&self, issue: &Issue) -> Option<&Project> {
-        if let Some(p) = self.projects.get(&issue.id.project) {
-            return Some(p);
+    /// The repositories an issue changes, in the order they merge: its own
+    /// project; or for an issue of an area, the repositories its plan names, else
+    /// the area's first.
+    pub fn repos_of(&self, issue: &Issue) -> Vec<ProjectId> {
+        if self.projects.contains_key(&issue.id.project) {
+            return vec![issue.id.project.clone()];
         }
-        let area = self.areas.get(&issue.id.project)?;
-        issue
-            .plan
-            .as_ref()
-            .and_then(|plan| plan.repos.first())
-            .or_else(|| area.projects.first())
+        let mut repos: Vec<ProjectId> = Vec::new();
+        for r in issue.plan.iter().flat_map(|p| p.repos.iter()) {
+            if !repos.contains(r) {
+                repos.push(r.clone());
+            }
+        }
+        if repos.is_empty() {
+            repos.push(
+                self.areas
+                    .get(&issue.id.project)
+                    .and_then(|a| a.projects.first())
+                    .unwrap_or(&issue.id.project)
+                    .clone(),
+            );
+        }
+        repos
+    }
+
+    /// The repository an issue is worked in: its first.
+    pub fn repo_of(&self, issue: &Issue) -> Option<&Project> {
+        self.repos_of(issue)
+            .first()
             .and_then(|id| self.projects.get(id))
     }
 
@@ -766,6 +851,41 @@ impl World {
         let place = self.folder_for(i, folder);
         let path = place.map(|f| std::path::PathBuf::from(&f.path));
         let shared = folder.is_none() && place.is_some_and(|f| f.holder.is_some());
+        // An author holding folders in several repositories is told each one.
+        let held: Vec<brief::Held> = if role == Role::Author {
+            i.folder
+                .iter()
+                .chain(&i.other_folders)
+                .filter_map(|id| self.folders.get(id))
+                .map(|f| brief::Held {
+                    project: f.project.clone(),
+                    repo: self
+                        .projects
+                        .get(&f.project)
+                        .map_or_else(String::new, |p| p.repo.clone()),
+                    path: f.path.clone(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Every pull request with where to open it, in the order they merge.
+        let order = self.repos_of(i);
+        let pulls: Vec<brief::Pulled> = order
+            .iter()
+            .chain(i.pulls.keys().filter(|r| !order.contains(r)))
+            .filter_map(|r| {
+                Some(brief::Pulled {
+                    project: r.clone(),
+                    repo: self
+                        .projects
+                        .get(r)
+                        .map_or_else(String::new, |p| p.repo.clone()),
+                    number: i.pulls.get(r)?.clone(),
+                    merged: i.merged.contains(r),
+                })
+            })
+            .collect();
         Some(Launch {
             agent: AgentId::new(format!("{}-{n}", role.name())),
             group: group.clone(),
@@ -781,8 +901,12 @@ impl World {
                     i,
                     self.source_name(issue),
                     &self.area_repos(issue),
-                    path,
-                    shared,
+                    brief::Workplace {
+                        folder: path,
+                        shared,
+                        held,
+                    },
+                    &pulls,
                     &self.kept_rules(),
                 )
             },
@@ -890,13 +1014,13 @@ impl World {
         }
     }
 
-    /// Frees a work folder for the next issue.
-    fn release(&mut self, folder: Option<FolderId>, out: &mut Vec<Effect>) {
-        if let Some(id) = folder
-            && let Some(f) = self.folders.get_mut(&id)
-        {
-            f.holder = None;
-            out.push(Effect::ReleaseFolder { folder: id });
+    /// Frees work folders for the next issue.
+    fn release(&mut self, folders: Vec<FolderId>, out: &mut Vec<Effect>) {
+        for id in folders {
+            if let Some(f) = self.folders.get_mut(&id) {
+                f.holder = None;
+                out.push(Effect::ReleaseFolder { folder: id });
+            }
         }
     }
 
@@ -937,6 +1061,31 @@ impl World {
                     .milestone
                     .as_ref()
                     .is_some_and(|m| group.milestones.contains(m)))
+    }
+
+    /// A free work folder in each of `repos`, in their order and all on one
+    /// machine, since one author has to reach every one: the machine of the first
+    /// repository's folder. `None` when no machine has them all, so two issues
+    /// cannot each hold half of what the other needs.
+    fn free_folders(&self, repos: &[ProjectId]) -> Option<Vec<FolderId>> {
+        let (first, others) = repos.split_first()?;
+        let free = |repo: &ProjectId, machine: &MachineId| {
+            self.folders
+                .values()
+                .find(|f| &f.project == repo && &f.machine == machine && f.holder.is_none())
+        };
+        self.folders
+            .values()
+            .filter(|f| &f.project == first && f.holder.is_none())
+            .find_map(|start| {
+                std::iter::once(Some(start.id.clone()))
+                    .chain(
+                        others
+                            .iter()
+                            .map(|r| free(r, &start.machine).map(|f| f.id.clone())),
+                    )
+                    .collect()
+            })
     }
 
     /// Takes new issues for refining and starts authors on ready ones.
@@ -985,28 +1134,29 @@ impl World {
             ready.sort_by_key(|i| Self::rank(group, i));
             let ready: Vec<IssueId> = ready.iter().map(|i| i.id.clone()).collect();
             for id in ready {
-                let repo = self
+                let repos = self
                     .issues
                     .get(&id)
-                    .and_then(|i| self.repo_of(i))
-                    .map_or_else(|| id.project.clone(), |p| p.id.clone());
-                let free = self
-                    .folders
-                    .values()
-                    .find(|f| f.project == repo && f.holder.is_none())
-                    .map(|f| f.id.clone());
-                let Some(folder) = free else { continue };
-                if let (Some(i), Some(f)) =
-                    (self.issues.get_mut(&id), self.folders.get_mut(&folder))
-                {
-                    f.holder = Some(id.clone());
-                    i.folder = Some(folder.clone());
+                    .map(|i| self.repos_of(i))
+                    .unwrap_or_default();
+                let Some(mut picked) = self.free_folders(&repos) else {
+                    continue;
+                };
+                for f in &picked {
+                    if let Some(f) = self.folders.get_mut(f) {
+                        f.holder = Some(id.clone());
+                    }
+                }
+                if let Some(i) = self.issues.get_mut(&id) {
+                    let first = picked.remove(0);
+                    i.folder = Some(first.clone());
+                    i.other_folders = picked;
                     i.stage = Stage::Working;
                     out.push(Effect::StartAgent {
                         group: group.id.clone(),
                         role: Role::Author,
                         issue: id,
-                        folder: Some(folder),
+                        folder: Some(first),
                     });
                 }
             }
