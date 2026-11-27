@@ -130,7 +130,8 @@ pub trait Runner: Send {
     /// Runs `program` to its end on `machine` (this one when `None`), with no
     /// terminal, its arguments as given and no shell. A program that cannot be
     /// started, ends with a nonzero exit or runs out of time is an error that
-    /// says why, ending with the last line it wrote to standard error.
+    /// says why in one line: what happened, with the first line it wrote to
+    /// standard error, or what to do about it.
     fn exec(&mut self, machine: Option<&str>, program: &Program) -> Result<(), RunnerError> {
         let _ = (machine, program);
         Err(RunnerError::NotBuilt(
