@@ -28,11 +28,12 @@ on. For an issue of an area, the project level is the repository the issue is wo
 
 ## Roles
 
-Any level can also set a value for one role, such as reviewers. At each level the
-agent's role is checked before the value for every role, and only then is the next level
-asked: the nearest level that says anything wins. So when the area sets
-`reviewer.runtime = "codex"` and the project sets `runtime = "claude"`, reviewers on that
-project run Claude; for them to run Codex there, the project names its reviewers too.
+A setting can also be given for one role, such as reviewers. The lookup goes level by
+level, and at each level it reads the role's own value first, then the value for every
+role. So when the area gives reviewers `runtime = "codex"` and the project gives
+everyone `runtime = "claude"`, reviewers on that project run Claude, because the project
+is asked before the area. For them to run Codex there, the project names its reviewers
+too.
 
 ## The settings
 
