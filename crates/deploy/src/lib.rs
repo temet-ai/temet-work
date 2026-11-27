@@ -202,8 +202,8 @@ impl Part for Deploys {
             return Outcome::Failed(format!("{issue} has no repository configured"));
         };
         let command = match step {
-            Step::Deploy => project.deploy.clone(),
-            Step::Verify => project.verify.clone(),
+            Step::Deploy => world.setting_text(issue, None, "deploy"),
+            Step::Verify => world.setting_text(issue, None, "verify"),
         };
         let Some(command) = command else {
             let event = match step {
@@ -221,9 +221,8 @@ impl Part for Deploys {
                 effects: Vec::new(),
             };
         };
-        let cwd = project
-            .run_in
-            .clone()
+        let cwd = world
+            .setting_text(issue, None, "run_in")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"));

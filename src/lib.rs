@@ -38,6 +38,8 @@ pub fn parts() -> Vec<Box<dyn Part>> {
         let mut family = temet_work_runtime::Runtimes::default();
         #[cfg(feature = "runtime-claude")]
         family.add(Box::new(temet_work_runtime_claude::Claude));
+        #[cfg(feature = "runtime-codex")]
+        family.add(Box::new(temet_work_runtime_codex::Codex));
         parts.push(Box::new(family));
     }
     #[cfg(feature = "codehost")]

@@ -30,8 +30,10 @@ pub struct Brief {
     pub issue: IssueId,
     /// Its task, in full: what to do, what done means, what to read first.
     pub task: String,
-    /// The model to run, when the group sets one.
+    /// The model to run, when a setting names one.
     pub model: Option<String>,
+    /// How the runtime asks about what the agent may do (`permission`).
+    pub permission: String,
     /// The folder it works in.
     pub folder: Option<PathBuf>,
 }

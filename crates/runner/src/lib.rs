@@ -14,6 +14,7 @@ use temet_work_core::brief;
 use temet_work_core::ids::AgentId;
 use temet_work_core::launch::AGENT_VAR;
 use temet_work_core::model::{AgentState, Role};
+use temet_work_core::settings::Choice;
 use temet_work_core::world::LOCAL;
 use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
 
@@ -116,6 +117,12 @@ pub trait Runner: Send {
     /// A short, stable id, the adapter's feature name after `runner-`.
     fn id(&self) -> &'static str;
 
+    /// Whether this is the runner used when no setting names one. The build's
+    /// first default one wins.
+    fn is_default(&self) -> bool {
+        false
+    }
+
     /// Starts a program in a new labelled terminal.
     fn start(&mut self, start: &Start) -> Result<TerminalId, RunnerError>;
 
@@ -153,12 +160,6 @@ pub trait Runner: Send {
     }
 }
 
-/// How long an agent its issue waits on may sit idle before it is reminded.
-pub const NUDGE_AFTER_MS: u64 = 600_000;
-
-/// Reminders before an idle agent is stopped, so a fresh one takes over.
-pub const NUDGES: u32 = 2;
-
 /// Text waiting for an agent to finish its turn.
 struct Message {
     agent: String,
@@ -171,8 +172,8 @@ struct Message {
 
 /// The runner part: the runners compiled into this build, in the order they were added.
 ///
-/// It starts each agent's program in a labelled terminal with the first runner in
-/// this build, turns runner updates into agent events, and delivers text to an
+/// It starts each agent's program in a labelled terminal with the runner its `runner`
+/// setting names (the build's default when none does), turns runner updates into agent events, and delivers text to an
 /// agent between its turns, holding it while the agent is working.
 #[derive(Default)]
 pub struct Runners {
@@ -198,6 +199,53 @@ impl Runners {
     pub fn ids(&self) -> Vec<&'static str> {
         self.adapters.iter().map(|a| a.id()).collect()
     }
+
+    /// The id of the runner used when no setting names one.
+    pub fn default_id(&self) -> Option<&'static str> {
+        self.adapters
+            .iter()
+            .find(|a| a.is_default())
+            .map(|a| a.id())
+    }
+
+    /// The index of the runner an agent of `role` on `issue` runs in: the one its
+    /// `runner` setting names, else this build's default.
+    fn pick(
+        &self,
+        world: &World,
+        issue: &temet_work_core::ids::IssueId,
+        role: Role,
+    ) -> Result<usize, String> {
+        let list = || {
+            let ids = self.ids();
+            if ids.is_empty() {
+                "none".to_string()
+            } else {
+                ids.join(", ")
+            }
+        };
+        let named = world.setting_text(issue, Some(role), "runner");
+        let id = named
+            .as_deref()
+            .or_else(|| self.default_id())
+            .ok_or_else(|| {
+                format!(
+                    "no runner is set for {issue}'s {}s and this build has no default; set runner \
+                 globally. This build has: {}",
+                    role.name(),
+                    list()
+                )
+            })?;
+        self.adapters
+            .iter()
+            .position(|a| a.id() == id)
+            .ok_or_else(|| {
+                format!(
+                    "no runner \"{id}\" in this build; this build has: {}",
+                    list()
+                )
+            })
+    }
 }
 
 impl Runners {
@@ -217,9 +265,10 @@ impl Runners {
     }
 
     /// Sends what is waiting; keeps what the agent cannot take yet.
-    /// Reminds an idle agent its issue waits on, twice, ten minutes apart; ten
-    /// minutes after the second reminder it stops the agent's session, so the loop
-    /// starts a fresh one. Returns the agents it stopped, as ended.
+    /// Reminds an idle agent its issue waits on, `reminders` times (two by default),
+    /// `remind_after` minutes (ten) apart; that long after the last reminder it stops
+    /// the agent's session, so the loop starts a fresh one. Returns the agents it
+    /// stopped, as ended.
     fn remind(
         &mut self,
         world: &World,
@@ -240,10 +289,12 @@ impl Runners {
             .retain(|agent, _| waiting.iter().any(|(a, _, _)| a == agent));
         for (agent, role, issue) in waiting {
             let (since, nudges) = *self.idle.entry(agent.clone()).or_insert((now_ms, 0));
-            if now_ms < since + NUDGE_AFTER_MS {
+            let after_ms = world.setting_number(&issue, Some(role), "remind_after") * 60_000;
+            let reminders = world.setting_number(&issue, Some(role), "reminders");
+            if now_ms < since + after_ms {
                 continue;
             }
-            if nudges < NUDGES {
+            if u64::from(nudges) < reminders {
                 self.idle.insert(agent.clone(), (now_ms, nudges + 1));
                 events.extend(self.queue(Message {
                     agent,
@@ -350,6 +401,14 @@ impl Part for Runners {
         "runner"
     }
 
+    fn choices(&self) -> Vec<Choice> {
+        vec![Choice {
+            key: "runner".into(),
+            allowed: self.ids().into_iter().map(String::from).collect(),
+            default: self.default_id().map(String::from),
+        }]
+    }
+
     fn screen(&mut self, agent: &AgentId) -> Option<Result<String, String>> {
         Some(Runners::screen(self, &agent.0).map_err(|e| e.to_string()))
     }
@@ -359,9 +418,15 @@ impl Part for Runners {
         // Each agent's state as this poll has seen it, so a quick turn (idle,
         // working, idle) ends on idle and not on working.
         let mut seen: BTreeMap<AgentId, AgentState> = BTreeMap::new();
+        // Every runner's updates first, so each agent's terminal is known to the
+        // runner that holds it before any runner's full list is read.
+        let mut lists: Vec<(usize, Vec<Update>)> = Vec::new();
         for (i, adapter) in self.adapters.iter_mut().enumerate() {
             let updates = adapter.updates();
             let listed = adapter.listed();
+            if let Some(listed) = listed {
+                lists.push((i, listed));
+            }
             for u in updates {
                 let Some(agent) = u.labels.get("agent").cloned() else {
                     continue;
@@ -392,38 +457,46 @@ impl Part for Runners {
                 seen.insert(id.clone(), state.clone());
                 events.push(Event::AgentChanged { agent: id, state });
             }
-            // A full list from the runner that starts agents: an agent of this log
-            // whose terminal is not on it, and that was not started since, is gone.
-            if let Some(listed) = listed.filter(|_| i == 0) {
-                let alive: std::collections::BTreeSet<String> = listed
-                    .iter()
-                    .filter(|u| {
-                        world
-                            .log
-                            .as_ref()
-                            .is_none_or(|log| u.labels.get("log") == Some(log))
-                    })
-                    .filter_map(|u| u.labels.get("agent").cloned())
-                    .collect();
-                for a in world.agents.values() {
-                    let name = &a.id.0;
-                    let elsewhere = self.terminals.get(name).is_some_and(|(r, _)| *r != 0);
-                    if a.state != AgentState::Ended
-                        && !alive.contains(name)
-                        && !self.started_here.contains(name)
-                        && !elsewhere
-                        && seen.get(&a.id) != Some(&AgentState::Ended)
-                    {
-                        self.terminals.remove(name);
-                        seen.insert(a.id.clone(), AgentState::Ended);
-                        events.push(Event::AgentChanged {
-                            agent: a.id.clone(),
-                            state: AgentState::Ended,
-                        });
-                    }
+        }
+        // A full list from a runner: an agent of this log whose terminal that runner
+        // holds, and which is not on its list and was not started since, is gone. An
+        // agent no runner holds yet is judged by the first runner's list, the one
+        // that starts agents when no setting names another.
+        let listed_any = !lists.is_empty();
+        for (i, listed) in lists {
+            let alive: std::collections::BTreeSet<String> = listed
+                .iter()
+                .filter(|u| {
+                    world
+                        .log
+                        .as_ref()
+                        .is_none_or(|log| u.labels.get("log") == Some(log))
+                })
+                .filter_map(|u| u.labels.get("agent").cloned())
+                .collect();
+            for a in world.agents.values() {
+                let name = &a.id.0;
+                let judged_here = match self.terminals.get(name) {
+                    Some((r, _)) => *r == i,
+                    None => i == 0,
+                };
+                if judged_here
+                    && a.state != AgentState::Ended
+                    && !alive.contains(name)
+                    && !self.started_here.contains(name)
+                    && seen.get(&a.id) != Some(&AgentState::Ended)
+                {
+                    self.terminals.remove(name);
+                    seen.insert(a.id.clone(), AgentState::Ended);
+                    events.push(Event::AgentChanged {
+                        agent: a.id.clone(),
+                        state: AgentState::Ended,
+                    });
                 }
-                self.started_here.clear();
             }
+        }
+        if listed_any {
+            self.started_here.clear();
         }
         events.extend(self.deliver());
         events.extend(self.remind(world, &seen, now_ms));
@@ -437,12 +510,12 @@ impl Part for Runners {
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
         match effect {
             Effect::Run { launch, program } => {
-                let Some(runner) = self.adapters.first_mut() else {
-                    return Outcome::Failed(
-                        "no terminal runner is compiled into this build".into(),
-                    );
-                };
                 let brief = &launch.brief;
+                let chosen = match self.pick(world, &brief.issue, brief.role) {
+                    Ok(i) => i,
+                    Err(e) => return Outcome::Failed(e),
+                };
+                let runner = &mut self.adapters[chosen];
                 let mut labels = BTreeMap::from([
                     ("agent".to_string(), launch.agent.0.clone()),
                     ("group".to_string(), launch.group.0.clone()),
@@ -471,7 +544,8 @@ impl Part for Runners {
                 };
                 match runner.start(&start) {
                     Ok(terminal) => {
-                        self.terminals.insert(launch.agent.0.clone(), (0, terminal));
+                        self.terminals
+                            .insert(launch.agent.0.clone(), (chosen, terminal));
                         self.started_here.insert(launch.agent.0.clone());
                         Outcome::Done {
                             events: vec![Event::AgentStarted {
@@ -761,6 +835,9 @@ mod tests {
         fn id(&self) -> &'static str {
             "shared"
         }
+        fn is_default(&self) -> bool {
+            true
+        }
         fn start(&mut self, start: &Start) -> Result<TerminalId, RunnerError> {
             self.fake.lock().expect("fake").start(start)
         }
@@ -903,7 +980,7 @@ mod tests {
         let author = run(&mut part, &mut w, &["cat"]);
         let first = part.poll(&w, 0).events;
         apply(&mut w, &first);
-        let at = |n: u64| n * NUDGE_AFTER_MS;
+        let at = |n: u64| n * 600_000;
         let polled = part.poll(&w, at(1)).events;
         apply(&mut w, &polled);
         let screen = part.screen(&author.0).expect("screen");
@@ -929,6 +1006,122 @@ mod tests {
         let mut part = runners();
         assert_eq!(part.carry_out(&fix, &world()), Outcome::done());
         assert_eq!(part.waiting(), 0);
+    }
+
+    fn two() -> Runners {
+        let mut part = Runners::default();
+        part.add(Box::new(FakeRunner::named("first")));
+        part.add(Box::new(FakeRunner::named("second")));
+        part
+    }
+
+    /// Which runner holds the agent, by its id.
+    fn held_by(part: &Runners, agent: &AgentId) -> &'static str {
+        part.adapters[part.terminals[&agent.0].0].id()
+    }
+
+    #[test]
+    fn two_adapters_the_default_runs_until_a_setting_names_the_other() {
+        let mut w = world();
+        let mut part = two();
+        let first = run(&mut part, &mut w, &["cat"]);
+        assert_eq!(held_by(&part, &first), "first");
+        w.apply(&Event::SettingSet {
+            scope: temet_work_core::settings::Scope::Task(IssueId::new("ankh", "1")),
+            role: Some(Role::Author),
+            key: "runner".into(),
+            value: temet_work_core::settings::Value::Text("second".into()),
+            by: "person".into(),
+        });
+        let second = run(&mut part, &mut w, &["cat"]);
+        assert_eq!(held_by(&part, &second), "second");
+        // Each agent's terminal is read from the runner that holds it.
+        assert!(part.screen(&second.0).is_ok());
+        assert!(part.screen(&first.0).is_ok());
+    }
+
+    #[test]
+    fn two_adapters_each_judge_only_the_agents_they_hold() {
+        let mut w = world();
+        let mut part = two();
+        let first = run(&mut part, &mut w, &["cat"]);
+        w.apply(&Event::SettingSet {
+            scope: temet_work_core::settings::Scope::Global,
+            role: None,
+            key: "runner".into(),
+            value: temet_work_core::settings::Value::Text("second".into()),
+            by: "file".into(),
+        });
+        let second = run(&mut part, &mut w, &["cat"]);
+        // Neither runner lists anything, and nothing is judged gone.
+        assert_eq!(part.poll(&w, 0).events, vec![]);
+        assert_eq!(w.agents[&first].state, AgentState::Idle);
+        assert_eq!(w.agents[&second].state, AgentState::Idle);
+    }
+
+    #[test]
+    fn two_adapters_a_setting_naming_one_the_build_lacks_is_a_problem_listing_the_ones_it_has() {
+        let mut w = world();
+        let mut part = two();
+        w.apply(&Event::SettingSet {
+            scope: temet_work_core::settings::Scope::Global,
+            role: None,
+            key: "runner".into(),
+            value: temet_work_core::settings::Value::Text("nonesuch".into()),
+            by: "file".into(),
+        });
+        let launch = w
+            .launch(
+                &GroupId::new("watch"),
+                Role::Author,
+                &IssueId::new("ankh", "1"),
+                Some(&FolderId::new("f1")),
+            )
+            .expect("launch");
+        let run = Effect::Run {
+            launch,
+            program: Program {
+                argv: vec!["cat".into()],
+                env: vec![],
+            },
+        };
+        assert!(matches!(
+            part.carry_out(&run, &w),
+            Outcome::Failed(e) if e.contains("nonesuch") && e.contains("first, second")
+        ));
+    }
+
+    #[test]
+    fn a_reminder_follows_the_settings_of_its_agents_issue() {
+        // remind_after and reminders are read per issue: one minute, no reminders,
+        // so a single idle minute stops the agent.
+        let mut w = world();
+        let mut part = runners();
+        let agent = run(&mut part, &mut w, &["cat"]);
+        w.apply(&Event::Told {
+            issue: IssueId::new("ankh", "1"),
+        });
+        for (key, n) in [("remind_after", 1), ("reminders", 0)] {
+            w.apply(&Event::SettingSet {
+                scope: temet_work_core::settings::Scope::Task(IssueId::new("ankh", "1")),
+                role: None,
+                key: key.into(),
+                value: temet_work_core::settings::Value::Number(n),
+                by: "person".into(),
+            });
+        }
+        w.issues
+            .get_mut(&IssueId::new("ankh", "1"))
+            .expect("there")
+            .stage = temet_work_core::model::Stage::Working;
+        assert_eq!(part.poll(&w, 0).events, vec![]);
+        assert_eq!(
+            part.poll(&w, 60_000).events,
+            vec![Event::AgentChanged {
+                agent,
+                state: AgentState::Ended
+            }]
+        );
     }
 
     #[test]

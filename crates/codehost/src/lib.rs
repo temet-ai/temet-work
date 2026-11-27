@@ -86,8 +86,9 @@ pub trait CodeHost: Send {
     /// The pull request `number`.
     fn pull(&mut self, repo: &str, number: &str) -> Result<Pull, CodeHostError>;
 
-    /// Merges the pull request `number`.
-    fn merge(&mut self, repo: &str, number: &str) -> Result<(), CodeHostError>;
+    /// Merges the pull request `number` the way `how` says: `squash`, `merge` or
+    /// `rebase`.
+    fn merge(&mut self, repo: &str, number: &str, how: &str) -> Result<(), CodeHostError>;
 }
 
 /// A code host in memory, for tests.
@@ -95,6 +96,8 @@ pub trait CodeHost: Send {
 pub struct FakeCodeHost {
     /// Pull requests, as (repo, pull).
     pub pulls: Vec<(String, Pull)>,
+    /// How each merge was asked for (`squash`, `merge` or `rebase`), in order.
+    pub merges: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl CodeHost for FakeCodeHost {
@@ -110,7 +113,7 @@ impl CodeHost for FakeCodeHost {
             .ok_or_else(|| CodeHostError::NotFound(format!("{repo} pull request {number}")))
     }
 
-    fn merge(&mut self, repo: &str, number: &str) -> Result<(), CodeHostError> {
+    fn merge(&mut self, repo: &str, number: &str, how: &str) -> Result<(), CodeHostError> {
         let (_, pull) = self
             .pulls
             .iter_mut()
@@ -122,6 +125,9 @@ impl CodeHost for FakeCodeHost {
             )));
         }
         pull.state = PullState::Merged;
+        if let Ok(mut merges) = self.merges.lock() {
+            merges.push(how.to_string());
+        }
         Ok(())
     }
 }
@@ -168,7 +174,8 @@ pub mod contract {
             "an unknown repository is an error",
         )?;
         if let Some(n) = harness.mergeable() {
-            host.merge(&repo, &n).map_err(|e| format!("merge: {e}"))?;
+            host.merge(&repo, &n, "squash")
+                .map_err(|e| format!("merge: {e}"))?;
             let after = host
                 .pull(&repo, &n)
                 .map_err(|e| format!("pull after merge: {e}"))?;
@@ -176,7 +183,10 @@ pub mod contract {
                 after.state == PullState::Merged,
                 "a merged pull request reads as merged",
             )?;
-            ensure(host.merge(&repo, &n).is_err(), "merging twice is an error")?;
+            ensure(
+                host.merge(&repo, &n, "squash").is_err(),
+                "merging twice is an error",
+            )?;
         }
         Ok(())
     }
@@ -185,32 +195,19 @@ pub mod contract {
 /// How long after a failed merge it is tried again.
 pub const MERGE_RETRY_AFTER: Duration = Duration::from_secs(60);
 
-/// How often an issue's CI is read, by the daemon's clock.
-pub const POLL_EVERY_MS: u64 = 30_000;
-
 /// The code-host part: the code hosts compiled into this build, in the order
 /// they were added.
 ///
-/// It reads the CI of each pull request under review and reports when it has
-/// finished, and merges an issue's pull request when the loop asks.
+/// It reads the CI of each pull request under review, as often as its `ci_every`
+/// setting says (30 seconds by default), and reports when it has finished, and merges an issue's pull request when the loop asks.
+#[derive(Default)]
 pub struct CodeHosts {
     adapters: Vec<Box<dyn CodeHost>>,
-    every_ms: u64,
+    /// Overrides the `ci_every` setting, for tests.
+    every_ms: Option<u64>,
     read_at: BTreeMap<IssueId, u64>,
     errors: BTreeMap<IssueId, String>,
     merge_failed: BTreeMap<IssueId, (String, Instant)>,
-}
-
-impl Default for CodeHosts {
-    fn default() -> Self {
-        Self {
-            adapters: Vec::new(),
-            every_ms: POLL_EVERY_MS,
-            read_at: BTreeMap::new(),
-            errors: BTreeMap::new(),
-            merge_failed: BTreeMap::new(),
-        }
-    }
 }
 
 impl CodeHosts {
@@ -224,9 +221,9 @@ impl CodeHosts {
         self.adapters.iter().map(|a| a.id()).collect()
     }
 
-    /// Reads CI every `ms` instead of every 30 seconds.
+    /// Reads CI every `ms` whatever the `ci_every` setting says.
     pub fn every(mut self, ms: u64) -> Self {
-        self.every_ms = ms;
+        self.every_ms = Some(ms);
         self
     }
 
@@ -269,10 +266,13 @@ impl Part for CodeHosts {
         self.errors
             .retain(|id, _| waiting.iter().any(|(w, _)| w == id));
         for (issue, number) in waiting {
+            let every = self
+                .every_ms
+                .unwrap_or_else(|| world.setting_number(&issue, None, "ci_every") * 1000);
             let due = self
                 .read_at
                 .get(&issue)
-                .is_none_or(|at| now_ms >= at + self.every_ms);
+                .is_none_or(|at| now_ms >= at + every);
             if !due {
                 continue;
             }
@@ -292,11 +292,7 @@ impl Part for CodeHosts {
             };
             // No checks yet usually means CI has not started on the new commit; only
             // a project that runs no CI leaves the plan's checks to the reviewer.
-            let runs_ci = world
-                .issues
-                .get(&issue)
-                .and_then(|i| world.repo_of(i))
-                .is_none_or(|p| p.ci);
+            let runs_ci = world.setting_flag(&issue, None, "ci");
             let finished = match pull.checks {
                 Checks::Pending => None,
                 Checks::None if runs_ci => None,
@@ -335,6 +331,9 @@ impl Part for CodeHosts {
             }],
             effects: Vec::new(),
         };
+        let how = world
+            .setting_text(issue, None, "merge")
+            .unwrap_or_else(|| "squash".into());
         let (host, repo) = match self.host_for(world, issue) {
             Ok(found) => found,
             Err(e) => return Outcome::Failed(e),
@@ -352,7 +351,7 @@ impl Part for CodeHosts {
                     PullState::Open if pull.conflicting => Ok(Some(format!(
                         "pull request {number} conflicts with the branch it merges into"
                     ))),
-                    PullState::Open => match host.merge(&repo, &number) {
+                    PullState::Open => match host.merge(&repo, &number, &how) {
                         Ok(()) => Ok(None),
                         Err(e)
                             if ["not mergeable", "merge conflict", "conflicts"]
@@ -390,6 +389,7 @@ impl Part for CodeHosts {
 mod tests {
     use super::*;
     use temet_work_core::ids::ProjectId;
+    use temet_work_core::settings::{Scope, Value};
 
     fn pull(number: &str, checks: Checks) -> Pull {
         Pull {
@@ -415,6 +415,7 @@ mod tests {
                     ),
                 ),
             ],
+            merges: Default::default(),
         }
     }
 
@@ -487,11 +488,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(
-            part.poll(&w, POLL_EVERY_MS - 1).events,
-            vec![],
-            "not due yet"
-        );
+        assert_eq!(part.poll(&w, 30_000 - 1).events, vec![], "not due yet");
     }
 
     #[test]
@@ -528,6 +525,62 @@ mod tests {
         ));
     }
 
+    fn set(w: &mut World, scope: Scope, key: &str, value: Value) {
+        w.apply(&Event::SettingSet {
+            scope,
+            role: None,
+            key: key.into(),
+            value,
+            by: "person".into(),
+        });
+    }
+
+    #[test]
+    fn the_merge_setting_reaches_the_code_host_for_that_issue_only() {
+        let mut w = in_review();
+        set(
+            &mut w,
+            Scope::Task(IssueId::new("ankh", "1")),
+            "merge",
+            Value::Text("rebase".into()),
+        );
+        let host = fake();
+        let merges = host.merges.clone();
+        let mut part = CodeHosts::default();
+        part.add(Box::new(host));
+        for key in ["1", "2"] {
+            let merge = Effect::Merge {
+                issue: IssueId::new("ankh", key),
+            };
+            assert!(matches!(part.carry_out(&merge, &w), Outcome::Done { .. }));
+        }
+        assert_eq!(*merges.lock().expect("lock"), ["rebase", "squash"]);
+    }
+
+    #[test]
+    fn ci_is_read_as_often_as_the_ci_every_setting_says_for_that_issue() {
+        let mut w = in_review();
+        set(
+            &mut w,
+            Scope::Task(IssueId::new("ankh", "1")),
+            "ci_every",
+            Value::Number(300),
+        );
+        let mut part = CodeHosts::default();
+        part.add(Box::new(fake()));
+        let finished = |events: &[Event], key: &str| {
+            events
+                .iter()
+                .any(|e| matches!(e, Event::ChecksFinished { issue, .. } if issue.key == key))
+        };
+        assert!(finished(&part.poll(&w, 0).events, "1"));
+        // ankh#3 is read again after the default 30 seconds; ankh#1 after 300.
+        let at_31s = part.poll(&w, 31_000).events;
+        assert!(finished(&at_31s, "3"));
+        assert!(!finished(&at_31s, "1"));
+        assert!(finished(&part.poll(&w, 300_000).events, "1"));
+    }
+
     #[test]
     fn no_ci_reading_waits_unless_the_project_runs_no_ci() {
         let mut w = in_review();
@@ -545,13 +598,12 @@ mod tests {
             None,
             "CI may not have started"
         );
-        w.apply(&Event::ProjectCommandsSet {
-            project: ProjectId::new("ankh"),
-            deploy: None,
-            verify: None,
-            run_in: None,
-            ci: Some(false),
-        });
+        set(
+            &mut w,
+            Scope::Project(ProjectId::new("ankh")),
+            "ci",
+            Value::Flag(false),
+        );
         assert!(matches!(
             first(part.poll(&w, 1).events),
             Some(Event::ChecksFinished { passed: true, .. })

@@ -265,6 +265,7 @@ fn an_author_runs_in_its_folder_and_a_refiner_in_any_folder_of_the_project() {
         issue: IssueId::new("ankh", "1"),
         plan: Plan {
             repos: Vec::new(),
+            settings: Default::default(),
             checks: vec![crate::model::Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),

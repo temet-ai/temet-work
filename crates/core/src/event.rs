@@ -5,6 +5,7 @@ use crate::ids::{
     AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId,
 };
 use crate::model::{AgentState, Decision, Plan, Role};
+use crate::settings::{Scope, Value};
 
 /// The reviewer's answer for one round.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -69,7 +70,32 @@ pub enum Event {
         #[serde(default)]
         tracker_name: String,
     },
-    /// A project's deploy and verify commands were set.
+    /// A setting was given a value at one level, for one role or for every role.
+    SettingSet {
+        /// The level it is set at.
+        scope: Scope,
+        /// The role it is for; none for every role.
+        role: Option<Role>,
+        /// The setting.
+        key: String,
+        /// Its value.
+        value: Value,
+        /// Who set it: `file`, `person`, or an agent's id.
+        by: String,
+    },
+    /// A setting's value at one level was removed, so the next level answers.
+    SettingUnset {
+        /// The level.
+        scope: Scope,
+        /// The role it was for; none for every role.
+        role: Option<Role>,
+        /// The setting.
+        key: String,
+        /// Who removed it.
+        by: String,
+    },
+    /// A project's deploy and verify commands were set. Older logs hold these;
+    /// they are read as project-level settings.
     ProjectCommandsSet {
         /// The project.
         project: ProjectId,
@@ -99,7 +125,8 @@ pub enum Event {
         milestones: Vec<MilestoneId>,
         /// How many issues it refines at once.
         refining_at_once: usize,
-        /// The model its agents run, when it names one.
+        /// The model its agents run, when it names one. Older logs hold this;
+        /// it is read as a model setting on the group's projects and areas.
         #[serde(default)]
         model: Option<String>,
     },

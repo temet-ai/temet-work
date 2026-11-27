@@ -17,9 +17,7 @@ use crate::model::Decision;
 use crate::model::{
     Agent, AgentState, Area, DecisionKind, Folder, Group, Issue, Project, Role, Stage,
 };
-
-/// How many agents of one role the loop starts on one issue before it gives up.
-pub const MAX_STARTS: usize = 3;
+use crate::settings::{FILE, Scope, Value};
 
 /// What [`World::missing`] finds.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -32,9 +30,6 @@ pub struct Missing {
 
 /// The machine an agent runs on when its project has no work folder.
 pub const LOCAL: &str = "local";
-
-/// How many review rounds run before an arbiter rules.
-pub const REVIEW_ROUNDS: u8 = 3;
 
 /// Everything the loop knows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -55,6 +50,11 @@ pub struct World {
     pub folders: BTreeMap<FolderId, Folder>,
     /// Decisions by id.
     pub decisions: BTreeMap<DecisionId, Decision>,
+    /// Settings by level, role and key (`docs/settings.md`).
+    pub settings: BTreeMap<crate::settings::Key, crate::settings::Entry>,
+    /// What the build's adapters offer for the settings that name one, put in by
+    /// the host. It is not built from events.
+    pub catalog: BTreeMap<String, crate::settings::Choice>,
     /// How many events have been applied.
     pub applied: u64,
 }
@@ -115,10 +115,6 @@ impl World {
                         name: String::new(),
                         code_host: String::new(),
                         repo: String::new(),
-                        deploy: None,
-                        verify: None,
-                        run_in: None,
-                        ci: true,
                     });
                 p.tracker = tracker.clone();
                 p.name = name.clone();
@@ -150,12 +146,36 @@ impl World {
                 run_in,
                 ci,
             } => {
-                if let Some(p) = self.projects.get_mut(project) {
-                    p.deploy = deploy.clone();
-                    p.verify = verify.clone();
-                    p.run_in = run_in.clone();
-                    p.ci = ci.unwrap_or(true);
+                // Older logs: the same values, as project-level settings.
+                if self.projects.contains_key(project) {
+                    let scope = Scope::Project(project.clone());
+                    for (key, value) in [
+                        ("deploy", deploy.clone().map(Value::Text)),
+                        ("verify", verify.clone().map(Value::Text)),
+                        ("run_in", run_in.clone().map(Value::Text)),
+                        ("ci", ci.filter(|c| !c).map(Value::Flag)),
+                    ] {
+                        match value {
+                            Some(v) => self.put(&scope, None, key, &v, FILE),
+                            None => {
+                                self.settings
+                                    .remove(&(scope.clone(), None, key.to_string()));
+                            }
+                        }
+                    }
                 }
+            }
+            Event::SettingSet {
+                scope,
+                role,
+                key,
+                value,
+                by,
+            } => self.put(scope, *role, key, value, by),
+            Event::SettingUnset {
+                scope, role, key, ..
+            } => {
+                self.settings.remove(&(scope.clone(), *role, key.clone()));
             }
             Event::GroupCreated {
                 group,
@@ -166,6 +186,19 @@ impl World {
                 refining_at_once,
                 model,
             } => {
+                // Older logs: a group's model, as a setting on what it works on.
+                if let Some(m) = model {
+                    let scopes = projects
+                        .iter()
+                        .map(|p| Scope::Project(p.clone()))
+                        .chain(areas.iter().map(|a| Scope::Area(a.clone())));
+                    for scope in scopes {
+                        let key = (scope.clone(), None, "model".to_string());
+                        if !self.settings.contains_key(&key) {
+                            self.put(&scope, None, "model", &Value::Text(m.clone()), FILE);
+                        }
+                    }
+                }
                 self.groups.insert(
                     group.clone(),
                     Group {
@@ -175,7 +208,6 @@ impl World {
                         areas: areas.clone(),
                         milestones: milestones.clone(),
                         refining_at_once: (*refining_at_once).max(1),
-                        model: model.clone(),
                     },
                 );
             }
@@ -333,6 +365,7 @@ impl World {
                 round,
                 verdict,
             } => {
+                let rounds = self.setting_number(issue, None, "review_rounds");
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == (Stage::InReview { round: *round })
                 {
@@ -341,7 +374,7 @@ impl World {
                             i.review_ok = true;
                             Self::try_merge(i, &mut out);
                         }
-                        Verdict::Block { points } if *round < REVIEW_ROUNDS => {
+                        Verdict::Block { points } if u64::from(*round) < rounds => {
                             Self::send_back(i, *round, points.clone(), false, &mut out);
                         }
                         Verdict::Block { .. } => {
@@ -547,7 +580,8 @@ impl World {
     /// the daemon decided on and did not start before it stopped. A running
     /// author or reviewer that has not heard its fixes or its new round is told
     /// again. After
-    /// [`MAX_STARTS`] agents of one role on one issue it gives up, and says so.
+    /// the `starts` setting's number of agents of one role on one issue it gives
+    /// up, and says so.
     pub fn missing(&self) -> Missing {
         let mut out = Missing::default();
         for i in self.issues.values() {
@@ -629,7 +663,7 @@ impl World {
                 .values()
                 .filter(|a| a.issue.as_ref() == Some(&i.id) && a.role == role)
                 .count();
-            if tried >= MAX_STARTS {
+            if tried as u64 >= self.setting_number(&i.id, Some(role), "starts") {
                 out.given_up.push(format!(
                     "{}: {tried} {}s ended before it moved on; no more are started",
                     i.id,
@@ -676,7 +710,10 @@ impl World {
             machine: place.map_or_else(|| MachineId::new(LOCAL), |f| f.machine.clone()),
             folder: folder.cloned(),
             brief: crate::launch::Brief {
-                model: self.groups.get(group).and_then(|g| g.model.clone()),
+                model: self.setting_text(issue, Some(role), "model"),
+                permission: self
+                    .setting_text(issue, Some(role), "permission")
+                    .unwrap_or_default(),
                 ..brief::write(
                     role,
                     i,
@@ -860,3 +897,7 @@ impl World {
 #[cfg(test)]
 #[path = "world_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "world_settings_tests.rs"]
+mod settings_scope;

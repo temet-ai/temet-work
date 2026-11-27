@@ -5,10 +5,9 @@ session_id:
 
 # Settings: defaults at every level
 
-This is the plan for how temet-work decides how a piece of work is done: which runtime
-and model an agent runs, where it runs, how many review rounds there are, and the rest.
-None of it is built yet. It replaces the fixed values and one-off keys listed under "The
-settings".
+This is how temet-work decides how a piece of work is done: which runtime and model an
+agent runs, where it runs, how many review rounds there are, and the rest. It replaced
+the fixed values and one-off keys that the code had.
 
 ## The chain
 
@@ -37,19 +36,23 @@ too.
 
 ## The settings
 
-| Setting | Built in | Where it is today |
+| Setting | Built in | Read by |
 |---|---|---|
-| `runtime` | `claude` when the build has it; a build without it must set one globally | every agent gets the first runtime in the build |
-| `model` | the runtime's own default | a group's `model` |
-| `runner` | `herdr` when the build has it, likewise | every agent gets the first runner in the build |
-| `permission` | `auto` | fixed in the Claude adapter |
-| `review_rounds` | 3 | `REVIEW_ROUNDS` in the core |
-| `ci` | true | a project's `ci` |
-| `deploy`, `verify`, `run_in` | none | a project's keys |
-| `merge` | squash | fixed in the GitHub adapter |
-| `remind_after`, `reminders` | 10 minutes, 2 | fixed in the runner family |
-| `starts` | 3 agents of one role on one issue | `MAX_STARTS` in the core |
-| `sync_every`, `ci_every` | 60 s, 30 s | fixed in the tracker and code-host families |
+| `runtime` | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
+| `model` | the runtime's own default | the agent's brief, so the runtime adapter |
+| `runner` | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
+| `permission` | `auto` | the agent's brief; the Claude adapter's permission mode, the Codex adapter's approval policy |
+| `review_rounds` | 3 | the loop, per issue |
+| `ci` | true | the code-host family, per issue |
+| `deploy`, `verify`, `run_in` | none | the deploy part, per issue |
+| `merge` | `squash` (or `merge`, `rebase`) | the code host's merge |
+| `remind_after`, `reminders` | 10 minutes, 2 | the runner family, per agent's issue and role |
+| `starts` | 3 agents of one role on one issue | the loop, per issue and role |
+| `sync_every`, `ci_every` | 60 s, 30 s | the tracker family for each project or area; the code-host family for each issue |
+
+The table is the resolver's: `temet-work settings` lists the same keys, and the code reads
+every one of them through it. A setting with no value and no built-in value, such as
+`model`, is left out of the listing.
 
 How many issues a group refines at once stays on the group: it is how much the group
 takes on, not how a piece of work is done.
@@ -92,12 +95,24 @@ temet-work unset radar#44 model
 temet-work settings radar#44 --role author
 ```
 
-A refiner can set task-level values in its plan, such as a stronger model for an issue it
-judges hard. That is a decision like any other: recorded, and open to overturning.
+A refiner can set task-level values in its plan, as a `settings:` map next to `checks:`,
+such as a stronger model for an issue it judges hard. That is a decision like any other:
+recorded as set by the refiner, and open to overturning with `temet-work set`. A refiner
+can set the task level of the issue it is refining and nothing wider; no other agent can
+set anything, and a wider level is a person's.
 
-Every change, from the file, a command or a plan, is an event in the log with who made
-it. A value that names a runtime or runner this build does not have is refused when it is
-set, and the daemon does not start with one in its configuration.
+Every change, from the file, a command or a plan, is a `SettingSet` or `SettingUnset`
+event in the log with who made it: `file`, `person`, or the agent's id. A later event
+overrides an earlier one at the same level, role and key, so replaying the log gives the
+same settings. A value that names a runtime or runner this build does not have is refused
+when it is set, with the ones the build has listed, and the daemon does not start with
+one in its configuration. A build with no default runtime or runner, and no global value
+for it, does not start either.
+
+Milestones are written `project:Milestone name` or `area:Milestone name`, in the
+commands and in the listing; in the file, `of` and `name`. An issue is matched to its
+milestone through the tracker's milestone field. Units: `remind_after` is in minutes,
+`sync_every` and `ci_every` in seconds.
 
 ## Seeing them
 
@@ -110,20 +125,28 @@ radar#44, author
   runner      herdr    built in
 ```
 
-`temet-work issue` shows the same for the role at work on the issue. The MCP server offers
-`settings` at the read level and `set` at the act level.
+The listing says "set by" for everything except a value from the file, which reads as
+its level alone. `temet-work issue` shows the same for the role at work on the issue.
+The MCP server offers `settings` at the read level and `set` and `unset` at the act
+level. `temet-work status` lists every value with the level it is set at and who set it.
 
 ## In the code
 
 - The core keeps each level's values, built from `SettingSet` events, and one resolver
-  answers "what is this setting for this issue and role, and which level set it". Parts
-  ask the world for a setting instead of reading their own fields or constants.
-- The runtime family picks its adapter by `runtime`, the runner family by `runner`. The
-  Codex adapter becomes the second runtime.
+  (`World::resolve`) answers "what is this setting for this issue and role, and which
+  level set it". Parts ask the world for a setting instead of reading their own fields
+  or constants.
+- A family reports the adapters in its build and its default one; the host puts them in
+  the world, which is how a value naming an adapter the build lacks is refused. The
+  runtime family picks its adapter by `runtime`, the runner family by `runner`. The Codex
+  adapter is the second runtime.
 - Every family is tested with two adapters compiled in at once, so "the first one wins"
   cannot come back unnoticed.
 - The group's `model` and the project's `ci`, `deploy`, `verify` and `run_in` are read as
-  settings at their level, so configuration written today keeps working.
+  settings at their level, so configuration written today keeps working. A group's model
+  becomes the model of the projects and areas it works on.
+- A value in the file does not overwrite one a person or an agent has set since, and a
+  value taken out of the file is unset again.
 
 ## Decided, open to change
 

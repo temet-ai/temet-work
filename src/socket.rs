@@ -133,9 +133,15 @@ pub fn send(path: &Path, request: &Request) -> Result<Reply, String> {
 /// Answers one request against the host. The error stops the daemon: an event
 /// could not be logged.
 pub fn answer(host: &mut Host, now_ms: u64, request: &Request) -> Result<Reply, String> {
-    match host.world().check(request.by.as_ref(), &request.command) {
+    match host.world().events(request.by.as_ref(), &request.command) {
         Err(why) => Ok(Reply::Refused { why }),
-        Ok(None) => Ok(match &request.command {
+        Ok(events) if events.is_empty() => Ok(match &request.command {
+            temet_work_core::Command::Settings { target, role } => {
+                match temet_work_core::text::settings(host.world(), target, *role) {
+                    Ok(text) => Reply::Done { text },
+                    Err(why) => Reply::Refused { why },
+                }
+            }
             temet_work_core::Command::Issue { issue } => Reply::Done {
                 text: temet_work_core::text::issue(host.world(), issue).unwrap_or_default(),
             },
@@ -147,8 +153,32 @@ pub fn answer(host: &mut Host, now_ms: u64, request: &Request) -> Result<Reply, 
                 text: temet_work_core::text::text(host.world(), host.problems()),
             },
         }),
-        Ok(Some(event)) => {
-            host.handle(now_ms, event)?;
+        Ok(events) => {
+            for event in events {
+                host.handle(now_ms, event)?;
+            }
+            match &request.command {
+                temet_work_core::Command::Set {
+                    target,
+                    role,
+                    key,
+                    value,
+                } => {
+                    let for_role = role.map_or_else(String::new, |r| format!(" for {}", r.name()));
+                    return Ok(Reply::Done {
+                        text: format!("{key} is {value} at {target}{for_role}"),
+                    });
+                }
+                temet_work_core::Command::Unset {
+                    target, role, key, ..
+                } => {
+                    let for_role = role.map_or_else(String::new, |r| format!(" for {}", r.name()));
+                    return Ok(Reply::Done {
+                        text: format!("{key} is no longer set at {target}{for_role}"),
+                    });
+                }
+                _ => (),
+            };
             let text = request
                 .command
                 .issue()

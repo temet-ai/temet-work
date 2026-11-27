@@ -13,6 +13,7 @@ pub mod host;
 pub mod ids;
 pub mod launch;
 pub mod model;
+pub mod settings;
 pub mod text;
 pub mod world;
 
@@ -35,6 +36,12 @@ pub trait Part: Send {
     fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
         let _ = (world, now_ms);
         Polled::default()
+    }
+
+    /// What this part offers for a setting that names one of its adapters, so a
+    /// value naming one the build lacks is refused.
+    fn choices(&self) -> Vec<settings::Choice> {
+        Vec::new()
     }
 
     /// Carries out `effect` if it is this part's to do.

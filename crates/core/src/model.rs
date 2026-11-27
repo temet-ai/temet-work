@@ -58,6 +58,10 @@ pub struct Plan {
     /// the issue's own project.
     #[serde(default)]
     pub repos: Vec<ProjectId>,
+    /// Settings the refiner gives this issue, such as a stronger model for a
+    /// hard one: task-level, recorded as set by the refiner.
+    #[serde(default)]
+    pub settings: std::collections::BTreeMap<String, crate::settings::Value>,
 }
 
 /// An issue as the loop sees it.
@@ -121,6 +125,22 @@ pub enum Role {
 }
 
 impl Role {
+    /// Reads a role from its lower-case word.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        [
+            Self::Refiner,
+            Self::Author,
+            Self::Reviewer,
+            Self::Arbiter,
+            Self::Investigator,
+        ]
+        .into_iter()
+        .find(|r| r.name() == s)
+        .ok_or_else(|| {
+            format!("no role {s}; the roles are refiner, author, reviewer, arbiter, investigator")
+        })
+    }
+
     /// The role in one lower-case word, as agent ids and labels use it.
     pub fn name(self) -> &'static str {
         match self {
@@ -189,8 +209,6 @@ pub struct Group {
     pub milestones: Vec<MilestoneId>,
     /// How many issues it refines at once.
     pub refining_at_once: usize,
-    /// The model its agents run, when it names one.
-    pub model: Option<String>,
 }
 
 /// A work folder: a checkout on one machine, held by one issue at a time.
@@ -239,14 +257,6 @@ pub struct Project {
     pub code_host: String,
     /// The code host's name for the repository.
     pub repo: String,
-    /// Run after a merge; none means merged is deployed.
-    pub deploy: Option<String>,
-    /// Run after a deploy, to check it works; none means deployed is verified.
-    pub verify: Option<String>,
-    /// The folder both run in.
-    pub run_in: Option<String>,
-    /// Whether its pull requests run CI.
-    pub ci: bool,
 }
 
 /// What a decision settles.

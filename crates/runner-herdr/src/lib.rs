@@ -369,6 +369,10 @@ impl Runner for Herdr {
         "herdr"
     }
 
+    fn is_default(&self) -> bool {
+        true
+    }
+
     fn start(&mut self, start: &Start) -> Result<TerminalId, RunnerError> {
         let mut labels = start.labels.clone();
         labels.insert(OWNER.0.into(), OWNER.1.into());

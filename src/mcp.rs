@@ -3,13 +3,15 @@
 //! views and runs the same commands, through the same socket as the command line.
 //!
 //! The server has two levels. At `read`, the default, it offers the views:
-//! `status`, `issue` and `screen`. At `act` it also offers the commands that move
-//! work: `plan`, `ready`, `review` and `rule`. A tool above the server's level is
+//! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
+//! that move work and change settings: `plan`, `ready`, `review`, `rule`, `set` and
+//! `unset`. A tool above the server's level is
 //! not listed, and calling it is refused.
 
 use serde_json::{Value, json};
 use temet_work_core::ids::{AgentId, IssueId};
-use temet_work_core::model::{Check, Plan};
+use temet_work_core::model::{Check, Plan, Role};
+use temet_work_core::settings::{Target, Value as Setting};
 use temet_work_core::{Command, Request, Verdict};
 
 use crate::socket::Reply;
@@ -37,6 +39,38 @@ fn issue_field() -> Value {
     json!({"type": "string", "description": "The issue as project#key, such as radar#44."})
 }
 
+fn target_field() -> Value {
+    json!({"type": "string", "description": "global, an area or project id, a milestone as project:Milestone name, or an issue as project#key."})
+}
+
+fn role_field() -> Value {
+    json!({"type": "string", "enum": ["refiner", "author", "reviewer", "arbiter", "investigator"], "description": "The role the setting is for; every role when left out."})
+}
+
+fn role(args: &Value) -> Result<Option<Role>, String> {
+    args.get("role")
+        .and_then(Value::as_str)
+        .map(Role::parse)
+        .transpose()
+}
+
+fn target(args: &Value) -> Result<Target, String> {
+    text(args, "target").map(|t| Target::parse(&t))
+}
+
+/// A setting's value from JSON, for a plan's `settings`.
+fn setting(value: &Value) -> Result<Setting, String> {
+    match value {
+        Value::Bool(b) => Ok(Setting::Flag(*b)),
+        Value::Number(n) => n
+            .as_u64()
+            .map(Setting::Number)
+            .ok_or_else(|| format!("{n} is not a whole number")),
+        Value::String(t) => Ok(Setting::Text(t.clone())),
+        other => Err(format!("a setting takes a single value, not {other}")),
+    }
+}
+
 fn tools() -> Vec<Tool> {
     vec![
         Tool {
@@ -58,6 +92,12 @@ fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {"agent": {"type": "string", "description": "The agent's id, such as author-3."}}, "required": ["agent"]}),
         },
         Tool {
+            name: "settings",
+            description: "Every setting in effect at a target, each with its value and the level that set it. The target is global, an area or project id, a milestone as project:Milestone name, or an issue.",
+            acts: false,
+            schema: json!({"type": "object", "properties": {"target": target_field(), "role": role_field()}, "required": ["target"]}),
+        },
+        Tool {
             name: "plan",
             description: "A refiner's plan for an issue it is refining: one entry per check, each an outcome a person can observe and what shows it.",
             acts: true,
@@ -65,7 +105,8 @@ fn tools() -> Vec<Tool> {
                 "issue": issue_field(),
                 "checks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
                     "done_when": {"type": "string"}, "proven_by": {"type": "string"}}, "required": ["done_when", "proven_by"]}},
-                "repos": {"type": "array", "items": {"type": "string"}, "description": "For an issue of an area: the repositories the change needs, in the order they merge."}
+                "repos": {"type": "array", "items": {"type": "string"}, "description": "For an issue of an area: the repositories the change needs, in the order they merge."},
+                "settings": {"type": "object", "description": "Task-level settings for this issue, such as {\"model\": \"opus\"} for a hard one. Recorded as set by you; a person can overturn them."}
             }, "required": ["issue", "checks"]}),
         },
         Tool {
@@ -91,6 +132,24 @@ fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {
                 "issue": issue_field(), "approve": {"type": "boolean"}, "reason": {"type": "string"}
             }, "required": ["issue", "approve", "reason"]}),
+        },
+        Tool {
+            name: "set",
+            description: "Gives a setting a value at one level, for one role or for every role. A refiner may set task-level values of the issue it is refining; a wider level is a person's.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "target": target_field(), "role": role_field(),
+                "key": {"type": "string", "description": "The setting, such as model or review_rounds."},
+                "value": {"type": "string", "description": "The value, as typed on the command line."}
+            }, "required": ["target", "key", "value"]}),
+        },
+        Tool {
+            name: "unset",
+            description: "Removes a setting's value at one level, so the next level answers.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "target": target_field(), "role": role_field(), "key": {"type": "string"}
+            }, "required": ["target", "key"]}),
         },
     ]
 }
@@ -129,6 +188,16 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                             .map(temet_work_core::ids::ProjectId::new)
                             .collect()
                     })
+                    .unwrap_or_default(),
+                settings: args
+                    .get("settings")
+                    .and_then(Value::as_object)
+                    .map(|m| {
+                        m.iter()
+                            .map(|(k, v)| Ok((k.clone(), setting(v)?)))
+                            .collect::<Result<_, String>>()
+                    })
+                    .transpose()?
                     .unwrap_or_default(),
                 checks: args
                     .get("checks")
@@ -174,6 +243,21 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                 .and_then(Value::as_bool)
                 .ok_or("approve is missing")?,
             reason: text(args, "reason")?,
+        },
+        "settings" => Command::Settings {
+            target: target(args)?,
+            role: role(args)?,
+        },
+        "set" => Command::Set {
+            target: target(args)?,
+            role: role(args)?,
+            key: text(args, "key")?,
+            value: text(args, "value")?,
+        },
+        "unset" => Command::Unset {
+            target: target(args)?,
+            role: role(args)?,
+            key: text(args, "key")?,
         },
         other => return Err(format!("no tool {other}")),
     })
@@ -293,8 +377,11 @@ mod tests {
 
     #[test]
     fn the_read_level_lists_only_the_views() {
-        assert_eq!(names(Level::Read), ["status", "issue", "screen"]);
-        assert_eq!(names(Level::Act).len(), 7);
+        assert_eq!(
+            names(Level::Read),
+            ["status", "issue", "screen", "settings"]
+        );
+        assert_eq!(names(Level::Act).len(), 10);
     }
 
     #[test]
@@ -339,6 +426,96 @@ mod tests {
             &mut sent,
         );
         assert!(matches!(&sent[0].command, Command::Plan { plan, .. } if plan.checks.len() == 1));
+    }
+
+    #[test]
+    fn set_and_unset_are_offered_only_at_the_act_level() {
+        let read = names(Level::Read);
+        assert!(read.contains(&"settings".to_string()));
+        assert!(!read.contains(&"set".to_string()) && !read.contains(&"unset".to_string()));
+        let act = names(Level::Act);
+        assert!(act.contains(&"set".to_string()) && act.contains(&"unset".to_string()));
+        let mut sent = Vec::new();
+        for name in ["set", "unset"] {
+            let args = json!({"target": "radar#44", "key": "model", "value": "opus"});
+            let answer = call(Level::Read, name, args, &mut sent);
+            assert_eq!(answer["result"]["isError"], true, "{name}");
+        }
+        assert!(sent.is_empty(), "nothing above the level was sent");
+    }
+
+    #[test]
+    fn settings_set_and_unset_become_the_commands_the_command_line_sends() {
+        let mut sent = Vec::new();
+        call(
+            Level::Read,
+            "settings",
+            json!({"target": "radar#44", "role": "author"}),
+            &mut sent,
+        );
+        call(
+            Level::Act,
+            "set",
+            json!({"target": "radar:Slack sign-in rework", "role": "reviewer", "key": "runtime", "value": "codex"}),
+            &mut sent,
+        );
+        call(
+            Level::Act,
+            "unset",
+            json!({"target": "global", "key": "model"}),
+            &mut sent,
+        );
+        let by = Some(AgentId::new("reviewer-1"));
+        assert_eq!(
+            sent,
+            [
+                Request {
+                    by: by.clone(),
+                    command: Command::Settings {
+                        target: Target::Issue(IssueId::new("radar", "44")),
+                        role: Some(Role::Author)
+                    }
+                },
+                Request {
+                    by: by.clone(),
+                    command: Command::Set {
+                        target: Target::Milestone {
+                            of: "radar".into(),
+                            name: "Slack sign-in rework".into()
+                        },
+                        role: Some(Role::Reviewer),
+                        key: "runtime".into(),
+                        value: "codex".into()
+                    }
+                },
+                Request {
+                    by,
+                    command: Command::Unset {
+                        target: Target::Global,
+                        role: None,
+                        key: "model".into()
+                    }
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_plan_may_carry_task_level_settings() {
+        let mut sent = Vec::new();
+        call(
+            Level::Act,
+            "plan",
+            json!({"issue": "ankh#1", "checks": [{"done_when": "a", "proven_by": "b"}],
+                   "settings": {"model": "opus", "review_rounds": 5, "ci": false}}),
+            &mut sent,
+        );
+        let Command::Plan { plan, .. } = &sent[0].command else {
+            panic!("not a plan");
+        };
+        assert_eq!(plan.settings["model"], Setting::Text("opus".into()));
+        assert_eq!(plan.settings["review_rounds"], Setting::Number(5));
+        assert_eq!(plan.settings["ci"], Setting::Flag(false));
     }
 
     #[test]

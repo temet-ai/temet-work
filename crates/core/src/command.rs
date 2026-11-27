@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, Verdict};
 use crate::ids::{AgentId, DecisionId, IssueId};
-use crate::model::{Decision, DecisionKind, Plan, Stage};
+use crate::model::{Decision, DecisionKind, Plan, Role, Stage};
+use crate::settings::{self, Scope, Target};
 use crate::text::stage;
 use crate::world::World;
 
@@ -50,6 +51,36 @@ pub enum Command {
         /// The verdict.
         verdict: Verdict,
     },
+    /// Gives a setting a value at one level, for a role or for every role.
+    Set {
+        /// Where: `global`, an area, a project, a milestone or an issue.
+        target: Target,
+        /// The role it is for; every role when none.
+        #[serde(default)]
+        role: Option<Role>,
+        /// The setting.
+        key: String,
+        /// The value, as typed.
+        value: String,
+    },
+    /// Removes a setting's value at one level, so the next level answers.
+    Unset {
+        /// Where.
+        target: Target,
+        /// The role it was for; every role when none.
+        #[serde(default)]
+        role: Option<Role>,
+        /// The setting.
+        key: String,
+    },
+    /// Every setting in effect at a target, and the level that set each.
+    Settings {
+        /// Where.
+        target: Target,
+        /// The role to read them for.
+        #[serde(default)]
+        role: Option<Role>,
+    },
     /// The arbiter's ruling once review rounds ran out.
     Rule {
         /// The issue.
@@ -65,7 +96,11 @@ impl Command {
     /// The issue the command is about; `None` for `Status`.
     pub fn issue(&self) -> Option<&IssueId> {
         match self {
-            Self::Status | Self::Screen { .. } => None,
+            Self::Status
+            | Self::Screen { .. }
+            | Self::Set { .. }
+            | Self::Unset { .. }
+            | Self::Settings { .. } => None,
             Self::Issue { issue } => Some(issue),
             Self::Plan { issue, .. }
             | Self::Ready { issue, .. }
@@ -88,6 +123,55 @@ pub struct Request {
 pub const PERSON: &str = "person";
 
 impl World {
+    /// The events a command becomes, in the order they are applied: a plan's
+    /// settings come before the plan, so they hold when its author starts.
+    pub fn events(&self, by: Option<&AgentId>, command: &Command) -> Result<Vec<Event>, String> {
+        let Some(event) = self.check(by, command)? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        if let Event::PlanWritten { issue, plan } = &event {
+            let who = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
+            for (key, value) in &plan.settings {
+                out.push(Event::SettingSet {
+                    scope: Scope::Task(issue.clone()),
+                    role: None,
+                    key: key.clone(),
+                    value: value.clone(),
+                    by: who.clone(),
+                });
+            }
+        }
+        out.push(event);
+        Ok(out)
+    }
+
+    /// Why `by` may not change a setting at `scope`: an agent may only give the
+    /// issue it is refining task-level settings in its plan or by command.
+    fn may_set(&self, by: Option<&AgentId>, scope: &Scope) -> Result<(), String> {
+        let Some(by) = by else {
+            return Ok(());
+        };
+        let Some(agent) = self.agents.get(by) else {
+            return Err(format!("{by} is not an agent this daemon started"));
+        };
+        match scope {
+            Scope::Task(issue)
+                if agent.role == Role::Refiner && agent.issue.as_ref() == Some(issue) =>
+            {
+                Ok(())
+            }
+            Scope::Task(_) => Err(format!(
+                "{} may change settings of the issue it is refining only",
+                agent.id
+            )),
+            _ => Err(format!(
+                "{} may change task-level settings only; a wider level is a person's to change",
+                agent.id
+            )),
+        }
+    }
+
     /// The event a command becomes, or why the loop refuses it. `Status`
     /// becomes no event.
     pub fn check(&self, by: Option<&AgentId>, command: &Command) -> Result<Option<Event>, String> {
@@ -113,6 +197,11 @@ impl World {
                 }
                 if plan.checks.is_empty() {
                     return Err("a plan needs at least one check".into());
+                }
+                for (key, value) in &plan.settings {
+                    settings::check_value(key, value)
+                        .and_then(|()| self.check_choice(key, value))
+                        .map_err(|e| format!("the plan's settings: {e}"))?;
                 }
                 if let Some(c) = plan
                     .checks
@@ -167,6 +256,48 @@ impl World {
                     verdict: verdict.clone(),
                 }
             }
+            Command::Settings { target, .. } => {
+                self.scope_of(target)?;
+                return Ok(None);
+            }
+            Command::Set {
+                target,
+                role,
+                key,
+                value,
+            } => {
+                let scope = self.scope_of(target)?;
+                self.may_set(by, &scope)?;
+                let value = settings::parse_value(key, value)?;
+                self.check_choice(key, &value)?;
+                Event::SettingSet {
+                    scope,
+                    role: *role,
+                    key: key.clone(),
+                    value,
+                    by: by.map_or_else(|| PERSON.to_string(), |a| a.0.clone()),
+                }
+            }
+            Command::Unset { target, role, key } => {
+                let scope = self.scope_of(target)?;
+                self.may_set(by, &scope)?;
+                settings::spec(key)?;
+                if !self
+                    .settings
+                    .contains_key(&(scope.clone(), *role, key.clone()))
+                {
+                    let for_role = role.map_or_else(String::new, |r| format!(" for {}", r.name()));
+                    return Err(format!(
+                        "{key} is not set at {target}{for_role}; nothing to unset"
+                    ));
+                }
+                Event::SettingUnset {
+                    scope,
+                    role: *role,
+                    key: key.clone(),
+                    by: by.map_or_else(|| PERSON.to_string(), |a| a.0.clone()),
+                }
+            }
             Command::Rule {
                 issue,
                 approve,
@@ -211,6 +342,7 @@ mod tests {
     fn plan() -> Plan {
         Plan {
             repos: Vec::new(),
+            settings: Default::default(),
             checks: vec![Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
@@ -404,7 +536,7 @@ mod tests {
             },
         )
         .expect("plan");
-        for _ in 0..crate::world::REVIEW_ROUNDS {
+        for _ in 0..3 {
             run(
                 &mut w,
                 Command::Ready {
@@ -432,5 +564,188 @@ mod tests {
         let d = &w.decisions[&DecisionId(1)];
         assert_eq!((d.by.0.as_str(), d.chosen), ("arbiter-1", 1));
         assert!(matches!(w.issues[&issue()].stage, Stage::Fixing { .. }));
+    }
+}
+
+#[cfg(test)]
+mod plan_settings {
+    use super::*;
+    use crate::ids::{GroupId, MachineId, ProjectId};
+    use crate::model::Check;
+    use crate::settings::{Level, Value};
+
+    fn issue() -> IssueId {
+        IssueId::new("ankh", "1")
+    }
+
+    /// ankh#1 is being refined by refiner-1.
+    fn refining() -> World {
+        let (w, _) = World::replay(&[
+            Event::ProjectAdded {
+                project: ProjectId::new("ankh"),
+                tracker: "t".into(),
+                name: "city/ankh".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::GroupCreated {
+                group: GroupId::new("watch"),
+                name: "Night watch".into(),
+                projects: vec![ProjectId::new("ankh")],
+                areas: Vec::new(),
+                milestones: vec![],
+                refining_at_once: 1,
+                model: None,
+            },
+            Event::IssueSynced {
+                issue: issue(),
+                title: "Mend the clock".into(),
+                milestone: None,
+                depends_on: vec![],
+                order: 1,
+                closed: false,
+            },
+            Event::AgentStarted {
+                agent: AgentId::new("refiner-1"),
+                group: GroupId::new("watch"),
+                role: Role::Refiner,
+                issue: Some(issue()),
+                machine: MachineId::new("local"),
+                folder: None,
+            },
+        ]);
+        w
+    }
+
+    fn plan(settings: &[(&str, Value)]) -> Command {
+        Command::Plan {
+            issue: issue(),
+            plan: Plan {
+                repos: Vec::new(),
+                settings: settings
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+                checks: vec![Check {
+                    done_when: "the clock strikes thirteen".into(),
+                    proven_by: "listening at midnight".into(),
+                }],
+            },
+        }
+    }
+
+    fn apply_all(w: &mut World, events: &[Event]) {
+        for e in events {
+            w.apply(e);
+        }
+    }
+
+    #[test]
+    fn a_plan_with_settings_records_them_as_the_refiners_task_level_events_first() {
+        let mut w = refining();
+        let refiner = AgentId::new("refiner-1");
+        let command = plan(&[
+            ("model", Value::Text("opus".into())),
+            ("review_rounds", Value::Number(5)),
+        ]);
+        let events = w.events(Some(&refiner), &command).expect("accepted");
+        assert!(matches!(events.last(), Some(Event::PlanWritten { .. })));
+        assert_eq!(events.len(), 3, "two settings, then the plan");
+        assert!(events[..2].iter().all(|e| matches!(
+            e,
+            Event::SettingSet { scope: Scope::Task(i), by, .. } if i == &issue() && by == "refiner-1"
+        )));
+        apply_all(&mut w, &events);
+        let model = w
+            .setting(&issue(), Some(Role::Author), "model")
+            .expect("set");
+        assert_eq!(model.source(), "task, set by refiner-1");
+        assert_eq!(w.setting_number(&issue(), None, "review_rounds"), 5);
+    }
+
+    #[test]
+    fn a_person_can_overturn_what_a_refiner_set() {
+        let mut w = refining();
+        let refiner = AgentId::new("refiner-1");
+        let events = w
+            .events(
+                Some(&refiner),
+                &plan(&[("model", Value::Text("opus".into()))]),
+            )
+            .expect("accepted");
+        apply_all(&mut w, &events);
+        let set = Command::Set {
+            target: Target::Issue(issue()),
+            role: None,
+            key: "model".into(),
+            value: "haiku".into(),
+        };
+        let events = w.events(None, &set).expect("a person may");
+        apply_all(&mut w, &events);
+        let r = w.setting(&issue(), None, "model").expect("set");
+        assert_eq!(
+            (r.value, r.level),
+            (Value::Text("haiku".into()), Level::Task)
+        );
+        assert_eq!(r.by.as_deref(), Some(PERSON));
+    }
+
+    #[test]
+    fn the_same_key_at_project_level_is_refused_for_a_refiner() {
+        let w = refining();
+        let refiner = AgentId::new("refiner-1");
+        let set = |target: Target| Command::Set {
+            target,
+            role: None,
+            key: "model".into(),
+            value: "opus".into(),
+        };
+        let why = w
+            .check(Some(&refiner), &set(Target::Id("ankh".into())))
+            .expect_err("refused");
+        assert!(why.contains("task-level settings only"), "{why}");
+        assert!(w.check(Some(&refiner), &set(Target::Global)).is_err());
+        assert!(
+            w.check(Some(&refiner), &set(Target::Issue(issue())))
+                .is_ok(),
+            "its own issue is its to set"
+        );
+        assert!(
+            w.check(
+                Some(&refiner),
+                &set(Target::Issue(IssueId::new("ankh", "2")))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_plan_with_an_unknown_key_or_a_value_of_the_wrong_kind_is_refused() {
+        let w = refining();
+        let refiner = AgentId::new("refiner-1");
+        let bad = plan(&[("colour", Value::Text("red".into()))]);
+        assert!(
+            w.check(Some(&refiner), &bad)
+                .is_err_and(|e| e.contains("colour"))
+        );
+        let bad = plan(&[("review_rounds", Value::Text("many".into()))]);
+        assert!(
+            w.check(Some(&refiner), &bad)
+                .is_err_and(|e| e.contains("review_rounds"))
+        );
+    }
+
+    #[test]
+    fn an_unset_of_what_is_not_set_is_refused() {
+        let w = refining();
+        let unset = Command::Unset {
+            target: Target::Issue(issue()),
+            role: None,
+            key: "model".into(),
+        };
+        assert!(
+            w.check(None, &unset)
+                .is_err_and(|e| e.contains("nothing to unset"))
+        );
     }
 }
