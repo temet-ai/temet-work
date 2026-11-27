@@ -58,7 +58,8 @@ fn world() -> World {
         });
         if let Some(i) = w.issues.get_mut(&issue) {
             i.stage = Stage::InReview { round: 1 };
-            i.pull = Some(if id == "watch" { "5" } else { "6" }.into());
+            let number = if id == "watch" { "5" } else { "6" };
+            i.pulls.insert(ProjectId::new(id), number.into());
         }
     }
     w
