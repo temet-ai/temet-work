@@ -67,13 +67,21 @@ const PLAIN_MODEL: &str = "A plain model is recorded as the global runtime's, as
 model.<that runtime>, when you write it, and is refused when the author runs another runtime; \
 model.<runtime> names the runtime a model is for.";
 
+/// Sends an agent to the issue's own text, which its brief does not carry.
+fn read_the_issue(issue: &IssueId) -> String {
+    format!(
+        "Read the issue's own text: run temet-work issue {issue}, which prints the issue's text \
+         from its tracker."
+    )
+}
+
 /// What a change is held against: by a reviewer in its brief and again on each
 /// later round, and by an arbiter. Each adds what it does with a point that is
 /// not met.
 fn hold_to_the_issue(issue: &IssueId) -> String {
+    let read = read_the_issue(issue);
     format!(
-        "Read the issue's own text: run temet-work issue {issue}, which prints the issue's text \
-         from its tracker. Check each of its points and its \"Done is\" line against the change, not \
+        "{read} Check each of its points and its \"Done is\" line against the change, not \
          only the plan's checks.\n\
          For each of the plan's checks, confirm that the test or evidence named under \"shown by\" \
          shows the whole of what the check states, including any failure or persistent case it \
@@ -88,9 +96,9 @@ fn hold_to_the_issue(issue: &IssueId) -> String {
 const BLOCK_WHAT_IS_NOT_MET: &str = "\
 Block on any point that is not met, and name that point in the block. A test that shows only part \
 of its check is a block. A plan check or a recorded decision that departs from a point the issue \
-states, or that leaves the issue's failure scenario happening, is a block, even when the plan \
-sanctions it. A decision the change writes down, such as under \"Decided, open to change\", is a \
-recorded decision.";
+states, or that leaves any failure the issue describes happening, is a block, even when the \
+plan sanctions it. A decision the change writes down, such as under \"Decided, open to \
+change\", is a recorded decision.";
 
 /// What an arbiter does with a point that is not met, or that the plan or a
 /// decision departs from.
@@ -98,7 +106,7 @@ const FIX_WHAT_IS_NOT_MET: &str = "\
 Where a point is not met, rule fix and name that point in the ruling. A test that shows only part \
 of its check is a fix. An author's answer that the plan does not list the point is no reason to \
 approve. A plan check or a recorded decision that departs from a point the issue states, or that \
-leaves the issue's failure scenario happening, is a fix, even when the plan sanctions it. A \
+leaves any failure the issue describes happening, is a fix, even when the plan sanctions it. A \
 decision the change writes down, such as under \"Decided, open to change\", is a recorded \
 decision.";
 
@@ -209,8 +217,10 @@ pub fn write(
              Use a chosen default only where the issue leaves the choice open (it says \"or\", \"pick\" or \
              \"record which\"): pick one of the options it names, the one you would defend, and say why \
              in done_when. \
-             When a point cannot be done as written, say why in that point's check and fix the issue's \
-             failure scenario some other way: the plan may not leave it in place.\n\
+             Where the issue says nothing about a choice, take the default you would defend and say \
+             why in done_when; a default never replaces a point the issue states. \
+             When a point cannot be done as written, say why in that point's check and fix any \
+             failure the issue describes some other way: the plan may not leave one in place.\n\
              For an issue that is hard, add a settings: map beside checks: with task-level values, such as model: opus; \
              they are recorded as yours and a person can overturn them. \
              A model you set is the author's only: the models of reviewers, arbiters and refiners are \
@@ -222,10 +232,13 @@ pub fn write(
         ),
         Role::Author => format!(
             "Work on {id}: {title}. It is {source}.\n\
+             {read} A decision may not depart from a point the issue states or leave any failure it \
+             describes in place. Where a point cannot be met, say so in the pull request.\n\
              This folder is yours until the change merges. Make a branch, change the code and open a pull request.\n\
              {folders}{fixes}The plan's checks, each to hold before you finish:\n{checks}\
              When the pull request is open and every check holds, run: temet-work ready {id} {ready}",
             title = issue.title,
+            read = read_the_issue(id),
         ),
         Role::Reviewer => format!(
             "Review the pull request for {id}: {title}. It is {source}.\n\
@@ -496,7 +509,9 @@ pub fn nudge(role: Role, issue: &IssueId) -> String {
     };
     format!(
         "{issue} is still waiting on you. If your step is done, run: {command}. \
-         If a choice stops you, take the default you would defend, say so, and finish."
+         If a choice stops you, take the default you would defend (where the issue leaves it open, \
+         one of the options it names; never in place of a point the issue states), say so, and \
+         finish."
     )
 }
 
@@ -690,7 +705,7 @@ mod tests {
             "A test that shows only part of its check is a fix.",
             "An author's answer that the plan does not list the point is no reason to approve.",
             "A plan check or a recorded decision that departs from a point the issue states, or \
-             that leaves the issue's failure scenario happening, is a fix, even when the plan \
+             that leaves any failure the issue describes happening, is a fix, even when the plan \
              sanctions it.",
             "A decision the change writes down, such as under \"Decided, open to change\", is a \
              recorded decision.",
@@ -701,6 +716,7 @@ mod tests {
             !brief.contains("block"),
             "an arbiter cannot block:\n{brief}"
         );
+        assert!(!brief.contains("failure scenario"), "{brief}");
         let again = next_round(&id, 2);
         assert!(
             again.contains("run temet-work issue watch#12, which prints"),
@@ -766,17 +782,59 @@ mod tests {
     }
 
     #[test]
+    fn an_author_reads_the_issue_and_may_not_depart_from_it() {
+        let brief = lamp_task(Role::Author, &lamp_issue());
+        for line in [
+            "Read the issue's own text: run temet-work issue watch#31, which prints the issue's \
+             text from its tracker.",
+            "A decision may not depart from a point the issue states or leave any failure it \
+             describes in place.",
+            "Where a point cannot be met, say so in the pull request.",
+        ] {
+            assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
+        }
+    }
+
+    #[test]
+    fn a_reminder_limits_the_default_a_stuck_agent_may_take() {
+        let id = lamp_issue().id;
+        for role in [Role::Refiner, Role::Author, Role::Reviewer, Role::Arbiter] {
+            let text = nudge(role, &id);
+            assert!(
+                text.starts_with("watch#31 is still waiting on you"),
+                "{text}"
+            );
+            assert!(
+                text.ends_with(
+                    "If a choice stops you, take the default you would defend (where the issue \
+                     leaves it open, one of the options it names; never in place of a point the \
+                     issue states), say so, and finish."
+                ),
+                "{text}"
+            );
+            assert!(
+                !text.contains("take the default you would defend, say so"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn a_refiner_meets_each_point_and_chooses_only_where_the_issue_leaves_it_open() {
         let brief = lamp_task(Role::Refiner, &lamp_issue());
+        let open = "Use a chosen default only where the issue leaves the choice open (it says \
+                    \"or\", \"pick\" or \"record which\"): pick one of the options it names, the one \
+                    you would defend, and say why in done_when.";
+        let silent = "Where the issue says nothing about a choice, take the default you would \
+                      defend and say why in done_when; a default never replaces a point the issue \
+                      states.";
+        assert!(brief.contains(&format!("{open} {silent}")), "{brief}");
         for line in [
             "A lamp with no oil: refuse it, or list it under Problems. It is issue 31 of \
              ankh-morpork/watch in its tracker.",
             "Each point the issue states needs a check that meets it as written.",
-            "Use a chosen default only where the issue leaves the choice open (it says \"or\", \
-             \"pick\" or \"record which\"): pick one of the options it names, the one you would \
-             defend, and say why in done_when.",
-            "When a point cannot be done as written, say why in that point's check and fix the \
-             issue's failure scenario some other way: the plan may not leave it in place.",
+            "When a point cannot be done as written, say why in that point's check and fix any \
+             failure the issue describes some other way: the plan may not leave one in place.",
         ] {
             assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
         }
@@ -786,6 +844,7 @@ mod tests {
             ),
             "{brief}"
         );
+        assert!(!brief.contains("failure scenario"), "{brief}");
     }
 
     #[test]
@@ -816,13 +875,16 @@ mod tests {
         let again = next_round(&issue.id, 2);
         for line in [
             "A plan check or a recorded decision that departs from a point the issue states, or \
-             that leaves the issue's failure scenario happening, is a block, even when the plan \
+             that leaves any failure the issue describes happening, is a block, even when the plan \
              sanctions it.",
             "A decision the change writes down, such as under \"Decided, open to change\", is a \
              recorded decision.",
         ] {
             assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
             assert!(again.contains(line), "missing {line:?} in:\n{again}");
+        }
+        for text in [&brief, &again] {
+            assert!(!text.contains("failure scenario"), "{text}");
         }
     }
 
