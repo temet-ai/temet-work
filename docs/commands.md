@@ -143,12 +143,14 @@ An agent that cannot finish has two more steps, so that it does not invent work 
 | `temet-work retry ISSUE REASON` | a person only | set aside by `blocked` | Sends the issue back to work with REASON first in the next brief. Proposes no rule. |
 | `temet-work proposal RULE keep [--scope ROLE or PROJECT or all] [--drop RULE] [TEXT]` | a person only | the rule is proposed | Keeps the rule with that scope and text. When the brief's budget is full it is refused until `--drop` names a kept rule. |
 | `temet-work proposal RULE drop` | a person only | the rule is proposed or kept | The rule leaves status and every brief written from then on. |
+| `temet-work rule ISSUE point N drop REASON` or `temet-work rule ISSUE point N fix REASON` | the arbiter working on ISSUE, or a person | with the arbiter before the last round | Rules on disputed point N alone: `drop` for the author, `fix` for the reviewer. The issue leaves the arbiter when every disputed point has a ruling. `approve` and `fix` without a point are refused there. |
 
 The reason of `blocked` and `unneeded` carries evidence: a `path:line`, a command with its
 exit code, or a session and event. The daemon refuses a reason that carries none of
 these. It checks a `path:line` with no model, by a command run in the agent's folder
 before the agent is stopped, and `status` shows a citation that did not resolve beside
-the reason; that does not undo the step. A command and a session and event are recorded
+the reason; that does not undo the step. Until the runner reports a command's exit code,
+a citation is recorded unchecked. A command and a session and event are recorded
 as the agent's claims and are not checked. Where ask-kit is installed, the agent's brief
 says to settle the claim with `ask` first. With the mike part, an agent held up by an
 agent on another issue asks a mike question marked blocked first; when that is declined
@@ -171,7 +173,7 @@ worker, and a step that leaves a part out is refused with the part named.
 |---|---|
 | `ready` | The commit; for each check, the command the author ran and its exit code; the tests it changed; what it did not establish; and for each blocking point of the last round, by its number, fixed or disputed, a dispute with its evidence. |
 | `review` | The commit reviewed and what was read or run. Each blocking point names a `path:line` and what would satisfy it. A later block names by number the earlier points it holds. |
-| `rule` | The commit; the blocking point or check the ruling rests on; and, when it turns on a claim about the code, the command the arbiter ran. A person's `rule` needs only the reason. |
+| `rule` | The commit; the blocking point or check the ruling rests on; and, when it turns on a claim about the code, the command the arbiter ran. A person's `rule` needs only the reason and, on an early visit, the point's number. |
 
 Every step is answered with one line that says what the daemon recorded and what happens
 next.

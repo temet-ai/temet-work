@@ -199,7 +199,7 @@ they are items 7 and 13 of "What comes next".
 |---|---|---|---|
 | The daemon to an agent: the brief, points to fix, a check's result, a reminder | The brief as the first prompt, and after that a prompt typed through the runner between turns. | Typed text needs nothing loaded in the session and no mike, stays in the transcript and is read as the user's turn: under 1 s to an idle session, held until a busy one's turn ends, refused at a permission prompt. The daemon has no session of its own, so mike mail from it would arrive as from an unknown sender, and an idle session started without Remote Control and the mike channel does not read its mail. Text the proxy injects is seen for one request, and a message on mike's channel was acknowledged and then declined. A Remote Control push and a mod's prompt were kept and acted on in mike's samples, and each needs mike or tether in the session. | Each message opens with a fixed line that names temet-work and the step, so mike's capture can tell the daemon's text from a person's; mike needs a marker for that line. A message is stored with a version and `temet-work issue` prints it; text longer than a short prompt is stored and pointed at. A message counts as heard when the terminal turns `working` after it or the step arrives. If neither happens it is sent once more, and after that the reminder takes over. A thing that was heard is not said again. |
 | An agent to the daemon: its step | The `temet-work` command its brief names. | mike draws the same line: a worker's report and a judge's verdict are typed calls, never mail, and a short one is refused with the missing field named. | `ready` carries the commit, what the author ran for each check (the command and its exit code), the tests it changed and what it did not establish. `review` and `rule` carry the commit and what was read or run. Each step is answered with one line that says what was recorded and what happens next. |
-| One agent to another | Through the daemon for what binds: review points, the author's answer to each, a ruling. They are steps, held in the log and carried into the next brief as that agent's claims. A question from a live agent to a live agent of another issue goes as a mike question (`ask`, `answer`, `decline`) when the mike part is on. | Text one agent types to another with `hc send` reads as the user's. A mike question names the sender, keeps a record with times, and arrives as information the reader may check, not as an order. | Sessions started so that mike knows them. For Claude Code: a session id the daemon chooses and records, a name, and Remote Control and the mike channel on, as mike's own launcher sets them; the mike part registers the role and goal on mike's roster when it sees the agent start. Claude Code stops at a "Loading development channels" confirmation at every start with the channel on, and no setting skips it. mike's launcher reads the screen for that text and presses Enter, and the runner has to do the same for that one dialog. A Codex session has no Remote Control and no channel, and Codex gives it its id: a Codex agent asks and is asked no mike question, and how the daemon learns its id is still to be designed. When the daemon stops a session, the mike part ends that registration and declines the session's open questions as that session. mike still accepts a question to a session whose registration has ended, so the mike part declines any that arrives for one. A question marked blocked that gets no answer in a set time, shorter than the first reminder, is told to the asker as unanswered in one typed message. The asker then takes the default it would defend and records it as a decision, or reports `blocked` itself. The daemon never reports a step for an agent, and an agent waiting on such a question is not reminded while it is open. |
+| One agent to another | Through the daemon for what binds: review points, the author's answer to each, a ruling. They are steps, held in the log and carried into the next brief as that agent's claims. A question from a live agent to a live agent of another issue goes as a mike question (`ask`, `answer`, `decline`) when the mike part is on. | Text one agent types to another with `hc send` reads as the user's. A mike question names the sender, keeps a record with times, and arrives as information the reader may check, not as an order. | Sessions started so that mike knows them. For Claude Code: a session id the daemon chooses and records, a name, and Remote Control and the mike channel on, as mike's own launcher sets them; the mike part registers the role and goal on mike's roster when it sees the agent start. Claude Code stops at a "Loading development channels" confirmation at every start with the channel on, and no setting skips it. mike's launcher reads the screen for that text and presses Enter, and the runner has to do the same for that one dialog. The text to wait for is a setting, set beside the start arguments that turn the channel on, and the brief carries it to the runner, so the runner names no runtime. When the text is not seen within 30 s, or the session is still at a prompt after the key, the daemon stops the session, lists a problem and starts it again without those arguments, so no start waits for a person. A Codex session has no Remote Control and no channel, and Codex gives it its id: a Codex agent asks and is asked no mike question, and how the daemon learns its id is still to be designed. When the daemon stops a session, the mike part ends that registration and declines the session's open questions as that session. mike still accepts a question to a session whose registration has ended, so the mike part declines any that arrives for one. A question marked blocked that gets no answer in a set time, shorter than the first reminder, is told to the asker as unanswered in one typed message. The asker then takes the default it would defend and says so in its step, or reports `blocked` itself. The daemon never reports a step for an agent. An agent waiting on such a question is not reminded until that message is sent; from then on it is reminded and stopped as any idle agent is, whether or not the question is still open. |
 | An agent to a person | `temet-work status`, and the app drawing the same view data. An agent never asks in its terminal and waits. | In the open-issues fleet 14 questions went to a person and none was answered in the record (`docs/research.md`). mike's fleets leave a note and carry on. | Each line a person may act on is said once, worded as what the person is asked to decide, with the time it was raised and the command that settles it. Such lines are kept apart from what the loop is still settling by itself and from a line saying nothing is moving. Each decision is also written as a note on the deciding agent's session in mike, where mike's tools and ask-kit's mike kit find it. |
 | A person to an agent or the daemon | The commands (`overturn`, `rule`, `proposal`, `retry`, `set`). To steer a running agent, the person types in its terminal. | Text typed in the terminal is the answer a session treats as its user's, and mike records it as the person's turn, which is what its judge of corrected turns reads. | `temet-work tell AGENT TEXT`, a person's only, for a front end: it types the words through the runner with no leading line, and records who said them. |
 | An agent finding something out | ask-kit's `ask`, before it asks anyone: the code domain for the folder it is in, the sessions domain for past sessions on that machine, the mike kit where mike runs. | About 12 s and $0.003 for a question about code, with a few hundred tokens back to the caller and a `path:line` for each fact. A standing seat kept to answer questions waited 25 of its 28 minutes (`docs/findings/fleet-run.md`). | Every brief names `temet-work issue` for the plan, the checks and their results. Where ask-kit is installed, the brief also says to ask before digging. That line is a rule in the config with the scope `all`, so it counts against the brief's budget and a person can drop it. Having ask-kit installed does not mean agents use it: on the machine measured, asks covered 19% of lookups, so asks are counted per issue. |
@@ -225,19 +225,23 @@ Not used, and why:
 - The routes of mike's fleet for a report, a verdict and the floor. They need a running
   fleet, so their shapes are copied and the routes are not called.
 
-tether stays optional. Where a session has it loaded, mail and questions arrive as a
-tether prompt and not on the channel (2 of the 12 mails in the dispute run), so with the
-mike part the merge record holds what each session had loaded. `ask` does the work the
+tether stays optional. Mail and questions reach a session in two forms: in the dispute
+run 10 of the 12 mails came over Claude Code's peer socket and 2 as a tether prompt, both
+forms to one session, and what picks the form is not known
+(`docs/findings/agent-talk.md`). So with the mike part the merge record holds what each
+session had loaded and the form each question arrived in. `ask` does the work the
 investigator role was meant for; the role stays in the core until asks have been counted.
 
 mike and ask-kit stay optional, and the core names neither. The core writes every brief
 and reminder, so a line that tells an agent about a tool comes from outside it. The
 `Part` contract grows one call, the lines a part adds to a brief, and the mike part uses
-it for its lines about questions. The line about `ask` is a rule's text. What a start
-needs beyond the task (the session id, extra arguments and variables) is carried by the
-brief from settings, and the runtime adapter passes it on, so no part names another. The
-steps, events and effects for questions, registration and notes carry no tool's name
-(`tests/parts.rs`, `core_names_no_tool_or_service`).
+it for its lines about questions. A line about `ask` is a rule's text, and such a rule
+starts in the config. What a start needs beyond the task is carried by the brief: the
+session id the daemon chose and, from settings, extra arguments, variables and the text
+of a start dialog to confirm. The runtime adapter passes the first three on and the
+runner reads the last, so no part names another. The steps, events and effects for
+questions, registration and notes carry no tool's name (`tests/parts.rs`,
+`core_names_no_tool_or_service`).
 
 Without the mike part there are no questions between agents, no notes and nothing read
 back from mike's capture; sessions are still captured whenever the daemon was started
@@ -336,21 +340,31 @@ dispute run settled four disputes of four in 25 to 60 s.
   the reviewer to read the pull request's description and comments as claims to check. It
   is stored with a version, so a session that replaces another reads the same brief.
 - Nothing passes from one reviewer session to the next, or from the author to the
-  reviewer, except through that brief. The reviewer's and the arbiter's briefs say so:
-  `ask` is for the code at the pull request's head commit, not for the sessions domain or
-  mike's history of the sessions on this issue, and neither asks nor answers a mike
-  question from an agent on the same issue. A mike question is for an agent on another
-  issue, such as the author of an issue this one depends on.
+  reviewer, except through that brief. The core's text in the reviewer's and the
+  arbiter's briefs says so and names no tool: the agent reads no account of this issue's
+  sessions, and neither asks nor answers a question from an agent on this issue.
+- The tools' own words come from outside the core. With the mike part, its lines in
+  those two briefs name mike's history and mike questions. Where ask-kit is installed, a
+  rule in the config for each of the two roles says that `ask` is for the code at the
+  pull request's head commit and not for the sessions domain.
+- A mike question is for an agent on another issue, such as the author of another issue
+  in work on the same repository. The author of an issue this one depends on is not such
+  an agent: that issue is done before this one's author starts, and its author was
+  stopped when it merged.
 - The daemon numbers each blocking point. The author answers each by its number in its
   `ready` step as fixed or disputed, a dispute with its evidence, and a later
   `review block` says by number which earlier points it holds. A disputed point that is
   held goes to the arbiter then, and that visit uses no round.
-- The arbiter's brief is written from the same record, and the arbiter has the
-  repository. An early ruling settles the disputed points only: a point ruled for the
-  author is dropped, one ruled for the reviewer is a fix, the block's other points stand,
-  and the issue goes back to its author with what is left or, with nothing left, counts
-  as approved. Only the ruling after the last round decides whether the issue merges, as
-  now.
+- The arbiter's brief is written from the same record. The arbiter works in the author's
+  work folder as the reviewer does, checked the same way, so it has the repository at the
+  pull request's head commit.
+- An early ruling settles the disputed points only and rules on each by its number
+  (`docs/commands.md`): a point ruled for the author is dropped, one ruled for the
+  reviewer is a fix, and the block's other points stand. The issue then goes back to its
+  author with what is left; with nothing left the block is void and the review counts as
+  approved. `rule approve` and `rule fix` rule on the whole pull request and are accepted
+  only after the last round, as now. An early ruling is a decision about its one point,
+  and overturning it changes that point only.
 - A ruling has a fixed shape: the ruling, the blocking point or check it rests on, and
   the command the arbiter ran when the ruling turns on a claim about the code. An
   arbiter's ruling with no evidence is sent back; a person's `rule` needs only its
@@ -393,9 +407,12 @@ record every number is measured and none is rewritten by a model.
   follow-up issues that name the issue they fix, `blocked` and `unneeded` with how long
   each has waited, settings set by a plan, a person's turns typed into agents' terminals,
   daemon messages that were never heard, reminders sent, sessions started against
-  sessions that reported their step and, where ask-kit is installed on the agent's
-  machine, asks against lookups done by hand, per session from `ask-kit gaps` and summed
-  per issue.
+  sessions that reported their step and, where a project's config names the command that
+  prints them (`ask-kit gaps` where ask-kit is installed on the agent's machine), asks
+  against lookups done by hand, per session and summed per issue. The daemon runs that
+  command through the runner on the agent's machine when the session ends, as it runs a
+  check's command, so no crate names ask-kit. The count waits for the floor's runner
+  contract, and with no command set it is left out.
 - `temet-work issue ISSUE` prints the issue's merge record, and `temet-work status`
   prints each project's counts under their own heading; the app draws the same view
   data. A count that meets a trigger of "Left until a trigger is met" is listed once as a
@@ -407,6 +424,8 @@ Found: a learned rule is a release, and standing text grows one fix at a time un
 something cuts it (finding 9). mike gives its standing text a budget that only goes down,
 tags each lesson with an id and a revision, and retires a lesson by count.
 
+- A rule can also start in the config, kept from the start; the line that says to ask
+  before digging is one.
 - A rule has a scope (a role, a project, or all), the keys mike's roster addresses a
   session by. A proposed rule starts scoped to the role that made the overturned
   decision; the person keeping it can change the scope and edit the text.
@@ -476,7 +495,8 @@ In this order:
     author's answer to each point, and a ruling in a fixed shape.
 11. A record of each merge written by the daemon, a plain approval recorded as a decision,
     and the counts.
-12. Rules with a scope, a budget and counts, tagged with an id and a revision.
+12. Rules with a scope, a budget and counts, tagged with an id and a revision; a rule can
+    also start in the config.
 13. How things are said, with the mike part: sessions on mike's roster, the start dialog
     confirmed by the runner, the lines a part adds to a brief, questions between agents,
     decisions as notes, and the mike part reading the turns a person typed and counting
@@ -485,6 +505,10 @@ In this order:
 
 Nothing waits on item 13. Items 8 to 12 use the fixed line and the stored briefs of item
 7 where they exist and are not held for them. Items 9 and 10 change the loop, the
-commands and the briefs, and can be taken whenever the loop is next worked on. Item 8 is
-larger: it needs the pull request's head commit from the code host and, from the runner,
-a command's exit code and whole output, in both contracts and their adapters.
+commands and the briefs, and can be taken whenever the loop is next worked on. Two checks
+in them use item 8's contracts and are left out until item 8 is in: the check of a
+`path:line` in a `blocked` reason or a block, and the check that the reviewer's folder is
+clean and at the head commit. Until then a citation is recorded unchecked and a reviewer
+gets its folder as now. Item 8 is larger: it needs the pull request's head commit from
+the code host and, from the runner, a command's exit code and whole output, in both
+contracts and their adapters.

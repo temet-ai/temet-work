@@ -23,7 +23,7 @@ yet.
 | Machine | the app | Where agents run, with its build slots. |
 | Limit | the app | A runtime account's usage windows (Claude 5 hours and 7 days, Codex 5 hours). |
 | Style guide | the app | Tokens, components, the ban list and the checks used when reviewing UI work. A project may set its accent, display face and density. |
-| Rule | the app or a project | A line in an agent's brief or in the config, with where it came from (a ruling, an overturned decision, a measured change), its state (proposed, kept or dropped; on trial and reverted are not built) and what it is measured by. It will carry a scope (a role, a project, or all), carry its id and revision on its line in a brief, count against a brief's budget of rules (the setting `rules`), and count the issues it was given to (not built). |
+| Rule | the app or a project | A line in an agent's brief or in the config, with where it came from (a ruling, an overturned decision, a measured change, or the config itself), its state (proposed, kept or dropped; on trial and reverted are not built) and what it is measured by. It will carry a scope (a role, a project, or all), carry its id and revision on its line in a brief, count against a brief's budget of rules (the setting `rules`), and count the issues it was given to (not built). |
 | Milestone | a project or area | From the tracker. A group's focus is a list of milestones. |
 | Issue | a project, in a milestone or none | From the tracker. One group at a time takes it through the loop. |
 | Work folder | a project | A checkout on one machine, used by one agent at a time, with a target directory that stays warm between issues. A reviewer will read its author's folder while the author waits, and change nothing there (not built). |
