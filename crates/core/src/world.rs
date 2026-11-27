@@ -471,6 +471,17 @@ impl World {
                     Self::send_back(i, round, points, true, &mut out);
                 }
             }
+            Event::Retried { issue } => {
+                if self
+                    .issues
+                    .get(issue)
+                    .is_some_and(|i| matches!(i.stage, Stage::Deploying | Stage::Verifying))
+                {
+                    out.push(Effect::Retry {
+                        issue: issue.clone(),
+                    });
+                }
+            }
             Event::Deployed { issue } => {
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Deploying

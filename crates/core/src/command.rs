@@ -81,6 +81,11 @@ pub enum Command {
         #[serde(default)]
         role: Option<Role>,
     },
+    /// Runs a deploy or a verify again at once, clearing its failures.
+    Retry {
+        /// The issue.
+        issue: IssueId,
+    },
     /// The arbiter's ruling once review rounds ran out.
     Rule {
         /// The issue.
@@ -105,6 +110,7 @@ impl Command {
             Self::Plan { issue, .. }
             | Self::Ready { issue, .. }
             | Self::Review { issue, .. }
+            | Self::Retry { issue }
             | Self::Rule { issue, .. } => Some(issue),
         }
     }
@@ -343,6 +349,17 @@ impl World {
                     role: *role,
                     key: key.clone(),
                     by: by.map_or_else(|| PERSON.to_string(), |a| a.0.clone()),
+                }
+            }
+            Command::Retry { issue } => {
+                if let Some(by) = by {
+                    return Err(format!("retry for {issue} is a person's: {by} is an agent"));
+                }
+                match at(issue)? {
+                    Stage::Deploying | Stage::Verifying => Event::Retried {
+                        issue: issue.clone(),
+                    },
+                    now => return refuse(issue, now, "deploying or verifying"),
                 }
             }
             Command::Rule {
@@ -998,6 +1015,57 @@ mod plan_settings {
         assert!(
             w.check(None, &unset)
                 .is_err_and(|e| e.contains("nothing to unset"))
+        );
+    }
+
+    #[test]
+    fn retry_is_accepted_when_deploying_or_verifying_and_refused_in_every_other_stage() {
+        let mut w = refining();
+        let retry = Command::Retry { issue: issue() };
+        for (s, ok) in [
+            (Stage::New, false),
+            (Stage::Refining, false),
+            (Stage::Ready, false),
+            (Stage::Working, false),
+            (Stage::InReview { round: 1 }, false),
+            (Stage::Fixing { round: 1 }, false),
+            (Stage::Arbitration { round: 3 }, false),
+            (Stage::Merging, false),
+            (Stage::Deploying, true),
+            (Stage::Verifying, true),
+            (Stage::Done, false),
+        ] {
+            if let Some(i) = w.issues.get_mut(&issue()) {
+                i.stage = s;
+            }
+            let got = w.events(None, &retry);
+            if ok {
+                assert_eq!(got, Ok(vec![Event::Retried { issue: issue() }]), "{s:?}");
+            } else {
+                let why = got.expect_err("refused");
+                assert!(why.contains(&stage(s)), "{why} names {s:?}");
+                assert!(why.contains("deploying or verifying"), "{why}");
+            }
+        }
+        let unknown = Command::Retry {
+            issue: IssueId::new("ankh", "99"),
+        };
+        assert!(
+            w.events(None, &unknown)
+                .is_err_and(|e| e.contains("no issue"))
+        );
+    }
+
+    #[test]
+    fn an_agent_may_not_retry() {
+        let mut w = refining();
+        if let Some(i) = w.issues.get_mut(&issue()) {
+            i.stage = Stage::Deploying;
+        }
+        let retry = Command::Retry { issue: issue() };
+        assert!(
+            w.events(Some(&AgentId::new("author-1")), &retry)
+                .is_err_and(|e| e.contains("a person's"))
         );
     }
 }

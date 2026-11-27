@@ -25,6 +25,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use temet_work_core::ids::IssueId;
+use temet_work_core::model::Stage;
 use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
 
 /// Runs one command in a folder with extra environment, and says whether it
@@ -302,6 +303,21 @@ impl Part for Deploys {
         let (issue, step) = match effect {
             Effect::Deploy { issue } => (issue, Step::Deploy),
             Effect::Verify { issue } => (issue, Step::Verify),
+            Effect::Retry { issue } => {
+                // A person asked: forget every failure and any handed-off restart,
+                // and run whichever step the issue is at.
+                let step = match world.issues.get(issue).map(|i| i.stage) {
+                    Some(Stage::Deploying) => Step::Deploy,
+                    Some(Stage::Verifying) => Step::Verify,
+                    _ => return Outcome::Failed(format!("{issue} is not deploying or verifying")),
+                };
+                self.failed.remove(issue);
+                self.pending.remove(issue);
+                if let Some((file, _)) = &self.handoff {
+                    clear_handoff(file, issue);
+                }
+                (issue, step)
+            }
             _ => return Outcome::NotMine,
         };
         // Asked again while it runs: it is already being done.
@@ -528,6 +544,67 @@ mod tests {
             "asked again at once, it says why and waits"
         );
         assert_eq!(part.running(), 0);
+    }
+
+    #[test]
+    fn a_retry_clears_three_failures_and_runs_the_deploy_again() {
+        let runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counted = Arc::clone(&runs);
+        let shell: Arc<Shell> = Arc::new(move |_: &str, _: &PathBuf, _: &[(String, String)]| {
+            let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n <= 3 {
+                Err(format!("run {n} failed"))
+            } else {
+                Ok(())
+            }
+        });
+        let mut w = world(Some("make deploy"), None);
+        if let Some(i) = w.issues.get_mut(&issue()) {
+            i.stage = Stage::Deploying;
+        }
+        let deploy = Effect::Deploy { issue: issue() };
+        let mut part = Deploys::with(shell);
+        for _ in 0..3 {
+            assert_eq!(part.carry_out(&deploy, &w), Outcome::done());
+            settle(&mut part, &w);
+            // Pretend the ten minutes have passed.
+            if let Some(f) = part.failed.get_mut(&issue()) {
+                f.at = Instant::now() - RETRY_AFTER;
+            }
+        }
+        assert!(
+            matches!(part.carry_out(&deploy, &w), Outcome::Failed(why) if why.contains("a person has to look at it"))
+        );
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 3);
+        let retry = Effect::Retry { issue: issue() };
+        assert_eq!(part.carry_out(&retry, &w), Outcome::done());
+        assert_eq!(
+            settle(&mut part, &w).events,
+            [Event::Deployed { issue: issue() }]
+        );
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert!(part.failed.is_empty());
+    }
+
+    #[test]
+    fn a_retry_in_the_verifying_stage_runs_the_verify_command_again() {
+        let mut w = world(Some("make deploy"), Some("make check"));
+        if let Some(i) = w.issues.get_mut(&issue()) {
+            i.stage = Stage::Verifying;
+        }
+        let mut part = Deploys::with(shell());
+        assert_eq!(
+            part.carry_out(&Effect::Retry { issue: issue() }, &w),
+            Outcome::done()
+        );
+        assert_eq!(
+            settle(&mut part, &w).events,
+            [Event::Verified {
+                issue: issue(),
+                passed: true,
+                output: String::new(),
+            }]
+        );
     }
 
     /// A scratch folder for one test.

@@ -48,6 +48,12 @@ pub enum Effect {
         /// The issue.
         issue: IssueId,
     },
+    /// Run the issue's deploy or verify again at once, forgetting how often and
+    /// how recently it failed.
+    Retry {
+        /// The issue.
+        issue: IssueId,
+    },
     /// Close the issue in its tracker.
     Close {
         /// The issue.
@@ -93,6 +99,7 @@ impl Effect {
             Self::Merge { issue } => format!("merge {issue}"),
             Self::Deploy { issue } => format!("deploy {issue}"),
             Self::Verify { issue } => format!("verify {issue} after deploy"),
+            Self::Retry { issue } => format!("retry the deploy or verify of {issue}"),
             Self::Close { issue } => format!("close {issue} in its tracker"),
             Self::ReleaseFolder { folder } => format!("release folder {folder}"),
             Self::ApplyOverturn { decision } => {

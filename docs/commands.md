@@ -18,6 +18,7 @@ reports its step done.
 | `temet-work ready ISSUE PULL` | only the author working on ISSUE, once the pull request is open and the plan's checks hold; `PULL` is its number, needed the first time | working, or fixing |
 | `temet-work review ISSUE approve` | only the reviewer working on ISSUE | in review |
 | `temet-work review ISSUE block POINT...` | only the reviewer working on ISSUE, one argument per thing to fix | in review |
+| `temet-work retry ISSUE` | a person only | deploying or verifying: runs the deploy (or verify) again at once and clears its failure count and ten-minute wait, so a deploy that failed three times gets three fresh tries |
 | `temet-work rule ISSUE approve REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
 | `temet-work rule ISSUE fix REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
 | `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines | any |

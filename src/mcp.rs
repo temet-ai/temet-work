@@ -4,7 +4,7 @@
 //!
 //! The server has two levels. At `read`, the default, it offers the views:
 //! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
-//! that move work and change settings: `plan`, `ready`, `review`, `rule`, `set` and
+//! that move work and change settings: `plan`, `ready`, `review`, `retry`, `rule`, `set` and
 //! `unset`. A tool above the server's level is
 //! not listed, and calling it is refused.
 
@@ -126,6 +126,12 @@ fn tools() -> Vec<Tool> {
             }, "required": ["issue", "verdict"]}),
         },
         Tool {
+            name: "retry",
+            description: "Runs the deploy or verify of an issue that is deploying or verifying again at once, clearing its failures. A person's command.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {"issue": issue_field()}, "required": ["issue"]}),
+        },
+        Tool {
             name: "rule",
             description: "The arbiter's ruling once review rounds ran out: approve to merge, or not, with the reason.",
             acts: true,
@@ -235,6 +241,9 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                 },
                 other => return Err(format!("verdict is approve or block, not {other}")),
             },
+        },
+        "retry" => Command::Retry {
+            issue: issue(args)?,
         },
         "rule" => Command::Rule {
             issue: issue(args)?,
@@ -381,7 +390,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 10);
+        assert_eq!(names(Level::Act).len(), 11);
     }
 
     #[test]

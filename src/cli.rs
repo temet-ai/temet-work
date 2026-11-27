@@ -99,6 +99,7 @@ pub fn request(
                 other => return Err(format!("review takes approve or block, not {other}")),
             },
         },
+        "retry" => Command::Retry { issue: issue()? },
         "rule" => Command::Rule {
             issue: issue()?,
             approve: match arg(2, "approve or fix")? {

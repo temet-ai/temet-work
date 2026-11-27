@@ -238,6 +238,11 @@ pub enum Event {
         #[serde(default)]
         output: String,
     },
+    /// A person asked for the issue's deploy or verify to run again, now.
+    Retried {
+        /// The issue.
+        issue: IssueId,
+    },
     /// The code host would not merge the pull request as it stands, such as for a
     /// conflict with the target branch.
     MergeRefused {
