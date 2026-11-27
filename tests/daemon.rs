@@ -862,7 +862,7 @@ fn an_agent_commands_arrive_over_ssh_as_its_own() {
             .expect("a request");
         by.push(pending.request.by.clone().map(|a| a.0));
         assert!(pending.request.relayed, "marked by the relay");
-        assert_eq!(pending.peer, Peer::Relayed);
+        assert!(matches!(pending.peer, Peer::Read(_)), "{:?}", pending.peer);
         let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
         pending.answer(reply);
     }
@@ -1767,6 +1767,19 @@ mod senders {
         child: Option<(&str, &str)>,
         args: &[&str],
     ) -> (Option<i32>, String, String) {
+        under_with(socket, parent, child, args, "")
+    }
+
+    /// [`under`], with `input` on the command's standard input.
+    #[cfg(target_os = "linux")]
+    fn under_with(
+        socket: &Path,
+        parent: (&str, &str),
+        child: Option<(&str, &str)>,
+        args: &[&str],
+        input: &str,
+    ) -> (Option<i32>, String, String) {
+        use std::io::Write;
         let set: Vec<String> = match child {
             None => ["-u", "TEMET_WORK_AGENT", "-u", SECRET_VAR]
                 .map(String::from)
@@ -1777,7 +1790,7 @@ mod senders {
             ],
         };
         // `; exit $?` keeps the shell alive as the command's parent.
-        let out = std::process::Command::new("sh")
+        let mut child = std::process::Command::new("sh")
             .args(["-c", "env \"$@\"; exit $?", "sh"])
             .args(&set)
             .arg(env!("CARGO_BIN_EXE_temet-work"))
@@ -1786,9 +1799,18 @@ mod senders {
             .env_remove("TEMET_WORK_DAEMON")
             .env("TEMET_WORK_AGENT", parent.0)
             .env(SECRET_VAR, parent.1)
-            .output()
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .expect("sh runs");
-        outcome(out)
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(input.as_bytes())
+            .expect("input");
+        outcome(child.wait_with_output().expect("sh ends"))
     }
 
     /// Two projects, ankh here and klatch on the machine mac, refined at once.
@@ -2302,6 +2324,52 @@ refining_at_once = 2
         let own = serve(&mut host, &requests, client);
         assert_eq!(own.0, Some(0), "{own:?}");
         assert!(host.world().issues[&issue].review_ok, "approved");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stolen_secret_sent_through_a_local_relay_is_refused_all_the_same() {
+        let sock = scratch("stolen-relay").join("daemon.sock");
+        let requests = socket::listen(&sock).expect("listen");
+        let (author, reviewer) = (fresh(), fresh());
+        let mut host = tree_host(
+            &[
+                ("author-1", Role::Author, &author),
+                ("reviewer-1", Role::Reviewer, &reviewer),
+            ],
+            Stage::InReview { round: 1 },
+        );
+        // The request the reviewer would send, which the relay marks as relayed.
+        let line = serde_json::to_string(&Request {
+            by: Some(AgentId::new("reviewer-1")),
+            secret: Some(reviewer.clone()),
+            relayed: true,
+            command: Command::Review {
+                issue: IssueId::new("ankh", "1"),
+                verdict: temet_work_core::Verdict::Approve,
+            },
+        })
+        .expect("line");
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            move || {
+                under_with(
+                    &sock,
+                    ("author-1", &author),
+                    None,
+                    &["relay", "--socket", &sock.display().to_string()],
+                    &format!("{line}\n"),
+                )
+            }
+        });
+        let got = serve(&mut host, &requests, client);
+        assert_eq!(got.0, Some(0), "the relay ran: {got:?}");
+        let reply: Reply = serde_json::from_str(&got.1).expect("a reply");
+        assert!(
+            matches!(&reply, Reply::Refused { why } if why.contains("inside author-1's process tree")),
+            "{reply:?}"
+        );
+        assert!(!host.world().issues[&IssueId::new("ankh", "1")].review_ok);
     }
 
     #[test]

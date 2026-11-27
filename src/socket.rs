@@ -104,16 +104,10 @@ fn serve(stream: UnixStream, tx: &Sender<Pending>) {
             },
             Ok(request) => {
                 let (reply, answered) = mpsc::channel();
-                // The relay's own process tree says nothing of the far machine's.
-                let peer = if request.relayed {
-                    Peer::Relayed
-                } else {
-                    peer.clone()
-                };
                 if tx
                     .send(Pending {
                         request,
-                        peer,
+                        peer: peer.clone(),
                         reply,
                     })
                     .is_err()
@@ -528,6 +522,7 @@ pub fn answer(
             .filter(|s| !s.is_empty())
             .map(crate::peer::digest),
         peer: peer.clone(),
+        relayed: request.relayed,
     };
     if let Err(why) = host.world().admit(&sender, &request.command) {
         return Ok(Reply::Refused { why });

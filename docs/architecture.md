@@ -143,8 +143,8 @@ The runner family makes each agent a random secret when it starts it, puts it in
 agent's environment, and records only its SHA-256 digest, in `AgentStarted`. For each
 request the daemon hashes the secret the request carries and, on Linux, the secrets it
 finds in the environments of the sending process and its parents (`src/peer.rs`, through
-`SO_PEERCRED` and `/proc`); `temet-work relay` marks what it forwards from another
-machine. The core's `World::admit` compares those digests with the ones on record and
+`SO_PEERCRED` and `/proc`), relayed or not; `temet-work relay` marks what it forwards
+from another machine, and the mark only adds refusals. The core's `World::admit` compares those digests with the ones on record and
 refuses a request it cannot take at its word, before the step checks run
 (`docs/commands.md`). Making a secret and reading another process are I/O, so the core
 does neither.

@@ -64,7 +64,8 @@ itself is in no log, reply, status or issue text.
   (`SO_PEERCRED`), and that process's parents in `/proc`, and looks in each one's
   environment for a secret it issued. A command that names agent A from inside agent B's
   process tree is refused, even with A's own secret, so an agent that reads another
-  agent's secret from `/proc` cannot use it.
+  agent's secret from `/proc` cannot use it. The tree is read for a command that came
+  through `temet-work relay` too: the relay's mark only adds refusals.
 - A command that names no agent is a person's. It may read from anywhere. A command that
   changes something (`rule`, `overturn`, `retry`, `proposal`, `set` and `unset`) is
   refused when it carries an agent's secret; when, on Linux, the sending process or one of
@@ -78,14 +79,17 @@ itself is in no log, reply, status or issue text.
 
 Agents run as the same user as the daemon, so this does not stop an agent that:
 
-- starts a process that leaves its process tree (`setsid -f`) and drops both variables;
+- starts a process that leaves its process tree (`setsid -f`): with both variables
+  dropped it passes as a person, and with another agent's id and secret it passes as
+  that agent;
 - edits the daemon's files or its event log;
 - logs in to the daemon's machine over SSH and runs `temet-work` there, outside the relay;
 - types into a person's terminal.
 
-On macOS the daemon checks secrets but not process trees: `SO_PEERCRED` and `/proc` are
-Linux only, and refusing every command a person sends would leave a person no way to run
-them.
+On macOS the daemon checks secrets but not process trees, because `SO_PEERCRED` and
+`/proc` are Linux only and refusing every command a person sends would leave a person no
+way to run them. There an agent that unsets both variables passes as a person, and one
+that has read another agent's secret passes as that agent.
 
 An agent on another machine sends its secret through `temet-work` on that machine, so
 that machine needs a build that sends it: install the same one there as on the daemon's

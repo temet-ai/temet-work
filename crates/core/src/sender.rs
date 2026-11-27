@@ -8,6 +8,10 @@
 //! carries an agent's secret, the daemon found one in the sending process or its
 //! parents, or it came from another machine through the relay.
 //!
+//! The process tree is read for every request, relayed or not. The relay's mark
+//! only adds refusals, so a local process that marks its own request as relayed
+//! is still judged by its own tree.
+//!
 //! The core only compares digests. Making a secret, hashing one and reading
 //! another process are I/O: the part that starts agents and the daemon do them.
 
@@ -44,9 +48,6 @@ pub enum Peer {
     Read(Vec<Digest>),
     /// The sending process itself could not be read; why.
     Unreadable(String),
-    /// The request came through `temet-work relay`, from another machine whose
-    /// processes the daemon cannot see.
-    Relayed,
     /// Not looked at: the platform has no process tree to read (macOS), or the
     /// request was made inside the daemon.
     Unchecked,
@@ -61,6 +62,9 @@ pub struct Sender {
     pub proof: Option<Digest>,
     /// What the daemon learned about the sending process.
     pub peer: Peer,
+    /// Whether the request says it came through `temet-work relay`, from
+    /// another machine whose processes the daemon cannot see.
+    pub relayed: bool,
 }
 
 impl World {
@@ -106,26 +110,27 @@ impl World {
                     agent.id
                 ));
             }
-            return match &sender.peer {
-                Peer::Read(_) => match found.first() {
-                    Some(agent) => Err(format!(
-                        "{name} names no agent but comes from inside {agent}'s process tree: an \
-                         agent may not run a person's command; a person runs it from a shell \
-                         outside any agent's terminal"
-                    )),
-                    None => Ok(()),
-                },
-                Peer::Unreadable(why) => Err(format!(
+            if let Some(agent) = found.first() {
+                return Err(format!(
+                    "{name} names no agent but comes from inside {agent}'s process tree: an \
+                     agent may not run a person's command; a person runs it from a shell \
+                     outside any agent's terminal"
+                ));
+            }
+            if let Peer::Unreadable(why) = &sender.peer {
+                return Err(format!(
                     "{name} names no agent, and the process that sent it cannot be read ({why}), \
                      so it cannot be told from an agent's"
-                )),
-                Peer::Relayed => Err(format!(
+                ));
+            }
+            if sender.relayed {
+                return Err(format!(
                     "{name} names no agent and came through temet-work relay from another \
                      machine, where the daemon cannot see who sent it: run it on the daemon's \
                      machine"
-                )),
-                Peer::Unchecked => Ok(()),
-            };
+                ));
+            }
+            return Ok(());
         };
         let Some(agent) = self.agents.get(by) else {
             return Err(format!("{by} is not an agent this daemon started"));
@@ -231,6 +236,14 @@ mod tests {
             by: by.map(AgentId::new),
             proof: proof.map(d),
             peer,
+            relayed: false,
+        }
+    }
+
+    fn relayed(by: Option<&str>, proof: Option<&str>, peer: Peer) -> Sender {
+        Sender {
+            relayed: true,
+            ..sender(by, proof, peer)
         }
     }
 
@@ -279,11 +292,33 @@ mod tests {
             &Command::Status,
         );
         assert!(status.is_err());
-        // Through the relay the secret is proof enough.
+        // Through the relay, from a clean tree, the secret is proof enough.
         assert_eq!(
-            review(sender(Some("reviewer-1"), Some("b"), Peer::Relayed)),
+            review(relayed(Some("reviewer-1"), Some("b"), Peer::Read(vec![]))),
             Ok(())
         );
+    }
+
+    #[test]
+    fn marking_a_request_as_relayed_does_not_skip_the_process_tree() {
+        let w = world();
+        // author-1 sends reviewer-1's stolen secret, marked as if it came
+        // through the relay.
+        let why = w
+            .admit(
+                &relayed(Some("reviewer-1"), Some("b"), Peer::Read(vec![d("a")])),
+                &approve(),
+            )
+            .expect_err("refused");
+        assert!(why.contains("inside author-1's process tree"), "{why}");
+        let keep = Command::Proposal {
+            rule: RuleId(1),
+            keep: true,
+        };
+        let why = w
+            .admit(&relayed(None, None, Peer::Read(vec![d("a")])), &keep)
+            .expect_err("refused");
+        assert!(why.contains("inside author-1's process tree"), "{why}");
     }
 
     #[test]
@@ -395,16 +430,15 @@ mod tests {
             )
             .expect_err("refused");
         assert!(unreadable.contains("process 7: gone"), "{unreadable}");
-        let relayed = w
-            .admit(&sender(None, None, Peer::Relayed), &set)
+        let far = w
+            .admit(&relayed(None, None, Peer::Read(vec![])), &set)
             .expect_err("refused");
         assert!(
-            relayed.contains("temet-work relay")
-                && relayed.contains("run it on the daemon's machine"),
-            "{relayed}"
+            far.contains("temet-work relay") && far.contains("run it on the daemon's machine"),
+            "{far}"
         );
         assert_eq!(
-            w.admit(&sender(None, None, Peer::Relayed), &Command::Status),
+            w.admit(&relayed(None, None, Peer::Read(vec![])), &Command::Status),
             Ok(())
         );
     }
