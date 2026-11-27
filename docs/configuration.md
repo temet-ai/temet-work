@@ -3,6 +3,7 @@ session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
   - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
   - 48c80237-558e-4a4a-a82d-bd96b37f1f46
+  - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
 ---
 
 # Configuring temet-workd
@@ -203,6 +204,9 @@ tables `[settings]` (with `[settings.<role>]` inside it), `[project.settings]`,
 `file`. The daemon reads the file when it starts, so a change to it takes effect at the
 next start. A `model` table in any of them, or in a role's table, gives a model per
 runtime: `[settings.model]` with `claude = "sonnet"` is the setting `model.claude`. A
+plain `model = "..."` is recorded as `model.<runtime>` of the file's global runtime (its
+`[settings]` `runtime`, else the build's default), and stops the daemon at start, naming
+`model.<runtime>`, in a table whose scope and role the file gives another runtime. A
 group's `model` and a project's `ci`, `deploy`, `verify` and `run_in` are still accepted
 and are read as settings at their level, so an existing file behaves as before. A key the
 daemon does not know is an error naming the key, and so is a key in a role's table that

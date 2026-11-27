@@ -508,7 +508,7 @@ radar#44, author
         w.put(
             &radar,
             Some(Role::Reviewer),
-            "model",
+            "model.alpha",
             &text_of("haiku"),
             crate::settings::FILE,
         );
@@ -742,7 +742,7 @@ Problems
             "{status}"
         );
         assert!(
-            status.contains("  global: model = sonnet, set by person\n"),
+            status.contains("  global: model.alpha = sonnet, set by person\n"),
             "{status}"
         );
     }
@@ -834,7 +834,7 @@ Problems
             "{all}"
         );
         assert!(
-            all.contains("  radar#44, author: model = opus, set by refiner-3\n"),
+            all.contains("  radar#44, author: model.alpha = opus, set by refiner-3\n"),
             "{all}"
         );
         assert!(

@@ -210,41 +210,23 @@ impl World {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
+        // The plan keeps what the refiner wrote; its settings are recorded under
+        // the keys they are bound to.
         if let Event::PlanWritten { issue, plan } = &event {
             let who = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
+            let scope = Scope::Task(issue.clone());
             for (key, value) in &plan.settings {
+                let role = settings::recorded_role(None, key, &who);
                 out.push(Event::SettingSet {
-                    scope: Scope::Task(issue.clone()),
-                    role: settings::recorded_role(None, key, &who),
-                    key: key.clone(),
+                    scope: scope.clone(),
+                    role,
+                    key: self.model_key(&scope, role, key)?,
                     value: value.clone(),
                     by: who.clone(),
                 });
             }
         }
         // An overturn proposes a rule, once for the decision.
-        // A person's change of a model also drops an agent's value for the
-        // author under the model's other name. It comes after the change, which
-        // is what the command is answered with.
-        let other = match (&event, by) {
-            (
-                Event::SettingSet {
-                    scope, role, key, ..
-                }
-                | Event::SettingUnset {
-                    scope, role, key, ..
-                },
-                None,
-            ) => self
-                .agents_other_model(scope, *role, key)
-                .map(|key| Event::SettingUnset {
-                    scope: scope.clone(),
-                    role: Some(Role::Author),
-                    key,
-                    by: PERSON.to_string(),
-                }),
-            _ => None,
-        };
         let rule = match &event {
             Event::DecisionOverturned {
                 decision,
@@ -255,7 +237,6 @@ impl World {
             _ => None,
         };
         out.push(event);
-        out.extend(other);
         out.extend(rule.map(|rule| Event::RuleProposed { rule }));
         Ok(out)
     }
@@ -542,11 +523,21 @@ impl World {
                     return Err("a plan needs at least one check".into());
                 }
                 let task = Scope::Task(issue.clone());
+                let who = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
+                let mut bound: std::collections::BTreeMap<String, &str> = Default::default();
                 for (key, value) in &plan.settings {
-                    self.may_set(by, &task, None, key)
+                    let role = settings::recorded_role(None, key, &who);
+                    let at = self
+                        .may_set(by, &task, None, key)
                         .and_then(|()| settings::check_value(key, value))
                         .and_then(|()| self.check_choice(key, value))
+                        .and_then(|()| self.model_key(&task, role, key))
                         .map_err(|e| format!("the plan's settings: {e}"))?;
+                    if let Some(other) = bound.insert(at.clone(), key) {
+                        return Err(format!(
+                            "the plan's settings: {other} and {key} are both {at}; give one"
+                        ));
+                    }
                 }
                 if let Some(c) = plan
                     .checks
@@ -662,10 +653,11 @@ impl World {
                 let value = settings::parse_value(key, value)?;
                 self.check_choice(key, &value)?;
                 let by = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
+                let role = settings::recorded_role(*role, key, &by);
                 Event::SettingSet {
+                    key: self.model_key(&scope, role, key)?,
                     scope,
-                    role: settings::recorded_role(*role, key, &by),
-                    key: key.clone(),
+                    role,
                     value,
                     by,
                 }
@@ -679,26 +671,46 @@ impl World {
                 settings::spec(key)?;
                 let who = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
                 let at = settings::recorded_role(*role, key, &who);
+                // A plain model is the global runtime's model now, as when it is set.
+                let bound = self.bound_key(key);
                 // A person's unset for every role also takes an agent's value for
                 // the author away, so it has something to unset when only that is.
-                let there = self
-                    .settings
-                    .contains_key(&(scope.clone(), at, key.clone()))
-                    || (by.is_none()
-                        && (at.is_none() && self.agents_author_value(&scope, key)
-                            || self.agents_other_model(&scope, at, key).is_some()));
-                if !there {
+                let held = |key: &str| {
+                    self.settings
+                        .contains_key(&(scope.clone(), at, key.to_string()))
+                        || (by.is_none() && at.is_none() && self.agents_author_value(&scope, key))
+                };
+                if !held(&bound) {
                     // A value left from a build that had the runtime can be unset.
                     self.check_model_runtime(key)?;
                     let for_role = at.map_or_else(String::new, |r| format!(" for {}", r.name()));
-                    return Err(format!(
-                        "{key} is not set at {target}{for_role}; nothing to unset"
-                    ));
+                    // A plain model set under another global runtime is under
+                    // that runtime's key: say which, so it can be taken away.
+                    let other = (bound != *key)
+                        .then(|| {
+                            self.settings
+                                .keys()
+                                .map(|(_, _, k)| k)
+                                .filter(|k| k.starts_with("model.") && **k != bound)
+                                .find(|k| held(k))
+                        })
+                        .flatten();
+                    return Err(match other {
+                        Some(other) => format!(
+                            "a plain {key} is {bound} now, the global runtime's, and {bound} is \
+                             not set at {target}{for_role}; {other} is: unset {other} to take it away"
+                        ),
+                        None if bound != *key => format!(
+                            "a plain {key} is {bound} now, the global runtime's, and {bound} is \
+                             not set at {target}{for_role}; nothing to unset"
+                        ),
+                        None => format!("{key} is not set at {target}{for_role}; nothing to unset"),
+                    });
                 }
                 Event::SettingUnset {
                     scope,
                     role: at,
-                    key: key.clone(),
+                    key: bound,
                     by: who,
                 }
             }
@@ -1436,45 +1448,148 @@ mod plan_settings {
         }
     }
 
+    /// ankh#1 being refined, in a build with the runtimes alpha (its default)
+    /// and beta, and alpha set globally by a person.
+    fn on_alpha() -> World {
+        let mut w = refining();
+        w.catalog.insert(
+            "runtime".into(),
+            crate::settings::Choice {
+                key: "runtime".into(),
+                allowed: vec!["alpha".into(), "beta".into()],
+                default: Some("alpha".into()),
+            },
+        );
+        run(&mut w, None, &set("global", None, "runtime", "alpha"));
+        w
+    }
+
     #[test]
-    fn a_persons_model_overturns_the_refiners_under_either_of_its_names() {
-        let names = ["model", "model.alpha"];
-        for (theirs, mine) in [(names[0], names[1]), (names[1], names[0])] {
+    fn a_plain_model_is_logged_under_the_global_runtimes_key_when_it_is_written() {
+        let mut w = on_alpha();
+        let events = run(&mut w, None, &set("ankh#1", None, "model", "opus"));
+        assert_eq!(
+            events,
+            [Event::SettingSet {
+                scope: Scope::Task(issue()),
+                role: None,
+                key: "model.alpha".into(),
+                value: Value::Text("opus".into()),
+                by: PERSON.into(),
+            }]
+        );
+        // A refiner's plan: its model is the author's model.alpha, and the plan
+        // keeps what the refiner wrote.
+        let mut w = on_alpha();
+        let command = plan(&[("model", Value::Text("opus".into()))]);
+        let events = run(&mut w, Some("refiner-1"), &command);
+        assert_eq!(
+            events[0],
+            Event::SettingSet {
+                scope: Scope::Task(issue()),
+                role: Some(Role::Author),
+                key: "model.alpha".into(),
+                value: Value::Text("opus".into()),
+                by: "refiner-1".into(),
+            }
+        );
+        assert!(
+            matches!(&events[1], Event::PlanWritten { plan, .. }
+                if plan.settings.keys().eq(["model"])),
+            "{events:?}"
+        );
+        // model and model.alpha are one key, so a plan gives one of them.
+        let both = plan(&[
+            ("model", Value::Text("opus".into())),
+            ("model.alpha", Value::Text("haiku".into())),
+        ]);
+        let why = on_alpha()
+            .check(Some(&AgentId::new("refiner-1")), &both)
+            .expect_err("refused");
+        assert!(why.contains("both model.alpha"), "{why}");
+    }
+
+    #[test]
+    fn a_plain_model_is_refused_where_that_scope_and_role_run_another_runtime() {
+        let mut w = on_alpha();
+        run(
+            &mut w,
+            None,
+            &set("global", Some(Role::Reviewer), "runtime", "beta"),
+        );
+        let why = w
+            .events(None, &set("ankh", Some(Role::Reviewer), "model", "gpt-x"))
+            .expect_err("refused");
+        assert!(why.contains("model.beta"), "{why}");
+        // For every role it is alpha's, which the reviewers do not read.
+        let events = run(&mut w, None, &set("ankh", None, "model", "haiku"));
+        assert!(
+            matches!(&events[..], [Event::SettingSet { key, role: None, .. }] if key == "model.alpha"),
+            "{events:?}"
+        );
+        // A plan's model is the author's: refused where the author runs beta.
+        let mut w = on_alpha();
+        run(
+            &mut w,
+            None,
+            &set("ankh", Some(Role::Author), "runtime", "beta"),
+        );
+        let before = w.clone();
+        let refiner = AgentId::new("refiner-1");
+        let command = plan(&[("model", Value::Text("opus".into()))]);
+        let why = w.events(Some(&refiner), &command).expect_err("refused");
+        assert!(
+            why.starts_with("the plan's settings: ") && why.contains("model.beta"),
+            "{why}"
+        );
+        // Its own runtime's key is taken, and nothing else was recorded.
+        assert_eq!(w, before);
+        let command = plan(&[("model.beta", Value::Text("gpt-x".into()))]);
+        assert!(w.events(Some(&refiner), &command).is_ok());
+    }
+
+    #[test]
+    fn a_persons_model_or_model_of_the_global_runtime_overturns_the_refiners() {
+        for mine in ["model", "model.alpha"] {
             for role in [None, Some(Role::Author)] {
-                let mut w = refining();
-                run(&mut w, None, &set("global", None, "runtime", "alpha"));
+                let mut w = on_alpha();
                 run(
                     &mut w,
                     Some("refiner-1"),
-                    &set("ankh#1", None, theirs, "opus"),
+                    &set("ankh#1", None, "model", "opus"),
                 );
                 let events = run(&mut w, None, &set("ankh#1", role, mine, "haiku"));
                 assert!(
-                    matches!(&events[0], Event::SettingSet { key, .. } if key == mine),
-                    "the command is answered with its own change: {events:?}"
+                    matches!(&events[..], [Event::SettingSet { key, .. }] if key == "model.alpha"),
+                    "one change, nothing else: {events:?}"
                 );
-                let model = read(&w, Role::Author, "model").map(|(value, _)| value);
-                assert_eq!(model.as_deref(), Some("haiku"), "{theirs} {mine} {role:?}");
+                assert_eq!(
+                    read(&w, Role::Author, "model"),
+                    is("haiku", "task, set by person"),
+                    "{mine} {role:?}"
+                );
             }
-            // An unset by the other name takes the refiner's value away too.
-            let mut w = refining();
-            run(&mut w, None, &set("global", None, "runtime", "alpha"));
+            // An unset takes the refiner's value away, in one change.
+            let mut w = on_alpha();
             run(
                 &mut w,
                 Some("refiner-1"),
-                &set("ankh#1", None, theirs, "opus"),
+                &set("ankh#1", None, "model", "opus"),
             );
             let unset = Command::Unset {
                 target: Target::Issue(issue()),
                 role: None,
                 key: mine.into(),
             };
-            run(&mut w, None, &unset);
-            assert_eq!(read(&w, Role::Author, "model"), None, "{theirs} {mine}");
+            let events = run(&mut w, None, &unset);
+            assert!(
+                matches!(&events[..], [Event::SettingUnset { key, role: None, .. }] if key == "model.alpha"),
+                "{events:?}"
+            );
+            assert_eq!(read(&w, Role::Author, "model"), None, "{mine}");
         }
         // Another runtime's model is not the same model, so it takes nothing away.
-        let mut w = refining();
-        run(&mut w, None, &set("global", None, "runtime", "alpha"));
+        let mut w = on_alpha();
         run(
             &mut w,
             Some("refiner-1"),
@@ -1482,8 +1597,40 @@ mod plan_settings {
         );
         let events = run(&mut w, None, &set("ankh#1", None, "model.beta", "gpt-x"));
         assert_eq!(events.len(), 1, "{events:?}");
-        let model = read(&w, Role::Author, "model").map(|(value, _)| value);
-        assert_eq!(model.as_deref(), Some("opus"));
+        assert_eq!(
+            read(&w, Role::Author, "model"),
+            is("opus", "task, set by refiner-1")
+        );
+    }
+
+    #[test]
+    fn an_unset_of_a_plain_model_names_the_model_key_that_is_set() {
+        let mut w = on_alpha();
+        run(&mut w, None, &set("ankh#1", None, "model", "opus"));
+        run(&mut w, None, &set("global", None, "runtime", "beta"));
+        let why = w.events(None, &unset(None)).expect_err("refused");
+        assert!(
+            why.contains("model.beta") && why.contains("model.alpha is: unset model.alpha"),
+            "{why}"
+        );
+        let unset_alpha = Command::Unset {
+            target: Target::Issue(issue()),
+            role: None,
+            key: "model.alpha".into(),
+        };
+        run(&mut w, None, &unset_alpha);
+        let why = w.events(None, &unset(None)).expect_err("refused");
+        assert!(why.ends_with("nothing to unset"), "{why}");
+        // A refiner's value for the author is named to a person too.
+        let mut w = on_alpha();
+        run(
+            &mut w,
+            Some("refiner-1"),
+            &set("ankh#1", None, "model", "opus"),
+        );
+        run(&mut w, None, &set("global", None, "runtime", "beta"));
+        let why = w.events(None, &unset(None)).expect_err("refused");
+        assert!(why.contains("model.alpha is"), "{why}");
     }
 
     #[test]

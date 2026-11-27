@@ -4,6 +4,7 @@ session_id:
   - 30de12a8-8bb8-4310-a59b-8d5267ce0b97
   - 7d9306de-2941-41bd-8a60-efad6ed38f2a
   - 48c80237-558e-4a4a-a82d-bd96b37f1f46
+  - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
 ---
 
 # Settings: defaults at every level
@@ -49,7 +50,7 @@ which is the one in effect.
 | Setting | Per role | Built in | Read by |
 |---|---|---|---|
 | `runtime` | yes | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
-| `model` | yes | the runtime's own default | the agent's brief, so the runtime adapter. A model belongs to one runtime: `model.<runtime>` (`model.codex`) names it, and a plain `model` is the global runtime's ("A model belongs to a runtime", below) |
+| `model` | yes | the runtime's own default | the agent's brief, so the runtime adapter. A model belongs to one runtime: `model.<runtime>` (`model.codex`) names it, and a plain `model` is recorded as the global runtime's when it is written ("A model belongs to a runtime", below) |
 | `runner` | yes | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
 | `machine` | yes | none: any machine | the loop, per issue and role, when it picks a work folder (below) |
 | `permission` | yes | `auto` (or `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`) | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
@@ -73,22 +74,33 @@ another one.
 
 - `model.<runtime>`, such as `model.claude` or `model.codex`, is the model for agents of
   that runtime.
-- A plain `model` is the model for agents of the global runtime: the `runtime` set
-  globally for every role, or the build's default (`claude`) when none is. A `runtime`
-  set for one role, or at a nearer level, does not change which runtime that is.
+- A plain `model` is bound to the global runtime when it is written: the `runtime` set
+  globally for every role, or the build's default (`claude`) when none is. It is recorded
+  as `model.<that runtime>`, and keeps that runtime when the global runtime changes later.
+  With `claude` global, `temet-work set radar#44 model opus` records `model.claude` and
+  answers `model.claude is opus at radar#44`; a refiner's `model: opus` is recorded the
+  same way, and its plan keeps `model` as the refiner wrote it.
+- A plain `model` is refused, naming `model.<runtime>`, where the runtime in effect for
+  that scope and role is not the global one. With reviewers on `codex`,
+  `temet-work set radar --role reviewer model gpt-5-codex` is refused naming `model.codex`,
+  and so is a plan's `model` on an issue whose author runs `codex`. Nothing is recorded.
+  `temet-work set radar model haiku` for every role is still taken, as `model.claude`.
 
 The lookup for an agent's model goes level by level like any other, with the role's own
 value before the value for every role, and at each of those places it reads
-`model.<the agent's runtime>` before a plain `model`. So a refiner's `model: opus` on an
-issue beats a global `model.claude` for a Claude author. An agent with no model of its own
-runtime anywhere in the chain runs its runtime's default.
+`model.<the agent's runtime>`. So a refiner's `model: opus` on an issue beats a global
+`model.claude` for a Claude author. An agent with no model of its own runtime anywhere in
+the chain runs its runtime's default. After `temet-work set global runtime codex`, that
+refiner's `opus` and every other plain model written before are still `model.claude`, so
+a Codex author runs Codex's default until a person sets `model.codex`.
 
 In the example under "Setting them", authors run Claude with `haiku` on `radar`'s issues
 and `opus` on the milestone's. Reviewers run Codex, so none of those models reaches them;
 `codex = "..."` under `[settings.reviewer.model]` would give them one.
 
 `temet-work settings` shows the `model` an agent of that role gets, and no `model` line
-when it gets none. `temet-work status` lists each value under the key it was set with.
+when it gets none. `temet-work status` lists each value under the key it is recorded
+with, so a plain model shows as `model.<runtime>`.
 
 How many issues a group refines at once stays on the group: it is how much the group
 takes on, not how a piece of work is done. So do `queue_low` and `investigate_every`, which
@@ -178,7 +190,15 @@ claude = "opus"
 TOML cannot hold `model = "..."` and `model.codex` in one table, so in the file a
 runtime's model is an entry of a `model` table at its level, or in a role's table
 (`[settings.reviewer.model]`). Each entry is the setting `model.<runtime>`. A plain
-`model = "..."` still loads, as the global runtime's model.
+`model = "..."` still loads. The file alone decides its runtime: the `runtime` the file
+gives that table's scope and role, which has to be the file's global one (its
+`[settings]` `runtime`, else the build's default). A `runtime` a person set by command does
+not move it, so after `temet-work set global runtime codex` a restart on the same file
+keeps its `model = "sonnet"` as `model.claude`; changing the file's own `[settings]`
+`runtime` to `codex` makes it `model.codex` on the next start. The daemon does not start
+on a plain `model` where the file gives that scope and role another runtime, such as
+`[settings.reviewer]` with `runtime = "codex"` and `model = "gpt-5-codex"`, and it names
+`model.codex`: write `codex = "gpt-5-codex"` under `[settings.reviewer.model]` instead.
 
 By command, the same way a person or an agent runs any other:
 
@@ -210,10 +230,12 @@ as `temet-work set radar#44 model haiku`: it holds for every role, and the refin
 for the author is dropped. A person's `unset` with no role drops it too, so the author
 takes the wider level's value. A value a person set with `--role author` stays.
 
-`model` and the global runtime's `model.<runtime>` (`model.claude`) are the same agents'
-model. So a person's `set` or `unset` of either on the task, with no role or for the
-author, also drops the refiner's value under the other name, which could otherwise be
-read first.
+A plain `model` is written as `model.claude` while `claude` is global, so a person's `set`
+or `unset` of either name on the task, with no role or for the author, replaces or drops
+the refiner's value. An `unset` of a plain `model` that finds only another runtime's key
+there is refused and names that key: with a model set on `radar#44` while `claude` was
+global, and `codex` global now, `temet-work unset radar#44 model` names `model.claude`, and
+`temet-work unset radar#44 model.claude` takes it away.
 
 Nine settings only a person sets, at any level and for any role they take. An agent's
 plan, `set` or `unset` that names one is refused with the reason, and a refused plan is
@@ -243,6 +265,21 @@ out. An issue refined before the upgrade is then reviewed on the person's model.
 A log written before a role was refused on a setting that takes none may hold one set for a
 role. It never had an effect, and the daemon reads the log and leaves it out, so neither
 `temet-work settings` nor `status` lists it.
+
+A log written before plain models were bound when written holds them as `model`. The
+daemon puts its build's runtimes in the world before it replays the log, and binds each
+plain `model` there, set or unset, to the runtime that was global at that point in the log,
+or to the build's default when none was set. A group's old `model` is bound the same way.
+`temet-work status` then lists each under `model.<runtime>`. A refiner's `model: opus`
+logged while `claude` was global stays `model.claude` after a later
+`temet-work set global runtime codex`, so a Codex author on that issue runs Codex's
+default. Before models were keyed by runtime, a plain `model` was the only way to give Codex reviewers a model
+(`[settings.reviewer] runtime = "codex"` with `model = "gpt-5-codex"`, or
+`temet-work set radar --role reviewer model gpt-5-codex`). A logged one is now listed under
+the runtime that was global then, usually `model.claude`, and reaches no reviewer. Set it
+again as `model.codex` (`temet-work set radar --role reviewer model.codex gpt-5-codex`), and
+`temet-work unset radar --role reviewer model.claude` takes the old one away. The file's
+form of it stops the start until it is moved under `[settings.reviewer.model]`.
 
 Every change, from the file, a command or a plan, is a `SettingSet` or `SettingUnset`
 event in the log with who made it: `file`, `person`, or the agent's id. A later event
@@ -286,15 +323,21 @@ level. `temet-work status` lists every value with the level it is set at and who
 - Each setting's `Spec` says whether an agent may set it: `May`, `ForAuthor` (a refiner
   may, for the author only: `model`) or `MayNot`. The plan check, `set`, `unset` and the
   replay of a log all read that, so a new key has to say which it is.
-- A family reports the adapters in its build and its default one; the host puts them in
-  the world, which is how a value naming an adapter the build lacks is refused. The
+- A family reports the adapters in its build and its default one; the daemon puts them in
+  the world before it replays the log (`temet_work::start`), which is how a value naming an
+  adapter the build lacks is refused, and how an older log's plain model finds the build's
+  default runtime. The
   runtime family picks its adapter by `runtime`, the runner family by `runner`. The Codex
   adapter (`temet-work-runtime-codex`) is the second runtime.
 - Every family is tested with two adapters compiled in at once, so "the first one wins"
   cannot come back unnoticed.
 - The group's `model` and the project's `ci`, `deploy`, `verify` and `run_in` are read as
   settings at their level, so configuration written today keeps working. A group's model
-  becomes the model of the projects and areas it works on.
+  becomes the model of the projects and areas it works on, bound like any plain `model`.
+- A plain `model` is bound where its event is made: `World::model_key` for `set` and a
+  plan's settings, `World::bound_key` for `unset` and for a logged event as it is applied,
+  and the configuration's own reading of the file. The log then says which runtime each
+  model is for.
 - A value in the file does not overwrite one a person or an agent has set since, and a
   value taken out of the file is unset again.
 
@@ -303,11 +346,25 @@ level. `temet-work status` lists every value with the level it is set at and who
 - Groups set no defaults. A group decides which work it takes; the chain decides how that
   work is done.
 - Within a level the role comes first; across levels the nearer level comes first.
-- Models are keyed by runtime, and a plain `model` is the global runtime's, so a file, a
-  group's old `model`, a log and a refiner's `model: opus` keep their meaning for the
-  agents they were written for. Applying a model only when it was set at a level as near
-  as the runtime was left out: in the example above the project's model is nearer than
+- Models are keyed by runtime, and a plain `model` is bound to the global runtime when it
+  is written. Refusing a change of the global `runtime` while plain models exist
+  was left out: it would block `set global runtime` on every refiner value in the log,
+  which no file holds and nobody can edit, and stop the daemon from starting after a
+  runtime change in the file. Applying a model only when it was set at a level as near as
+  the runtime was left out too: in the example above the project's model is nearer than
   the global runtime of reviewers, so a Codex reviewer would still get a Claude model.
+- A plain `model` written where that scope and role run another runtime is refused,
+  naming `model.<that runtime>`. Binding it to that role's runtime was left out: refiners
+  and these docs read a plain model as the global runtime's, so binding a refiner's `opus`
+  to a Codex author would start Codex with a Claude model. Binding it to the global runtime there
+  was left out too: the value would reach nobody, and the writer would not be told.
+- The file's plain `model` is bound by the file alone. Binding it against the live
+  settings was left out: it would make the file's `sonnet` Codex's on the first restart
+  after a person's `set global runtime codex`.
+- An older log's plain `model` replays as the model of the runtime that was global at that
+  point. Binding it to the role's runtime was left out: the global one is the runtime it was
+  read for when it was written, and the role's would hand a refiner's Claude model to a
+  Codex author.
 - Only a person sets `runtime`. The Codex adapter ignores `permission`, so an agent that
   chose the runtime could undo what a person set there. Refusing the change only when
   `permission` is not `auto` and the runtime named ignores it was left out: the core

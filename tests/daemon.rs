@@ -230,6 +230,93 @@ fn a_synced_issue_gets_a_refiner_in_a_labelled_terminal() {
     );
 }
 
+/// An older log holds plain models and sets no global runtime. The daemon puts
+/// its build's runtimes in the world before it replays the log, so each plain
+/// model is the build's default runtime's.
+#[cfg(feature = "store")]
+#[test]
+fn a_start_over_a_log_with_no_global_runtime_binds_its_plain_models_to_the_builds_default() {
+    use temet_work_core::event::Event;
+    use temet_work_core::ids::{GroupId, ProjectId};
+    use temet_work_core::model::Role;
+    use temet_work_core::settings::{Scope, Value};
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("plain-model-start");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let log = dir.join("events.jsonl");
+    let ankh = ProjectId::new("ankh");
+    let issue = IssueId::new("ankh", "1");
+    let model = |scope: Scope, role: Option<Role>, value: &str, by: &str| Event::SettingSet {
+        scope,
+        role,
+        key: "model".into(),
+        value: Value::Text(value.into()),
+        by: by.into(),
+    };
+    {
+        let (mut written, _) = temet_work_store::Log::open(&log).expect("log");
+        for event in [
+            Event::ProjectAdded {
+                project: ankh.clone(),
+                tracker: "fake".into(),
+                name: "city/ankh".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::GroupCreated {
+                group: GroupId::new("watch"),
+                name: "Night watch".into(),
+                projects: vec![ankh.clone()],
+                areas: Vec::new(),
+                milestones: Vec::new(),
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+            Event::IssueSynced {
+                issue: issue.clone(),
+                title: "Mend the clock".into(),
+                milestone: None,
+                depends_on: vec![],
+                order: 1,
+                closed: false,
+            },
+            model(Scope::Task(issue.clone()), None, "opus", "refiner-1"),
+            model(
+                Scope::Project(ankh.clone()),
+                Some(Role::Reviewer),
+                "haiku",
+                "person",
+            ),
+        ] {
+            written.append(0, &event).expect("logged");
+        }
+    }
+    let host = temet_work::start(&log, vec![Box::new(fake_runtimes())]).expect("start");
+    let w = host.world();
+    let kept: Vec<(Option<Role>, &str, String)> = w
+        .settings
+        .iter()
+        .map(|((_, role, key), e)| (*role, key.as_str(), e.value.to_string()))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            (Some(Role::Reviewer), "model.fake", "haiku".to_string()),
+            (Some(Role::Author), "model.fake", "opus".to_string()),
+        ]
+    );
+    let brief = |role| {
+        w.launch(&GroupId::new("watch"), role, &issue, None)
+            .expect("known")
+            .brief
+            .model
+    };
+    assert_eq!(brief(Role::Author).as_deref(), Some("opus"));
+    assert_eq!(brief(Role::Reviewer).as_deref(), Some("haiku"));
+}
+
 /// A reviewer set to run Codex starts as the Codex program in a labelled
 /// terminal; the author of the same issue keeps the build's default runtime.
 #[cfg(feature = "runtime-codex")]
@@ -668,9 +755,11 @@ mod settings_commands {
         let kept = Kept::default();
         let (mut host, _) = host_with(Box::new(kept.clone()));
         host.tick(0).expect("sync");
+        // A plain model is the global runtime's, the build's default here, and
+        // the reply names the key it is recorded under.
         assert_eq!(
             done(ask(&mut host, None, set("ankh#1", None, "model", "opus"))),
-            "model is opus at ankh#1"
+            "model.fake is opus at ankh#1"
         );
         done(ask(
             &mut host,
@@ -716,7 +805,7 @@ mod settings_commands {
         // The status lists the events' effect, with who made each.
         let status = done(ask(&mut host, None, Command::Status));
         assert!(
-            status.contains("ankh#1: model = opus, set by person"),
+            status.contains("ankh#1: model.fake = opus, set by person"),
             "{status}"
         );
 
@@ -727,7 +816,7 @@ mod settings_commands {
         };
         assert_eq!(
             done(ask(&mut host, None, unset.clone())),
-            "model is no longer set at ankh#1"
+            "model.fake is no longer set at ankh#1"
         );
         assert!(refused(ask(&mut host, None, unset)).contains("nothing to unset"));
 
@@ -743,7 +832,12 @@ mod settings_commands {
         ));
         assert!(matches!(
             settings[1],
-            Event::SettingSet { scope: Scope::Task(_), value: Value::Text(v), by, .. } if v == "opus" && by == "person"
+            Event::SettingSet { scope: Scope::Task(_), key, value: Value::Text(v), by, .. }
+                if key == "model.fake" && v == "opus" && by == "person"
+        ));
+        assert!(matches!(
+            settings[3],
+            Event::SettingUnset { key, .. } if key == "model.fake"
         ));
     }
 
@@ -766,7 +860,7 @@ mod settings_commands {
         for role in [None, Some(Role::Author)] {
             assert_eq!(
                 done(refiner(&mut host, set("ankh#1", role, "model", "haiku"))),
-                "model is haiku at ankh#1 for author"
+                "model.fake is haiku at ankh#1 for author"
             );
         }
         let why = refused(refiner(
@@ -781,7 +875,7 @@ mod settings_commands {
         };
         assert_eq!(
             done(refiner(&mut host, unset)),
-            "model is no longer set at ankh#1 for author"
+            "model.fake is no longer set at ankh#1 for author"
         );
         let plan = Command::Plan {
             issue: IssueId::new("ankh", "1"),
@@ -806,7 +900,7 @@ mod settings_commands {
         assert_eq!(shown(Role::Author), "sonnet task, set by refiner-1");
         let status = done(ask(&mut host, None, Command::Status));
         assert!(
-            status.contains("ankh#1, author: model = sonnet, set by refiner-1\n"),
+            status.contains("ankh#1, author: model.fake = sonnet, set by refiner-1\n"),
             "{status}"
         );
     }
@@ -2108,7 +2202,7 @@ refining_at_once = 2
     #[test]
     fn every_agent_gets_a_secret_of_its_own_and_none_is_logged_or_shown() {
         let log = scratch("log").join("events.jsonl");
-        let (journal, world) = temet_work::journal(&log).expect("log");
+        let (journal, world) = temet_work::journal(&log, Default::default()).expect("log");
         let (mut host, starts) = host_from(
             world,
             journal,

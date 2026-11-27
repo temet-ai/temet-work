@@ -98,14 +98,21 @@ pub struct Host {
     problems: BTreeMap<String, String>,
 }
 
+/// What the parts' families offer for the settings that name an adapter, by
+/// setting. The daemon puts it in the world before it replays the log, since an
+/// older log's plain model is bound to the build's default runtime.
+pub fn catalog(parts: &[Box<dyn Part>]) -> BTreeMap<String, crate::settings::Choice> {
+    parts
+        .iter()
+        .flat_map(|p| p.choices())
+        .map(|c| (c.key.clone(), c))
+        .collect()
+}
+
 impl Host {
     /// A host over `world`, already built from the journal's events.
     pub fn new(mut world: World, parts: Vec<Box<dyn Part>>, journal: Box<dyn Journal>) -> Self {
-        world.catalog = parts
-            .iter()
-            .flat_map(|p| p.choices())
-            .map(|c| (c.key.clone(), c))
-            .collect();
+        world.catalog = catalog(&parts);
         Self {
             world,
             parts,
