@@ -1,4 +1,5 @@
 use super::*;
+use crate::command::Command;
 use crate::event::{Event, Verdict};
 use crate::ids::{
     AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId,
@@ -1069,6 +1070,77 @@ fn after_a_ci_failure_the_next_round_waits_on_its_reviewer_again() {
     assert!(waited_on(&w, "reviewer-1"));
     w.apply(&ended("reviewer-1"));
     assert_eq!(w.missing().start, vec![next]);
+}
+
+#[test]
+fn a_repeated_round_1_lost_to_a_restart_is_sent_to_its_running_reviewer_again() {
+    let approved = || verdict(1, Verdict::Approve);
+    let conflict = Event::PullConflicts {
+        issue: issue("1"),
+        repo: None,
+    };
+    let refused = Event::MergeRefused {
+        issue: issue("1"),
+        reason: "it conflicts with main".into(),
+    };
+    let paths = [
+        ("approved, then CI failed", vec![approved(), checks(false)]),
+        ("still reviewing, then CI failed", vec![checks(false)]),
+        ("still reviewing, then a conflict", vec![conflict]),
+        (
+            "approved and checks passed, then the merge refused",
+            vec![approved(), checks(true), refused],
+        ),
+    ];
+    let reviewer = AgentId::new("reviewer-1");
+    let approve = Command::Review {
+        issue: issue("1"),
+        verdict: Verdict::Approve,
+    };
+    for (path, events) in paths {
+        let mut w = in_review();
+        for event in &events {
+            w.apply(event);
+        }
+        // The effect `ready` returns is dropped, as a restart drops the queued message.
+        w.apply(&pull_ready());
+        assert_eq!(stage(&w, "1"), Stage::InReview { round: 1 }, "{path}");
+        assert!(!w.issues[&issue("1")].told, "{path}");
+        let running = w.running(&issue("1"), Role::Reviewer).map(|a| &a.id);
+        assert_eq!(running, Some(&reviewer), "{path}");
+        let again = Effect::StartReview {
+            issue: issue("1"),
+            round: 1,
+        };
+        assert_eq!(w.missing().start, vec![again], "{path}");
+        let early = w.check(Some(&reviewer), &approve);
+        assert!(
+            early
+                .as_ref()
+                .is_err_and(|e| e.contains("started after your review began")),
+            "{path}: {early:?}"
+        );
+
+        w.apply(&Event::Told { issue: issue("1") });
+        assert!(waited_on(&w, "reviewer-1"), "{path}");
+        assert_eq!(w.missing().start, vec![], "{path}: not sent a third time");
+        let heard = w.check(Some(&reviewer), &approve);
+        assert!(heard.is_ok(), "{path}: {heard:?}");
+    }
+}
+
+#[test]
+fn a_repeated_round_1_approved_before_its_running_reviewer_heard_of_it_is_left_alone() {
+    let mut w = in_review();
+    w.apply(&checks(false));
+    w.apply(&pull_ready());
+    // A person's verdict does not wait for the reviewer to have heard the round.
+    w.apply(&verdict(1, Verdict::Approve));
+    assert_eq!(stage(&w, "1"), Stage::InReview { round: 1 });
+    assert!(w.issues[&issue("1")].review_ok);
+    assert!(!w.issues[&issue("1")].told);
+    assert!(w.running(&issue("1"), Role::Reviewer).is_some());
+    assert_eq!(w.missing().start, vec![]);
 }
 
 #[test]
