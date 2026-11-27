@@ -14,6 +14,12 @@ use temet_work_core::{Journal, Part, World};
 /// The parts compiled into this build, in a fixed order: families first, then
 /// services.
 pub fn parts() -> Vec<Box<dyn Part>> {
+    parts_with(None)
+}
+
+/// The parts, with `daemon_host`: this machine as other machines reach it over SSH.
+#[cfg_attr(not(feature = "runner"), allow(unused_variables))]
+pub fn parts_with(daemon_host: Option<String>) -> Vec<Box<dyn Part>> {
     #[allow(unused_mut)]
     let mut parts: Vec<Box<dyn Part>> = Vec::new();
     #[cfg(feature = "tracker")]
@@ -27,7 +33,7 @@ pub fn parts() -> Vec<Box<dyn Part>> {
     #[cfg(feature = "runner")]
     {
         #[allow(unused_mut)]
-        let mut family = temet_work_runner::Runners::default();
+        let mut family = temet_work_runner::Runners::default().daemon_host(daemon_host);
         #[cfg(feature = "runner-herdr")]
         family.add(Box::new(temet_work_runner_herdr::Herdr::default()));
         parts.push(Box::new(family));

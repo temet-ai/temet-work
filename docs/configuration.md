@@ -98,3 +98,49 @@ set since is not overwritten by the file; a value taken out of the file is unset
 Each project, folder and group in the file becomes an event in the log the first time the
 daemon reads it, and again whenever it changes. Removing one from the file does not
 remove it from the daemon yet.
+
+## A work folder on another machine
+
+An agent can run on another machine, in a checkout there. Give the folder that machine
+and say how the machine reaches the daemon:
+
+```toml
+daemon_host = "omit"      # this machine, as the other machine's ssh names it
+
+[[folder]]
+id = "radar-mac"
+project = "radar"
+machine = "mac"           # a machine herdr-core knows (`hc machine add`)
+path = "/Users/me/projects/radar"
+```
+
+The daemon starts the agent through herdr-core on `machine`, with `TEMET_WORK_DAEMON=ssh://omit` in its
+environment (`ssh://omit/PATH/TO/daemon.sock` when this daemon was started with
+`TEMET_WORK_SOCKET`, so a second daemon on the same machine is reached too; the path
+after the host is the daemon's socket there, and none means its default). Every `temet-work` command the agent runs then goes over
+`ssh -o BatchMode=yes omit temet-work relay [--socket PATH]`, which hands the request to the daemon's
+local socket. No port is opened and no new secret is made. `BatchMode` makes a missing
+key fail with ssh's own error instead of waiting for a password. With no `daemon_host`
+the daemon starts no agent on another machine and lists a problem naming `machine` and
+`daemon_host`, because the daemon's own name is often not one the other machine can
+resolve.
+
+The other machine needs four things, and each has a command that checks it:
+
+| Needs | Check |
+|---|---|
+| SSH access from the daemon's machine | `ssh -o BatchMode=yes mac true` on the daemon's machine |
+| SSH access back to the daemon's machine, under the name in `daemon_host` | `ssh -o BatchMode=yes omit true` on the other machine |
+| `temet-work` on the `PATH` a non-interactive SSH session gets | `ssh mac temet-work parts`, and `ssh omit temet-work parts` from there |
+| The checkout at `path`, and the agent runtime (such as `claude`) | `ssh mac 'cd /Users/me/projects/radar && git status -sb && command -v claude'` |
+
+On a new machine, start `claude --permission-mode auto` once in the work folder and answer
+"Allow this read outside the working directories?" with "Yes, and keep allowing". An unattended
+agent stops at that prompt on its first read outside the folder.
+
+A failed hop says which step failed in one line: `could not connect` (ssh, either
+direction), `temet-work is not on the other machine's PATH`, or `no temet-work daemon
+answers at ...` (the daemon is not running there). A refusal from the daemon is a
+refusal, as for a local agent.
+
+To send one command from your own shell the same way: `TEMET_WORK_DAEMON=ssh://omit temet-work status`.

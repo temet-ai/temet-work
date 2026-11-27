@@ -14,6 +14,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("mcp") => return mcp(&args[1..]),
+        Some("relay") => return relay(&args[1..]),
         Some("parts") => {
             let parts = temet_work::parts();
             let ids: Vec<String> = parts
@@ -61,7 +62,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match socket::send(&socket::path(), &request) {
+    let transport = match socket::from_env() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    match transport.send(&request) {
         Ok(Reply::Done { text }) => {
             println!("{}", text.trim_end());
             ExitCode::SUCCESS
@@ -73,6 +81,32 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("{e}");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `temet-work relay` (hidden): the far end of an SSH transport. Copies one
+/// request line from standard input to this machine's daemon and the reply line
+/// back to standard output.
+fn relay(args: &[String]) -> ExitCode {
+    let path = match args {
+        [] => socket::path(),
+        [flag, path] if flag == "--socket" => std::path::PathBuf::from(path),
+        _ => {
+            eprintln!("temet-work relay [--socket PATH]");
+            return ExitCode::from(2);
+        }
+    };
+    match socket::relay(&path, std::io::stdin().lock(), std::io::stdout().lock()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            let no_daemon = e.starts_with("no temet-work daemon answers");
+            ExitCode::from(if no_daemon {
+                socket::RELAY_NO_DAEMON as u8
+            } else {
+                1
+            })
         }
     }
 }
@@ -90,8 +124,14 @@ fn mcp(args: &[String]) -> ExitCode {
         }
     };
     let by = std::env::var(cli::AGENT_VAR).ok();
-    let path = socket::path();
-    let mut send = |r: &temet_work_core::Request| socket::send(&path, r);
+    let transport = match socket::from_env() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut send = |r: &temet_work_core::Request| transport.send(r);
     let mut out = std::io::stdout().lock();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
