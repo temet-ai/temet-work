@@ -15,7 +15,24 @@ fn main() -> ExitCode {
         }
         Some("mcp") => return mcp(&args[1..]),
         Some("parts") => {
-            let ids: Vec<&str> = temet_work::parts().iter().map(|p| p.id()).collect();
+            let parts = temet_work::parts();
+            let ids: Vec<String> = parts
+                .iter()
+                .map(|p| {
+                    // A family lists its adapters: `runtime (claude, codex)`.
+                    let adapters: Vec<String> = p
+                        .choices()
+                        .into_iter()
+                        .find(|c| c.key == p.id())
+                        .map(|c| c.allowed)
+                        .unwrap_or_default();
+                    if adapters.is_empty() {
+                        p.id().to_string()
+                    } else {
+                        format!("{} ({})", p.id(), adapters.join(", "))
+                    }
+                })
+                .collect();
             let ids = if ids.is_empty() {
                 "none".to_string()
             } else {

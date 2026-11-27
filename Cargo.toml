@@ -87,6 +87,7 @@ temet-work-runtime-codex = { workspace = true, optional = true }
 temet-work-codehost-github = { workspace = true, optional = true }
 
 [dev-dependencies]
+temet-work-runtime-codex.workspace = true
 serde_json.workspace = true
 
 [lints]

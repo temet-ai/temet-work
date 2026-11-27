@@ -63,7 +63,7 @@ What exists today:
 | `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, and the state as text |
 | `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, and holds text for an agent until its turn ends |
 | `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
-| `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting |
+| `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |
 | `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
 | `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-codehost` | the contract, a fake and contract tests. The family reads the CI of each pull request in review every 30 seconds and reports it finished, with the names of failing checks; it merges when the loop asks |
@@ -181,11 +181,10 @@ In this order:
 1. The settings chain (`docs/settings.md`): global, area, project, milestone and task
    levels, with roles inside each; runtimes and runners chosen by it; every family tested
    with two adapters at once.
-2. The Codex runtime, as the second runtime.
-3. The app's theme generated from the design system's tokens, then the navbar with areas
+2. The app's theme generated from the design system's tokens, then the navbar with areas
    through review.
-4. The desktop window on GPUI, drawing the daemon's view data.
-5. Areas, stage 2: one issue across several repositories, merged in order
+3. The desktop window on GPUI, drawing the daemon's view data.
+4. Areas, stage 2: one issue across several repositories, merged in order
    (`docs/areas.md`).
-6. A Jira tracker and a GitLab code host.
-7. Overturning a decision by command, and rules proposed from overturns.
+5. A Jira tracker and a GitLab code host.
+6. Overturning a decision by command, and rules proposed from overturns.
