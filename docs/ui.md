@@ -20,7 +20,7 @@ Its rules are in its Storybook under Start/Rules.
 |---|---|---|---|
 | Base items | colour, type, spacing, sizes, shape, icons, motion | the design system's tokens | `temet-work-style`, generated |
 | Components | one control or container each: Button, Tag, StatusTag, CutPanel, AppShell | base items | the front-end crate's parts |
-| Composites | a working piece of a screen: NavBar, PageHeader, IssueTable, IssuePane | components and smaller composites | the front-end crate's parts |
+| Composites | a working piece of a screen: SideNav, PageHeader, IssueTable, IssuePane | components and smaller composites | the front-end crate's parts |
 | Pages | a screen | composites and components | the front-end crate's pages |
 
 The front-end crate does not exist yet; `spikes/gpui-shell` is the spike it grows from. It is the
@@ -136,7 +136,7 @@ tokens.
 
 | Part | What it is | Built from | Design system |
 |---|---|---|---|
-| NavBar | the left column's areas and projects: an area is a group label that opens and closes, a project an item with its icon, name and a count of what waits on a person; two levels at most; past about five areas, an area selector at the top (`docs/areas.md`) | PlusMinusTree, Tag, Tooltip, Icon, HTMLSelect | gap; the Storybook page `pages-temet-work-radar` draws it in its own code |
+| SideNav | the guide's nav bar, the left column's areas and projects: an area is a group label that opens and closes, a project an item with its icon, name and a count of what waits on a person; two levels at most; past about five areas, an area selector at the top (`docs/areas.md`) | PlusMinusTree, Tag, Tooltip, Icon, HTMLSelect | gap; the Storybook page `pages-temet-work-radar` draws it in its own code |
 | TopBar | across the window: the app's sections and search; needed once the app has a second section, such as settings (`docs/settings.md`) | Navbar, NavbarGroup, NavbarHeading, Button, InputGroup, Omnibar | gap |
 | GroupList | the left column's groups: each group's name and milestone, and its agents with role, machine and model, and status | Heading, ListRow, StatusTag | gap |
 | MeterList | the left column's machines (build slots in use) and limits (use per window, when it resets) | Heading, Meter | gap |
@@ -154,8 +154,8 @@ tokens.
 
 | Page | What it shows | Built from | Design system |
 |---|---|---|---|
-| Project | one project: the nav bar, groups, machines and limits on the left; the project's milestones and issues in the middle; the selected issue or agent on the right (`docs/objects.md`) | AppShell, NavBar, GroupList, MeterList, PageHeader, NeedsYou, MilestonePanel, IssueTable, IssuePane, AgentPane, Alert, Toast | `pages-temet-work-radar` (RadarScreen) |
-| Area | one area: its projects' milestones as a list, its tracker and code-host groups in the page header (`docs/areas.md`) | AppShell, NavBar, PageHeader, MilestonePanel | gap |
+| Project | one project: the nav bar, groups, machines and limits on the left; the project's milestones and issues in the middle; the selected issue or agent on the right (`docs/objects.md`) | AppShell, SideNav, GroupList, MeterList, PageHeader, NeedsYou, MilestonePanel, IssueTable, IssuePane, AgentPane, Alert, Toast | `pages-temet-work-radar` (RadarScreen) |
+| Area | one area: its projects' milestones as a list, its tracker and code-host groups in the page header (`docs/areas.md`) | AppShell, SideNav, PageHeader, MilestonePanel | gap |
 | Settings | the settings chain, global down to one task (`docs/settings.md`) | not defined yet | gap |
 | Rules | rules with where they came from, their state and what measures them (`docs/objects.md`) | not defined yet | gap |
 
@@ -169,11 +169,14 @@ its row above takes the part's id in place of "gap".
   that file in place of the running Storybook.
 - The attention colour: yellow or the accent. Dawid picks.
 - The type scale (20, 16, 14, 13 and 12 px with their weights and line heights), the spacing
-  steps and the column widths the radar page sets in its own CSS, as tokens.
+  steps and the column widths the radar page sets in its own CSS, as tokens. Blueprint's own
+  controls stay at 14 px; whether they drop to the page's 13 px is Dawid's call.
 - The app's font: one sans and one mono family the desktop app can embed. Blueprint's stack
-  names system fonts, which differ by machine.
-- AppShell, Heading, PropertyList, Meter, ListRow and TerminalView as components.
-- Every composite above.
+  names system fonts, which differ by machine. The design system offers Inter and JetBrains
+  Mono, both under the OFL; Dawid picks.
+- AppShell, Heading, PropertyList, Meter and ListRow as components, and every composite above
+  but AgentPane.
+- TerminalView and AgentPane, once temet-work sends their definitions.
 - InputGroup without `round`, as Tag has: a round input is a pill.
 - Props the Storybook does not document: NavbarGroup, MenuItem and OverlayToaster.
 
