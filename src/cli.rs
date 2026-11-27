@@ -32,6 +32,7 @@ temet-work settings TARGET [--role ROLE]    every setting in effect there, and t
 temet-work mcp [--allow read|act]           the same views and commands as MCP tools, for agents;
                                             read (the default) offers status, issue and screen
 temet-work parts                            the parts in this build
+temet-work --version                        the version and the build id
 
 ISSUE is project#key, such as radar#44. TARGET is global, an area or project id, a
 milestone as project:Milestone name, or an issue. ROLE is refiner, author, reviewer,
