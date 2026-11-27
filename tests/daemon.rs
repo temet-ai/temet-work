@@ -273,7 +273,7 @@ fn commands_reach_the_daemon_over_its_socket() {
                 socket::send(
                     &path,
                     &Request {
-                        by: Some(AgentId::new("author-9")),
+                        by: Some(AgentId::new("refiner-1")),
                         command,
                     },
                 )
@@ -305,7 +305,9 @@ fn commands_reach_the_daemon_over_its_socket() {
     assert_eq!(
         ready,
         Reply::Refused {
-            why: "ankh#1 is refining, not being worked on".into()
+            why: "ready for ankh#1 is the author's: no author is working on it; \
+                  you are refiner-1"
+                .into()
         }
     );
 }
@@ -351,6 +353,20 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         issue: issue.clone(),
         pull: Some("57".into()),
     };
+    // The refiner is told whose step ready is before the loop looks at stages,
+    // and the author's own ready is accepted.
+    let wrong = Request {
+        by: Some(AgentId::new("refiner-1")),
+        command: ready.clone(),
+    };
+    assert_eq!(
+        answer(&mut host, 1, &wrong).expect("answer"),
+        Reply::Refused {
+            why: "ready for ankh#1 is the author's: author-1 is working on it; \
+                  you are refiner-1"
+                .into()
+        }
+    );
     assert_eq!(
         run(&mut host, "author-1", ready.clone()),
         "ankh#1 is in review, round 1"

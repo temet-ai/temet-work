@@ -14,15 +14,33 @@ reports its step done.
 | `temet-work status` | anyone | any |
 | `temet-work issue ISSUE` | anyone: the issue in full, with its plan, pull request, fixes and agents | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
-| `temet-work plan ISSUE FILE` | the refiner, with the plan as YAML; `-` reads it from standard input | refining |
-| `temet-work ready ISSUE PULL` | the author, once the pull request is open and the plan's checks hold; `PULL` is its number, needed the first time | working, or fixing |
-| `temet-work review ISSUE approve` | the reviewer | in review |
-| `temet-work review ISSUE block POINT...` | the reviewer, one argument per thing to fix | in review |
-| `temet-work rule ISSUE approve REASON` | the arbiter | with the arbiter |
-| `temet-work rule ISSUE fix REASON` | the arbiter | with the arbiter |
+| `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
+| `temet-work ready ISSUE PULL` | only the author working on ISSUE, once the pull request is open and the plan's checks hold; `PULL` is its number, needed the first time | working, or fixing |
+| `temet-work review ISSUE approve` | only the reviewer working on ISSUE | in review |
+| `temet-work review ISSUE block POINT...` | only the reviewer working on ISSUE, one argument per thing to fix | in review |
+| `temet-work rule ISSUE approve REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
+| `temet-work rule ISSUE fix REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
 | `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines | any |
 | `temet-work unset TARGET [--role ROLE] KEY` | the same | any |
 | `temet-work settings TARGET [--role ROLE]` | anyone | any |
+
+## Who may run a step
+
+`plan`, `ready`, `review` and `rule` are steps. The daemon checks the sender before the
+issue's stage, so a wrong sender is told whose step it is, not what stage the issue is at.
+
+- An agent may run a step only if it has the role whose step it is (refiner for `plan`,
+  author for `ready`, reviewer for `review`, arbiter for `rule`) and works on that same
+  issue. An id the daemon did not start is refused too. The refusal names the step and
+  its owner, for example: `plan for radar#44 is the refiner's: refiner-3 is working on it;
+  you are author-2`.
+- A person may run `rule` only. A ruling is a final judgement a person can take over, and
+  it is recorded as a decision made by `person`. A person running `plan`, `ready` or
+  `review` is refused with the owning role named: those would skip the work an agent is
+  there to do. To get a stuck agent moving, a person rules or changes settings with `set`
+  and `unset`.
+- `status`, `issue`, `screen` and `settings` are open to anyone. `set` and `unset` keep
+  their own rule, in the table.
 
 `ISSUE` is `project#key`, such as `radar#44`. A plan file looks like this:
 

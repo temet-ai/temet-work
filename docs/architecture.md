@@ -88,8 +88,6 @@ What does not work yet:
 
 - A TCP transport with a token is not built: the daemon is reached over its local
   socket, or over SSH from another machine.
-- Any agent or person can run any command; a command is not yet limited to the agent
-  whose step it is.
 - Overturning a decision: the loop records an overturn, but no command makes one and no
   part applies it or proposes a rule from it.
 - A deploy that failed three times waits for a person, and no command retries it.
