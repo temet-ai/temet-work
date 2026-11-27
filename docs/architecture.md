@@ -4,6 +4,7 @@ session_id:
   - 26cd49d9-7565-4506-b988-a9b64ed0fa45
   - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
   - c27ea5f8-79a8-4f76-ae9d-52bda3729faa
+  - d1ccda48-cbb5-44cc-9ea0-c03999c970e9
 ---
 
 # temet-work architecture
@@ -77,7 +78,7 @@ What exists today:
 |---|---|
 | `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, and the state as text |
 | `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, holds text for an agent until its turn ends, and types `continue` into an agent whose usage limit has reset |
-| `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
+| `temet-work-runner-herdr` | the herdr-core socket client; puts each agent's terminal on the herdr app's screens by starting it with `herdr.space`, `herdr.tab` and `herdr.name`, one space per group, one tab per issue and one for the group's investigator; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
 | `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |
 | `temet-work-tracker` | the contract (issues, milestones, comment, close, create), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
 | `temet-work-tracker-github` | issues and milestones through `gh`, and issues filed with `gh issue create`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
