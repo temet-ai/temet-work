@@ -23,7 +23,7 @@ them. Nothing in the loop waits on a person.
 | Process | Owns |
 |---|---|
 | `temet-workd`, the daemon | All state and all work. It keeps running when every window is closed. |
-| herdr-core, or tmux | The terminals agents run in. They outlive the daemon too. |
+| herdr-core (tmux to come) | The terminals agents run in. They outlive the daemon too. |
 | The desktop app (GPUI) | Nothing. It draws the daemon's view data and sends commands. |
 | `temet-work`, the CLI, and its MCP server | Nothing. They send the same commands and read the same view data as the app, so an agent sees what a person sees. |
 
@@ -41,7 +41,8 @@ once, in the daemon, and every front end uses it by name.
 ## Crates
 
 The workspace has one small core. Every other crate depends on the core or on its family
-crate, and on no other crate in the workspace.
+crate, and on no other crate in the workspace. This table is the design; the one after it
+says what each crate holds today.
 
 | Crate | Depends on | Holds |
 |---|---|---|
@@ -174,7 +175,7 @@ features.
 | A crate's whole suite stays under 10 s; CI fails when one goes over. | `scripts/test-budget`, run in CI |
 | Most tests are pure core tests: an event goes in, state and effects are checked. They run in milliseconds. | |
 | Adapters are tested through their family's contract tests, with fakes and recorded streams, never live services. | |
-| Storage tests use SQLite in memory; there is no database tier. | |
+| Storage tests write a fresh log file per test under `CARGO_TARGET_TMPDIR`; there is no database tier. | |
 | Tests against live services run nightly, behind a feature. | |
 | A crate's tests test that crate with its own fixtures. A change that fails another crate's tests is a coupling fault to fix, not a snapshot to record again. | |
 | While working, run only the changed crate: `cargo nextest run -p <crate>`. CI runs the workspace, the budget and the mixes. | `.github/workflows/ci.yml` |

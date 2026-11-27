@@ -2,12 +2,13 @@
 
 ## Version and artifacts
 
-One workspace SemVer version, `0.1.0-alpha.1`, then the last number goes up for each
-alpha. Commit the version and the lockfile together. An annotated `v<version>` tag on
-`main` of `temet-ai/temet-work` runs `.github/workflows/release.yml`: it refuses a tag that
-disagrees with Cargo, tests, builds each target, checks `temet-work --version`, and
-publishes a GitHub release (a prerelease while the version has `-alpha`) with SHA-256
-checksums. Never move a released tag or replace its assets; publish the next version.
+One workspace SemVer version. The first release is `0.1.0-alpha.1` (`Cargo.toml` stays at
+`0.0.1` until then), and the last number goes up for each alpha. Commit the version and
+the lockfile together. An annotated `v<version>` tag on `main` of `temet-ai/temet-work`
+runs `.github/workflows/release.yml`: it refuses a tag that disagrees with Cargo, tests,
+builds each target, checks `temet-work --version`, and publishes a GitHub release (a
+prerelease while the version has `-alpha`) with SHA-256 checksums. Never move a released
+tag or replace its assets; publish the next version.
 
 Targets: macOS Apple Silicon and Intel, Linux arm64 and x64 (glibc, built on Ubuntu
 22.04, so glibc 2.35 or later). Each archive holds `temet-work`, LICENSE and

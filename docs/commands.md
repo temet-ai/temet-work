@@ -76,6 +76,13 @@ A command for an issue at another step is refused, with the step the issue is at
 command line exits 0 when the daemon did it, 1 when the daemon refused it, and 2 when the
 command was not understood or no daemon answered.
 
+`temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
+standard input and output, for an agent's MCP client. At `read`, the default, it offers
+`status`, `issue` and `screen`; `act` adds `plan`, `ready`, `review` and `rule`.
+
+`temet-work parts` prints the version and the parts compiled in, without asking the
+daemon.
+
 The daemon starts every agent with `TEMET_WORK_AGENT` set to the agent's id, so a command
 an agent runs is recorded as that agent's. A ruling is recorded as a decision, listed by
 `temet-work status` with its numbered options.
@@ -110,7 +117,8 @@ A review from an agent that has not yet heard of the round under review is refus
 began on code that has since changed.
 
 The daemon listens at `$TEMET_WORK_SOCKET`, else `$XDG_RUNTIME_DIR/temet-work/daemon.sock`,
-one JSON request per line and one JSON reply per line.
+else `~/.local/state/temet-work/daemon.sock`, one JSON request per line and one JSON reply
+per line.
 
 `TEMET_WORK_DAEMON` picks how a command reaches the daemon: unset or empty is the local
 socket above; `ssh://[USER@]HOST[:PORT][/SOCKET/PATH]` runs `ssh -o BatchMode=yes HOST temet-work relay`, with `--socket SOCKET/PATH` when the address has a path.

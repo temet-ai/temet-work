@@ -25,7 +25,7 @@ A project in temet-work is one repository. An area groups projects.
 |---|---|
 | `id`, `name` | Its id, shared with projects (an id names a project or an area, never both), and the name shown for it. |
 | `projects` | The repositories in it. A project is in one area at most. |
-| `tracker`, `tracker_name` | Optional: the tracker its issues come from, when one tracker project serves all its repositories. Its projects then name no tracker of their own. |
+| `tracker`, `tracker_project` | Optional, both or neither: the tracker its issues come from, when one tracker project serves all its repositories. Its projects then name no tracker of their own. |
 
 An issue from an area's tracker has the id `area#KEY`, and its plan says which of the
 area's repositories it changes, in the order they merge (`repos`). For an issue from a

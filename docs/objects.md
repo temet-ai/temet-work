@@ -5,9 +5,11 @@ session_id:
 
 # What temet-work holds
 
-Every screen, command and message in temet-work is about one of these objects. The core
-crate defines them; the app, the CLI and the MCP server show and change them through the
-same commands.
+Every screen, command and message in temet-work is about one of these objects. The app,
+the CLI and the MCP server show and change them through the same commands. The core crate
+defines areas, projects, groups, agents, work folders, issues, plans, checks, decisions
+and events today; a milestone is an id on its issues, and the other objects are not built
+yet.
 
 ## Objects
 
@@ -17,7 +19,7 @@ same commands.
 | Project | the app or an area | A repository: the tracker its issues come from (GitHub, GitLab or Jira), the code host its pull requests are on, and its work folders. |
 | Setting | a level: global, area, project, milestone or task | A value that says how work is done, such as the runtime, model or review rounds, for every role or one role. The most specific level that sets it wins (`docs/settings.md`). |
 | Group | the app | Sessions working together on a goal: its agents and the issues it has taken, from one or more projects, in the order of the milestones it works on. The daemon coordinates a group; no agent does. Groups run side by side and do not wait on each other. |
-| Agent | a group | One session: its role (refiner, author, reviewer, arbiter, investigator), runtime and model (from the settings), machine, work folder, terminal and state. |
+| Agent | a group | One session: its role (refiner, author, reviewer, arbiter, investigator), machine, work folder, terminal and state. Its model comes from its group until the settings give runtime and model per role (`docs/settings.md`). |
 | Machine | the app | Where agents run, with its build slots. |
 | Limit | the app | A runtime account's usage windows (Claude 5 hours and 7 days, Codex 5 hours). |
 | Style guide | the app | Tokens, components, the ban list and the checks used when reviewing UI work. A project may set its accent, display face and density. |
@@ -25,7 +27,7 @@ same commands.
 | Milestone | a project or area | From the tracker. A group's focus is a list of milestones. |
 | Issue | a project, in a milestone or none | From the tracker. One group at a time takes it through the loop. |
 | Work folder | a project | A checkout on one machine, used by one agent at a time, with a target directory that stays warm between issues. |
-| Plan | an issue | Written by the refiner as YAML: the checks, the parts and who does each, the folder, the merge rule. |
+| Plan | an issue | Written by the refiner as YAML: the checks and, for an area's issue, the repositories it changes in merge order (`repos`). The parts and who does each, the folder and the merge rule are not built yet. |
 | Check | a plan | One "Done when" line from the issue and the test or command that proves it. |
 | Pull request | an issue | The branch, CI, and the review rounds. |
 | Review round | a pull request | The reviewer's blocking points and the author's replies. A dispute between them goes to an arbiter. |

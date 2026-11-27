@@ -2,7 +2,7 @@
 
 temet-work runs groups of coding-agent sessions through tickets, from refining to merged
 and deployed code. How the code is divided and why: `docs/architecture.md`. Read it
-before adding a crate.
+before you change code.
 
 ## Commands
 
@@ -20,6 +20,11 @@ Test the crate you changed as you work. Before you commit, run the workspace tes
 
 ## Rules
 
+- This repository has been public since its first commit, so no private material goes
+  into it. Turn the hooks on once per checkout: `git config core.hooksPath scripts/hooks`.
+- Test data uses made-up names, never a real organisation, person, project or ticket.
+  Take them from Terry Pratchett's Discworld (`Sam Vimes`, `ankh-morpork/watch`,
+  `WATCH-12`); hosts are `example.com` or `.invalid`.
 - The core names no tool or service and does no I/O. A part depends on the core only; an
   adapter depends on its family crate only. Only a front end uses a UI library.
   `tests/parts.rs` checks each of these.
@@ -34,5 +39,5 @@ Test the crate you changed as you work. Before you commit, run the workspace tes
   `--config`, `--log` and `TEMET_WORK_SOCKET`. Never touch the live `temet-workd` service
   or `~/.config/temet-work/config.toml`.
 - After a rebase, push your own branch with `git push --force-with-lease`.
-- Turn the hooks on once per checkout: `git config core.hooksPath scripts/hooks`. Every
-  commit here is public.
+- A change to what temet-work stores or sends updates `docs/privacy.md` in the same
+  commit.
