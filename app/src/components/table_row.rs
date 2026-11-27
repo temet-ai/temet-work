@@ -9,7 +9,7 @@ use gpui::{
     Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
 };
 
-use super::{Class, apply, baseline, padded, type_of};
+use super::{Class, apply, baseline, below_baseline, padded, type_of};
 use crate::theme::look::{self, Look, State};
 use crate::theme::{size, space};
 
@@ -153,21 +153,6 @@ impl Layout {
     }
 }
 
-/// How far a line box reaches below its baseline, in the text style in force: the font's
-/// descent plus half the leading. GPUI gives the descent as a negative offset from the
-/// baseline, as fonts store it.
-fn below_baseline(window: &Window) -> Pixels {
-    let style = window.text_style();
-    let rem = window.rem_size();
-    let font_size = style.font_size.to_pixels(rem);
-    let line = style.line_height_in_pixels(rem);
-    let text = window.text_system();
-    let font = text.resolve_font(&style.font());
-    let ascent = text.ascent(font, font_size);
-    let descent = text.descent(font, font_size).abs();
-    (line - (ascent + descent)) / 2. + descent
-}
-
 type OnClick = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
@@ -261,8 +246,10 @@ impl RenderOnce for TableRow {
                 Content::Element(element) => cell.child(element),
             }
         });
+        let selector = format!("{}", self.id);
         let mut row = div()
             .id(self.id)
+            .debug_selector(|| selector)
             .flex()
             .items_start()
             .w_full()

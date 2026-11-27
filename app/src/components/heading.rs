@@ -5,7 +5,7 @@ use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
 };
 
-use super::{Class, apply, type_of};
+use super::{Class, apply, to_baseline, type_of};
 use crate::theme::look::{self, State};
 use crate::theme::space;
 
@@ -64,13 +64,24 @@ impl RenderOnce for Heading {
             HeadingSize::Pane => look::get(cx, "Heading", "tm-heading tm-heading-pane", rest),
             HeadingSize::Section => look::get(cx, "Heading", "tm-heading tm-heading-section", rest),
         };
-        // The look's height is one line of the heading.
+        // The look's height is one line of the heading; NeedsYou's heading line is taller, to
+        // hold its icon beside the title.
+        let line = if self.class_name == Some(Class::NeedsHeading) {
+            look::get(
+                cx,
+                "NeedsYou",
+                "tm-heading tm-heading-section tm-needs-head",
+                rest,
+            )
+        } else {
+            look.clone()
+        };
         let mut heading = type_of(div(), &look)
             .flex()
-            .items_baseline()
+            .items_start()
             .justify_between()
             .gap(space::s4(cx))
-            .line_height(look.height);
+            .line_height(line.height);
         if self.size != HeadingSize::Page {
             heading = heading.mb(space::s3(cx));
         }
@@ -86,9 +97,11 @@ impl RenderOnce for Heading {
                     "tm-heading tm-heading-note tm-heading-section",
                     rest,
                 );
+                // The note sits on the title's baseline.
                 type_of(div(), &look)
                     .flex_none()
                     .line_height(look.height)
+                    .mt(to_baseline(cx, &line, &look))
                     .child(note)
             }))
     }

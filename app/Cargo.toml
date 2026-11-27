@@ -33,6 +33,11 @@ shots = ["dep:gpui_wgpu", "gpui/test-support", "gpui_platform/test-support"]
 name = "shots"
 required-features = ["shots"]
 
+[[test]]
+# Clicks on the drawn page under GPUI's test support, with no window: about a second each.
+name = "clicks"
+required-features = ["shots"]
+
 [dev-dependencies]
 serde_json = "1"
 

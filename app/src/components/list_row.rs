@@ -3,10 +3,10 @@
 
 use gpui::{
     AnyElement, App, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled, Window,
-    div,
+    div, px,
 };
 
-use super::{Class, apply, box_of, to_baseline, type_of};
+use super::{Class, apply, baseline, box_of, to_baseline, type_of};
 use crate::theme::look::{self, State};
 use crate::theme::space;
 
@@ -111,10 +111,13 @@ impl RenderOnce for ListRow {
         let meta = self.meta.map(|meta| {
             let line = type_of(div(), &meta_look);
             if wraps {
+                // Moved down to the title's baseline without growing the line, so a meta that
+                // wraps to its own line does not push the row taller.
                 line.flex_grow(1.)
                     .flex_shrink_0()
                     .max_w_full()
-                    .mt(drop)
+                    .relative()
+                    .top(drop)
                     .line_height(meta_look.height)
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -146,7 +149,7 @@ impl RenderOnce for ListRow {
         });
         let mut main = div().flex_1().min_w_0();
         if wraps {
-            // A wrapped meta starts its own line, so it needs no drop to the title's baseline.
+            // The meta wraps under the title when the two do not fit on one line.
             main = main
                 .flex()
                 .flex_wrap()
@@ -183,6 +186,25 @@ impl RenderOnce for ListRow {
         } else {
             row.items_start()
         };
+        if compact && self.end.is_some() {
+            // The end of a compact row is a tag, centred in the row as the main line is: move
+            // the main line so its baseline meets the tag word's. GPUI rounds line heights to
+            // whole pixels, snaps each box's edges to whole pixels (halves toward zero) and
+            // rounds each glyph's baseline, so the two baselines are worked out on those
+            // snapped positions; on the unsnapped ones they differ by less than a pixel and
+            // still land on different rows.
+            let tag = look::get(cx, "StatusTag", "minimal", rest);
+            let word = tag.height - tag.padding.top - tag.padding.bottom;
+            let inside = look.height - look.border.top - look.padding.top - look.padding.bottom;
+            // Where a box of this height lands when centred in the row; halves go toward zero,
+            // as GPUI snaps them.
+            let centred = |height: Pixels| px((f32::from((inside - height) / 2.) - 0.5).ceil());
+            let tag_word =
+                centred(tag.height) + tag.padding.top + baseline(cx, tag.font_size, word).round();
+            let title_word = centred(title_look.height.round())
+                + baseline(cx, title_look.font_size, title_look.height).round();
+            main = main.relative().top(tag_word - title_word);
+        }
         row.child(main).children(self.end.map(|end| {
             div()
                 .flex_none()

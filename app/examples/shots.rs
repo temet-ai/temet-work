@@ -25,6 +25,17 @@ struct Shot {
     grouping: Grouping,
     needs: bool,
     selected: &'static str,
+    overturn: Overturn,
+}
+
+/// How far the shot has gone with overturning WATCH-51's decision in Needs you.
+#[derive(Clone, Copy, PartialEq)]
+enum Overturn {
+    None,
+    /// The confirm question is open.
+    Asking,
+    /// Confirmed: the toast is on show.
+    Done,
 }
 
 const fn shot(name: &'static str, theme: &'static str, width: f32, height: f32) -> Shot {
@@ -37,6 +48,7 @@ const fn shot(name: &'static str, theme: &'static str, width: f32, height: f32) 
         grouping: Grouping::Milestone,
         needs: true,
         selected: "WATCH-44",
+        overturn: Overturn::None,
     }
 }
 
@@ -84,6 +96,22 @@ const SHOTS: &[Shot] = &[
     Shot {
         selected: "WATCH-47",
         ..shot("dark-1440-facts-only", "dark", 1440., 900.)
+    },
+    Shot {
+        overturn: Overturn::Asking,
+        ..shot("dark-1440-overturn-asking", "dark", 1440., 900.)
+    },
+    Shot {
+        overturn: Overturn::Asking,
+        ..shot("light-1440-overturn-asking", "light", 1440., 900.)
+    },
+    Shot {
+        overturn: Overturn::Done,
+        ..shot("dark-1440-overturn-done", "dark", 1440., 900.)
+    },
+    Shot {
+        overturn: Overturn::Done,
+        ..shot("light-1440-overturn-done", "light", 1440., 900.)
     },
 ];
 
@@ -136,6 +164,12 @@ fn main() -> gpui::Result<()> {
                 let mut page = Project::new(view, Some(s.selected.into()));
                 page.set_grouping(s.grouping);
                 page.set_tab(s.tab);
+                if s.overturn != Overturn::None {
+                    page.ask_need(&"n1".into());
+                }
+                if s.overturn == Overturn::Done {
+                    page.confirm();
+                }
                 page
             });
             cx.new(|cx| Root::new(page, window, cx))

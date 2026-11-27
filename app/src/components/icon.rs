@@ -1,7 +1,7 @@
 //! Icon (`blueprint-icon`): one of Blueprint's icons, drawn from the SVG files embedded in the
 //! app (`app/assets/icons`, served by `crate::assets`).
 
-use gpui::{App, Hsla, IntoElement, RenderOnce, SharedString, Styled, Window, svg};
+use gpui::{App, Hsla, IntoElement, Pixels, RenderOnce, SharedString, Styled, Window, svg};
 
 use crate::theme;
 
@@ -34,6 +34,10 @@ pub enum IconName {
     Notifications,
     WarningSign,
     InfoSign,
+    // A toast's close button, from Blueprint's newer icon set.
+    X,
+    // Overturning a decision: its Alert and toast.
+    Undo,
     // Projects in SideNav.
     Console,
     Database,
@@ -45,7 +49,7 @@ pub enum IconName {
 
 impl IconName {
     /// Every icon the app embeds.
-    pub const ALL: [IconName; 27] = [
+    pub const ALL: [IconName; 29] = [
         Self::TickCircle,
         Self::Refresh,
         Self::Time,
@@ -67,6 +71,8 @@ impl IconName {
         Self::Notifications,
         Self::WarningSign,
         Self::InfoSign,
+        Self::X,
+        Self::Undo,
         Self::Console,
         Self::Database,
         Self::Layout,
@@ -99,6 +105,8 @@ impl IconName {
             Self::Notifications => "notifications",
             Self::WarningSign => "warning-sign",
             Self::InfoSign => "info-sign",
+            Self::X => "x",
+            Self::Undo => "undo",
             Self::Console => "console",
             Self::Database => "database",
             Self::Layout => "layout",
@@ -138,6 +146,7 @@ pub enum IconSize {
 pub struct Icon {
     icon: IconName,
     size: IconSize,
+    side: Option<Pixels>,
     color: Option<Hsla>,
 }
 
@@ -146,6 +155,7 @@ impl Icon {
         Self {
             icon,
             size: IconSize::Standard,
+            side: None,
             color: None,
         }
     }
@@ -153,6 +163,14 @@ impl Icon {
     /// The size, on Blueprint's 16 px or 20 px grid.
     pub fn size(mut self, size: IconSize) -> Self {
         self.size = size;
+        self
+    }
+
+    /// Draws a large icon at another side, as a part's own rules size its icon with
+    /// `font-size`, such as the Alert's, twice the large size.
+    pub(crate) fn large_at(mut self, side: Pixels) -> Self {
+        self.size = IconSize::Large;
+        self.side = Some(side);
         self
     }
 
@@ -165,10 +183,10 @@ impl Icon {
 
 impl RenderOnce for Icon {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let side = match self.size {
+        let side = self.side.unwrap_or_else(|| match self.size {
             IconSize::Standard => theme::size::icon(cx),
             IconSize::Large => theme::size::icon_large(cx),
-        };
+        });
         let color = self.color.unwrap_or_else(|| window.text_style().color);
         svg()
             .path(self.icon.path(self.size))

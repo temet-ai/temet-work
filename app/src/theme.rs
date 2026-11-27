@@ -344,6 +344,10 @@ pub mod colour {
 
     use super::{Active, Intent, active, c, is_light};
 
+    /// The shade over the page behind a modal dialog, such as an Alert (`--tm-backdrop`).
+    pub fn backdrop(cx: &App) -> Hsla {
+        c(active(cx).tm_backdrop)
+    }
     /// The window's ground.
     pub fn page(cx: &App) -> Hsla {
         c(active(cx).tm_surface_page)
@@ -611,6 +615,52 @@ pub mod size {
     /// gap: calc(var(--bp-surface-spacing) * 0.5); padding: calc(var(--bp-surface-spacing) * 0.5) }`.
     pub fn segmented_inset(cx: &App) -> Pixels {
         steps(cx, 0.5)
+    }
+    /// An Alert's padding, and the space between a toast and the window's edge or the toast
+    /// above it: `.bp6-alert { padding: calc(var(--bp-surface-spacing) * 5) }`,
+    /// `.bp6-toast-container { padding: 0 calc(var(--bp-surface-spacing) * 5)
+    /// calc(var(--bp-surface-spacing) * 5) }`.
+    pub fn overlay_pad(cx: &App) -> Pixels {
+        steps(cx, 5.)
+    }
+    /// An Alert's icon: `.bp6-alert-body .bp6-icon { font-size: $pt-icon-size-large * 2 }`.
+    pub fn alert_icon(cx: &App) -> Pixels {
+        icon_large(cx) * 2.
+    }
+    /// The space under a paragraph: Blueprint's reset, `p { margin-bottom:
+    /// calc(var(--bp-surface-spacing) * 2) }`.
+    pub fn paragraph_gap(cx: &App) -> Pixels {
+        steps(cx, 2.)
+    }
+    /// An Alert's widest: `.bp6-alert { max-width: calc(var(--bp-surface-spacing) * 100) }`.
+    pub fn alert_width(cx: &App) -> Pixels {
+        steps(cx, 100.)
+    }
+    /// The space above an Alert's buttons: `.bp6-alert-footer { margin-top:
+    /// calc(var(--bp-surface-spacing) * 3) }`; and around a toast's icon, written as `margin:
+    /// 12px` in Blueprint's rules, three spacing steps.
+    pub fn alert_footer_gap(cx: &App) -> Pixels {
+        steps(cx, 3.)
+    }
+    /// The space between an Alert's buttons: `.bp6-alert-footer .bp6-button { margin-left:
+    /// calc(var(--bp-surface-spacing) * 2) }`.
+    pub fn alert_button_gap(cx: &App) -> Pixels {
+        steps(cx, 2.)
+    }
+    /// A toast's narrowest and widest: `min-width: min(var(--bp-surface-spacing) * 75, 100%);
+    /// max-width: min(var(--bp-surface-spacing) * 125, 100%)`.
+    pub fn toast_width(cx: &App) -> (Pixels, Pixels) {
+        (steps(cx, 75.), steps(cx, 125.))
+    }
+    /// A toast message's padding, written as `padding: 11px` in Blueprint's rules: the same as
+    /// a table cell's side padding, `(--bp-surface-spacing * 10 - 18px) / 2`.
+    pub fn toast_message_pad(cx: &App) -> Pixels {
+        px((active(cx).bp_surface_spacing.0 * 10. - 18.) * 0.5)
+    }
+    /// The padding around a toast's close button, written as `padding: 5px` in Blueprint's
+    /// rules: one and a quarter spacing steps.
+    pub fn toast_button_pad(cx: &App) -> Pixels {
+        steps(cx, 1.25)
     }
     /// A tab's line: `.bp6-tab { line-height: 30px }`, seven and a half spacing steps.
     pub fn tab_line(cx: &App) -> Pixels {

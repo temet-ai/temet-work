@@ -6,7 +6,8 @@ use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
 };
 
-use super::{Class, apply};
+use super::{Class, apply, below_baseline};
+use crate::theme::look::{self, State};
 use crate::theme::{colour, size, space};
 
 /// A value: text, an element, or a set of elements laid out as a wrapping row.
@@ -86,13 +87,17 @@ impl PropertyList {
 }
 
 impl RenderOnce for PropertyList {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let label = match self.label_width {
             LabelWidth::Normal => size::label(cx),
             LabelWidth::Narrow => size::label_narrow(cx),
         };
         // The list's labels have no measured look: `.tm-props dt { color: muted }`.
         let muted = colour::muted(cx);
+        let tag = look::get(cx, "StatusTag", "minimal", State::Rest);
+        // The story keeps that line's fraction, and the next row lands on the next whole
+        // pixel; GPUI would round it away, so it is rounded up.
+        let tag_line = (tag.padding.top + size::icon(cx) + below_baseline(window)).ceil();
         let rows = self.items.into_iter().map(|item| {
             let mut value = div().flex_1().min_w_0();
             if item.mono {
@@ -100,7 +105,9 @@ impl RenderOnce for PropertyList {
             }
             let value = match item.value {
                 PropertyValue::Text(text) => value.child(text),
-                PropertyValue::Element(el) => value.flex().child(el),
+                // A tag in a value sits in a line box as an inline block: its icon's foot on
+                // the text's baseline, the line reaching on below it.
+                PropertyValue::Element(el) => value.flex().items_start().min_h(tag_line).child(el),
                 PropertyValue::Set(els) => {
                     value.flex().flex_wrap().gap(space::s2(cx)).children(els)
                 }

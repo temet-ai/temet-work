@@ -76,7 +76,9 @@ impl RenderOnce for SegmentedControl {
         let options = self.options.into_iter().enumerate().map(|(i, option)| {
             let on = self.value.as_ref() == Some(&option.value);
             let look = if on { &chosen } else { &other };
+            let selector = format!("option-{}", option.value);
             let mut button = box_of(type_of(div().id(("option", i)), look), look)
+                .debug_selector(|| selector)
                 .flex()
                 .items_center()
                 .h(look.height)

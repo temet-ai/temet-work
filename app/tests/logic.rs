@@ -58,10 +58,78 @@ fn the_sample_has_every_state_the_screen_must_draw() {
 }
 
 #[test]
-fn each_milestone_counts_its_open_issues_in_its_total() {
+fn each_milestone_counts_its_issues_and_the_deployed_ones_as_done() {
     for m in sample::project_view().milestones {
-        assert_eq!(m.done + m.issues.len(), m.total, "{}", m.name);
+        assert_eq!(m.issues.len(), m.total, "{}", m.name);
+        let deployed = m
+            .issues
+            .iter()
+            .filter(|i| i.stage == Stage::Deployed)
+            .count();
+        assert_eq!(m.done, deployed, "{}", m.name);
     }
+}
+
+#[test]
+fn every_agent_folder_and_decision_names_an_issue_of_its_own_group() {
+    let view = sample::project_view();
+    let issues: Vec<_> = view
+        .milestones
+        .iter()
+        .flat_map(|m| m.issues.clone())
+        .collect();
+    for group in &view.groups {
+        for agent in &group.agents {
+            let Some(place) = &agent.r#where else {
+                continue;
+            };
+            for issue in &issues {
+                let folder = issue.key.to_lowercase();
+                if place.contains(&format!("{folder}-")) {
+                    assert_eq!(issue.group.as_ref(), Some(&group.name), "{place}");
+                }
+            }
+        }
+    }
+    // Each project's count of decisions that need the person matches the list.
+    for need in &view.needs {
+        assert!(view.need_project.contains_key(&need.id), "{}", need.id);
+    }
+    for (need, (key, id)) in &view.same_decision {
+        assert!(view.needs.iter().any(|n| &n.id == need));
+        let decisions = view.details[key].decisions.as_ref().expect("decisions");
+        assert!(decisions.iter().any(|d| &d.id == id));
+    }
+}
+
+#[test]
+fn overturning_asks_then_marks_both_copies_of_a_decision_and_says_so() {
+    let mut page = Project::new(sample::project_view(), sample::selected());
+    page.ask_need(&"n3".into());
+    let ask = page.asking().cloned().expect("a question");
+    assert_eq!(
+        ask.decision,
+        Some(("WATCH-44".into(), "d2".into())),
+        "the same decision"
+    );
+    assert_eq!(
+        ask.question(),
+        "Overturn the arbiter's decision on WATCH-44? Claude chose to refuse to store the \
+         token when the keyring is locked."
+    );
+    page.cancel();
+    assert!(page.asking().is_none() && page.needs().len() == 4);
+    page.ask_decision(&"WATCH-44".into(), &"d2".into());
+    assert_eq!(
+        page.asking().and_then(|a| a.need.clone()).as_deref(),
+        Some("n3")
+    );
+    page.confirm();
+    assert_eq!(page.needs().len(), 3);
+    assert_eq!(
+        page.toast().map(|t| t.to_string()),
+        Some("Overturned on WATCH-44: Refuse to store when the keyring is locked, rather than fall back to a file".into())
+    );
 }
 
 #[test]

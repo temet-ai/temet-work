@@ -5,6 +5,7 @@ use gpui::{App, IntoElement, ParentElement, RenderOnce, Styled, Window, div};
 
 use super::icon::IconName;
 use super::tag::draw;
+use super::{Class, apply};
 use crate::theme::{
     self,
     look::{self, State},
@@ -57,22 +58,33 @@ impl Stage {
 #[derive(IntoElement)]
 pub struct StageTag {
     stage: Stage,
+    class_name: Option<Class>,
 }
 
 impl StageTag {
     pub fn new(stage: Stage) -> Self {
-        Self { stage }
+        Self {
+            stage,
+            class_name: None,
+        }
+    }
+}
+
+impl StageTag {
+    /// A class of the design system's own, such as `IssuesStatus` in a group row.
+    pub fn class_name(mut self, class: Class) -> Self {
+        self.class_name = Some(class);
+        self
     }
 }
 
 impl RenderOnce for StageTag {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let look = look::get(cx, "StageTag", "minimal", State::Rest);
-        div().flex().flex_none().child(draw(
-            &look,
-            Some(self.stage.icon()),
-            self.stage.name().into(),
-            cx,
-        ))
+        let mut tag = draw(&look, Some(self.stage.icon()), self.stage.name().into(), cx);
+        if let Some(class) = self.class_name {
+            tag = apply(tag, class, cx);
+        }
+        div().flex().flex_none().child(tag)
     }
 }

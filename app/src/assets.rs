@@ -55,6 +55,8 @@ pub const FILES: &[(&str, &[u8])] = icons![
     "notifications",
     "warning-sign",
     "info-sign",
+    "x",
+    "undo",
     "console",
     "database",
     "layout",

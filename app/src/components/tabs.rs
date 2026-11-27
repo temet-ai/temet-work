@@ -89,8 +89,10 @@ impl RenderOnce for Tabs {
         let mut titles = Vec::new();
         for (i, tab) in self.tabs.into_iter().enumerate() {
             let is_open = open.as_ref() == Some(&tab.id);
+            let selector = format!("tab-{}", tab.id);
             let mut title = div()
                 .id(("tab", i))
+                .debug_selector(|| selector)
                 .relative()
                 .flex()
                 .items_center()

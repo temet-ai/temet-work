@@ -117,7 +117,7 @@ GroupList `tm-groups-head`; a class with no measured look follows its rule in `t
 | Part | Design system id | Variants temet-work uses | GPUI basis |
 |---|---|---|---|
 | AppShell | `temet-appshell` | regions: nav bar, main area, side pane, optional top bar | |
-| Icon | `blueprint-icon` | 16, 20 px | `icon` |
+| Icon | `blueprint-icon` | 16, 20 px; the Alert's 40 px | `icon` |
 | Button | `blueprint-button` | `variant` solid, minimal, outlined; `intent` none, primary; `size` small, medium; `icon`; `loading`; `disabled` | `button` |
 | AttentionButton | `temet-attentionbutton` | `size` small | `button` |
 | AttentionText | `temet-attentionbutton` (subcomponent) | | `label` |
@@ -140,9 +140,9 @@ GroupList `tm-groups-head`; a class with no measured look follows its rule in `t
 | Navbar, NavbarGroup, NavbarHeading, NavbarDivider | `blueprint-navbar` | NavbarGroup `align` right | `title_bar` |
 | Popover | `blueprint-popover` | | `popover` |
 | ContextMenu | `blueprint-contextmenu` | | `menu` |
-| Alert | `blueprint-alert` | `intent` primary; `icon` | `dialog` |
+| Alert | `blueprint-alert` | `intent` danger; `icon` undo; `cancelButtonText`, `confirmButtonText` | `dialog` |
 | Dialog | `blueprint-dialog` | | `dialog` |
-| Toast, OverlayToaster | `blueprint-toast` | | `notification` |
+| Toast, OverlayToaster | `blueprint-toast` | `intent` primary; `icon`; `position` bottom-right; no `timeout` (no duration token) | `notification` |
 | Callout | `blueprint-callout` | `intent`; `compact` | `alert` |
 | NonIdealState | `blueprint-nonidealstate` | | `empty` |
 | Omnibar | `blueprint-omnibar` | | `command` |

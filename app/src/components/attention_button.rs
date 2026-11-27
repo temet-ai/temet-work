@@ -51,7 +51,9 @@ impl RenderOnce for AttentionButton {
         let rest = look::get(cx, "AttentionButton", "outlined small", State::Rest);
         let hover = look::get(cx, "AttentionButton", "outlined small", State::Hover);
         let active = look::get(cx, "AttentionButton", "outlined small", State::Active);
+        let selector = format!("{}", self.id);
         let mut button = box_of(type_of(div().id(self.id), &rest), &rest)
+            .debug_selector(|| selector)
             .flex()
             .flex_none()
             .items_center()

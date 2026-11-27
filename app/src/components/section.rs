@@ -17,6 +17,7 @@ pub struct Section {
     title: Option<SharedString>,
     subtitle: Option<SharedString>,
     compact: bool,
+    heading_level: Option<u8>,
     right_element: Option<AnyElement>,
     children: Vec<SectionCard>,
 }
@@ -24,6 +25,13 @@ pub struct Section {
 impl Section {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The title's heading level, 2 to 6, so it fits the page's outline; 6 when left out. The
+    /// size stays the same at each level, but the light mode draws an h6 title muted.
+    pub fn heading_level(mut self, level: u8) -> Self {
+        self.heading_level = Some(level);
+        self
     }
 
     /// The title. The header is drawn only when there is one.
@@ -68,6 +76,17 @@ impl RenderOnce for Section {
             el.border_b(shape::border(cx))
                 .border_color(colour::edge(cx))
         };
+        // The title's look as measured at its level: CutPanel's story draws an h6 title and
+        // MilestonePanel's an h2, the only levels the design system measured.
+        let title_look = match self.heading_level.unwrap_or(6) {
+            6 => look::get(cx, "CutPanel", "tm-cut-body tm-section-title", State::Rest),
+            _ => look::get(
+                cx,
+                "MilestonePanel",
+                "tm-cut-body tm-section-title",
+                State::Rest,
+            ),
+        };
         let header = self.title.map(|title| {
             let left = div()
                 .flex()
@@ -76,18 +95,7 @@ impl RenderOnce for Section {
                 .py(size::section_title_pad(cx))
                 .child(
                     div()
-                        .child(
-                            type_of(
-                                div(),
-                                &look::get(
-                                    cx,
-                                    "CutPanel",
-                                    "tm-cut-body tm-section-title",
-                                    State::Rest,
-                                ),
-                            )
-                            .child(title),
-                        )
+                        .child(type_of(div(), &title_look).child(title))
                         .children(self.subtitle.map(|subtitle| {
                             div()
                                 .mt(size::section_subtitle_gap(cx))

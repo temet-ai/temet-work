@@ -108,7 +108,10 @@ impl RenderOnce for MilestonePanel {
             self.summary.as_deref(),
         );
         let name = self.name.clone();
-        let mut section = Section::new().compact(true).title(self.name);
+        let mut section = Section::new()
+            .compact(true)
+            .heading_level(2)
+            .title(self.name);
         if let Some(line) = line {
             section = section.subtitle(line);
         }

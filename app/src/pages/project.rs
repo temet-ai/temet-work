@@ -2,13 +2,16 @@
 //! and limits on the left; what needs the person and the project's issues in the middle; the
 //! selected issue on the right.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{App, Context, IntoElement, ParentElement, Render, SharedString, Window};
 
 use crate::components::Intent;
+use crate::components::alert::Alert;
 use crate::components::app_shell::AppShell;
+use crate::components::icon::IconName;
 use crate::components::segmented_control::{SegmentedControl, SegmentedControlOption};
+use crate::components::toast::{OverlayToaster, Toast};
 use crate::composites::group_list::{GroupList, GroupListGroup};
 use crate::composites::issue_pane::{
     IssueDecision, IssuePane, IssuePlan, IssuePullRequest, IssueTab,
@@ -24,6 +27,7 @@ use crate::composites::side_nav::{SideNav, SideNavArea};
 /// What the Project page shows, in the shape of its parts' props.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectView {
+    /// The areas and projects. Each project's count is worked out from `needs`.
     pub areas: Vec<SideNavArea>,
     /// The id of the project on screen.
     pub project: SharedString,
@@ -39,6 +43,11 @@ pub struct ProjectView {
     pub milestones: Vec<Milestone>,
     /// What each issue has so far beyond its row, by key.
     pub details: HashMap<SharedString, IssueDetail>,
+    /// The project each decision in `needs` belongs to, by the decision's id.
+    pub need_project: HashMap<SharedString, SharedString>,
+    /// The decision in an issue's pane that is the same as one in `needs`: the need's id, and
+    /// the issue's key and the decision's id. Overturning either overturns both.
+    pub same_decision: HashMap<SharedString, (SharedString, SharedString)>,
 }
 
 /// A milestone and its open issues.
@@ -166,6 +175,45 @@ pub fn all_issues_summary(milestones: &[Milestone]) -> String {
     format!("{issues} across {across}")
 }
 
+/// A decision the person has asked to overturn, waiting on the confirm question: the decision
+/// in Needs you, the one in an issue's pane, or both when they are the same.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask {
+    pub issue: SharedString,
+    pub by: SharedString,
+    pub took: SharedString,
+    pub need: Option<SharedString>,
+    pub decision: Option<(SharedString, SharedString)>,
+}
+
+impl Ask {
+    /// The confirm question, such as "Overturn the arbiter's decision on WATCH-51? Claude chose
+    /// to page the tower list 200 at a time instead of loading all."
+    pub fn question(&self) -> String {
+        let (role, runtime) = self
+            .by
+            .split_once(" · ")
+            .unwrap_or((self.by.as_ref(), self.by.as_ref()));
+        let mut took = self.took.chars();
+        let took = match took.next() {
+            Some(first) => first.to_lowercase().chain(took).collect::<String>(),
+            None => String::new(),
+        };
+        format!(
+            "Overturn the {role}'s decision on {}? {runtime} chose to {took}.",
+            self.issue
+        )
+    }
+
+    /// The toast once it is overturned, such as "Overturned on WATCH-51: Page the ...".
+    pub fn done(&self) -> String {
+        format!("Overturned on {}: {}", self.issue, self.took)
+    }
+}
+
+/// The note that replaces an overturned decision's action.
+pub const OVERTURNED: &str = "Overturned just now";
+
 /// The Project page: a window's view, holding what it shows and what the person has chosen.
 pub struct Project {
     view: ProjectView,
@@ -173,6 +221,14 @@ pub struct Project {
     grouping: Grouping,
     /// The open tab of the selected issue's pane; its first tab when none is chosen.
     tab: Option<IssueTab>,
+    /// The decision waiting on the confirm question.
+    asking: Option<Ask>,
+    /// The decisions in Needs you that are overturned, by id.
+    overturned_needs: HashSet<SharedString>,
+    /// The decisions in issues' panes that are overturned, by issue key and id.
+    overturned_decisions: HashSet<(SharedString, SharedString)>,
+    /// The toast on show.
+    toast: Option<SharedString>,
 }
 
 impl Project {
@@ -182,7 +238,123 @@ impl Project {
             selection: Selection::new(selected),
             grouping: Grouping::Milestone,
             tab: None,
+            asking: None,
+            overturned_needs: HashSet::new(),
+            overturned_decisions: HashSet::new(),
+            toast: None,
         }
+    }
+
+    /// Asks to overturn the decision `id` in Needs you: the confirm question opens.
+    pub fn ask_need(&mut self, id: &SharedString) {
+        let Some(n) = self.view.needs.iter().find(|n| &n.id == id) else {
+            return;
+        };
+        self.asking = Some(Ask {
+            issue: n.decision.issue.clone().unwrap_or_default(),
+            by: n.decision.by.clone(),
+            took: n.decision.took.clone(),
+            need: Some(n.id.clone()),
+            decision: self.view.same_decision.get(id).cloned(),
+        });
+    }
+
+    /// Asks to overturn the decision `id` in the pane of the issue `key`.
+    pub fn ask_decision(&mut self, key: &SharedString, id: &SharedString) {
+        let found = self
+            .view
+            .details
+            .get(key)
+            .and_then(|d| d.decisions.as_ref())
+            .and_then(|ds| ds.iter().find(|d| &d.id == id));
+        let Some(d) = found else {
+            return;
+        };
+        let need = self
+            .view
+            .same_decision
+            .iter()
+            .find(|(_, (k, i))| k == key && i == id)
+            .map(|(need, _)| need.clone());
+        self.asking = Some(Ask {
+            issue: key.clone(),
+            by: d.decision.by.clone(),
+            took: d.decision.took.clone(),
+            need,
+            decision: Some((key.clone(), id.clone())),
+        });
+    }
+
+    /// The decision waiting on the confirm question, if any.
+    pub fn asking(&self) -> Option<&Ask> {
+        self.asking.as_ref()
+    }
+
+    /// Confirms the question: the decision is overturned in Needs you and in its issue's pane,
+    /// and the toast says so. The daemon has no command for it yet.
+    pub fn confirm(&mut self) {
+        let Some(ask) = self.asking.take() else {
+            return;
+        };
+        if let Some(need) = &ask.need {
+            self.overturned_needs.insert(need.clone());
+        }
+        if let Some(decision) = &ask.decision {
+            self.overturned_decisions.insert(decision.clone());
+        }
+        self.toast = Some(ask.done().into());
+    }
+
+    pub fn cancel(&mut self) {
+        self.asking = None;
+    }
+
+    pub fn dismiss_toast(&mut self) {
+        self.toast = None;
+    }
+
+    /// The toast on show.
+    pub fn toast(&self) -> Option<&SharedString> {
+        self.toast.as_ref()
+    }
+
+    /// The decisions in Needs you that are not overturned, in order.
+    pub fn needs(&self) -> Vec<NeedsYouDecision> {
+        self.view
+            .needs
+            .iter()
+            .filter(|n| !self.overturned_needs.contains(&n.id))
+            .cloned()
+            .collect()
+    }
+
+    /// The areas, each project's count the decisions in Needs you that belong to it.
+    pub fn areas(&self) -> Vec<SideNavArea> {
+        let needs = self.needs();
+        let mut areas = self.view.areas.clone();
+        for project in areas.iter_mut().flat_map(|a| a.projects.iter_mut()) {
+            project.waiting = needs
+                .iter()
+                .filter(|n| self.view.need_project.get(&n.id) == Some(&project.id))
+                .count();
+        }
+        areas
+    }
+
+    /// The selected issue's decisions, each overturned one with its note.
+    fn decisions(&self, key: &SharedString, decisions: Vec<IssueDecision>) -> Vec<IssueDecision> {
+        decisions
+            .into_iter()
+            .map(|mut d| {
+                if self
+                    .overturned_decisions
+                    .contains(&(key.clone(), d.id.clone()))
+                {
+                    d.decision.overturned = Some(OVERTURNED.into());
+                }
+                d
+            })
+            .collect()
     }
 
     /// Selects the issue `key` and opens it in the pane, on its first tab.
@@ -192,6 +364,20 @@ impl Project {
             self.tab = None;
         }
         changed
+    }
+
+    /// The selected issue's key.
+    pub fn selected(&self) -> Option<&SharedString> {
+        self.selection.key()
+    }
+
+    /// The open tab of the selected issue's pane, when the person chose one.
+    pub fn tab(&self) -> Option<IssueTab> {
+        self.tab
+    }
+
+    pub fn grouping(&self) -> Grouping {
+        self.grouping
     }
 
     pub fn set_grouping(&mut self, grouping: Grouping) {
@@ -229,19 +415,40 @@ impl Render for Project {
                 }
             }
         };
-        let on_tab = move |tab: IssueTab, _: &mut Window, cx: &mut App| {
-            page.update(cx, |page, cx| {
-                page.set_tab(tab);
-                cx.notify();
-            })
-            .ok();
+        let on_tab = {
+            let page = page.clone();
+            move |tab: IssueTab, _: &mut Window, cx: &mut App| {
+                page.update(cx, |page, cx| {
+                    page.set_tab(tab);
+                    cx.notify();
+                })
+                .ok();
+            }
         };
-        // Overturning does nothing yet: the daemon has no command for it.
-        let overturn = |_: &SharedString, _: &mut Window, _: &mut App| {};
+        let update = |f: fn(&mut Project)| {
+            let page = page.clone();
+            move |_: &mut Window, cx: &mut App| {
+                page.update(cx, |p, cx| {
+                    f(p);
+                    cx.notify();
+                })
+                .ok();
+            }
+        };
+        let ask_need = {
+            let page = page.clone();
+            move |id: &SharedString, _: &mut Window, cx: &mut App| {
+                page.update(cx, |p, cx| {
+                    p.ask_need(id);
+                    cx.notify();
+                })
+                .ok();
+            }
+        };
 
         let view = &self.view;
         let selected = self.selection.key().cloned();
-        let nav = SideNav::new(view.areas.clone())
+        let nav = SideNav::new(self.areas())
             .selected(view.project.clone())
             .child(GroupList::new(view.groups.clone()))
             .child(MeterList::new("Machines", view.machines.clone()))
@@ -264,9 +471,10 @@ impl Render for Project {
             .facts(view.facts.clone())
             .actions_label("Group by")
             .actions(group_by);
-        let needs = NeedsYou::new(view.needs.clone())
-            .note(format!("{}, costliest to undo first", view.needs.len()))
-            .on_overturn(overturn);
+        let open = self.needs();
+        let needs = NeedsYou::new(open.clone())
+            .note(format!("{}, costliest to undo first", open.len()))
+            .on_overturn(ask_need);
 
         let mut shell = AppShell::new(nav).child(header).child(needs);
         match self.grouping.table() {
@@ -325,12 +533,42 @@ impl Render for Project {
                 .plan(detail.plan)
                 .pull(detail.pull)
                 .rounds(detail.rounds)
-                .decisions(detail.decisions)
+                .decisions(detail.decisions.map(|d| self.decisions(&issue.key, d)))
                 .tab(self.tab.unwrap_or(IssueTab::Plan))
                 .on_tab_change(on_tab)
-                .on_overturn(overturn);
+                .on_overturn({
+                    let page = page.clone();
+                    let key = issue.key.clone();
+                    move |id: &SharedString, _: &mut Window, cx: &mut App| {
+                        page.update(cx, |p, cx| {
+                            p.ask_decision(&key, id);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                });
             shell = shell.side(pane);
         }
-        shell
+
+        // Overturning asks first, as the Alert's story asks, then says it is done.
+        let alert = Alert::new()
+            .is_open(self.asking.is_some())
+            .icon(IconName::Undo)
+            .intent(Intent::Danger)
+            .cancel_button_text("Cancel")
+            .confirm_button_text("Overturn")
+            .on_cancel(update(Project::cancel))
+            .on_confirm(update(Project::confirm))
+            .children(self.asking.as_ref().map(|ask| ask.question()));
+        let mut toaster = OverlayToaster::new();
+        if let Some(message) = &self.toast {
+            toaster = toaster.child(
+                Toast::new(message.clone())
+                    .icon(IconName::Undo)
+                    .intent(Intent::Primary)
+                    .on_dismiss(update(Project::dismiss_toast)),
+            );
+        }
+        shell.child(alert).child(toaster)
     }
 }

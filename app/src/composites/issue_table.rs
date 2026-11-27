@@ -230,7 +230,9 @@ impl RenderOnce for IssueTable {
             // Each group is a body of its own, under a row with its stage or name and count.
             for (stage, name, issues) in grouped(self.issues, by) {
                 let label = match stage {
-                    Some(stage) => StageTag::new(stage).into_any_element(),
+                    Some(stage) => StageTag::new(stage)
+                        .class_name(Class::IssuesStatus)
+                        .into_any_element(),
                     None => name.clone().into_any_element(),
                 };
                 let head =

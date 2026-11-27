@@ -81,7 +81,13 @@ impl RenderOnce for NeedsYou {
         });
         CutPanel::new()
             .attention(true)
-            .child(classed(Class::NeedsHead, cx).child(Heading::new(title).note(note)))
+            .child(
+                classed(Class::NeedsHead, cx).child(
+                    Heading::new(title)
+                        .note(note)
+                        .class_name(Class::NeedsHeading),
+                ),
+            )
             .children(rows)
             .into_any_element()
     }

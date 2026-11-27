@@ -10,7 +10,7 @@
 //! reads no colour or type, so it names the class, and the class resolves to the look the
 //! design system measured for an element with that class.
 
-use gpui::{App, Div, ParentElement, Pixels, SharedString, Styled, div, font};
+use gpui::{App, Div, ParentElement, Pixels, SharedString, Styled, Window, div, font};
 
 use crate::theme::look::{self, Look, State};
 use crate::theme::{colour, size, space, text};
@@ -18,9 +18,11 @@ use crate::theme::{colour, size, space, text};
 /// The design system's intents, as the components' `intent` props take them.
 pub use crate::theme::Intent;
 
+pub mod alert;
 pub mod app_shell;
 pub mod attention_button;
 pub mod attention_text;
+pub mod button;
 pub mod cut_panel;
 pub mod heading;
 pub mod html_table;
@@ -37,16 +39,34 @@ pub mod status_tag;
 pub mod table_row;
 pub mod tabs;
 pub mod tag;
+pub mod toast;
 
 /// How far below the top of its line box the baseline of `size` text sits, in the text face in
-/// force, as GPUI places a line: half the leading, then the ascent.
+/// force, as GPUI places a line: half the leading, then the ascent. GPUI rounds a line height to
+/// whole pixels (`TextStyle::line_height_in_pixels`), so the line is rounded first.
 pub(crate) fn baseline(cx: &App, size: Pixels, line: Pixels) -> Pixels {
+    let line = line.round();
     let system = cx.text_system();
     let id = system.resolve_font(&font(text::family(cx)));
     let ascent = system.ascent(id, size);
     // GPUI gives the descent as a negative offset from the baseline, as fonts store it.
     let descent = system.descent(id, size).abs();
     (line - ascent - descent) / 2. + ascent
+}
+
+/// How far a line box reaches below its baseline, in the text style in force: the font's
+/// descent plus half the leading. GPUI gives the descent as a negative offset from the
+/// baseline, as fonts store it.
+pub(crate) fn below_baseline(window: &Window) -> Pixels {
+    let style = window.text_style();
+    let rem = window.rem_size();
+    let font_size = style.font_size.to_pixels(rem);
+    let line = style.line_height_in_pixels(rem);
+    let text = window.text_system();
+    let font = text.resolve_font(&style.font());
+    let ascent = text.ascent(font, font_size);
+    let descent = text.descent(font, font_size).abs();
+    (line - (ascent + descent)) / 2. + descent
 }
 
 /// How far to move text in `low`'s look down so its baseline meets that of text in `high`'s
@@ -113,6 +133,10 @@ pub enum Class {
     /// `.tm-issues` on an HTMLTable: its rows and cells take IssueTable's looks, and a tag in
     /// a cell is raised so its word lines up with the text beside it.
     Issues,
+    /// `.tm-issues .tm-status` on the StageTag of a group row: raised by `--tm-space-1` above
+    /// and below, as a tag in a body row is, its word in the head's weight, which the tag
+    /// takes from its `th`.
+    IssuesStatus,
     /// `.tm-issue-group`: a group row's stage or name, then its count.
     IssueGroup,
     /// `.tm-issue-count`: a group row's count of issues.
@@ -136,6 +160,8 @@ pub enum Class {
     PageheadIcon,
     /// `.tm-needs-head`: the padding around NeedsYou's heading.
     NeedsHead,
+    /// NeedsYou's Heading, inside `.tm-needs-head`: its line is tall enough for the bell icon.
+    NeedsHeading,
     /// `.tm-needs-title` on AttentionText: NeedsYou's icon and title.
     NeedsTitle,
     /// `.tm-decision-issue`: the issue's key at the start of a decision's meta line.
@@ -163,7 +189,16 @@ pub fn spans(runs: Vec<(SharedString, Option<Class>)>, cx: &App) -> Div {
             })
             .collect::<Vec<_>>()
     });
-    div().flex().flex_wrap().children(words)
+    // A line holding code is the measured line of a meta with code in it, taller than one of
+    // text alone, as the code face's ascent and descent widen the line box. GPUI rounds a line
+    // height to whole pixels, where the story keeps the fraction and a wrapped line lands the
+    // next whole pixel down, so the line is rounded up.
+    let line = look::get(cx, "IssuePane", "tm-row-main tm-row-meta", State::Rest).height;
+    div()
+        .flex()
+        .flex_wrap()
+        .line_height(line.ceil())
+        .children(words)
 }
 
 /// A plain element with a class, as the design system's composites write `<span
@@ -203,6 +238,10 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
             .text_color(colour::muted(cx))
             .p(size::section_pad(cx, true)),
         Class::IssueGroup => el.flex().items_center().gap(space::s4(cx)),
+        Class::IssuesStatus => el
+            .mt(-space::s1(cx))
+            .mb(-space::s1(cx))
+            .font_weight(look::get(cx, "HTMLTable", "th: compact interactive", rest).font_weight),
         // Measured nowhere: `font-weight: default; color: muted`.
         Class::IssueCount => el
             .font_weight(text::normal_weight(cx))
@@ -281,6 +320,6 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
                 rest,
             ),
         ),
-        Class::Issues | Class::GroupsEmpty | Class::GroupsGroup => el,
+        Class::Issues | Class::GroupsEmpty | Class::GroupsGroup | Class::NeedsHeading => el,
     }
 }

@@ -152,18 +152,18 @@ pub fn project_view() -> ProjectView {
         GroupListGroup {
             id: s("yard"),
             name: s("pseudopolis yard clacks paging and unread counts"),
-            note: Some(s("watch 0.5")),
+            note: Some(s("watch 0.4, 0.5")),
             agents: vec![
                 agent(
                     "py-1",
                     "reviewer",
-                    "deus · claude-sonnet-5 · watch-44-keyring-token",
+                    "deus · claude-sonnet-5 · watch-58-semaphore-copy",
                     Status::Waiting,
                 ),
                 agent(
                     "py-2",
                     "author",
-                    "omit · claude-opus-5 · watch-51-clacks-pages",
+                    "omit · claude-opus-5 · watch-42-cursor-row",
                     Status::Blocked,
                 ),
             ],
@@ -235,8 +235,8 @@ pub fn project_view() -> ProjectView {
         Milestone {
             name: s("watch 0.4"),
             due: Some(s("12 Dec")),
-            done: 7,
-            total: 12,
+            done: 1,
+            total: 5,
             issues: vec![
                 issue(
                     "WATCH-44",
@@ -302,7 +302,7 @@ pub fn project_view() -> ProjectView {
                     "Selecting text copies it over the semaphore",
                     Stage::Merging,
                     "pseudopolis yard clacks paging and unread counts",
-                    None,
+                    Some("reviewer · Claude"),
                     "8 min ago",
                 ),
             ],
@@ -453,7 +453,19 @@ pub fn project_view() -> ProjectView {
         ),
     ]);
 
+    // Which project each decision that needs the person belongs to, and the decision in an
+    // issue's pane that is the same one, so overturning either overturns both.
+    let need_project = HashMap::from([
+        (s("n1"), s("watch")),
+        (s("n2"), s("mint")),
+        (s("n3"), s("watch")),
+        (s("n4"), s("post-office")),
+    ]);
+    let same_decision = HashMap::from([(s("n3"), (s("WATCH-44"), s("d2")))]);
+
     ProjectView {
+        need_project,
+        same_decision,
         areas,
         project: s("watch"),
         groups,
