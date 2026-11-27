@@ -1,6 +1,7 @@
 //! A deterministic runner for tests: terminals live in memory, a send echoes its
 //! text onto the screen and runs one turn, and tests can put a terminal at a
-//! prompt, end its turn in an error, once or after every send, or end it.
+//! prompt, end its turn in an error, once or after every send, keep it in the
+//! turn a send starts, or end it.
 
 use std::collections::BTreeMap;
 
@@ -14,10 +15,21 @@ struct Term {
     screen: Vec<String>,
     /// The line its turn last ended on in an error.
     error: Option<String>,
-    /// Whether every send ends on that error again.
-    keeps_failing: bool,
+    /// How the turn each send starts goes.
+    turns: Turns,
     /// The turn it is in, when that turn is going to fail.
     failing: Option<Failing>,
+}
+
+/// How the turn a send starts goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Turns {
+    /// It ends between turns at once.
+    End,
+    /// It ends in the error the terminal last ended in.
+    Fail,
+    /// It stays working until the test ends it.
+    Stay,
 }
 
 /// How far a turn that is going to fail has come.
@@ -126,10 +138,10 @@ impl FakeRunner {
     }
 
     /// Puts a terminal between turns: its prompt was answered, or its turn ended
-    /// well. It no longer keeps failing.
+    /// well. It no longer keeps failing or working.
     pub fn unblock(&mut self, terminal: &TerminalId) {
         if let Some(t) = self.terms.get_mut(terminal) {
-            t.keeps_failing = false;
+            t.turns = Turns::End;
         }
         self.set(terminal, Status::Between);
     }
@@ -148,10 +160,24 @@ impl FakeRunner {
     /// Makes a terminal that ended in an error keep failing, as a session does
     /// while its API is overloaded: a send to it is working on the next call to
     /// `updates`, and only the call after that reports the error it last ended
-    /// in, with its line on the screen again.
+    /// in, with its line on the screen again. It no longer keeps working.
     pub fn keep_failing(&mut self, terminal: &TerminalId) {
         if let Some(t) = self.terms.get_mut(terminal) {
-            t.keeps_failing = t.error.is_some();
+            t.turns = if t.error.is_some() {
+                Turns::Fail
+            } else {
+                Turns::End
+            };
+        }
+    }
+
+    /// Makes the turn each send starts stay working, call after call to
+    /// `updates`, until the test ends it with [`FakeRunner::end_in_error`],
+    /// [`FakeRunner::block`] or [`FakeRunner::unblock`]. It no longer keeps
+    /// failing.
+    pub fn keep_working(&mut self, terminal: &TerminalId) {
+        if let Some(t) = self.terms.get_mut(terminal) {
+            t.turns = Turns::Stay;
         }
     }
 
@@ -221,7 +247,7 @@ impl Runner for FakeRunner {
                 status,
                 screen: vec![format!("$ {}", start.program.argv.join(" "))],
                 error: None,
-                keeps_failing: false,
+                turns: Turns::End,
                 failing: None,
             },
         );
@@ -265,10 +291,10 @@ impl Runner for FakeRunner {
         }
         t.screen.push(text.to_string());
         t.status = Status::Working;
-        let fails = t.keeps_failing;
-        t.failing = fails.then_some(Failing::Unreported);
+        let turns = t.turns;
+        t.failing = (turns == Turns::Fail).then_some(Failing::Unreported);
         self.update(terminal, Some(format!("reading: {text}")));
-        if !fails {
+        if turns == Turns::End {
             self.set(terminal, Status::Between);
         }
         Ok(())

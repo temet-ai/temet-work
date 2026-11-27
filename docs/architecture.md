@@ -127,11 +127,13 @@ tomorrow's, so a limit seen just after its reset is continued at once. The reset
 event log, so a restart does not lose it. A time more than six hours ahead is not read, and the
 agent is treated as idle: reminded, then stopped. The same happens when an error has no reset time
 the daemon can read, or comes back with a reset time no later than the one already continued after.
-A reminder starts a turn, and one that ends on the same error, or on another with no
-reset time to wait for, counts toward the stop, however long the turn worked: the next reminder
-or the stop is still timed from the last reminder. The count starts again when such a turn ends
-between turns, when the agent stops at a prompt or on a limit with a reset time, when it ends,
-and when its issue stops waiting on it. A reviewer whose approval is in is not
+A reminder starts a turn, which may end on the same error, or on another with no reset time to
+wait for. When the daemon saw that turn working for at least `remind_after` (ten minutes by
+default) before the error came back, the turn counts as recovery and a new count starts at that
+error. A shorter turn counts toward the stop: the next reminder or the stop is still timed from
+the last reminder. The count also starts again when such a turn ends between turns, when the
+agent stops at a prompt or on a limit with a reset time, when it ends, and when its issue stops
+waiting on it. A reviewer whose approval is in is not
 waited on while the checks run: it is not reminded, no other is started in its place, and it stays
 until the merge, so after a failed check a reviewer still running hears the next round. A refiner
 stops once its plan is in and an arbiter once its ruling is in. The arbiter also stops when its
