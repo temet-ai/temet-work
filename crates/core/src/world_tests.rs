@@ -2160,5 +2160,63 @@ fn an_issue_takes_every_folder_on_the_first_repositorys_machine_or_none() {
     );
 }
 
+/// A world with folders `f1` and `f2` where issue 1 is in review: its author
+/// holds `f1` and its reviewer runs, recorded with no folder.
+fn in_review_with_a_second_folder() -> World {
+    let (mut w, _) = World::replay(&[
+        group(&["m1"], 2),
+        folder("f1"),
+        folder("f2"),
+        sync("1", "m1", 1, &[]),
+        planned("1"),
+        started("author-1", Role::Author, "1"),
+        Event::PullRequestReady {
+            issue: issue("1"),
+            pull: Some("57".into()),
+            pulls: Default::default(),
+            replies: Vec::new(),
+        },
+        started("reviewer-1", Role::Reviewer, "1"),
+    ]);
+    assert_eq!(w.folders[&FolderId::new("f2")].holder, None);
+    w.apply(&sync("2", "m1", 2, &[]));
+    w
+}
+
+fn reader_launch(w: &World, role: Role, key: &str) -> crate::launch::Brief {
+    w.launch(&GroupId::new("watch"), role, &issue(key), None)
+        .expect("launch")
+        .brief
+}
+
+#[test]
+fn a_reviewer_in_a_folder_an_author_is_then_given_was_told_to_leave_it_alone() {
+    let mut w = in_review_with_a_second_folder();
+    let leave = "Do not switch its branch or change any file in it.";
+    let before = reader_launch(&w, Role::Reviewer, "1");
+    assert_eq!(before.folder, Some("/srv/ankh/f2".into()));
+    assert!(before.task.contains(leave), "{}", before.task);
+
+    assert_eq!(w.apply(&planned("2")), vec![author("2", "f2")]);
+    let after = reader_launch(&w, Role::Reviewer, "1");
+    assert!(after.task.contains(leave), "{}", after.task);
+}
+
+#[test]
+fn readers_in_every_free_folder_do_not_keep_a_ready_issue_from_its_author() {
+    let mut w = in_review_with_a_second_folder();
+    w.apply(&sync("3", "m1", 3, &[]));
+    w.apply(&started("refiner-3", Role::Refiner, "3"));
+    // f2 is the only free folder, and both running readers are in it.
+    for (role, key) in [(Role::Reviewer, "1"), (Role::Refiner, "3")] {
+        assert_eq!(
+            reader_launch(&w, role, key).folder,
+            Some("/srv/ankh/f2".into())
+        );
+        assert!(w.running(&issue(key), role).is_some());
+    }
+    assert_eq!(w.apply(&planned("2")), vec![author("2", "f2")]);
+}
+
 #[path = "world_scope_tests.rs"]
 mod scope;
