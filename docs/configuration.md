@@ -86,21 +86,23 @@ name = "temet-ai/radar"   # the tracker's name for it
 # ci = false              # its pull requests run no CI; the plan's checks are left to the reviewer
 
 # Settings (docs/settings.md): [settings] is global, [settings.reviewer] is for one role.
+# A model belongs to a runtime, so a `model` table names the runtime each one is for.
 # [settings]
 # runtime = "claude"
-# model = "sonnet"
+# [settings.model]
+# claude = "sonnet"
 # [settings.reviewer]
 # runtime = "codex"
 #
 # A project's, an area's and a milestone's own: under the project, the area or [[milestone]].
-# [project.settings]
-# model = "haiku"
+# [project.settings.model]
+# claude = "haiku"
 #
 # [[milestone]]
 # of = "radar"                 # a project or an area
 # name = "Slack sign-in rework"
-# [milestone.settings]
-# model = "opus"
+# [milestone.settings.model]
+# claude = "opus"
 
 # A work folder: a checkout an author works in, one issue at a time.
 [[folder]]
@@ -152,13 +154,16 @@ Projects with different `run_in` folders deploy side by side. The daemon reaches
 Settings at every level, from global down to one task, are in `docs/settings.md`. The
 tables `[settings]` (with `[settings.<role>]` inside it), `[project.settings]`,
 `[area.settings]` and `[[milestone]]` become `SettingSet` events recorded as set by
-`file`, when the daemon reads the file and again whenever it changes. A group's `model`
-and a project's `ci`, `deploy`, `verify` and `run_in` are still accepted and are read as
-settings at their level, so an existing file behaves as before. A key the daemon does not
-know is an error naming the key. A value that names a runtime or runner the build does
-not have stops the daemon at start, with the ones it has listed, and so does a build with
-no default runtime or runner and no global value for it. What a person or an agent has
-set since is not overwritten by the file; a value taken out of the file is unset.
+`file`, when the daemon reads the file and again whenever it changes. A `model` table in
+any of them, or in a role's table, gives a model per runtime: `[settings.model]` with
+`claude = "sonnet"` is the setting `model.claude`. A group's `model` and a project's
+`ci`, `deploy`, `verify` and `run_in` are still accepted and are read as settings at their
+level, so an existing file behaves as before. A key the daemon does not know is an error
+naming the key. A value that names a runtime or runner the build does not have, or a model
+for such a runtime, stops the daemon at start, with the ones it has listed, and so does a
+build with no default runtime or runner and no global value for it. What a person or an
+agent has set since is not overwritten by the file; a value taken out of the file is
+unset.
 
 Listing a folder under `[[folder]]` is your choice to let agents work in it. Before each
 agent starts in a folder, the `claude` runtime marks the folder trusted

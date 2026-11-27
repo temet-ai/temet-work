@@ -109,14 +109,33 @@ pub struct FolderConf {
 type Wanted = BTreeMap<Key, Value>;
 
 /// Reads a `[settings]`-style table at `scope`: scalars are the settings for every
-/// role, a table named for a role holds that role's.
+/// role, a table named for a role holds that role's. In either, a table `model`
+/// holds a model for each runtime it names.
 fn read_settings(table: &toml::Table, scope: &Scope, out: &mut Wanted) -> Result<(), String> {
     let at = |scope: &Scope| match scope {
         Scope::Global => "[settings]".to_string(),
         other => format!("the settings of {other}"),
     };
+    let mut read = |role: Option<Role>, key: &str, value: &toml::Value| {
+        // TOML cannot hold `model = "x"` and `model.y` in one table, so a
+        // runtime's model is an entry of a `model` table: the key `model.y`.
+        let entries = match value {
+            toml::Value::Table(models) if key == "model" => models
+                .iter()
+                .map(|(runtime, model)| (format!("model.{runtime}"), model))
+                .collect(),
+            _ => vec![(key.to_string(), value)],
+        };
+        for (key, value) in entries {
+            let value = value_of(&key, value).map_err(|e| format!("{}: {e}", at(scope)))?;
+            out.insert((scope.clone(), role, key), value);
+        }
+        Ok::<(), String>(())
+    };
     for (key, value) in table {
-        if let toml::Value::Table(inner) = value {
+        if let toml::Value::Table(inner) = value
+            && key != "model"
+        {
             let role = Role::parse(key).map_err(|_| {
                 format!(
                     "{}: {key} is not a setting, and is not a role either; \
@@ -125,17 +144,11 @@ fn read_settings(table: &toml::Table, scope: &Scope, out: &mut Wanted) -> Result
                 )
             })?;
             for (key, value) in inner {
-                out.insert(
-                    (scope.clone(), Some(role), key.clone()),
-                    value_of(key, value).map_err(|e| format!("{}: {e}", at(scope)))?,
-                );
+                read(Some(role), key, value)?;
             }
             continue;
         }
-        out.insert(
-            (scope.clone(), None, key.clone()),
-            value_of(key, value).map_err(|e| format!("{}: {e}", at(scope)))?,
-        );
+        read(None, key, value)?;
     }
     Ok(())
 }
@@ -382,7 +395,7 @@ impl Config {
     }
 
     /// Why this build cannot run with the file's settings: one that names a
-    /// runtime or runner it does not have.
+    /// runtime or runner it does not have, or gives such a runtime a model.
     pub fn check_build(&self, world: &World) -> Result<(), String> {
         for ((scope, _, key), value) in self.wanted()? {
             world
@@ -845,6 +858,112 @@ starts = 1
         );
         let empty = format!("[settings]\nmachine = \"\"\n{TODAY}");
         assert!(Config::parse(&empty).is_err_and(|e| e.contains("machine")));
+    }
+
+    #[test]
+    fn a_model_table_gives_each_runtime_its_model_at_every_level_and_role() {
+        let text = r#"
+[settings.model]
+alpha = "sonnet"
+beta = "gpt-x"
+
+[settings.reviewer.model]
+beta = "gpt-y"
+
+[[project]]
+id = "ankh"
+tracker = "fake"
+name = "city/ankh"
+
+[project.settings.model]
+alpha = "haiku"
+
+[project.settings.author.model]
+beta = "gpt-z"
+
+[[area]]
+id = "guild"
+projects = ["ankh"]
+
+[area.settings.model]
+alpha = "guild's"
+
+[[milestone]]
+of = "ankh"
+name = "Clocks"
+
+[milestone.settings.model]
+alpha = "opus"
+
+[milestone.settings.arbiter]
+model = { beta = "gpt-w" }
+"#;
+        let w = world_of(text);
+        let ankh = || Scope::Project(ProjectId::new("ankh"));
+        let milestone = || Scope::Milestone {
+            of: ProjectId::new("ankh"),
+            name: "Clocks".into(),
+        };
+        let want = [
+            (Scope::Global, None, "model.alpha", "sonnet"),
+            (Scope::Global, None, "model.beta", "gpt-x"),
+            (Scope::Global, Some(Role::Reviewer), "model.beta", "gpt-y"),
+            (ankh(), None, "model.alpha", "haiku"),
+            (ankh(), Some(Role::Author), "model.beta", "gpt-z"),
+            (
+                Scope::Area(ProjectId::new("guild")),
+                None,
+                "model.alpha",
+                "guild's",
+            ),
+            (milestone(), None, "model.alpha", "opus"),
+            (milestone(), Some(Role::Arbiter), "model.beta", "gpt-w"),
+        ];
+        assert_eq!(w.settings.len(), want.len(), "{:?}", w.settings);
+        for (scope, role, key, value) in want {
+            let entry = &w.settings[&(scope, role, key.to_string())];
+            assert_eq!(
+                (entry.value.to_string().as_str(), entry.by.as_str()),
+                (value, FILE)
+            );
+        }
+        for (bad, named) in [
+            ("[settings.model]\nalpha = 4\n", "model.alpha"),
+            (
+                "[settings.model.reviewer]\nalpha = \"x\"\n",
+                "model.reviewer",
+            ),
+            ("[settings.model]\nalpha = \"\"\n", "model.alpha"),
+        ] {
+            let why = Config::parse(bad).expect_err(bad);
+            assert!(why.contains(named), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_model_for_a_runtime_the_build_lacks_stops_the_start_naming_it() {
+        use temet_work_core::settings::Choice;
+        let mut world = World::default();
+        world.catalog.insert(
+            "runtime".into(),
+            Choice {
+                key: "runtime".into(),
+                allowed: vec!["alpha".into(), "beta".into()],
+                default: Some("alpha".into()),
+            },
+        );
+        for table in ["[settings.model]", "[settings.reviewer.model]"] {
+            let text = format!("{table}\nnonesuch = \"x\"\n{TODAY}");
+            let config = Config::parse(&text).expect("the file is well formed");
+            let err = config.check_build(&world).expect_err("refused");
+            assert!(
+                err.contains("model.nonesuch") && err.contains("alpha, beta"),
+                "{err}"
+            );
+        }
+        let had = format!("[settings.model]\nbeta = \"x\"\n{TODAY}");
+        let config = Config::parse(&had).expect("parse");
+        assert!(config.check_build(&world).is_ok());
     }
 
     /// The first TOML block under `heading` in `docs/configuration.md`.

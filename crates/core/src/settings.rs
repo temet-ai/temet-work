@@ -148,6 +148,17 @@ pub struct Choice {
     pub default: Option<String>,
 }
 
+impl Choice {
+    /// The adapters this build has, in words.
+    fn listed(&self) -> String {
+        if self.allowed.is_empty() {
+            "none".to_string()
+        } else {
+            self.allowed.join(", ")
+        }
+    }
+}
+
 /// What kind of value a setting takes.
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
@@ -210,7 +221,8 @@ pub const SPECS: [Spec; 16] = [
     Spec {
         key: "model",
         kind: Kind::Text,
-        about: "the model an agent runs; the runtime's own default when none is set",
+        about: "the model of the global runtime's agents, as model.<runtime> is that of one \
+                runtime's; the runtime's own default when none is set",
         agents: Agents::ForAuthor,
     },
     Spec {
@@ -315,9 +327,19 @@ pub fn specs() -> impl Iterator<Item = &'static Spec> {
     SPECS.iter()
 }
 
-/// The setting called `key`.
+/// The runtime a `model.<runtime>` key names the model of.
+fn model_runtime(key: &str) -> Option<&str> {
+    key.strip_prefix("model.").filter(|r| !r.is_empty())
+}
+
+/// The setting called `key`; a `model.<runtime>` key is `model` for one runtime.
 pub fn spec(key: &str) -> Result<&'static Spec, String> {
-    specs().find(|s| s.key == key).ok_or_else(|| {
+    let name = if model_runtime(key).is_some() {
+        "model"
+    } else {
+        key
+    };
+    specs().find(|s| s.key == name).ok_or_else(|| {
         let keys: Vec<&str> = specs().map(|s| s.key).collect();
         format!("no setting {key}; the settings are: {}", keys.join(", "))
     })
@@ -416,9 +438,10 @@ pub fn parse_value(key: &str, raw: &str) -> Result<Value, String> {
 }
 
 impl World {
-    /// Refuses a value that names an adapter this build does not have, and says
-    /// which ones it has.
+    /// Refuses a value that names an adapter this build does not have, or a
+    /// model for a runtime it does not have, and says which ones it has.
     pub fn check_choice(&self, key: &str, value: &Value) -> Result<(), String> {
+        self.check_model_runtime(key)?;
         let Some(choice) = self.catalog.get(key) else {
             return Ok(());
         };
@@ -426,12 +449,20 @@ impl World {
             Value::Text(t) if choice.allowed.iter().any(|a| a == t) => Ok(()),
             _ => Err(format!(
                 "{key} \"{value}\" is not in this build; this build has: {}",
-                if choice.allowed.is_empty() {
-                    "none".to_string()
-                } else {
-                    choice.allowed.join(", ")
-                }
+                choice.listed()
             )),
+        }
+    }
+
+    /// Refuses a `model.<runtime>` key whose runtime this build does not have.
+    pub(crate) fn check_model_runtime(&self, key: &str) -> Result<(), String> {
+        match (model_runtime(key), self.catalog.get("runtime")) {
+            (Some(runtime), Some(c)) if !c.allowed.iter().any(|a| a == runtime) => Err(format!(
+                "{key} is for runtime \"{runtime}\", which is not in this build; \
+                 this build has: {}",
+                c.listed()
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -533,11 +564,16 @@ impl World {
     /// The setting `key` over `scope`'s chain for `role` (none: the values for
     /// every role only), and which level set it. Within a level the role's own
     /// value comes before the value for every role; across levels the nearer one
-    /// comes first. The build's own value is the last resort.
+    /// comes first. The build's own value is the last resort. `model` answers
+    /// for the runtime that runs there ([`World::keys_read`]).
     pub fn resolve(&self, scope: &Scope, role: Option<Role>, key: &str) -> Option<Resolved> {
+        let keys = self.keys_read(scope, role, key);
         for (level, at) in self.chain(scope) {
-            let own = role.and_then(|r| self.settings.get(&(at.clone(), Some(r), key.to_string())));
-            let entry = own.or_else(|| self.settings.get(&(at.clone(), None, key.to_string())));
+            let get = |role: Option<Role>| {
+                keys.iter()
+                    .find_map(|k| self.settings.get(&(at.clone(), role, k.clone())))
+            };
+            let entry = role.and_then(|r| get(Some(r))).or_else(|| get(None));
             if let Some(e) = entry {
                 return Some(Resolved {
                     value: e.value.clone(),
@@ -558,6 +594,51 @@ impl World {
             scope: None,
             by: None,
         })
+    }
+
+    /// The keys that answer `key` over `scope` for `role`, in the order each
+    /// place in the chain is read. A model belongs to a runtime: for `model`
+    /// that is `model.<runtime>` of the runtime that runs there, then the plain
+    /// `model` when that runtime is the global one, so a model written for one
+    /// runtime never reaches another.
+    fn keys_read(&self, scope: &Scope, role: Option<Role>, key: &str) -> Vec<String> {
+        if key != "model" {
+            return vec![key.to_string()];
+        }
+        let runtime = self.resolve(scope, role, "runtime").map(|r| r.value);
+        let named = runtime.as_ref().map(|r| format!("model.{r}"));
+        let plain = (runtime == self.global_runtime()).then(|| key.to_string());
+        named.into_iter().chain(plain).collect()
+    }
+
+    /// The runtime a plain `model` is for: the global `runtime` for every role,
+    /// else the build's default.
+    fn global_runtime(&self) -> Option<Value> {
+        self.resolve(&Scope::Global, None, "runtime")
+            .map(|r| r.value)
+    }
+
+    /// The key an agent's model for the author is under when a person changes the
+    /// same model by its other name: `model` and the global runtime's
+    /// `model.<runtime>` are one runtime's model, and one is read before the
+    /// other, so a person's change of either, for every role or the author, has
+    /// to take the agent's value under the other away.
+    pub(crate) fn agents_other_model(
+        &self,
+        scope: &Scope,
+        role: Option<Role>,
+        key: &str,
+    ) -> Option<String> {
+        if !matches!(role, None | Some(Role::Author)) {
+            return None;
+        }
+        let global = format!("model.{}", self.global_runtime()?);
+        let other = match key {
+            "model" => global,
+            k if k == global => "model".to_string(),
+            _ => return None,
+        };
+        self.agents_author_value(scope, &other).then_some(other)
     }
 
     /// The setting for an issue and role.
@@ -1241,7 +1322,16 @@ mod replay {
             key: "verify".into(),
             by: "refiner-3".into(),
         });
-        let w = world(&events);
+        let mut w = world(&events);
+        // The build's default is the runtime a plain model is for.
+        w.catalog.insert(
+            "runtime".into(),
+            Choice {
+                key: "runtime".into(),
+                allowed: vec!["alpha".into(), "beta".into()],
+                default: Some("alpha".into()),
+            },
+        );
         let at = |key| {
             w.setting(&IssueId::new("radar", "44"), Some(Role::Author), key)
                 .map(|r| (r.value.to_string(), r.source()))
@@ -1372,6 +1462,8 @@ mod unknown_adapter {
     use super::level::{base, world};
     use super::*;
     use crate::command::Command;
+    use crate::ids::{AgentId, MachineId};
+    use crate::model::{Check, Plan};
 
     fn with_catalog() -> World {
         let mut w = world(&base());
@@ -1401,6 +1493,97 @@ mod unknown_adapter {
             "{why}"
         );
         assert!(w.check(None, &set("beta")).is_ok());
+    }
+
+    #[test]
+    fn a_model_for_a_runtime_the_build_lacks_is_refused_with_the_ones_it_has() {
+        use crate::event::Event;
+        let mut w = with_catalog();
+        let set = |key: &str| Command::Set {
+            target: Target::parse("global"),
+            role: None,
+            key: key.into(),
+            value: "x".into(),
+        };
+        let unset = |key: &str| Command::Unset {
+            target: Target::parse("global"),
+            role: None,
+            key: key.into(),
+        };
+        let lacking = |why: String| {
+            assert!(
+                why.contains("model.nonesuch") && why.contains("alpha, beta"),
+                "{why}"
+            );
+        };
+        lacking(w.check(None, &set("model.nonesuch")).expect_err("refused"));
+        lacking(
+            w.check(None, &unset("model.nonesuch"))
+                .expect_err("refused"),
+        );
+        // A value left from a build that had the runtime can still be taken away.
+        w.put(
+            &Scope::Global,
+            None,
+            "model.nonesuch",
+            &Value::Text("x".into()),
+            "person",
+        );
+        assert!(w.check(None, &unset("model.nonesuch")).is_ok());
+        assert!(w.check(None, &set("model.nonesuch")).is_err());
+        for event in w.events(None, &set("model.beta")).expect("accepted") {
+            w.apply(&event);
+        }
+        assert!(w.check(None, &unset("model.beta")).is_ok());
+        for empty in ["model.", "models.beta", "merge.beta"] {
+            let why = w.check(None, &set(empty)).expect_err("no such setting");
+            assert!(why.starts_with(&format!("no setting {empty}")), "{why}");
+        }
+        // A refiner's plan is held to the same runtimes.
+        w.apply(&Event::GroupCreated {
+            group: crate::ids::GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ProjectId::new("radar")],
+            areas: Vec::new(),
+            milestones: vec![crate::ids::MilestoneId::new("Sign-in")],
+            refining_at_once: 1,
+            model: None,
+        });
+        let refiner = AgentId::new("refiner-1");
+        w.apply(&Event::AgentStarted {
+            agent: refiner.clone(),
+            group: crate::ids::GroupId::new("watch"),
+            role: Role::Refiner,
+            issue: Some(IssueId::new("radar", "44")),
+            folder: None,
+            machine: MachineId::new("local"),
+            secret_digest: None,
+        });
+        let plan = |key: &str| Command::Plan {
+            issue: IssueId::new("radar", "44"),
+            plan: Plan {
+                checks: vec![Check {
+                    done_when: "it works".into(),
+                    proven_by: "a test".into(),
+                }],
+                repos: Vec::new(),
+                settings: [(key.to_string(), Value::Text("x".into()))].into(),
+            },
+        };
+        lacking(
+            w.check(Some(&refiner), &plan("model.nonesuch"))
+                .expect_err("refused"),
+        );
+        let events = w
+            .events(Some(&refiner), &plan("model.beta"))
+            .expect("accepted");
+        assert!(
+            matches!(
+                &events[0],
+                Event::SettingSet { key, role: Some(Role::Author), .. } if key == "model.beta"
+            ),
+            "{events:?}"
+        );
     }
 
     #[test]

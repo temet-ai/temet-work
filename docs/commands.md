@@ -116,15 +116,18 @@ checks:
 issue. `ROLE` is refiner, author, reviewer, arbiter or investigator; without it a value is
 for every role. `settings` lists every setting in effect there, each with the level that
 set it (`task, set by refiner-3`, `built in`); `temet-work issue` shows the same for the
-role at work on the issue. A value of the wrong kind, an unknown key or a runtime or
-runner the build lacks is refused with the reason, and the command exits 1.
+role at work on the issue. `KEY` is a setting's name, or `model.<runtime>`
+(`model.codex`) for the model of one runtime's agents; a plain `model` is the global
+runtime's. A value of the wrong kind, an unknown key, a runtime or runner the build lacks,
+or a `model.<runtime>` for such a runtime is refused with the reason, and the command
+exits 1.
 
 A refiner may add task-level settings to its plan, other than the eight only a person
 sets: `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify` and
 `run_in` (`docs/settings.md`, "Setting them"). What it sets is recorded as set by it. Its
-`model`, from the plan or from its `set`, is for the author only: the models of reviewers,
-arbiters and refiners are a person's to set, and a person's `set` on the issue with no
-role overturns the refiner's value. A plan with settings:
+`model` or `model.<runtime>`, from the plan or from its `set`, is for the author only:
+the models of reviewers, arbiters and refiners are a person's to set, and a person's
+`set` on the issue with no role overturns the refiner's value. A plan with settings:
 
 ```yaml
 checks:

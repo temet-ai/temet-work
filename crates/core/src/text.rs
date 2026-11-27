@@ -595,6 +595,63 @@ Problems
     }
 
     #[test]
+    fn the_model_listed_is_the_one_the_roles_runtime_runs() {
+        let mut w = world();
+        let target = Target::parse("radar#44");
+        let set = |w: &mut World, scope, role, key: &str, value: &str| {
+            w.apply(&Event::SettingSet {
+                scope,
+                role,
+                key: key.into(),
+                value: Value::Text(value.into()),
+                by: "person".into(),
+            });
+        };
+        set(&mut w, Scope::Global, None, "model", "sonnet");
+        set(
+            &mut w,
+            Scope::Global,
+            Some(Role::Reviewer),
+            "runtime",
+            "beta",
+        );
+        let listed = |w: &World, role| settings(w, &target, Some(role)).expect("known");
+        let author = listed(&w, Role::Author);
+        assert!(
+            author.contains("  model          opus    task, set by refiner-3\n"),
+            "{author}"
+        );
+        let reviewer = listed(&w, Role::Reviewer);
+        assert!(reviewer.contains("  runtime        beta    global, set by person\n"));
+        assert!(
+            !reviewer.contains("  model "),
+            "no model reaches a beta reviewer: {reviewer}"
+        );
+        set(
+            &mut w,
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model.beta",
+            "gpt-x",
+        );
+        let reviewer = listed(&w, Role::Reviewer);
+        assert!(
+            reviewer.contains("  model          gpt-x   global, set by person\n"),
+            "{reviewer}"
+        );
+        assert_eq!(listed(&w, Role::Author), author);
+        let status = text(&w, &BTreeMap::new());
+        assert!(
+            status.contains("  global, reviewer: model.beta = gpt-x, set by person\n"),
+            "{status}"
+        );
+        assert!(
+            status.contains("  global: model = sonnet, set by person\n"),
+            "{status}"
+        );
+    }
+
+    #[test]
     fn the_issue_view_shows_the_settings_of_the_role_at_work_on_it() {
         let w = world();
         let text = issue(&w, &IssueId::new("radar", "44")).expect("known");

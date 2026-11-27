@@ -168,6 +168,182 @@ fn a_model_on_a_project_reaches_the_brief_of_that_projects_issues_only() {
     assert_eq!(launch(&w, "1").as_deref(), Some("opus"));
 }
 
+/// The documented example, with stand-in runtimes: `alpha` is the build's
+/// default and set globally, with a model for every role; reviewers run `beta`;
+/// the project and a milestone of it have a plain model of their own. ankh#1 is
+/// in no milestone, ankh#2 is in "Clocks".
+fn two_runtimes() -> World {
+    let mut w = working();
+    w.catalog.insert(
+        "runtime".into(),
+        crate::settings::Choice {
+            key: "runtime".into(),
+            allowed: vec!["alpha".into(), "beta".into()],
+            default: Some("alpha".into()),
+        },
+    );
+    w.apply(&Event::IssueSynced {
+        issue: id("ankh", "2"),
+        title: "ankh 2".into(),
+        milestone: Some(crate::ids::MilestoneId::new("Clocks")),
+        depends_on: vec![],
+        order: 1,
+        closed: false,
+    });
+    let text = |t: &str| Value::Text(t.into());
+    let clocks = Scope::Milestone {
+        of: ProjectId::new("ankh"),
+        name: "Clocks".into(),
+    };
+    set(&mut w, Scope::Global, None, "runtime", text("alpha"));
+    set(&mut w, Scope::Global, None, "model", text("sonnet"));
+    set(
+        &mut w,
+        Scope::Global,
+        Some(Role::Reviewer),
+        "runtime",
+        text("beta"),
+    );
+    set(
+        &mut w,
+        Scope::Project(ProjectId::new("ankh")),
+        None,
+        "model",
+        text("haiku"),
+    );
+    set(&mut w, clocks, None, "model", text("opus"));
+    w
+}
+
+/// The model in the brief of an agent of `role` on ankh's issue `key`.
+fn briefed(w: &World, role: Role, key: &str) -> Option<String> {
+    w.launch(&GroupId::new("watch"), role, &id("ankh", key), None)
+        .expect("known")
+        .brief
+        .model
+}
+
+#[test]
+fn a_model_reaches_only_its_runtime() {
+    let mut w = two_runtimes();
+    for key in ["1", "2"] {
+        assert_eq!(briefed(&w, Role::Reviewer, key), None, "ankh#{key}");
+    }
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+    assert_eq!(briefed(&w, Role::Author, "2").as_deref(), Some("opus"));
+    // Nor does a plain model for the reviewers themselves, or for their task.
+    for (scope, role) in [
+        (Scope::Global, Some(Role::Reviewer)),
+        (Scope::Task(id("ankh", "1")), None),
+    ] {
+        set(&mut w, scope, role, "model", Value::Text("fable".into()));
+        assert_eq!(briefed(&w, Role::Reviewer, "1"), None);
+    }
+}
+
+#[test]
+fn a_plain_model_is_the_global_runtimes_whichever_that_is() {
+    let mut w = two_runtimes();
+    set(
+        &mut w,
+        Scope::Global,
+        None,
+        "runtime",
+        Value::Text("beta".into()),
+    );
+    assert_eq!(briefed(&w, Role::Reviewer, "1").as_deref(), Some("haiku"));
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+    // With no global value it is the build's default's, wherever that is named.
+    w.apply(&Event::SettingUnset {
+        scope: Scope::Global,
+        role: None,
+        key: "runtime".into(),
+        by: "person".into(),
+    });
+    set(
+        &mut w,
+        Scope::Project(ProjectId::new("ankh")),
+        None,
+        "runtime",
+        Value::Text("alpha".into()),
+    );
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+    assert_eq!(briefed(&w, Role::Reviewer, "1").as_deref(), Some("haiku"));
+}
+
+#[test]
+fn a_runtimes_own_model_reaches_the_agents_of_that_runtime_only() {
+    let mut w = two_runtimes();
+    set(
+        &mut w,
+        Scope::Global,
+        Some(Role::Reviewer),
+        "model.beta",
+        Value::Text("gpt-x".into()),
+    );
+    for key in ["1", "2"] {
+        assert_eq!(briefed(&w, Role::Reviewer, key).as_deref(), Some("gpt-x"));
+    }
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+    assert_eq!(briefed(&w, Role::Author, "2").as_deref(), Some("opus"));
+    // The same for every role still leaves the other runtime's authors alone.
+    set(
+        &mut w,
+        Scope::Task(id("ankh", "1")),
+        None,
+        "model.beta",
+        Value::Text("gpt-y".into()),
+    );
+    assert_eq!(briefed(&w, Role::Reviewer, "1").as_deref(), Some("gpt-y"));
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+}
+
+#[test]
+fn a_runtimes_own_model_is_looked_up_level_by_level_and_before_the_plain_one() {
+    let mut w = two_runtimes();
+    let text = |t: &str| Value::Text(t.into());
+    let task = || Scope::Task(id("ankh", "1"));
+    set(&mut w, Scope::Global, None, "model.alpha", text("global"));
+    // The project's plain model is nearer than the global model.alpha.
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("haiku"));
+    // So is a refiner's task-level model.
+    w.apply(&Event::SettingSet {
+        scope: task(),
+        role: Some(Role::Author),
+        key: "model".into(),
+        value: text("opus"),
+        by: "refiner-1".into(),
+    });
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("opus"));
+    // At one place the runtime's own is read before the plain one.
+    set(
+        &mut w,
+        task(),
+        Some(Role::Author),
+        "model.alpha",
+        text("own"),
+    );
+    assert_eq!(briefed(&w, Role::Author, "1").as_deref(), Some("own"));
+    // And the role's own plain model before every role's model.alpha.
+    let project = || Scope::Project(ProjectId::new("klatch"));
+    set(&mut w, project(), None, "model.alpha", text("everyone"));
+    set(
+        &mut w,
+        project(),
+        Some(Role::Author),
+        "model",
+        text("authors"),
+    );
+    let klatch = |w: &World, role| {
+        w.launch(&GroupId::new("watch"), role, &id("klatch", "1"), None)
+            .expect("known")
+            .brief
+            .model
+    };
+    assert_eq!(klatch(&w, Role::Author).as_deref(), Some("authors"));
+    assert_eq!(klatch(&w, Role::Arbiter).as_deref(), Some("everyone"));
+}
+
 #[test]
 fn a_reviewers_only_runtime_reaches_reviewers_and_not_authors() {
     let mut w = working();

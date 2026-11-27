@@ -41,7 +41,7 @@ too.
 | Setting | Built in | Read by |
 |---|---|---|
 | `runtime` | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
-| `model` | the runtime's own default | the agent's brief, so the runtime adapter |
+| `model` | the runtime's own default | the agent's brief, so the runtime adapter. A model belongs to one runtime: `model.<runtime>` (`model.codex`) names it, and a plain `model` is the global runtime's ("A model belongs to a runtime", below) |
 | `runner` | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
 | `machine` | none: any machine | the loop, per issue and role, when it picks a work folder (below) |
 | `permission` | `auto` (or `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`) | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
@@ -56,6 +56,30 @@ too.
 The table is the resolver's: `temet-work settings` lists the same keys, and the code reads
 every one of them through it. A setting with no value and no built-in value, such as
 `model`, is left out of the listing.
+
+## A model belongs to a runtime
+
+A model's name means something to one runtime only, so a model never reaches an agent of
+another one.
+
+- `model.<runtime>`, such as `model.claude` or `model.codex`, is the model for agents of
+  that runtime.
+- A plain `model` is the model for agents of the global runtime: the `runtime` set
+  globally for every role, or the build's default (`claude`) when none is. A `runtime`
+  set for one role, or at a nearer level, does not change which runtime that is.
+
+The lookup for an agent's model goes level by level like any other, with the role's own
+value before the value for every role, and at each of those places it reads
+`model.<the agent's runtime>` before a plain `model`. So a refiner's `model: opus` on an
+issue beats a global `model.claude` for a Claude author. An agent with no model of its own
+runtime anywhere in the chain runs its runtime's default.
+
+In the example under "Setting them", authors run Claude with `haiku` on `radar`'s issues
+and `opus` on the milestone's. Reviewers run Codex, so none of those models reaches them;
+`codex = "..."` under `[settings.reviewer.model]` would give them one.
+
+`temet-work settings` shows the `model` an agent of that role gets, and no `model` line
+when it gets none. `temet-work status` lists each value under the key it was set with.
 
 How many issues a group refines at once stays on the group: it is how much the group
 takes on, not how a piece of work is done.
@@ -112,7 +136,9 @@ area can have its own, and a milestone is named with its project or area:
 ```toml
 [settings]
 runtime = "claude"
-model = "sonnet"
+
+[settings.model]
+claude = "sonnet"
 
 [settings.reviewer]
 runtime = "codex"
@@ -122,22 +148,28 @@ id = "radar"
 tracker = "github"
 name = "temet-ai/radar"
 
-[project.settings]
-model = "haiku"
+[project.settings.model]
+claude = "haiku"
 
 [[milestone]]
 of = "radar"
 name = "Slack sign-in rework"
 
-[milestone.settings]
-model = "opus"
+[milestone.settings.model]
+claude = "opus"
 ```
+
+TOML cannot hold `model = "..."` and `model.codex` in one table, so in the file a
+runtime's model is an entry of a `model` table at its level, or in a role's table
+(`[settings.reviewer.model]`). Each entry is the setting `model.<runtime>`. A plain
+`model = "..."` still loads, as the global runtime's model.
 
 By command, the same way a person or an agent runs any other:
 
 ```
 temet-work set radar#44 model opus
 temet-work set radar --role reviewer runtime codex
+temet-work set radar --role reviewer model.codex NAME
 temet-work unset radar#44 model
 temet-work settings radar#44 --role author
 ```
@@ -155,12 +187,17 @@ arbiters, refiners and investigators are a person's to set. A value from a plan,
 refiner's `set` with no role or with `--role author`, is recorded for the author, and its
 `unset` removes the author's value. A `set` or `unset` of `model` that names another role
 is refused. The refiner's other keys, such as `merge` or `starts`, are recorded for every
-role.
+role. All of this holds for `model.<runtime>` as for `model`.
 
 A person overturns the refiner's value with a `set` on the task that names no role, such
 as `temet-work set radar#44 model haiku`: it holds for every role, and the refiner's value
 for the author is dropped. A person's `unset` with no role drops it too, so the author
 takes the wider level's value. A value a person set with `--role author` stays.
+
+`model` and the global runtime's `model.<runtime>` (`model.claude`) are the same agents'
+model. So a person's `set` or `unset` of either on the task, with no role or for the
+author, also drops the refiner's value under the other name, which could otherwise be
+read first.
 
 Eight settings only a person sets, at any level and for any role. An agent's plan, `set` or
 `unset` that names one is refused with the reason, and a refused plan is not recorded:
@@ -188,10 +225,10 @@ out. An issue refined before the upgrade is then reviewed on the person's model.
 Every change, from the file, a command or a plan, is a `SettingSet` or `SettingUnset`
 event in the log with who made it: `file`, `person`, or the agent's id. A later event
 overrides an earlier one at the same level, role and key, so replaying the log gives the
-same settings. A value that names a runtime or runner this build does not have is refused
-when it is set, with the ones the build has listed, and the daemon does not start with
-one in its configuration. A build with no default runtime or runner, and no global value
-for it, does not start either.
+same settings. A value that names a runtime or runner this build does not have, or a
+`model.<runtime>` for such a runtime, is refused when it is set, with the ones the build
+has listed, and the daemon does not start with one in its configuration. A build with no
+default runtime or runner, and no global value for it, does not start either.
 
 Milestones are written `project:Milestone name` or `area:Milestone name`, in the
 commands and in the listing; in the file, `of` and `name`. An issue is matched to its
@@ -240,6 +277,11 @@ level. `temet-work status` lists every value with the level it is set at and who
 - Groups set no defaults. A group decides which work it takes; the chain decides how that
   work is done.
 - Within a level the role comes first; across levels the nearer level comes first.
+- Models are keyed by runtime, and a plain `model` is the global runtime's, so a file, a
+  group's old `model`, a log and a refiner's `model: opus` keep their meaning for the
+  agents they were written for. Applying a model only when it was set at a level as near
+  as the runtime was left out: in the example above the project's model is nearer than
+  the global runtime of reviewers, so a Codex reviewer would still get a Claude model.
 - Only a person sets `runtime`. The Codex adapter ignores `permission`, so an agent that
   chose the runtime could undo what a person set there. Refusing the change only when
   `permission` is not `auto` and the runtime named ignores it was left out: the core
