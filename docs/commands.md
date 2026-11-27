@@ -126,3 +126,21 @@ socket above; `ssh://[USER@]HOST[:PORT][/SOCKET/PATH]` runs `ssh -o BatchMode=ye
 The hidden command `temet-work relay` copies one request line from standard input to the
 local socket and the reply line back; it exits 4 when no daemon answers.
 `docs/configuration.md` says how to set up a work folder on another machine.
+
+## Steps that are not built yet
+
+Decided on 27 November 2026 (`docs/architecture.md`, "What the autonomy findings change").
+An agent that cannot finish has two more things it can say, so that it does not invent
+work to get to `ready`.
+
+| Command | Who runs it | Accepted when the issue is | What it does |
+|---|---|---|---|
+| `temet-work blocked ISSUE REASON` | the refiner or the author working on ISSUE | refining, working or fixing | Says the step cannot be done as the issue stands. `status` lists the issue as set aside with the reason, its agents are stopped, its work folder is freed and the group takes the next issue. Its pull request, if it has one, stays open. Issues that depend on it wait, and are listed as waiting on it. |
+| `temet-work unneeded ISSUE REASON` | the same | refining, working or fixing | Says the issue needs no change. `status` lists the issue with the reason, its agents are stopped, its work folder is freed and the group takes the next issue. The daemon also comments on the tracker issue with the reason and does not close it. Issues that depend on it start as if it were done. |
+
+Each is recorded as a decision with two options. A person who thinks the agent was wrong
+overturns it: the issue goes back to work with the reason, and a rule is proposed as for
+any overturn. When what blocked an issue has changed, a person runs `temet-work retry
+ISSUE` instead, which sends it back to work and proposes nothing. The refiner's and the
+author's briefs name these two beside the command that reports the step done, and so does
+the reminder an idle refiner or author gets.

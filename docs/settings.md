@@ -153,3 +153,5 @@ level. `temet-work status` lists every value with the level it is set at and who
 - Groups set no defaults. A group decides which work it takes; the chain decides how that
   work is done.
 - Within a level the role comes first; across levels the nearer level comes first.
+- A plan may set any setting at task level. Limiting a plan to a list of settings is left
+  until a trigger is met (`docs/architecture.md`, "Left until a trigger is met").

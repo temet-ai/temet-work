@@ -108,6 +108,8 @@ Conductor, Claude Squad, Sculptor, Superset, Agent Deck, Devin, Factory and Line
 | about 40% of weekly usage in one run | usage windows in the top bar and on the timeline; heavy work placed against them |
 | the retrospective failed 10 of 30 times; lesson effects mostly unmeasured | Learn: each proposed change cites the ruling or wait it came from, goes into a brief file, is measured on the next items and is kept or reverted |
 
+What the design takes from the research of 27 November into systems that write, review and ship their own code is in `docs/architecture.md` ("What the autonomy findings change"). The research is in `docs/findings/autonomy-research.md`, and the articles behind it in `docs/findings/autonomy-articles.md`.
+
 ## A first architecture
 
 | Part | What it does |

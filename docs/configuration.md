@@ -115,6 +115,10 @@ It refines `refining_at_once` issues at a time. It starts an author on a refined
 when one of the project's folders is free and every issue in the issue's "Depends on"
 lines is done. A project with two folders has at most two authors working at once.
 
+On a repository other people can open issues in, name the group's milestones: an issue
+with no milestone is then not taken (`docs/architecture.md`, "Left until a trigger is
+met").
+
 A project's `deploy` and `verify` commands run through `sh -c` in its `run_in` folder (your
 home folder when left out), with `TEMET_WORK_ISSUE` (the issue, such as `radar#44`),
 `TEMET_WORK_PROJECT` (the project's id) and `TEMET_WORK_REPO` (the code host's name for its

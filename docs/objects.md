@@ -23,15 +23,16 @@ yet.
 | Machine | the app | Where agents run, with its build slots. |
 | Limit | the app | A runtime account's usage windows (Claude 5 hours and 7 days, Codex 5 hours). |
 | Style guide | the app | Tokens, components, the ban list and the checks used when reviewing UI work. A project may set its accent, display face and density. |
-| Rule | the app or a project | A line in an agent's brief or in the config, with where it came from (a ruling, an overturned decision, a measured change), its state (proposed, kept or dropped; on trial and reverted are not built) and what it is measured by. |
+| Rule | the app or a project | A line in an agent's brief or in the config, with where it came from (a ruling, an overturned decision, a measured change), its state (proposed, kept or dropped; on trial and reverted are not built) and what it is measured by. It will carry a scope (a role, a project, or all), count against a brief's budget of rules (the setting `rules`), and count the issues it was given to (not built). |
 | Milestone | a project or area | From the tracker. A group's focus is a list of milestones. |
 | Issue | a project, in a milestone or none | From the tracker. One group at a time takes it through the loop. |
 | Work folder | a project | A checkout on one machine, used by one agent at a time, with a target directory that stays warm between issues. |
 | Plan | an issue | Written by the refiner as YAML: the checks and, for an area's issue, the repositories it changes in merge order (`repos`). The parts and who does each, the folder and the merge rule are not built yet. |
-| Check | a plan | One "Done when" line from the issue and the test or command that proves it. |
+| Check | a plan | One "Done when" line from the issue and the test or command that proves it. It may also carry a command with an expected exit code, which the daemon runs itself in the author's work folder at the pull request's head commit before review (not built). |
 | Pull request | an issue | The branch, CI, and the review rounds. |
-| Review round | a pull request | The reviewer's blocking points and the author's replies. A dispute between them goes to an arbiter. |
-| Decision | an issue | A choice an agent made: the options it weighed, the one it took, why, who decided, and the point after which overturning it costs more. Work carries on at once; a person reads decisions afterwards and can overturn them. |
+| Review round | a pull request | The reviewer's blocking points and the author's replies. A dispute between them goes to an arbiter. Each time the pull request comes up for review it will get a new reviewer session, whose brief carries the plan's checks, the daemon's results for them and the earlier blocking points; today one session serves every round. |
+| Decision | an issue | A choice an agent made: the options it weighed, the one it took, why, who decided, and the point after which overturning it costs more. Work carries on at once; a person reads decisions afterwards and can overturn them. Today the only decisions are rulings at arbitration; a plain approval, `blocked` and `unneeded` will be decisions too (not built). |
+| Merge record | an issue | What the daemon ran and saw when the issue merged: the commit, the checks and their results, the files changed, the review rounds and whether an arbiter ruled, each reviewer session's runtime and model, and whether the daemon merged it or found it merged. The daemon writes it; no agent does (not built). |
 | Message | an agent | Agent to agent, or agent to a person. |
 | Event | everything | What happened, with its time, in one append-only log. State is built from events. |
 
@@ -42,6 +43,12 @@ and opens a pull request; a reviewer reviews it in rounds, and an arbiter settle
 CI and the checks pass; it merges, deploys and is checked in a real session; the issue
 closes and the group takes the next one. Each choice along the way is a decision a person
 can overturn, and overturns change the rules agents work by.
+
+Two additions to this loop are decided and not built (`docs/architecture.md`, "What the
+autonomy findings change"). Before the review, the daemon runs the command of each check
+that has one and sends a failure straight back to the author. An agent that cannot do its
+step, or finds the issue needs no change, says so with `blocked` or `unneeded`; `status`
+lists the issue with the reason and the group takes the next one.
 
 ## Where each object shows in the app
 

@@ -183,6 +183,43 @@ features.
 | While working, run only the changed crate: `cargo nextest run -p <crate>`. CI runs the workspace, the budget and the mixes. | `.github/workflows/ci.yml` |
 | Every test runs sandboxed (`TEMET_WORK_SANDBOX=1`) and in UTC. | `.cargo/config.toml` |
 
+## What the autonomy findings change
+
+Decided on 27 November 2026. The research and the reasons are in
+`docs/findings/autonomy-research.md`, and the articles behind it in
+`docs/findings/autonomy-articles.md`; the finding numbers below are that document's.
+
+temet-work has no users but its authors, and the tickets, the machines and the
+repositories are theirs. A gate that stops work costs more than it saves at this stage.
+So the rule is: record and count now, and add a gate only when one of the triggers below
+is met. Nothing in the loop waits on a person, and that stays whole.
+
+### Taken into the design now
+
+Each of these makes the loop's work better or cheaper and holds nothing for a person.
+None is built; they are items 7 to 11 of "What comes next".
+
+| Found | In the design |
+|---|---|
+| A passing check proves little when the author controls it, and an agent's report of its own work is often wrong (finding 3). mike's floor runs a task's checks itself before any model sees the work. | A check may carry a command with an expected exit code. Before a reviewer starts, the daemon runs it in a terminal of its own in the author's work folder, on that folder's machine, so the build there is warm. It starts the run when the author's turn has ended, and first checks that the folder is clean and at the pull request's head commit. A failure, a timeout or a dirty folder goes back to the author as a fix and uses no review round; a check that fails again after that fix goes to the reviewer with its result, so the cap on rounds still ends it. A run with no result, such as a machine that cannot be reached, is a listed problem and is tried again. An author that cannot make a check pass because the check is wrong reports `blocked`. A check with no command is left to the reviewer, as now. Two contracts grow for this: a runner reports the exit code of a terminal that has ended, and a code host reports a pull request's head commit. |
+| A blocked agent often finds another way to finish, and agents change code in a third to two thirds of cases where no change is needed (finding 7). | Two more steps, `blocked` and `unneeded`, each with a reason (`docs/commands.md`). `status` lists the issue with the reason, its agents are stopped, its work folder is freed and the group takes the next issue. Issues that depend on a `blocked` issue wait and are listed as waiting on it; issues that depend on an `unneeded` one start as if it were done. Each is a decision a person can overturn. |
+| A reviewer that has been through a repair round grows more lenient, a judge shown its own verdicts repeats them, and a checker that reads the author's account can be steered by it (finding 4). mike's judge is not given the worker's summary. | A new reviewer session each time the pull request comes up for review; the session before it is stopped when its verdict is in. Its brief names the pull request and tells the reviewer to read the diff from the code host and the issue from the tracker, and to treat the pull request's description and the author's comments as claims to check. The brief itself carries what the daemon holds: the plan's checks, the results of the daemon's runs of them and the points that were blocking. The first round reads the whole change. A later round checks that the blocking points are met and reads the commits since for new defects; it raises nothing new about code that has not changed. A block names a `path:line` and what would satisfy it. The `starts` limit counts sessions that ended without reporting their step, so a reviewer that finished its round does not use one up. |
+| A person's check adds little when it rests on the agent's account, and "nobody overturned it" is not evidence that a decision was right (finding 8). | A plain approval is recorded as a decision by the reviewer; overturning one before the merge sends the issue back to its author with the reason. `status` lists the decisions of issues that are not done and the ones overturned, and counts the rest. Every merge leaves a record the daemon writes from what it ran and saw: the commit that merged; the checks and their results; the files changed as the code host lists them, and whether they include CI, deploy or verify commands, agent instructions or settings; the review rounds it took and whether an arbiter ruled; each reviewer session with the runtime and model it was started with; and whether the daemon merged it or found it merged. The daemon counts per project: failed verifies, issues that merged more than once, follow-up issues that name the issue they fix, `blocked` and `unneeded` with how long each has waited, and settings set by a plan. |
+| A learned rule is a release, and standing text grows one fix at a time unless something cuts it (finding 9). mike gives its standing text a budget that only goes down, and retires a lesson by count. | A rule has a scope (a role, a project, or all). A proposed rule starts scoped to the role that made the overturned decision; the person keeping it can change the scope and edit the text. A brief has a budget of rules, the setting `rules`; when keeping a rule would put a brief past it, the keep names a kept rule to drop, and `proposal RULE drop` works on a kept rule too. Each rule counts the issues it was given to. Trial and revert follow when there are enough issues to count. |
+
+### Left until a trigger is met
+
+| Left out now | Why it can wait | Trigger |
+|---|---|---|
+| Agents running as another user or in a sandbox, with the daemon's files and sign-in out of reach; a code-host identity of their own for agents; protected default branches (finding 5). | The agents, the machines and the repositories are the authors', and a mistake costs a revert. | Someone who is not one of the authors tells them they run temet-work, or is asked to; or it manages a repository its authors do not own; or a merge record shows a pull request the daemon found merged and did not merge itself. |
+| Stronger proof of who sent a command (finding 6). | Every sender today is one of the authors or an agent they started. | The same. |
+| A list of the settings a plan may set (finding 6). | A setting a refiner should not have set is listed as set by that refiner (`temet-work settings`), and a person sets it back. | A project takes tickets its authors did not write; or the count of settings set by plans shows one its issue did not ask for. |
+| Ticket text marked as content in briefs, a list of whose tickets are taken, and tokens that cannot write for the roles that only read (finding 10). | The tickets are the authors'. Until a trigger is met, every group on a repository other people can open issues in is given its milestones (`docs/configuration.md`): an issue a stranger opens has no milestone and is not taken. Its title is still listed by `status`, and a stranger's comment on an issue in work can still be read by the agent working on it; both are accepted for now. | A group works such a repository with no `milestones`; or an issue the authors did not write is put into a milestone a group works. |
+| A class of change held for a person: the daemon's own repository, CI and deploy commands, agent instructions, sign-in, migrations (findings 1 and 11). | Nothing waits on a person. In the open-issues fleet 14 questions went to a person and none was answered in the record (`docs/research.md`). | A managed project has users of its own or data that cannot be rebuilt; or the merge records show a merge that changed files of that class and had to be merged again. |
+| A trial run of a new build on a second daemon before it replaces the live one, with the previous build kept for an automatic return (finding 11). | A daemon that breaks itself is fixed by hand by the people who wrote it. | A deploy of temet-work itself leaves the daemon down or on the wrong build and nobody sees it for a working day; or that happens twice in one month. |
+| A second reviewer on another vendor's model, and a catch rate measured on seeded defects (findings 2 and 4). | A measured rate needs more merged issues than there are. | 50 issues have merged in one project and more than 6 of them merged more than once or drew a follow-up issue. The research found 11.5% of people's merged changes reverted within 90 days. |
+| State files agents cannot write; a stop command for a group, a project and everything; a daily count of sessions started against sessions captured. | The machines are the authors', and nobody else uses them. Today the stop is by hand: closing an issue in the tracker stops its agents at the next sync, and stopping the daemon and the `owner=temet-work` terminals stops everything. The count needs the mike part, which is a skeleton. | Someone who is not one of the authors runs agents with temet-work; or stopping a group by hand takes more than a few minutes. |
+
 ## What comes next
 
 In this order:
@@ -198,3 +235,18 @@ In this order:
 5. A GitLab code host.
 6. Overturning a decision by command, and rules proposed from overturns. Done: the loop applies an
    overturn itself, and a kept rule ends every brief written afterwards (`docs/commands.md`).
+7. The floor: a check can carry a command with an expected exit code, which the daemon
+   runs at the pull request's head commit before review (`docs/objects.md`).
+8. `blocked` and `unneeded` as steps a refiner or an author can report
+   (`docs/commands.md`).
+9. A new reviewer session each round, briefed with the diff, the issue and the daemon's
+   check results.
+10. A record of each merge written by the daemon, a plain approval recorded as a decision,
+    and counts of reverts, follow-up fixes and failed verifies.
+11. Rules with a scope, a budget and counts.
+
+Items 8 and 9 are small and can be taken whenever the loop is next worked on, ahead of
+their place here: 8 changes the loop and the commands, 9 the loop, the briefs and when the
+runtime family starts a reviewer. Item 7 is larger: it needs the pull request's head
+commit from the code host and a command's exit code from the runner, in both contracts
+and their adapters.
