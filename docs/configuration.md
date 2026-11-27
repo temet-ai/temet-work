@@ -167,11 +167,13 @@ When the issue is back in its group's lists it carries on from the stage it reac
 agent that stage needs starts or is told, or the merge goes ahead. An issue with a plan is
 not refined again.
 
-A group's work queue is its issues being refined or ready, and the new issues it would take
-that no group has taken yet. When the queue holds fewer than `queue_low` issues, the daemon
-starts one investigator for the group. Left out, `queue_low` is twice the work folders of
-the group's projects and of the projects in its areas, or 2 when they have none; 0 starts
-no investigator. The investigator holds no work folder and changes no file: it runs in a
+A group's work queue is the refining, ready and new issues in its scope (its milestones,
+projects and areas): those it is refining or has refined and not started, and those no group
+has taken yet. An issue moved out of them does not hold off an investigator, and counts again
+once it is back. When the queue holds fewer than `queue_low` issues, the daemon starts one
+investigator for the group. Left out, `queue_low` is twice the work folders of the group's
+projects and of the projects in its areas, or 2 when they have none; 0 starts no
+investigator. The investigator holds no work folder and changes no file: it runs in a
 free folder of the group's first project, or in one an author holds when none is free. It
 reads each project's docs for planned work that is not built, the open issues, and the pull
 requests merged since the group's last investigation started (the last 7 days for its
@@ -193,7 +195,8 @@ session ends. An idle investigator is reminded and then stopped after `remind_af
 `reminders`, like any agent the loop waits on. The next one starts once the queue is short
 again and `investigate_every` minutes have passed since the last one ended: 120 when left
 out, and at least 1. A group never investigated may start one at once. `temet-work status`
-shows the group's queue and `queue_low`, and `investigating: investigator-N` while one runs.
+shows how many issues the group's queue holds, the count compared with `queue_low`, beside
+`queue_low` itself, and `investigating: investigator-N` while one runs.
 
 A project's `deploy` and `verify` commands run through `sh -c` in its `run_in` folder (your
 home folder when left out), with `TEMET_WORK_ISSUE` (the issue, such as `radar#44`),

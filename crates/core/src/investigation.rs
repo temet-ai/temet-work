@@ -27,17 +27,19 @@ pub const FIRST_SINCE_DAYS: u64 = 7;
 
 impl World {
     /// The group's work queue: its issues refining or ready, and the new issues
-    /// it would take that no group has taken yet. Those count because the group
-    /// refines them next; leaving them out would start investigations that file
-    /// them again.
+    /// it would take that no group has taken yet, each only while in its scope.
+    /// The new ones count because the group refines them next; leaving them out
+    /// would start investigations that file them again. One out of scope is no
+    /// work for the group until it comes back.
     pub fn queue(&self, group: &Group) -> usize {
         self.issues
             .values()
             .filter(|i| match i.stage {
                 Stage::Refining | Stage::Ready => i.group.as_ref() == Some(&group.id),
-                Stage::New => i.group.is_none() && self.in_scope(group, i),
+                Stage::New => i.group.is_none(),
                 _ => false,
             })
+            .filter(|i| self.in_scope(group, i))
             .count()
     }
 

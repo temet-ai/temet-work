@@ -893,6 +893,58 @@ Problems
     }
 
     #[test]
+    fn the_status_counts_only_the_queue_in_scope() {
+        use crate::ids::{GroupId, MilestoneId};
+        let ankh = ProjectId::new("ankh");
+        let mut w = World::default();
+        w.apply(&Event::ProjectAdded {
+            project: ankh.clone(),
+            tracker: "t".into(),
+            name: "city/ankh".into(),
+            code_host: None,
+            repo: None,
+        });
+        w.apply(&Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ankh],
+            areas: Vec::new(),
+            milestones: vec![MilestoneId::new("First")],
+            refining_at_once: 1,
+            model: None,
+            queue_low: Some(8),
+            investigate_every: None,
+        });
+        let sync = |key: u64, milestone: &str| Event::IssueSynced {
+            issue: IssueId::new("ankh", key.to_string()),
+            title: format!("Issue {key}"),
+            milestone: Some(MilestoneId::new(milestone)),
+            depends_on: Vec::new(),
+            order: key,
+            closed: false,
+        };
+        // Twelve refined in First; the last ten are then moved to Later.
+        for key in 1..=12 {
+            w.apply(&sync(key, "First"));
+            w.apply(&Event::PlanWritten {
+                issue: IssueId::new("ankh", key.to_string()),
+                plan: Default::default(),
+            });
+        }
+        for key in 3..=12 {
+            w.apply(&sync(key, "Later"));
+        }
+        let all = text(&w, &BTreeMap::new());
+        assert!(
+            all.contains(
+                "\n  watch (Night watch): ankh; First; refines 1 at a time; 2 in its queue, \
+                 investigates below 8\n"
+            ),
+            "{all}"
+        );
+    }
+
+    #[test]
     fn the_status_lists_each_event_with_who_made_it() {
         let w = world();
         let all = text(&w, &BTreeMap::new());
