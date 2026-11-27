@@ -175,7 +175,8 @@ const SSH_OUTPUT_GRACE: Duration = Duration::from_millis(500);
 
 /// The daemon's socket on another machine, reached by running
 /// `ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
-/// -o ServerAliveCountMax=2 HOST temet-work relay` there. No listener and no
+/// -o ServerAliveCountMax=2 HOST temet-work relay --build BUILD --host NAME`
+/// there, with this client's [`crate::BUILD`] and machine name. No listener and no
 /// secret beyond the SSH access that already exists; BatchMode makes a missing key
 /// fail with ssh's own error instead of waiting for a password nobody can type.
 /// The other three options limit the connect and the silence on an open link
@@ -307,6 +308,10 @@ impl Transport for Ssh {
         }
         // `--` ends ssh's options, so the target is never read as one.
         cmd.args(["--", self.target.as_str(), "temet-work", "relay"]);
+        cmd.args(["--build", &shell_word(crate::BUILD)]);
+        if let Some(name) = machine_name() {
+            cmd.args(["--host", &name]);
+        }
         if let Some(socket) = &self.socket {
             cmd.args(["--socket", socket]);
         }
@@ -385,13 +390,60 @@ pub fn from_env() -> Result<Box<dyn Transport>, String> {
     transport_for(std::env::var(DAEMON_VAR).ok().as_deref(), path())
 }
 
+/// `text` as one word the far machine's shell reads unchanged: ssh joins the
+/// command into one line, so any other character becomes `_`.
+fn shell_word(text: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "._-+/".contains(c);
+    text.chars()
+        .map(|c| if plain(c) { c } else { '_' })
+        .collect()
+}
+
+/// This machine's name, as `uname -n` says it on Linux and macOS.
+fn machine_name() -> Option<String> {
+    let out = Command::new("uname").arg("-n").output().ok()?;
+    let name = String::from_utf8(out.stdout).ok()?;
+    Some(shell_word(name.trim())).filter(|n| !n.is_empty())
+}
+
+/// What the client on the other end of a hop says about itself on the relay
+/// call. A client from before builds were sent says nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Caller<'a> {
+    /// Its [`crate::BUILD`].
+    pub build: Option<&'a str>,
+    /// Its machine's name.
+    pub host: Option<&'a str>,
+}
+
 /// `temet-work relay`: copies one request line from `input` to the daemon's
 /// socket at `path` and its reply line to `out`, so the other end of an SSH hop
-/// speaks the daemon's own wire format.
-pub fn relay(path: &Path, input: impl BufRead, mut out: impl Write) -> Result<(), String> {
+/// speaks the daemon's own wire format. A `caller` that is not this build gets a
+/// refusal naming both builds, and the daemon is not contacted: this program and
+/// the daemon come from one install.
+pub fn relay(
+    path: &Path,
+    caller: Caller,
+    input: impl BufRead,
+    mut out: impl Write,
+) -> Result<(), String> {
     let mut line = String::new();
     let mut input = input;
     input.read_line(&mut line).map_err(|e| e.to_string())?;
+    if caller.build != Some(shell_word(crate::BUILD).as_str()) {
+        let refusal = Reply::Refused {
+            why: format!(
+                "temet-work on {} is build {}, the daemon is build {}: update it",
+                caller.host.unwrap_or("the other machine"),
+                caller.build.unwrap_or("unknown"),
+                crate::BUILD
+            ),
+        };
+        let refusal = serde_json::to_string(&refusal).map_err(|e| e.to_string())?;
+        return writeln!(out, "{refusal}")
+            .and_then(|()| out.flush())
+            .map_err(|e| e.to_string());
+    }
     let mut stream = connect(path)?;
     stream
         .write_all(line.trim_end().as_bytes())
@@ -578,6 +630,8 @@ mod tests {
         let args = std::fs::read_to_string(script.with_extension("args")).expect("args");
         remove(&script);
         assert_eq!(reply, all_quiet());
+        let build = shell_word(crate::BUILD);
+        let name = machine_name().expect("this machine's name");
         assert_eq!(
             args.lines().collect::<Vec<_>>(),
             [
@@ -593,7 +647,33 @@ mod tests {
                 "unseen-university.invalid",
                 "temet-work",
                 "relay",
+                "--build",
+                &build,
+                "--host",
+                &name,
             ]
+        );
+    }
+
+    #[test]
+    fn relay_refuses_a_caller_that_sends_no_build_before_it_touches_the_socket() {
+        let mut out = Vec::new();
+        // No daemon is there: reaching for it would be an error.
+        let relayed = relay(
+            Path::new("/nonexistent/daemon.sock"),
+            Caller::default(),
+            &b"{\"command\":\"from an older client\"}\n"[..],
+            &mut out,
+        );
+        assert_eq!(relayed, Ok(()));
+        assert_eq!(
+            serde_json::from_slice::<Reply>(&out).expect("a reply"),
+            Reply::Refused {
+                why: format!(
+                    "temet-work on the other machine is build unknown, the daemon is build {}: update it",
+                    crate::BUILD
+                )
+            }
         );
     }
 

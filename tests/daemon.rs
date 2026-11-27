@@ -892,9 +892,124 @@ fn a_failed_ssh_hop_says_which_step_failed() {
 }
 
 #[test]
+fn a_hop_sends_the_clients_build_and_machine_name_on_the_relay_call() {
+    use temet_work::socket::{self, Ssh, Transport};
+    use temet_work_core::{Command, Request};
+
+    let args = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("relay-call.args");
+    let body = format!(
+        r#"#!/bin/sh
+printf '%s\n' "$@" >{}
+cat >/dev/null
+printf '{{"reply":"done","text":"all quiet"}}\n'
+"#,
+        args.display()
+    );
+    let stub = stub_ssh("relay-call", &args, Some(&body));
+    Ssh {
+        target: "stub".into(),
+        port: None,
+        socket: None,
+        program: stub.display().to_string(),
+        deadline: socket::SSH_DEADLINE,
+    }
+    .send(&Request {
+        by: None,
+        command: Command::Status,
+    })
+    .expect("a reply");
+    let args = std::fs::read_to_string(args).expect("args");
+    let args: Vec<&str> = args.lines().collect();
+    let uname = std::process::Command::new("uname")
+        .arg("-n")
+        .output()
+        .expect("uname");
+    let name = String::from_utf8_lossy(&uname.stdout);
+    let call = [
+        "temet-work",
+        "relay",
+        "--build",
+        temet_work::BUILD,
+        "--host",
+        name.trim(),
+    ];
+    assert!(args.ends_with(&call), "{args:?}");
+}
+
+/// A stub `ssh` whose far end is the real `temet-work relay`, told that the
+/// caller is build `other` on the machine `lancre`.
+fn other_build_stub(name: &str, socket: &std::path::Path) -> std::path::PathBuf {
+    let body = format!(
+        "#!/bin/sh\nTEMET_WORK_SOCKET={} exec {} relay --build other --host lancre\n",
+        socket.display(),
+        env!("CARGO_BIN_EXE_temet-work")
+    );
+    stub_ssh(name, socket, Some(&body))
+}
+
+fn other_build_refusal() -> String {
+    format!(
+        "temet-work on lancre is build other, the daemon is build {}: update it",
+        temet_work::BUILD
+    )
+}
+
+#[test]
+fn a_client_at_a_different_build_is_refused_and_nothing_reaches_the_daemon() {
+    use temet_work::socket::{self, Reply, Ssh, Transport};
+    use temet_work_core::{Command, Request};
+
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("other-build.sock");
+    let requests = socket::listen(&path).expect("listen");
+    let stub = other_build_stub("other-build", &path);
+    let reply = Ssh {
+        target: "stub".into(),
+        port: None,
+        socket: None,
+        program: stub.display().to_string(),
+        deadline: socket::SSH_DEADLINE,
+    }
+    .send(&Request {
+        by: None,
+        command: Command::Status,
+    });
+    assert_eq!(
+        reply,
+        Ok(Reply::Refused {
+            why: other_build_refusal()
+        })
+    );
+    assert!(requests.try_recv().is_err(), "the request was forwarded");
+}
+
+#[test]
+fn a_person_at_a_different_build_reads_one_line_and_exit_code_1() {
+    let nowhere = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("unused.sock");
+    let stub = other_build_stub("other-build-cli", &nowhere);
+    let path = format!(
+        "{}:{}",
+        stub.parent().expect("dir").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+        .arg("status")
+        .env("PATH", path)
+        .env("TEMET_WORK_DAEMON", "ssh://stub")
+        .env_remove("TEMET_WORK_AGENT")
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!("refused: {}\n", other_build_refusal())
+    );
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
 fn relay_with_no_daemon_exits_non_zero_saying_so() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
-        .arg("relay")
+        .args(["relay", "--build", temet_work::BUILD])
         .env(
             "TEMET_WORK_SOCKET",
             std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("none.sock"),

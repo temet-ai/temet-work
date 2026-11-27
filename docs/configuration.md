@@ -186,21 +186,33 @@ The daemon starts the agent through herdr-core on `machine`, with `TEMET_WORK_DA
 environment (`ssh://omit/PATH/TO/daemon.sock` when this daemon was started with
 `TEMET_WORK_SOCKET`, so a second daemon on the same machine is reached too; the path
 after the host is the daemon's socket there, and none means its default). Every `temet-work` command the agent runs then goes over
-`ssh -o BatchMode=yes omit temet-work relay [--socket PATH]`, which hands the request to the daemon's
-local socket. No port is opened and no new secret is made. `BatchMode` makes a missing
+`ssh -o BatchMode=yes omit temet-work relay --build BUILD --host NAME [--socket PATH]`,
+which hands the request to the daemon's local socket when `BUILD`, the build of the agent's
+`temet-work`, is the build of the one on the daemon's machine. No port is opened and no new
+secret is made. `BatchMode` makes a missing
 key fail with ssh's own error instead of waiting for a password. With no `daemon_host`
 the daemon starts no agent on another machine and lists a problem naming `machine` and
 `daemon_host`, because the daemon's own name is often not one the other machine can
 resolve.
 
-The other machine needs four things, and each has a command that checks it:
+The other machine needs five things, and each has a command that checks it:
 
 | Needs | Check |
 |---|---|
 | SSH access from the daemon's machine | `ssh -o BatchMode=yes mac true` on the daemon's machine |
 | SSH access back to the daemon's machine, under the name in `daemon_host` | `ssh -o BatchMode=yes omit true` on the other machine |
 | `temet-work` on the `PATH` a non-interactive SSH session gets | `ssh mac temet-work parts`, and `ssh omit temet-work parts` from there |
+| `temet-work` at the daemon's build | `ssh mac 'TEMET_WORK_DAEMON=ssh://omit temet-work status'`: at another build it is refused, naming both builds |
 | The checkout at `path`, and the agent runtime (such as `claude`) | `ssh mac 'cd /Users/me/projects/radar && git status -sb && command -v claude'` |
+
+The build is what `git describe --always --dirty` said where `temet-work` was built, and
+`temet-workd --build` prints the daemon's. `temet-work` has no flag that prints its own, so
+the check is that `temet-work relay` on the daemon's machine does not refuse it. The
+refusal is one line,
+`refused: temet-work on mac is build X, the daemon is build Y: update it`. A `temet-work`
+too old to send its build is refused as build `unknown` on `the other machine`. Two
+clones of one commit can describe it differently (other tags, or a longer short hash),
+and those count as different builds.
 
 On a new machine, start `claude --permission-mode auto` once in the work folder and answer
 "Allow this read outside the working directories?" with "Yes, and keep allowing". An unattended
@@ -278,6 +290,10 @@ folder's own `machine` field still says where that folder is. The daemon's own m
 `local`, whatever its host name.
 
 ## temet-work deploying itself
+
+Self-deploy updates only the daemon's machine. Every other machine that has a work folder
+needs the same install, of the same commit; until then the commands its agents send are
+refused ("A work folder on another machine", above).
 
 A deploy may restart the daemon that runs it, so the command does three things in this
 order: build and install, record the handoff, start the restart outside the daemon. A
