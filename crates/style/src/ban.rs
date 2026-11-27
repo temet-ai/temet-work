@@ -175,4 +175,68 @@ mod tests {
         icons.dedup();
         assert_eq!(icons.len(), STAGES.len());
     }
+
+    /// Every colour a look draws with, named for the message.
+    fn look_colours(l: &crate::Look) -> Vec<(String, Rgba)> {
+        let mut out = vec![
+            ("background".to_string(), l.background),
+            ("text".to_string(), l.text),
+        ];
+        out.extend(l.border_colour.map(|c| ("border".to_string(), c)));
+        out.extend(
+            l.shadow
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (format!("shadow {i}"), s.colour)),
+        );
+        out
+    }
+
+    #[test]
+    fn no_part_draws_a_banned_colour_or_a_round_corner_in_any_theme() {
+        let mut found: Vec<String> = Vec::new();
+        for (theme, t) in THEMES {
+            for l in t.looks {
+                let at = format!("{theme}: {} {} {:?}", l.component, l.variant, l.state);
+                for (what, c) in look_colours(l) {
+                    if let Some(b) = banned(c) {
+                        found.push(format!("{at}: {what} {:08x} is {}", c.0, b.name));
+                    }
+                }
+                if l.radius.0 > MAX_RADIUS.0 {
+                    found.push(format!("{at}: a {} px corner", l.radius.0));
+                }
+            }
+        }
+        assert!(found.is_empty(), "{}", found.join("\n"));
+    }
+
+    #[test]
+    fn every_theme_measures_the_same_parts_variants_and_states() {
+        let keys = |t: &Tokens| -> Vec<(&str, &str, crate::State)> {
+            let mut k: Vec<_> = t
+                .looks
+                .iter()
+                .map(|l| (l.component, l.variant, l.state))
+                .collect();
+            k.sort_by_key(|(c, v, s)| (*c, *v, format!("{s:?}")));
+            k
+        };
+        let (first, rest) = THEMES.split_first().expect("a theme");
+        for (theme, t) in rest {
+            assert_eq!(keys(t), keys(first.1), "{theme} and {}", first.0);
+        }
+    }
+
+    #[test]
+    fn every_setting_is_a_colour_of_every_theme() {
+        for (theme, t) in THEMES {
+            for name in SETTINGS {
+                assert!(
+                    t.colours().iter().any(|(n, _)| *n == name),
+                    "{theme}: the setting {name} is not one of its colours"
+                );
+            }
+        }
+    }
 }

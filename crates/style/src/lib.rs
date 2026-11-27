@@ -102,6 +102,66 @@ pub struct StageView {
     pub icon: &'static str,
 }
 
+/// One layer of a box shadow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shadow {
+    /// Drawn inside the box.
+    pub inset: bool,
+    pub x: Px,
+    pub y: Px,
+    pub blur: Px,
+    pub spread: Px,
+    pub colour: Rgba,
+}
+
+/// The state a part is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum State {
+    Rest,
+    Hover,
+    Active,
+    Focus,
+    Disabled,
+}
+
+/// A part as the design system's stories draw it, in one variant and state: what the design
+/// system's build measured on the rendered element.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Look {
+    /// The part, as the design system names it: `Tag`, `ListRow`.
+    pub component: &'static str,
+    /// The classes of the element and of its part's root or nearest tm-* ancestor, sorted, such as
+    /// `intent-primary minimal tm-row-end tm-status`; with the sub-element first where a part has
+    /// several (`th: default`); or `default`.
+    pub variant: &'static str,
+    pub state: State,
+    /// Fully transparent when the element has no fill.
+    pub background: Rgba,
+    pub text: Rgba,
+    /// Border widths: top, right, bottom, left.
+    pub border: [Px; 4],
+    pub border_colour: Option<Rgba>,
+    pub radius: Px,
+    /// The rendered height. For an element whose height follows its content, it is the story's.
+    pub height: Px,
+    /// Top, right, bottom, left.
+    pub padding: [Px; 4],
+    pub font_size: Px,
+    pub font_weight: f32,
+    pub shadow: &'static [Shadow],
+}
+
+/// A font file the app embeds, under `app/assets/fonts/`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontFile {
+    pub family: &'static str,
+    pub weight: f32,
+    /// Its path under `app/assets/fonts/`.
+    pub file: &'static str,
+    /// Its licence's path under `app/assets/fonts/`.
+    pub licence: &'static str,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

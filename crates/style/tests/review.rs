@@ -4,7 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use temet_work_style::review::{parse_map, review};
+use temet_work_style::review::{parse_map, review, unknown_parts};
+use temet_work_style::tokens::PARTS;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -47,6 +48,12 @@ fn the_app_keeps_the_layer_map() {
         parsed.components.len(),
         parsed.composites.len(),
         parsed.pages.len()
+    );
+    let unknown = unknown_parts(&parsed, &PARTS);
+    assert!(
+        unknown.is_empty(),
+        "docs/ui.md names parts the design system does not have:\n{}",
+        unknown.join("\n")
     );
     let findings = review(&files(&root().join("app/src")), &map);
     let lines: Vec<String> = findings.iter().map(ToString::to_string).collect();

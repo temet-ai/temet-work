@@ -755,6 +755,84 @@ pub mod size {
     }
 }
 
+/// The parts' looks, as the design system's stories draw them: each part, variant and state
+/// measured by the design system's build. For components only. Ask with the part's name and its
+/// variant's classes as string literals, as the design system names them
+/// (`look::get(cx, "Tag", "minimal", State::Rest)`), so the theme's test can find every look the
+/// app asks for and check that each theme has it.
+pub mod look {
+    use gpui::{App, BoxShadow, Edges, FontWeight, Hsla, Pixels, point};
+    pub use temet_work_style::State;
+
+    use super::{active, c, size_of};
+
+    /// A look in GPUI's values.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Look {
+        /// Fully transparent when the part has no fill.
+        pub background: Hsla,
+        pub text: Hsla,
+        pub border: Edges<Pixels>,
+        pub border_colour: Option<Hsla>,
+        pub radius: Pixels,
+        /// The height the story drew it at; a part whose height follows its content reads it
+        /// only for a single line.
+        pub height: Pixels,
+        pub padding: Edges<Pixels>,
+        pub font_size: Pixels,
+        pub font_weight: FontWeight,
+        pub shadow: Vec<BoxShadow>,
+    }
+
+    fn edges(e: [temet_work_style::Px; 4]) -> Edges<Pixels> {
+        Edges {
+            top: size_of(e[0]),
+            right: size_of(e[1]),
+            bottom: size_of(e[2]),
+            left: size_of(e[3]),
+        }
+    }
+
+    fn of(l: &temet_work_style::Look) -> Look {
+        Look {
+            background: c(l.background),
+            text: c(l.text),
+            border: edges(l.border),
+            border_colour: l.border_colour.map(c),
+            radius: size_of(l.radius),
+            height: size_of(l.height),
+            padding: edges(l.padding),
+            font_size: size_of(l.font_size),
+            font_weight: FontWeight(l.font_weight),
+            shadow: l
+                .shadow
+                .iter()
+                .map(|s| BoxShadow {
+                    color: c(s.colour),
+                    offset: point(size_of(s.x), size_of(s.y)),
+                    blur_radius: size_of(s.blur),
+                    spread_radius: size_of(s.spread),
+                    inset: s.inset,
+                })
+                .collect(),
+        }
+    }
+
+    /// The look of `component` in `variant` and `state` in the theme in force. A state the
+    /// design system did not measure for that variant takes the variant's rest look. A variant
+    /// it did not measure at all is a bug the theme's test catches; at run time it panics.
+    pub fn get(cx: &App, component: &str, variant: &str, state: State) -> Look {
+        let t = active(cx);
+        let found = t
+            .look(component, variant, state)
+            .or_else(|| t.look(component, variant, State::Rest));
+        match found {
+            Some(l) => of(l),
+            None => panic!("the design system has no look for {component} `{variant}`"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Map, Value};
@@ -864,6 +942,73 @@ mod tests {
         let (.., ground) = l.tm_surface_page.hsl();
         let (.., ink) = l.bp_typography_color_default_rest.hsl();
         assert!(ground > 0.8 && ink < 0.3, "ground {ground}, text {ink}");
+    }
+
+    /// Every `look::get(cx, "Part", "variant", State::X)` in the app's source, as written.
+    fn looks_asked() -> Vec<(String, String, String, String)> {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = Vec::new();
+        let mut todo = vec![src];
+        while let Some(dir) = todo.pop() {
+            for e in std::fs::read_dir(&dir).expect("src reads").flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    todo.push(path);
+                    continue;
+                }
+                // Code only, with a call that rustfmt split over lines joined up again.
+                let text: String = std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                for call in text.split("look::get(").skip(1) {
+                    let args: Vec<&str> = call
+                        .split(')')
+                        .next()
+                        .unwrap_or("")
+                        .split(',')
+                        .map(str::trim)
+                        .collect();
+                    if let [_, part, variant, state, ..] = args[..]
+                        && part.starts_with('"')
+                        && variant.starts_with('"')
+                    {
+                        out.push((
+                            path.display().to_string(),
+                            part.trim_matches('"').to_string(),
+                            variant.trim_matches('"').to_string(),
+                            state.trim_start_matches("State::").to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_look_the_app_asks_for_is_in_every_theme() {
+        let mut missing = Vec::new();
+        for (file, part, variant, _state) in looks_asked() {
+            for (theme, t) in tokens::THEMES {
+                if t.look(&part, &variant, look::State::Rest).is_none() {
+                    missing.push(format!(
+                        "{file}: {theme} has no look for {part} `{variant}`"
+                    ));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "{}", missing.join("\n"));
+    }
+
+    #[test]
+    fn a_look_reads_the_measured_values() {
+        let l = tokens::DARK
+            .look("Tag", "minimal", look::State::Rest)
+            .expect("Tag minimal");
+        assert!(l.radius.0 <= 2.0 && l.font_size.0 > 0.0, "{l:?}");
     }
 
     #[test]
