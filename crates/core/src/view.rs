@@ -4,12 +4,15 @@
 //! The desktop app reads it, and `temet-work status --json` prints it. It is
 //! built from named fields, so what the log holds for the loop alone stays out:
 //! an agent's secret digest and limit marks, folder paths, plans, what an author
-//! is to fix, settings, rules and the waiting list.
+//! is to fix, settings, rules and the waiting list. The problem lines and the
+//! agents' state lines are free text that may name a work folder's path, so they
+//! are taken without it.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::host;
 use crate::ids::{AgentId, FolderId, GroupId, MachineId, MilestoneId, ProjectId};
 use crate::model::{self, AgentState, Stage};
 use crate::text;
@@ -249,11 +252,58 @@ impl View {
                 .values()
                 .filter(|i| i.stage == Stage::Done)
                 .count(),
-            agents: world.agents.values().map(agent).collect(),
+            agents: world.agents.values().map(|a| agent(world, a)).collect(),
             decisions: world.decisions.values().map(decision).collect(),
-            problems: problems.clone(),
+            problems: shown(world, problems),
         }
     }
+}
+
+/// The problem lines for the view, without work folders' paths. The host's lines
+/// for stopped agents name the folder each runs in, so they are written again
+/// without it; one for an agent that has since left that state is dropped.
+fn shown(world: &World, problems: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let stopped: BTreeMap<String, String> = world
+        .agents
+        .values()
+        .filter_map(|a| host::stopped(a, String::new))
+        .collect();
+    problems
+        .iter()
+        .filter_map(|(key, line)| {
+            let line = if host::of_a_stopped_agent(key) {
+                stopped.get(key)?
+            } else {
+                line
+            };
+            Some((key.clone(), without_paths(world, line)))
+        })
+        .collect()
+}
+
+/// `line` with each work folder's path in it written as `folder ID`. A path that
+/// is a bare name, such as `work`, is a word like any other, so it is replaced
+/// only where a part says it cannot trust it.
+fn without_paths(world: &World, line: &str) -> String {
+    let mut folders: Vec<&model::Folder> = world.folders.values().collect();
+    // Longest first, so a folder inside another is replaced whole.
+    folders.sort_by_key(|f| std::cmp::Reverse(f.path.len()));
+    let mut line = line.to_string();
+    for f in folders {
+        let named = format!("folder {}", f.id);
+        let path = f.path.trim_end_matches('/');
+        if path.contains('/') {
+            line = line.replace(path, &named);
+        } else {
+            for after in [":", " on "] {
+                line = line.replace(
+                    &format!("cannot trust {}{after}", f.path),
+                    &format!("cannot trust {named}{after}"),
+                );
+            }
+        }
+    }
+    line
 }
 
 fn project(world: &World, p: &model::Project) -> Project {
@@ -311,7 +361,7 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
     }
 }
 
-fn agent(a: &model::Agent) -> Agent {
+fn agent(world: &World, a: &model::Agent) -> Agent {
     Agent {
         id: a.id.clone(),
         group: a.group.clone(),
@@ -320,7 +370,7 @@ fn agent(a: &model::Agent) -> Agent {
         machine: a.machine.clone(),
         folder: a.folder.clone(),
         state: (&a.state).into(),
-        state_text: text::agent_state(&a.state),
+        state_text: without_paths(world, &text::agent_state(&a.state)),
         started: a.started,
     }
 }
@@ -346,6 +396,7 @@ fn decision(d: &model::Decision) -> Decision {
 mod tests {
     use super::*;
     use crate::event::Event;
+    use crate::host::{Host, Memory};
     use crate::ids::{DecisionId, IssueId};
     use crate::model::{DecisionKind, Plan, Role};
     use crate::sender::Digest;
@@ -450,7 +501,7 @@ mod tests {
                 folder: FolderId::new("yard-1"),
                 project: ProjectId::new("watch"),
                 machine: MachineId::new("pseudopolis"),
-                path: "/srv/pseudopolis-yard/watch".into(),
+                path: FOLDER_PATH.into(),
             },
             Event::SettingSet {
                 scope: Scope::Project(ProjectId::new("watch")),
@@ -570,10 +621,37 @@ mod tests {
         );
     }
 
+    /// A host over the snapshot world after one tick, so its problems are the
+    /// ones the daemon reports: among them a line for the blocked agent and one
+    /// for the errored agent, each naming the work folder's path.
+    fn ticked() -> Host {
+        let mut host = Host::new(world(), Vec::new(), Box::new(Memory::default()));
+        host.tick(0).expect("tick");
+        host
+    }
+
+    const FOLDER_PATH: &str = "/srv/pseudopolis-yard/watch";
+
     #[test]
     fn the_json_holds_no_digest_reset_time_path_plan_fix_or_setting() {
-        let w = world();
-        let json = serde_json::to_string(&View::new(&w, &problems())).expect("json");
+        let host = ticked();
+        for key in ["blocked: reviewer-3", "errored: author-4"] {
+            let line = &host.problems()[key];
+            assert!(line.contains(FOLDER_PATH), "the host names it: {line}");
+        }
+        let w = host.world();
+        let view = View::new(w, host.problems());
+        let json = serde_json::to_string(&view).expect("json");
+        // The two lines are still there, without the folder.
+        assert_eq!(
+            view.problems["blocked: reviewer-3"],
+            "reviewer-3 is blocked: permission; the daemon cannot answer it"
+        );
+        assert_eq!(
+            view.problems["errored: author-4"],
+            "author-4 stopped on an error: usage limit reached; \
+             the daemon sends continue after it resets"
+        );
         let digests: Vec<String> = w
             .agents
             .values()
@@ -586,7 +664,7 @@ mod tests {
         let left_out = [
             reset.to_string(),
             CONTINUED_MS.to_string(),
-            "/srv/pseudopolis-yard".into(),
+            FOLDER_PATH.into(),
             "the clock strikes thirteen".into(),
             "listening at midnight".into(),
             "the broom is missing".into(),
@@ -595,6 +673,73 @@ mod tests {
         for value in digests.iter().chain(&left_out) {
             assert!(!json.contains(value), "{value} is in {json}");
         }
+    }
+
+    #[test]
+    fn a_folders_path_in_a_parts_line_or_an_agents_is_written_as_the_folders_id() {
+        let mut w = world();
+        // A bare name, as a folder's path may be, and a folder inside another.
+        for (id, path) in [
+            ("bare", "work"),
+            ("inner", "/srv/pseudopolis-yard/watch/ui/"),
+        ] {
+            w.apply(&Event::FolderAdded {
+                folder: FolderId::new(id),
+                project: ProjectId::new("watch"),
+                machine: MachineId::new("pseudopolis"),
+                path: path.into(),
+            });
+        }
+        w.apply(&Event::AgentChanged {
+            agent: AgentId::new("author-2"),
+            state: AgentState::Working {
+                doing: format!("reading {FOLDER_PATH}/clock.rs and {FOLDER_PATH}/ui/face.rs"),
+            },
+        });
+        let problems = [
+            (
+                "run author-2",
+                format!("cannot trust {FOLDER_PATH} on pseudopolis: denied"),
+            ),
+            (
+                "start a author on watch#3",
+                "cannot trust work: no work folder".to_string(),
+            ),
+        ]
+        .map(|(key, line)| (key.to_string(), line))
+        .into();
+        let view = View::new(&w, &problems);
+        assert_eq!(
+            view.problems["run author-2"],
+            "cannot trust folder yard-1 on pseudopolis: denied"
+        );
+        assert_eq!(
+            view.problems["start a author on watch#3"],
+            "cannot trust folder bare: no work folder"
+        );
+        let author = view.agents.iter().find(|a| a.id.0 == "author-2");
+        assert_eq!(
+            author.map(|a| a.state_text.as_str()),
+            Some("working: reading folder yard-1/clock.rs and folder inner/face.rs")
+        );
+    }
+
+    #[test]
+    fn a_stopped_agents_line_goes_when_the_agent_has_left_that_state() {
+        let mut host = ticked();
+        host.handle(
+            1,
+            Event::AgentChanged {
+                agent: AgentId::new("reviewer-3"),
+                state: AgentState::Ended,
+            },
+        )
+        .expect("ended");
+        // The host lists it until its next tick.
+        assert!(host.problems().contains_key("blocked: reviewer-3"));
+        let view = View::new(host.world(), host.problems());
+        assert!(!view.problems.contains_key("blocked: reviewer-3"));
+        assert!(view.problems.contains_key("errored: author-4"));
     }
 
     #[test]
