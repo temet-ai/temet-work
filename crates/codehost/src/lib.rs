@@ -279,8 +279,10 @@ pub const MERGE_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// It reads the CI of each pull request under review, as often as its `ci_every`
 /// setting says (30 seconds by default), and reports when it has finished. An issue
 /// that changes several repositories passes only when CI passed on every pull
-/// request. It merges an issue's pull requests when the loop asks, one repository at
-/// a time in the plan's order, each after the previous one's main pipeline passed.
+/// request. A pull request that still shows no run at a later read, while its
+/// repository runs CI, is a problem until it has one. It merges an issue's pull
+/// requests when the loop asks, one repository at a time in the plan's order, each
+/// after the previous one's main pipeline passed.
 #[derive(Default)]
 pub struct CodeHosts {
     adapters: Vec<Box<dyn CodeHost>>,
@@ -288,6 +290,10 @@ pub struct CodeHosts {
     every_ms: Option<u64>,
     read_at: BTreeMap<IssueId, u64>,
     errors: BTreeMap<IssueId, String>,
+    /// The pull requests under review that showed no run when last read, though
+    /// their repository runs CI, by issue, repository and pull request: true once
+    /// the read before had found none either.
+    no_run: BTreeMap<(IssueId, ProjectId, String), bool>,
     merge_failed: BTreeMap<IssueId, (String, Instant)>,
     /// When the main pipeline after a merge was last read, and what it said,
     /// by issue, repository and pull request.
@@ -391,9 +397,20 @@ impl CodeHosts {
             }
             // No checks yet usually means CI has not started on the new commit; only
             // a repository that runs no CI leaves the plan's checks to the reviewer.
+            let awaited = pull.checks == Checks::None && world.repo_flag(&issue.id, &repo, "ci");
+            let key = (issue.id.clone(), repo.clone(), number.clone());
+            if awaited {
+                // A second read with none may mean no run is coming.
+                self.no_run
+                    .entry(key)
+                    .and_modify(|again| *again = true)
+                    .or_insert(false);
+            } else {
+                self.no_run.remove(&key);
+            }
             match pull.checks {
                 Checks::Pending => pending = true,
-                Checks::None if world.repo_flag(&issue.id, &repo, "ci") => pending = true,
+                Checks::None if awaited => pending = true,
                 Checks::Passed | Checks::None => {}
                 Checks::Failed { failing } => failed.extend(
                     failing
@@ -576,8 +593,9 @@ impl Part for CodeHosts {
             })
             .cloned()
             .collect();
-        self.errors
-            .retain(|id, _| waiting.iter().any(|w| &w.id == id));
+        let still_waiting = |id: &IssueId| waiting.iter().any(|w| &w.id == id);
+        self.errors.retain(|id, _| still_waiting(id));
+        self.no_run.retain(|(id, ..), _| still_waiting(id));
         for i in waiting {
             let issue = i.id.clone();
             let every = self
@@ -601,8 +619,20 @@ impl Part for CodeHosts {
                 }
             }
         }
-        let problem = (!self.errors.is_empty())
-            .then(|| self.errors.values().cloned().collect::<Vec<_>>().join("; "));
+        // Made from what the last reads found, so it stays listed between reads.
+        let no_run = self.no_run.iter().filter(|(_, again)| **again);
+        let problems: Vec<String> = self
+            .errors
+            .values()
+            .cloned()
+            .chain(no_run.map(|((issue, repo, number), _)| {
+                format!(
+                    "{issue}: still no CI run on pull request {number} in {repo}; set ci to \
+                     false for {repo} if it runs none there"
+                )
+            }))
+            .collect();
+        let problem = (!problems.is_empty()).then(|| problems.join("; "));
         Polled { events, problem }
     }
 
@@ -883,6 +913,131 @@ mod tests {
             first(part.poll(&w, 1).events),
             Some(Event::ChecksFinished { passed: true, .. })
         ));
+    }
+
+    /// The problem line for ankh#`key`, whose pull request `number` has no run.
+    fn no_run(key: &str, number: &str) -> String {
+        format!(
+            "ankh#{key}: still no CI run on pull request {number} in ankh; set ci to false for \
+             ankh if it runs none there"
+        )
+    }
+
+    /// A part whose every poll reads again, and where pull request 57 has no run.
+    fn watching_57() -> CodeHosts {
+        let mut part = CodeHosts::default().every(0);
+        set_57(&mut part, Checks::None);
+        part
+    }
+
+    /// Makes pull request 57 read `checks` from now on.
+    fn set_57(part: &mut CodeHosts, checks: Checks) {
+        let mut host = fake();
+        host.pulls[0].1.checks = checks;
+        part.adapters = vec![Box::new(host)];
+    }
+
+    /// Whether the checks of ankh#1 were reported, and as what.
+    fn reported_for_1(events: &[Event]) -> Option<bool> {
+        events.iter().find_map(|e| match e {
+            Event::ChecksFinished { issue, passed, .. } if issue.key == "1" => Some(*passed),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_pull_request_still_without_checks_at_a_later_read_is_a_problem_until_it_has_some() {
+        let w = in_review();
+        let mut part = watching_57();
+        let mut read = |now, found: Checks| {
+            set_57(&mut part, found);
+            let polled = part.poll(&w, now);
+            (polled.problem, reported_for_1(&polled.events))
+        };
+        let listed = (Some(no_run("1", "57")), None);
+        assert_eq!(
+            read(0, Checks::None),
+            (None, None),
+            "the run may not exist yet"
+        );
+        assert_eq!(read(1, Checks::None), listed);
+        assert_eq!(read(2, Checks::Pending), (None, None));
+        assert_eq!(read(3, Checks::None), (None, None), "a first read again");
+        assert_eq!(read(4, Checks::None), listed);
+        assert_eq!(read(5, Checks::Passed), (None, Some(true)));
+    }
+
+    #[test]
+    fn a_pull_request_without_checks_stays_listed_between_reads() {
+        let w = in_review();
+        let mut host = fake();
+        host.pulls[0].1.checks = Checks::None;
+        let mut part = CodeHosts::default().every(60_000);
+        part.add(Box::new(host));
+        assert_eq!(part.poll(&w, 0).problem, None);
+        let listed = Some(no_run("1", "57"));
+        assert_eq!(part.poll(&w, 60_000).problem, listed);
+        assert_eq!(part.poll(&w, 60_001).problem, listed, "not due");
+    }
+
+    #[test]
+    fn setting_ci_to_false_clears_a_pull_request_without_checks() {
+        let mut w = in_review();
+        let mut part = watching_57();
+        part.poll(&w, 0);
+        assert_eq!(part.poll(&w, 1).problem, Some(no_run("1", "57")));
+        set(
+            &mut w,
+            Scope::Project(ProjectId::new("ankh")),
+            "ci",
+            Value::Flag(false),
+        );
+        let polled = part.poll(&w, 2);
+        assert_eq!(polled.problem, None);
+        assert_eq!(reported_for_1(&polled.events), Some(true));
+    }
+
+    #[test]
+    fn an_issue_that_leaves_review_drops_its_no_run_problem() {
+        for left in [Stage::Fixing { round: 1 }, Stage::Merging] {
+            let mut w = in_review();
+            let mut part = watching_57();
+            let stage = |w: &mut World, stage| {
+                let issue = IssueId::new("ankh", "1");
+                w.issues.get_mut(&issue).expect("issue").stage = stage;
+            };
+            part.poll(&w, 0);
+            assert_eq!(part.poll(&w, 1).problem, Some(no_run("1", "57")));
+            stage(&mut w, left);
+            assert_eq!(part.poll(&w, 2).problem, None);
+            stage(&mut w, Stage::InReview { round: 2 });
+            assert_eq!(
+                part.poll(&w, 3).problem,
+                None,
+                "the new commit's first read"
+            );
+            assert_eq!(part.poll(&w, 4).problem, Some(no_run("1", "57")));
+        }
+    }
+
+    #[test]
+    fn a_no_run_problem_and_a_read_error_are_listed_together() {
+        let mut w = in_review();
+        add_in_review(&mut w, "lancre", "hills/lancre", Some("nonesuch"));
+        let mut part = watching_57();
+        let error = "lancre#1: no code host \"nonesuch\" in this build";
+        assert_eq!(part.poll(&w, 0).problem.as_deref(), Some(error));
+        assert_eq!(
+            part.poll(&w, 1).problem,
+            Some(format!("{error}; {}", no_run("1", "57")))
+        );
+        set_57(&mut part, Checks::Pending);
+        assert_eq!(part.poll(&w, 2).problem.as_deref(), Some(error));
+        set_57(&mut part, Checks::None);
+        part.poll(&w, 3);
+        part.poll(&w, 4);
+        w.issues.remove(&IssueId::new("lancre", "1"));
+        assert_eq!(part.poll(&w, 5).problem, Some(no_run("1", "57")));
     }
 
     #[test]
@@ -1341,6 +1496,21 @@ mod tests {
                 polled.events.as_slice(),
                 [Event::ChecksFinished { passed: true, .. }]
             ));
+        }
+
+        #[test]
+        fn only_a_repository_that_runs_ci_is_named_for_a_pull_request_without_checks() {
+            let mut w = world(Stage::InReview { round: 1 });
+            set(&mut w, Scope::Project(pid("svc")), "ci", Value::Flag(false));
+            let mut part = part(host(Checks::None, Checks::None));
+            assert_eq!(part.poll(&w, 0).problem, None);
+            assert_eq!(
+                part.poll(&w, 1).problem.as_deref(),
+                Some(
+                    "guild#GLD-1: still no CI run on pull request 1 in ui; set ci to false for ui \
+                     if it runs none there"
+                )
+            );
         }
 
         #[test]
