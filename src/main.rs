@@ -16,6 +16,14 @@ fn main() -> ExitCode {
         Some("mcp") => return mcp(&args[1..]),
         Some("relay") => return relay(&args[1..]),
         Some("trust-folder") => return trust_folder(&args[1..]),
+        Some("--version") => {
+            println!(
+                "temet-work {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                temet_work::BUILD
+            );
+            return ExitCode::SUCCESS;
+        }
         Some("parts") => {
             let parts = temet_work::parts();
             let ids: Vec<String> = parts

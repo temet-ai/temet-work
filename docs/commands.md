@@ -6,6 +6,7 @@ session_id:
   - 7d9306de-2941-41bd-8a60-efad6ed38f2a
   - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
   - 48c80237-558e-4a4a-a82d-bd96b37f1f46
+  - 29b5659a-5fe0-4f00-806c-b1db18d91396
 ---
 
 # Commands
@@ -150,6 +151,10 @@ standard input and output, for an agent's MCP client. At `read`, the default, it
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
+
+`temet-work --version` prints one line, `temet-work <version> (<build id>)`, without
+asking the daemon. The build id is the commit the binary was built from, as
+`temet-workd --version` shows it.
 
 A command an agent runs is recorded as that agent's (see "How the daemon knows who sent a
 command"). A ruling is recorded as a decision, listed by `temet-work status` with its
