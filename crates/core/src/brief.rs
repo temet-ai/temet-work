@@ -83,16 +83,24 @@ fn hold_to_the_issue(issue: &IssueId) -> String {
     )
 }
 
-/// What a reviewer does with a point that is not met.
+/// What a reviewer does with a point that is not met, or that the plan or a
+/// decision departs from.
 const BLOCK_WHAT_IS_NOT_MET: &str = "\
 Block on any point that is not met, and name that point in the block. A test that shows only part \
-of its check is a block.";
+of its check is a block. A plan check or a recorded decision that departs from a point the issue \
+states, or that leaves the issue's failure scenario happening, is a block, even when the plan \
+sanctions it. A decision the change writes down, such as under \"Decided, open to change\", is a \
+recorded decision.";
 
-/// What an arbiter does with a point that is not met.
+/// What an arbiter does with a point that is not met, or that the plan or a
+/// decision departs from.
 const FIX_WHAT_IS_NOT_MET: &str = "\
 Where a point is not met, rule fix and name that point in the ruling. A test that shows only part \
 of its check is a fix. An author's answer that the plan does not list the point is no reason to \
-approve.";
+approve. A plan check or a recorded decision that departs from a point the issue states, or that \
+leaves the issue's failure scenario happening, is a fix, even when the plan sanctions it. A \
+decision the change writes down, such as under \"Decided, open to change\", is a recorded \
+decision.";
 
 /// Writes the brief for an agent of `role` on `issue`, run in `place`.
 /// `rules` are the kept rules from overturned decisions; each brief ends with them.
@@ -187,7 +195,12 @@ pub fn write(
              temet-work plan {id} - <<'PLAN'\n\
              checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\
              PLAN\n\
-             Where the issue leaves a choice open, pick the default you would defend and say why in done_when.\n\
+             Each point the issue states needs a check that meets it as written. \
+             Use a chosen default only where the issue leaves the choice open (it says \"or\", \"pick\" or \
+             \"record which\"): pick one of the options it names, the one you would defend, and say why \
+             in done_when. \
+             When a point cannot be done as written, say why in that point's check and fix the issue's \
+             failure scenario some other way: the plan may not leave it in place.\n\
              For an issue that is hard, add a settings: map beside checks: with task-level values, such as model: opus; \
              they are recorded as yours and a person can overturn them. \
              A model you set is the author's only: the models of reviewers, arbiters and refiners are \
@@ -663,6 +676,11 @@ mod tests {
             "Where a point is not met, rule fix and name that point in the ruling.",
             "A test that shows only part of its check is a fix.",
             "An author's answer that the plan does not list the point is no reason to approve.",
+            "A plan check or a recorded decision that departs from a point the issue states, or \
+             that leaves the issue's failure scenario happening, is a fix, even when the plan \
+             sanctions it.",
+            "A decision the change writes down, such as under \"Decided, open to change\", is a \
+             recorded decision.",
         ] {
             assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
         }
@@ -686,6 +704,96 @@ mod tests {
             ),
             "{brief}"
         );
+    }
+
+    /// A synced issue of ankh-morpork/watch. Its text stays there, so its title
+    /// carries the point a plan could depart from.
+    fn lamp_issue() -> Issue {
+        let id = IssueId::new("watch", "31");
+        let mut world = World::default();
+        world.apply(&Event::IssueSynced {
+            issue: id.clone(),
+            title: "A lamp with no oil: refuse it, or list it under Problems".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        world.issues[&id].clone()
+    }
+
+    fn lamp_task(role: Role, issue: &Issue) -> String {
+        write(
+            role,
+            issue,
+            Some("ankh-morpork/watch"),
+            &[],
+            Workplace::default(),
+            &[],
+            &[],
+        )
+        .task
+    }
+
+    #[test]
+    fn a_refiner_meets_each_point_and_chooses_only_where_the_issue_leaves_it_open() {
+        let brief = lamp_task(Role::Refiner, &lamp_issue());
+        for line in [
+            "A lamp with no oil: refuse it, or list it under Problems. It is issue 31 of \
+             ankh-morpork/watch in its tracker.",
+            "Each point the issue states needs a check that meets it as written.",
+            "Use a chosen default only where the issue leaves the choice open (it says \"or\", \
+             \"pick\" or \"record which\"): pick one of the options it names, the one you would \
+             defend, and say why in done_when.",
+            "When a point cannot be done as written, say why in that point's check and fix the \
+             issue's failure scenario some other way: the plan may not leave it in place.",
+        ] {
+            assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
+        }
+        assert!(
+            !brief.contains(
+                "Where the issue leaves a choice open, pick the default you would defend"
+            ),
+            "{brief}"
+        );
+    }
+
+    #[test]
+    fn a_departure_from_the_issue_blocks_the_review_even_when_the_plan_sanctions_it() {
+        let mut issue = lamp_issue();
+        issue.plan = Some(Plan {
+            checks: vec![Check {
+                done_when: "Chosen rule: lamps on the Watch House's own oil are neither refused \
+                            nor listed under Problems"
+                    .into(),
+                proven_by: "the Watch House lamp test".into(),
+            }],
+            ..Plan::default()
+        });
+        let brief = lamp_task(Role::Reviewer, &issue);
+        assert!(
+            brief.contains("refuse it, or list it under Problems. It is issue 31 of"),
+            "{brief}"
+        );
+        assert!(
+            brief.contains(
+                "The plan's checks:\n\
+                 - Chosen rule: lamps on the Watch House's own oil are neither refused nor listed \
+                 under Problems (shown by: the Watch House lamp test)\n"
+            ),
+            "{brief}"
+        );
+        let again = next_round(&issue.id, 2);
+        for line in [
+            "A plan check or a recorded decision that departs from a point the issue states, or \
+             that leaves the issue's failure scenario happening, is a block, even when the plan \
+             sanctions it.",
+            "A decision the change writes down, such as under \"Decided, open to change\", is a \
+             recorded decision.",
+        ] {
+            assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
+            assert!(again.contains(line), "missing {line:?} in:\n{again}");
+        }
     }
 
     /// A world where the group watch, over ankh and the area guild (whose tracker
