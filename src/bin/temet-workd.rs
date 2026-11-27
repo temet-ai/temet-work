@@ -150,7 +150,9 @@ fn run() -> Result<(), String> {
                     pending.request.by.as_ref().map_or("none", |a| a.0.as_str()),
                     debug.split([' ', '{', '(']).next().unwrap_or_default(),
                     match &reply {
-                        socket::Reply::Done { .. } => "done".to_string(),
+                        socket::Reply::Done { .. } | socket::Reply::View { .. } => {
+                            "done".to_string()
+                        }
                         socket::Reply::Refused { why } => format!("refused: {why}"),
                     }
                 );

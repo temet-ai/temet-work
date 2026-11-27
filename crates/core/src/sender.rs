@@ -197,6 +197,7 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Status => "status",
+            Self::View => "view",
             Self::Issue { .. } => "issue",
             Self::Screen { .. } => "screen",
             Self::Plan { .. } => "plan",
@@ -214,12 +215,16 @@ impl Command {
         }
     }
 
-    /// Whether the command changes anything; `status`, `issue`, `screen` and
-    /// `settings` only read.
+    /// Whether the command changes anything; `status`, `view`, `issue`, `screen`
+    /// and `settings` only read.
     pub fn changes(&self) -> bool {
         !matches!(
             self,
-            Self::Status | Self::Issue { .. } | Self::Screen { .. } | Self::Settings { .. }
+            Self::Status
+                | Self::View
+                | Self::Issue { .. }
+                | Self::Screen { .. }
+                | Self::Settings { .. }
         )
     }
 }
@@ -337,6 +342,13 @@ mod tests {
             &Command::Status,
         );
         assert!(status.is_err());
+        let unnamed = sender(Some("reviewer-1"), None, Peer::Unchecked);
+        assert_eq!(
+            w.admit(&unnamed, &Command::View),
+            w.admit(&unnamed, &Command::Status)
+        );
+        let named = sender(Some("reviewer-1"), Some("b"), Peer::Unchecked);
+        assert_eq!(w.admit(&named, &Command::View), Ok(()));
         // Through the relay, from a clean tree, the secret is proof enough.
         assert_eq!(
             review(relayed(Some("reviewer-1"), Some("b"), Peer::Read(vec![]))),
@@ -417,6 +429,11 @@ mod tests {
             )
             .expect_err("refused");
         assert!(why.starts_with("reviewer-2 has ended"), "{why}");
+        let view = w.admit(
+            &sender(Some("reviewer-2"), Some("e"), Peer::Unchecked),
+            &Command::View,
+        );
+        assert_eq!(view, Err(why));
     }
 
     #[test]
@@ -488,6 +505,7 @@ mod tests {
             );
             for read in [
                 Command::Status,
+                Command::View,
                 Command::Issue {
                     issue: IssueId::new("ankh", "1"),
                 },
@@ -537,6 +555,7 @@ mod tests {
         );
         for read in [
             Command::Status,
+            Command::View,
             Command::Screen {
                 agent: AgentId::new("author-1"),
             },
@@ -592,6 +611,10 @@ mod tests {
         );
         assert_eq!(
             w.admit(&relayed(None, None, Peer::Read(vec![])), &Command::Status),
+            Ok(())
+        );
+        assert_eq!(
+            w.admit(&relayed(None, None, Peer::Read(vec![])), &Command::View),
             Ok(())
         );
     }

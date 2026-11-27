@@ -6,6 +6,7 @@ session_id:
   - c27ea5f8-79a8-4f76-ae9d-52bda3729faa
   - d1ccda48-cbb5-44cc-9ea0-c03999c970e9
   - 0645e4e2-33bd-43f8-980f-503649da2f15
+  - edd1e649-f07a-4d7c-b5c6-ff74b0021fbb
 ---
 
 # temet-work architecture
@@ -77,7 +78,7 @@ What exists today:
 
 | Crate | State |
 |---|---|
-| `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, and the state as text |
+| `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, the state as text and, beside it, as view data (`view.rs`) that the `view` command answers with, the daemon's reply, and the rule for where its socket is |
 | `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, holds text for an agent until its turn ends, and types `continue` into an agent whose usage limit has reset |
 | `temet-work-runner-herdr` | the herdr-core socket client; puts each agent's terminal on the herdr app's screens by starting it with `herdr.space`, `herdr.tab` and `herdr.name`, one space per group, one tab per issue and one for the group's investigator; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
 | `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |

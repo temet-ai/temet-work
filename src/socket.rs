@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use temet_work_core::{Host, Peer, Request};
 
+pub use temet_work_core::Reply;
+
 /// A line that asks the socket something about the daemon itself, such as
 /// `{"ask":"build"}`. The socket code answers it; it never reaches the loop.
 #[derive(Serialize, Deserialize)]
@@ -21,42 +23,15 @@ enum Question {
     Build,
 }
 
-/// The daemon's answer to one request.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "reply", rename_all = "snake_case")]
-pub enum Reply {
-    /// Done; the text says what changed, holds the state for `status`, or is
-    /// the build the daemon was asked for.
-    Done {
-        /// What to show.
-        text: String,
-    },
-    /// Refused, and why.
-    Refused {
-        /// Why, in a line.
-        why: String,
-    },
-}
-
-/// Where the daemon listens: `TEMET_WORK_SOCKET`, else
-/// `$XDG_RUNTIME_DIR/temet-work/daemon.sock`, else under the user's own state
-/// folder. Never the shared temp folder, where another user could make the path
-/// first.
+/// Where the daemon listens: the core's rule
+/// ([`temet_work_core::socket::path`]) over this process's environment.
 pub fn path() -> PathBuf {
-    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-    if let Some(p) = var("TEMET_WORK_SOCKET") {
-        return PathBuf::from(p);
-    }
-    let dir = var("XDG_RUNTIME_DIR").map_or_else(
-        || {
-            var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default()
-                .join(".local/state")
-        },
-        PathBuf::from,
-    );
-    dir.join("temet-work").join("daemon.sock")
+    let var = std::env::var_os;
+    temet_work_core::socket::path(
+        var("TEMET_WORK_SOCKET"),
+        var("XDG_RUNTIME_DIR"),
+        var("HOME"),
+    )
 }
 
 /// A request waiting for the daemon's reply.
@@ -595,6 +570,9 @@ pub fn answer(
                     Err(why) => Reply::Refused { why },
                 }
             }
+            temet_work_core::Command::View => Reply::View {
+                view: temet_work_core::View::new(host.world(), host.problems()),
+            },
             temet_work_core::Command::Issue { issue } => Reply::Done {
                 text: temet_work_core::text::issue(host.world(), issue, &host.issue_text(issue))
                     .unwrap_or_default(),

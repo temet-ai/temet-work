@@ -11,7 +11,7 @@ pub use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 
 /// How to call `temet-work`.
 pub const USAGE: &str = "\
-temet-work status
+temet-work status [--json]                  the state as text, or with --json as data
 temet-work issue ISSUE                      one issue in full, with its text from the last sync
 temet-work screen AGENT                     what an agent's terminal shows now
 temet-work plan ISSUE FILE                  a refiner's plan, as YAML; FILE - reads it from standard input
@@ -44,6 +44,27 @@ milestone as project:Milestone name, or an issue. ROLE is refiner, author, revie
 arbiter or investigator. Agents' commands are recorded as theirs
 through TEMET_WORK_AGENT and carry the secret in TEMET_WORK_AGENT_TOKEN; the
 daemon sets both when it starts an agent.";
+
+/// The flag that asks `status` for data.
+pub const JSON: &str = "--json";
+
+/// What `--json` on a command other than `status` is answered with.
+pub fn json_refused() -> String {
+    format!("{JSON} goes with status only\n\n{USAGE}")
+}
+
+/// Whether `args` give [`JSON`] as a flag. In a command's free text (a value, a
+/// title or body, a review point or a reason) it is a word like any other.
+fn has_json(args: &[String]) -> bool {
+    let word = |i: usize| args.get(i).map(String::as_str);
+    let before_text = match word(0) {
+        Some("file") => 2,
+        Some("set" | "rule" | "overturn") => 3,
+        Some("review") if word(2) == Some("block") => 3,
+        _ => args.len(),
+    };
+    args.iter().take(before_text).any(|a| a == JSON)
+}
 
 /// A plan from its YAML text.
 pub fn plan(yaml: &str) -> Result<Plan, String> {
@@ -93,7 +114,13 @@ pub fn request(
         IssueId::parse(s)
             .ok_or_else(|| format!("{s} is not an issue; write project#key, such as radar#44"))
     };
-    let command = match arg(0, "a command")? {
+    let name = arg(0, "a command")?;
+    let json = has_json(args);
+    if json && name != "status" {
+        return Err(json_refused());
+    }
+    let command = match name {
+        "status" if json => Command::View,
         "status" => Command::Status,
         "issue" => Command::Issue { issue: issue()? },
         "screen" => Command::Screen {
@@ -300,6 +327,44 @@ mod tests {
                 group: GroupId::new("watch")
             })
         );
+    }
+
+    #[test]
+    fn json_asks_status_for_the_view_and_is_refused_on_any_other_command() {
+        let read = |line: &str| request(&args(line), None, no_files).map(|r| r.command);
+        assert_eq!(read("status"), Ok(Command::Status));
+        assert_eq!(read("status --json"), Ok(Command::View));
+        for line in [
+            "issue ankh#1 --json",
+            "screen author-1 --json",
+            "ready ankh#1 --json",
+            "review ankh#1 approve --json",
+            "retry ankh#1 --json",
+            "settings radar --json",
+            "unset radar model --json",
+            "set radar --json model opus",
+            "file --json ankh title body",
+            "investigated watch --json",
+            "--json status",
+        ] {
+            assert!(
+                read(line).is_err_and(|e| e.contains("temet-work status [--json]")),
+                "{line}"
+            );
+        }
+        // In free text it is a word like any other.
+        assert!(matches!(
+            read("set radar verify gh run list --json status"),
+            Ok(Command::Set { value, .. }) if value == "gh run list --json status"
+        ));
+        assert!(matches!(
+            read("rule ankh#1 fix print --json too"),
+            Ok(Command::Rule { reason, .. }) if reason == "print --json too"
+        ));
+        assert!(matches!(
+            read("review ankh#1 block --json"),
+            Ok(Command::Review { verdict: Verdict::Block { points }, .. }) if points == ["--json"]
+        ));
     }
 
     #[test]

@@ -9,6 +9,7 @@ session_id:
   - 29b5659a-5fe0-4f00-806c-b1db18d91396
   - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
   - 0645e4e2-33bd-43f8-980f-503649da2f15
+  - edd1e649-f07a-4d7c-b5c6-ff74b0021fbb
 ---
 
 # Commands
@@ -19,7 +20,7 @@ reports its step done.
 
 | Command | Who runs it | Accepted when the issue is |
 |---|---|---|
-| `temet-work status` | anyone | any |
+| `temet-work status [--json]` | anyone; `--json` prints the state as data (below) | any |
 | `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes and agents. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise) | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
@@ -53,8 +54,8 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
   `review` is refused with the owning role named: those would skip the work an agent is
   there to do. To get a stuck agent moving, a person rules or changes settings with `set`
   and `unset`.
-- `status`, `issue`, `screen` and `settings` are open to anyone. `set` and `unset` keep
-  their own rule, in the table.
+- `status` (with or without `--json`), `issue`, `screen` and `settings` are open to
+  anyone. `set` and `unset` keep their own rule, in the table.
 - `file` and `investigated` belong to a group's running investigator, which works for its
   group and on no issue. A person, another agent, or an investigator whose investigation
   has ended is refused with the reason; a person files issues in the tracker itself.
@@ -168,6 +169,14 @@ settings:
 A command for an issue at another step is refused, with the step the issue is at. The
 command line exits 0 when the daemon did it, 1 when the daemon refused it, and 2 when the
 command was not understood or no daemon answered.
+
+`temet-work status --json` sends the `view` command (`{"command":"view"}` on the socket)
+and prints the reply as indented JSON: projects, groups, the issues that are not done and
+the count of done ones, agents, decisions and problems (`crates/core/src/view.rs`; what it
+carries is listed in `docs/privacy.md`). Issue ids are `project#key`, each stage and agent
+state is a fixed word with the text form's words beside it, and decision options are
+numbered from 1. `--json` on any other command is refused with the usage; inside a value,
+a title, a body, a review point or a reason it is a word like any other.
 
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers

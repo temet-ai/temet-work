@@ -439,6 +439,8 @@ pub fn handle(
                 match reply {
                     Ok(Reply::Done { text }) => tool_text(text, false),
                     Ok(Reply::Refused { why }) => tool_text(format!("refused: {why}"), true),
+                    // No tool asks for the view; a reply that holds one is shown as it is.
+                    Ok(Reply::View { view }) => tool_text(json!(view).to_string(), false),
                     Err(e) => tool_text(e, true),
                 },
             )

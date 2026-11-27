@@ -15,16 +15,21 @@ pub mod investigation;
 pub mod launch;
 pub mod model;
 pub mod placement;
+pub mod reply;
 pub mod sender;
 pub mod settings;
+pub mod socket;
 pub mod text;
+pub mod view;
 pub mod world;
 
 pub use command::{Command, Request};
 pub use effect::Effect;
 pub use event::{Event, Verdict};
 pub use host::{Host, Journal, Outcome, Polled};
+pub use reply::Reply;
 pub use sender::{Digest, Peer, Sender};
+pub use view::View;
 pub use world::World;
 
 /// An issue's own text, as a part last read it from where the issue comes from.
