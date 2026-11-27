@@ -90,7 +90,6 @@ What does not work yet:
   socket, or over SSH from another machine.
 - Overturning a decision: the loop records an overturn, but no command makes one and no
   part applies it or proposes a rule from it.
-- A deploy that failed three times waits for a person, and no command retries it.
 
 ## Who coordinates
 

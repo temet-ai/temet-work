@@ -889,3 +889,58 @@ fn an_area_issue_is_worked_in_the_first_repository_its_plan_names() {
         Some("api")
     );
 }
+
+#[test]
+fn a_retry_asks_again_for_the_deploy_or_verify_and_survives_a_restart() {
+    let mut w = in_review();
+    for (s, want) in [
+        (Stage::Deploying, Effect::Retry { issue: issue("1") }),
+        (Stage::Verifying, Effect::Retry { issue: issue("1") }),
+    ] {
+        if let Some(i) = w.issues.get_mut(&issue("1")) {
+            i.stage = s;
+        }
+        assert!(
+            w.apply(&Event::Retried { issue: issue("1") })
+                .contains(&want),
+            "{s:?}"
+        );
+    }
+    // Replaying the log with the retry in it: same stage, deploy asked for again.
+    let mut log = vec![
+        group(&["m1"], 1),
+        folder("f1"),
+        sync("1", "m1", 1, &[]),
+        planned("1"),
+        Event::PullRequestReady {
+            issue: issue("1"),
+            pull: Some("57".into()),
+        },
+        Event::ReviewFinished {
+            issue: issue("1"),
+            round: 1,
+            verdict: Verdict::Approve,
+        },
+        Event::ChecksFinished {
+            issue: issue("1"),
+            passed: true,
+            failing: vec![],
+        },
+        Event::Merged { issue: issue("1") },
+    ];
+    let (before, _) = World::replay(&log);
+    assert_eq!(stage(&before, "1"), Stage::Deploying);
+    log.push(Event::Retried { issue: issue("1") });
+    let (after, _) = World::replay(&log);
+    assert_eq!(stage(&after, "1"), Stage::Deploying);
+    assert_eq!(
+        after.missing().start,
+        vec![Effect::Deploy { issue: issue("1") }]
+    );
+}
+
+#[test]
+fn a_retry_of_an_issue_in_another_stage_changes_nothing() {
+    let mut w = in_review();
+    assert!(w.apply(&Event::Retried { issue: issue("1") }).is_empty());
+}
