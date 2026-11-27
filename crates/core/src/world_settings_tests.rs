@@ -81,6 +81,7 @@ fn blocked(w: &mut World, issue: &IssueId, round: u8) -> Vec<Effect> {
         issue: issue.clone(),
         pull: Some("1".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     w.apply(&Event::ReviewFinished {
         issue: issue.clone(),
@@ -987,6 +988,7 @@ fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
         issue: issue.clone(),
         pull: Some("1".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     assert_eq!(review, vec![]);
     assert_eq!(place_of(&w, Role::Reviewer, "1"), None);
@@ -1060,6 +1062,7 @@ fn an_approved_issue_waits_for_its_checks_not_for_a_reviewers_machine() {
         issue: issue.clone(),
         pull: Some("1".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     assert_eq!(w.machine_waits()[0].role, Role::Reviewer);
     w.apply(&Event::ReviewFinished {

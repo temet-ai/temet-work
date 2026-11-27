@@ -227,6 +227,10 @@ pub enum Event {
         /// The pull requests' numbers by repository, when the author names them.
         #[serde(default)]
         pulls: std::collections::BTreeMap<ProjectId, String>,
+        /// The author's replies to the points of the review round its fix
+        /// answers; empty when it sent none, and in older logs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replies: Vec<String>,
     },
     /// What an issue's agent was to hear reached it: the fixes, or a new round.
     Told {

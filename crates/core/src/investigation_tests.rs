@@ -248,6 +248,8 @@ fn out_of_scope_by_project_or_area_leaves_the_queue() {
         machine: MachineId::new("morpork"),
         folder: None,
         secret_digest: None,
+        runtime: None,
+        model: None,
     });
     assert_eq!(queued(&w), 3);
 
@@ -882,6 +884,7 @@ fn an_issue_closed_after_its_pull_request_merged_is_not_a_persons_close() {
             issue: issue.clone(),
             pull: Some("57".into()),
             pulls: Default::default(),
+            replies: Vec::new(),
         },
         Event::ReviewFinished {
             issue: issue.clone(),

@@ -699,6 +699,7 @@ Problems
             issue: issue("1"),
             pull: Some("7".into()),
             pulls: Default::default(),
+            replies: Vec::new(),
         });
         let status = text(&w, &BTreeMap::new());
         assert!(

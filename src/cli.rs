@@ -16,7 +16,9 @@ temet-work issue ISSUE                      one issue in full, with its text fro
 temet-work screen AGENT                     what an agent's terminal shows now
 temet-work plan ISSUE FILE                  a refiner's plan, as YAML; FILE - reads it from standard input
 temet-work ready ISSUE PULL|REPO=PULL...     the pull request is open and the checks hold;
-                                            PULL is its number, needed the first time
+                                            PULL is its number, needed the first time;
+                                            --reply TEXT, once for each point of the
+                                            review round the fix answers
 temet-work review ISSUE approve
 temet-work review ISSUE block POINT...      what to fix, one argument each
 temet-work rule ISSUE approve REASON
@@ -48,6 +50,9 @@ daemon sets both when it starts an agent.";
 /// The flag that asks `status` for data.
 pub const JSON: &str = "--json";
 
+/// The flag before each of the author's replies in `ready`.
+const REPLY: &str = "--reply";
+
 /// What `--json` on a command other than `status` is answered with.
 pub fn json_refused() -> String {
     format!("{JSON} goes with status only\n\n{USAGE}")
@@ -61,6 +66,7 @@ fn has_json(args: &[String]) -> bool {
         Some("file") => 2,
         Some("set" | "rule" | "overturn") => 3,
         Some("review") if word(2) == Some("block") => 3,
+        Some("ready") => args.iter().position(|a| a == REPLY).unwrap_or(args.len()),
         _ => args.len(),
     };
     args.iter().take(before_text).any(|a| a == JSON)
@@ -133,7 +139,16 @@ pub fn request(
         },
         "ready" => {
             let (mut pull, mut pulls) = (None, std::collections::BTreeMap::new());
-            for a in args.get(2..).unwrap_or_default() {
+            let mut replies = Vec::new();
+            let mut rest = args.get(2..).unwrap_or_default().iter();
+            while let Some(a) = rest.next() {
+                if a == REPLY {
+                    let text = rest
+                        .next()
+                        .ok_or_else(|| format!("{REPLY} needs the reply's text"))?;
+                    replies.push(text.clone());
+                    continue;
+                }
                 match a.split_once('=') {
                     Some((repo, number)) if !repo.is_empty() && !number.is_empty() => {
                         pulls.insert(ProjectId::new(repo), number.to_string());
@@ -151,6 +166,7 @@ pub fn request(
                 issue: issue()?,
                 pull,
                 pulls,
+                replies,
             }
         }
         "review" => Command::Review {
@@ -264,6 +280,7 @@ mod tests {
                     (ProjectId::new("api"), "34".to_string())
                 ]
                 .into(),
+                replies: Vec::new(),
             })
         );
         assert_eq!(
@@ -272,10 +289,42 @@ mod tests {
                 issue: IssueId::new("ankh", "1"),
                 pull: Some("57".into()),
                 pulls: Default::default(),
+                replies: Vec::new(),
             })
         );
         assert!(ready("ready ankh#1 57 58").is_err());
         assert!(ready("ready ankh#1 ui=").is_err());
+    }
+
+    #[test]
+    fn ready_takes_a_reply_after_each_reply_flag_and_json_in_one_is_a_word() {
+        let words = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let ready = |line: &[&str]| request(&words(line), None, no_files).map(|r| r.command);
+        assert_eq!(
+            ready(&[
+                "ready",
+                "ankh#1",
+                "--reply",
+                "added a test for a stopped clock",
+                "57",
+                "--reply",
+                "--json stays as it was",
+            ]),
+            Ok(Command::Ready {
+                issue: IssueId::new("ankh", "1"),
+                pull: Some("57".into()),
+                pulls: Default::default(),
+                replies: vec![
+                    "added a test for a stopped clock".into(),
+                    "--json stays as it was".into()
+                ],
+            })
+        );
+        assert!(
+            ready(&["ready", "ankh#1", "--reply"])
+                .is_err_and(|e| e.contains("needs the reply's text"))
+        );
+        assert!(ready(&["ready", "ankh#1", "--json", "--reply", "x"]).is_err());
     }
 
     #[test]

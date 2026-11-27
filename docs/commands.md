@@ -25,7 +25,7 @@ reports its step done.
 | `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes and agents. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise) | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
-| `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...` | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL` | working, or fixing |
+| `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...`, with `--reply TEXT` for each point it answers | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL`. With a fix for a review round or a ruling, each `--reply` answers one of the round's points, in their order: what the author did about it, or why not. The replies are kept with that round and shown with it in `status --json`. A reply is refused when the fix answers no review round: the first pull request, or a fix for CI, a conflict or a refused merge | working, or fixing |
 | `temet-work review ISSUE approve` | only the reviewer working on ISSUE | in review |
 | `temet-work review ISSUE block POINT...` | only the reviewer working on ISSUE, one argument per thing to fix | in review |
 | `temet-work retry ISSUE` | a person only | deploying or verifying: runs the deploy (or verify) again, at once unless a deploy or verify of the same project or `run_in` folder is running, and clears its failure count, its ten-minute wait and its reruns in `deploy-handoff.stale`, so a deploy that failed three times gets three fresh tries |
@@ -174,8 +174,8 @@ command was not understood or no daemon answered.
 `temet-work status --json` sends the `view` command (`{"command":"view"}` on the socket)
 and prints the reply as indented JSON: projects with the web addresses of their issues and
 code, milestones, groups, the issues that are not done and the count of done ones, agents,
-machines, limits, decisions and problems (`crates/core/src/view.rs`; what it carries is
-listed in `docs/privacy.md`). Issue ids are `project#key`, each stage and agent state is a
+decisions and problems (`crates/core/src/view.rs`; what it carries is listed in
+`docs/privacy.md`). Issue ids are `project#key`, each stage and agent state is a
 fixed word with the text form's words beside it, and decision options are numbered from 1.
 Times, such as when an issue last changed, are milliseconds since 1970, and due dates are
 `YYYY-MM-DD`; a value temet-work does not know, such as a due date the tracker does not

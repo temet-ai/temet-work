@@ -1,17 +1,16 @@
 //! The loop's state as data, for a front end: what the text form lists, in the
 //! same order, as plain fields that need none of the loop's logic to draw, and
-//! what the desktop window shows beside it: when each issue last changed, each
-//! agent's runtime and model, milestones with their progress and due dates,
-//! what overturning a decision costs, where each project's issues and code are,
-//! machines with their build slots, and the runtime accounts held on a limit.
+//! what the desktop window shows beside it: when each issue last changed, its
+//! plan's checks and its review rounds with the author's replies, each agent's
+//! runtime and model, milestones with their progress and due dates, what
+//! overturning a decision costs, and where each project's issues and code are.
 //! Times are in milliseconds since 1970 and dates are `YYYY-MM-DD`; the window
 //! works out "4 min ago" with its own clock.
 //!
 //! The desktop app reads it, and `temet-work status --json` prints it. It is
 //! built from named fields, so what the log holds for the loop alone stays out:
-//! an agent's secret digest and the mark of the limit it was last continued
-//! after, folder paths, a plan's settings and repositories, what an author is
-//! to fix, settings, rules and the waiting list. The problem lines and the
+//! an agent's secret digest and limit marks, folder paths, a plan's settings and
+//! repositories, what an author is to fix, settings, rules and the waiting list. The problem lines and the
 //! agents' state lines are free text that may name a work folder's path, so they
 //! are taken without it.
 
@@ -40,11 +39,6 @@ pub struct View {
     pub done: usize,
     /// The agents, by id, ended ones too.
     pub agents: Vec<Agent>,
-    /// Each machine that has a work folder, by id.
-    pub machines: Vec<Machine>,
-    /// Each runtime account an agent is held on until its limit resets, by
-    /// runtime and machine.
-    pub limits: Vec<Limit>,
     /// The decisions, by number.
     pub decisions: Vec<Decision>,
     /// What is wrong now, by where it came from.
@@ -96,32 +90,6 @@ pub struct Milestone {
     /// Its due date as `YYYY-MM-DD`; none when its tracker gives none or does
     /// not list it as open.
     pub due: Option<String>,
-}
-
-/// A machine with work folders: each folder is a build slot, in use while an
-/// issue holds it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Machine {
-    /// Its id.
-    pub id: MachineId,
-    /// Its work folders.
-    pub slots: usize,
-    /// Its work folders an issue holds.
-    pub in_use: usize,
-}
-
-/// A runtime account used up until its limit resets. Agents of one runtime on
-/// one machine share its sign-in, so the runtime and machine stand for the
-/// account.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Limit {
-    /// The runtime.
-    pub runtime: String,
-    /// The machine.
-    pub machine: MachineId,
-    /// When the daemon continues the agents held on it, in milliseconds since
-    /// 1970: the latest reset time among them.
-    pub resets_ms: u64,
 }
 
 /// A group.
@@ -188,6 +156,9 @@ pub struct Review {
     pub verdict: VerdictWord,
     /// What a block asked to change; empty for an approval.
     pub points: Vec<String>,
+    /// The author's replies, sent with the fix that answered this round; empty
+    /// until then, or when the author sent none.
+    pub replies: Vec<String>,
 }
 
 /// A review round's verdict, as one word.
@@ -372,8 +343,6 @@ impl View {
                 .filter(|i| i.stage == Stage::Done)
                 .count(),
             agents: world.agents.values().map(|a| agent(world, a)).collect(),
-            machines: machines(world),
-            limits: limits(world),
             decisions: world
                 .decisions
                 .values()
@@ -415,47 +384,6 @@ fn milestones(world: &World) -> Vec<Milestone> {
             id: id.clone(),
             done,
             total,
-        })
-        .collect()
-}
-
-/// Each machine with work folders, with how many there are and how many an
-/// issue holds.
-fn machines(world: &World) -> Vec<Machine> {
-    let mut slots: BTreeMap<&MachineId, (usize, usize)> = BTreeMap::new();
-    for f in world.folders.values() {
-        let (all, in_use) = slots.entry(&f.machine).or_default();
-        *all += 1;
-        if f.holder.is_some() {
-            *in_use += 1;
-        }
-    }
-    slots
-        .into_iter()
-        .map(|(id, (slots, in_use))| Machine {
-            id: id.clone(),
-            slots,
-            in_use,
-        })
-        .collect()
-}
-
-/// Each runtime and machine with an agent held on a limit the daemon will
-/// continue it after ([`model::Agent::limit_reset`]), with the latest such reset
-/// time. An agent with no runtime recorded gives none.
-fn limits(world: &World) -> Vec<Limit> {
-    let mut held: BTreeMap<(&str, &MachineId), u64> = BTreeMap::new();
-    for a in world.agents.values() {
-        if let (Some(runtime), Some(at)) = (&a.runtime, a.limit_reset()) {
-            let latest = held.entry((runtime, &a.machine)).or_insert(at);
-            *latest = (*latest).max(at);
-        }
-    }
-    held.into_iter()
-        .map(|((runtime, machine), resets_ms)| Limit {
-            runtime: runtime.to_string(),
-            machine: machine.clone(),
-            resets_ms,
         })
         .collect()
 }
@@ -578,6 +506,7 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
                     VerdictWord::Block
                 },
                 points: r.points.clone(),
+                replies: r.replies.clone(),
             })
             .collect(),
     }
@@ -802,12 +731,6 @@ mod tests {
                 machine: MachineId::new("pseudopolis"),
                 path: FOLDER_PATH.into(),
             },
-            Event::FolderAdded {
-                folder: FolderId::new("yard-2"),
-                project: ProjectId::new("watch"),
-                machine: MachineId::new("pseudopolis"),
-                path: format!("{FOLDER_PATH}-2"),
-            },
             listed("watch", "The Clacks", Some("2026-12-12")),
             listed("watch", "Snuff", None),
             Event::SettingSet {
@@ -911,20 +834,19 @@ mod tests {
                 reviewer: Some(AgentId::new("reviewer-3")),
                 approve: false,
                 points: vec!["the bell is cracked".into(), "the rope is frayed".into()],
+                replies: vec![
+                    "recast the bell".into(),
+                    "the rope stays: it was checked".into(),
+                ],
             },
             model::Review {
                 round: 2,
                 reviewer: Some(AgentId::new("reviewer-3")),
                 approve: true,
                 points: Vec::new(),
+                replies: Vec::new(),
             },
         ];
-        // The author on watch#3 holds the first of pseudopolis's two folders.
-        w.issues.get_mut(&watch("3")).expect("synced").folder = Some(FolderId::new("yard-1"));
-        w.folders
-            .get_mut(&FolderId::new("yard-1"))
-            .expect("added")
-            .holder = Some(watch("3"));
         // The addresses the tracker and code host give, put in each round.
         let address = |issues: Option<&str>, code: Option<&str>| Addresses {
             issues: issues.map(String::from),
@@ -985,7 +907,7 @@ mod tests {
     const FOLDER_PATH: &str = "/srv/pseudopolis-yard/watch";
 
     #[test]
-    fn the_json_holds_no_digest_continued_mark_path_fix_or_setting() {
+    fn the_json_holds_no_digest_reset_time_path_fix_or_setting() {
         let host = ticked();
         for key in ["blocked: reviewer-3", "errored: author-4"] {
             let line = &host.problems()[key];
@@ -1013,17 +935,12 @@ mod tests {
         let reset = w.agents[&AgentId::new("author-4")]
             .limit_reset()
             .expect("the errored agent has a reset time");
-        // The reset time is in the limits list, and nowhere else.
-        assert_eq!(json.matches(&reset.to_string()).count(), 1, "{json}");
-        assert_eq!(
-            view.limits.iter().map(|l| l.resets_ms).collect::<Vec<_>>(),
-            [reset]
-        );
         // A plan's checks are in it; its settings are not.
         for line in ["the clock strikes thirteen", "listening at midnight"] {
             assert!(json.contains(line), "{line} is not in {json}");
         }
         let left_out = [
+            reset.to_string(),
             CONTINUED_MS.to_string(),
             FOLDER_PATH.into(),
             "the-luggage".into(),
@@ -1250,14 +1167,19 @@ mod tests {
             runtime: None,
             model: None,
         };
-        let ready = Event::PullRequestReady {
+        let ready = |replies: &[&str]| Event::PullRequestReady {
             issue: watch4.clone(),
             pull: None,
             pulls: [(ProjectId::new("watch"), "41".to_string())].into(),
+            replies: replies.iter().map(ToString::to_string).collect(),
         };
         let points = vec![
             "the bell is cracked".to_string(),
             "the rope is frayed".into(),
+        ];
+        let replies = vec![
+            "recast the bell".to_string(),
+            "the rope stays: it was checked".into(),
         ];
         let events = [
             added("watch", "fake", "ankh-morpork/watch"),
@@ -1285,7 +1207,8 @@ mod tests {
                 plan: Plan::default(),
             },
             started("author-1", Role::Author),
-            ready.clone(),
+            // The first pull request answers no round: a reply has nowhere to go.
+            ready(&["nothing to answer yet"]),
             started("reviewer-3", Role::Reviewer),
             Event::ReviewFinished {
                 issue: watch4.clone(),
@@ -1294,7 +1217,7 @@ mod tests {
                     points: points.clone(),
                 },
             },
-            ready,
+            ready(&["recast the bell", "the rope stays: it was checked"]),
             Event::ReviewFinished {
                 issue: watch4.clone(),
                 round: 2,
@@ -1303,72 +1226,24 @@ mod tests {
         ];
         let (w, _) = World::replay(&events);
         let view = View::new(&w, &BTreeMap::new());
-        let round = |round, verdict, points| Review {
+        let round = |round, verdict, points, replies| Review {
             round,
             reviewer: Some(AgentId::new("reviewer-3")),
             verdict,
             points,
+            replies,
         };
+        // The block has the replies the fix that answered it sent; the approval,
+        // which no fix answered yet, has none.
         assert_eq!(
             issue_of(&view, "watch#4").reviews,
             [
-                round(1, VerdictWord::Block, points),
-                round(2, VerdictWord::Approve, Vec::new())
+                round(1, VerdictWord::Block, points, replies),
+                round(2, VerdictWord::Approve, Vec::new(), Vec::new())
             ]
         );
         // Never reviewed.
         assert_eq!(issue_of(&view, "watch#3").reviews, []);
-    }
-
-    #[test]
-    fn each_machine_with_work_folders_shows_its_slots_in_use() {
-        let view = View::new(&world(), &BTreeMap::new());
-        assert_eq!(
-            view.machines,
-            [Machine {
-                id: MachineId::new("pseudopolis"),
-                slots: 2,
-                in_use: 1,
-            }]
-        );
-        assert_eq!(View::new(&World::default(), &BTreeMap::new()).machines, []);
-    }
-
-    #[test]
-    fn an_account_held_on_a_limit_is_listed_with_its_reset_time() {
-        let view = View::new(&world(), &BTreeMap::new());
-        assert_eq!(
-            view.limits,
-            [Limit {
-                runtime: RUNTIME.into(),
-                machine: MachineId::new("pseudopolis"),
-                resets_ms: RESETS_MS,
-            }]
-        );
-        let author4 = AgentId::new("author-4");
-        let errored = |resets_ms| Event::AgentChanged {
-            agent: author4.clone(),
-            state: AgentState::Errored {
-                line: "usage limit reached".into(),
-                resets_ms,
-            },
-        };
-        // An error with no reset time.
-        let mut w = world();
-        w.apply(&errored(None));
-        assert_eq!(View::new(&w, &BTreeMap::new()).limits, []);
-        // The same limit again, after the daemon continued it.
-        let mut w = world();
-        w.apply(&Event::Continued {
-            agent: author4.clone(),
-            resets_ms: RESETS_MS,
-        });
-        w.apply(&errored(Some(RESETS_MS)));
-        assert_eq!(View::new(&w, &BTreeMap::new()).limits, []);
-        // An agent with no runtime recorded.
-        let mut w = world();
-        w.agents.get_mut(&author4).expect("started").runtime = None;
-        assert_eq!(View::new(&w, &BTreeMap::new()).limits, []);
     }
 
     #[test]

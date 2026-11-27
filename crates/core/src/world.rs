@@ -125,8 +125,8 @@ impl Updated {
 
 /// A mark of an issue's record: two records with different marks differ. Text
 /// that changes only together with the issue's stage or with a count, its plan,
-/// what it is to fix and its review points, is marked by its count, so marking
-/// every issue after every event stays cheap.
+/// what it is to fix, its review points and the author's replies, is marked by
+/// its count, so marking every issue after every event stays cheap.
 fn mark(i: &Issue) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
@@ -138,7 +138,8 @@ fn mark(i: &Issue) -> u64 {
         .hash(&mut h);
     (i.review_ok, i.checks_ok, &i.pulls, &i.merged, i.fix.len()).hash(&mut h);
     (i.told, i.fix_keeps_round, i.round, i.closed_by_loop).hash(&mut h);
-    (i.has_merged, i.review_waived, i.reviews.len()).hash(&mut h);
+    let replies: usize = i.reviews.iter().map(|r| r.replies.len()).sum();
+    (i.has_merged, i.review_waived, i.reviews.len(), replies).hash(&mut h);
     h.finish()
 }
 
@@ -541,12 +542,23 @@ impl World {
                     out.extend(done);
                 }
             }
-            Event::PullRequestReady { issue, pull, pulls } => {
+            Event::PullRequestReady {
+                issue,
+                pull,
+                pulls,
+                replies,
+            } => {
                 let first = self
                     .issues
                     .get(issue)
                     .and_then(|i| self.repos_of(i).into_iter().next());
                 if let Some(i) = self.issues.get_mut(issue) {
+                    // The author's replies go on the review round its fix answers.
+                    if let Some(round) = Self::answered_round(i)
+                        && let Some(r) = i.reviews.iter_mut().rev().find(|r| r.round == round)
+                    {
+                        r.replies.extend(replies.iter().cloned());
+                    }
                     // Older logs name one pull request: the first repository's.
                     let old = pull.clone().zip(first).map(|(n, repo)| (repo, n));
                     for (repo, number) in old
@@ -603,6 +615,7 @@ impl World {
                             Verdict::Approve => Vec::new(),
                             Verdict::Block { points } => points.clone(),
                         },
+                        replies: Vec::new(),
                     });
                     // The latest verdict counts: a block takes an approval back.
                     i.review_ok = matches!(verdict, Verdict::Approve);
@@ -1367,6 +1380,16 @@ impl World {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// The review round an issue's next pull request answers: the round it is
+    /// being fixed for, when a review or a ruling sent it back. A fix for CI, a
+    /// conflict or a refused merge answers no review round.
+    pub fn answered_round(issue: &Issue) -> Option<u8> {
+        match issue.stage {
+            Stage::Fixing { round } if !issue.fix_keeps_round => Some(round),
+            _ => None,
         }
     }
 

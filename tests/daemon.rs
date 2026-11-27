@@ -392,6 +392,7 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
             issue,
             pull: Some("57".into()),
             pulls: Default::default(),
+            replies: Vec::new(),
         },
     );
     assert!(host.problems().is_empty(), "{:?}", host.problems());
@@ -568,6 +569,7 @@ fn commands_reach_the_daemon_over_its_socket() {
                     issue: IssueId::new("ankh", "1"),
                     pull: Some("57".into()),
                     pulls: Default::default(),
+                    replies: Vec::new(),
                 }),
             )
         })
@@ -726,6 +728,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         issue: issue.clone(),
         pull: Some("57".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     };
     // The refiner was stopped once its plan was in, so nothing may name it any
     // more; the author's own ready is accepted.
@@ -1911,6 +1914,7 @@ areas = ["guild"]
                 (ProjectId::new("svc"), "34".to_string()),
             ]
             .into(),
+            replies: Vec::new(),
         };
         done(run(f, "author-1", ready));
         issue
@@ -2151,6 +2155,7 @@ projects = ["ankh"]
             issue: issue.clone(),
             pull: Some(pull.into()),
             pulls: Default::default(),
+            replies: Vec::new(),
         };
         run(&mut host, issue, Role::Author, ready);
     }

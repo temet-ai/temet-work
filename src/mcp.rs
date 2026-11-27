@@ -111,9 +111,9 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ready",
-            description: "The author's pull requests are open and every check of the plan holds. Their numbers are needed the first time: pull for an issue that changes one repository, pulls (repository to number) for each repository of one that changes several.",
+            description: "The author's pull requests are open and every check of the plan holds. Their numbers are needed the first time: pull for an issue that changes one repository, pulls (repository to number) for each repository of one that changes several. With a fix for a review round or a ruling, replies holds the author's reply to each of its points, in their order.",
             acts: true,
-            schema: json!({"type": "object", "properties": {"issue": issue_field(), "pull": {"type": "string"}, "pulls": {"type": "object", "additionalProperties": {"type": "string"}}}, "required": ["issue"]}),
+            schema: json!({"type": "object", "properties": {"issue": issue_field(), "pull": {"type": "string"}, "pulls": {"type": "object", "additionalProperties": {"type": "string"}}, "replies": {"type": "array", "items": {"type": "string"}, "description": "What you did about each point of the review round your fix answers, or why you did not, in the points' order."}}, "required": ["issue"]}),
         },
         Tool {
             name: "review",
@@ -277,6 +277,20 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                                 .or_else(|| n.as_u64().map(|n| n.to_string()))
                                 .map(|n| (ProjectId::new(repo.as_str()), n))
                                 .ok_or_else(|| format!("pulls.{repo} is not a pull request number"))
+                        })
+                        .collect::<Result<_, String>>()
+                })
+                .transpose()?
+                .unwrap_or_default(),
+            replies: args
+                .get("replies")
+                .and_then(Value::as_array)
+                .map(|r| {
+                    r.iter()
+                        .map(|t| {
+                            t.as_str()
+                                .map(String::from)
+                                .ok_or_else(|| "each reply is text".to_string())
                         })
                         .collect::<Result<_, String>>()
                 })
@@ -532,7 +546,7 @@ mod tests {
         call(
             Level::Act,
             "ready",
-            json!({"issue": "guild#GLD-1", "pulls": {"ui": "12", "api": 34}}),
+            json!({"issue": "guild#GLD-1", "pulls": {"ui": "12", "api": 34}, "replies": ["recast the bell"]}),
             &mut sent,
         );
         assert_eq!(
@@ -545,6 +559,7 @@ mod tests {
                     (ProjectId::new("api"), "34".to_string())
                 ]
                 .into(),
+                replies: vec!["recast the bell".into()],
             })
         );
     }

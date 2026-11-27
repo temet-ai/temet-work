@@ -10,8 +10,7 @@ Every screen, command and message in temet-work is about one of these objects. T
 the CLI and the MCP server show and change them through the same commands. The core crate
 defines areas, projects, groups, agents, work folders, issues, plans, checks, review
 rounds, decisions and events today. A milestone is an id on its issues, with the due date
-its tracker gives. A machine is known by the work folders on it, and a limit only while an
-agent waits for it to reset. The other objects are not built yet.
+its tracker gives. The other objects are not built yet.
 
 ## Objects
 

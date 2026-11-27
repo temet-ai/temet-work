@@ -136,6 +136,11 @@ pub struct Review {
     pub approve: bool,
     /// What a block asked to change; empty for an approval.
     pub points: Vec<String>,
+    /// The author's replies to it, sent with the fix that answers this round
+    /// (`temet-work ready --reply`); empty until then, or when the author sent
+    /// none.
+    #[serde(default)]
+    pub replies: Vec<String>,
 }
 
 impl Issue {

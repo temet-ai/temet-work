@@ -243,6 +243,7 @@ fn pull_requests_by_repository_survive_the_log() {
         issue: IssueId::new("guild", "GLD-1"),
         pull: None,
         pulls: [(ProjectId::new("ui"), "12".to_string())].into(),
+        replies: Vec::new(),
     };
     log.append(0, &event).expect("append");
     drop(log);
