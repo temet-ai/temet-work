@@ -219,6 +219,10 @@ too old to send its build is refused as build `unknown` on `the other machine`. 
 clones of one commit can describe it differently (other tags, or a longer short hash),
 and those count as different builds.
 
+So the other machine's `temet-work` must be at the daemon's build. The relay checks that
+only once an agent runs there. A `temet-work` older than the trust step below fails at
+that step, before any agent starts, so the relay's refusal is never reached.
+
 Before each agent starts in a folder on another machine, the daemon trusts the folder
 there: herdr-core runs `temet-work trust-folder claude PATH` on that machine, with no
 shell, and with `CLAUDE_CONFIG_DIR` when the daemon has it. That command marks the folder
@@ -239,7 +243,14 @@ line naming the folder, the machine and the reason, such as the command missing 
 run author-1: cannot trust /Users/me/projects/radar on mac: temet-work is not on mac's PATH for programs herdr-core runs there; `hc exec --on mac which temet-work` checks it
 ```
 
-A nonzero exit ends with the last line the command wrote, such as
+A `temet-work` there with no `trust-folder` command is reported as older than the daemon,
+and the line names the daemon's build, the one to update it to:
+
+```text
+run author-1: cannot trust /Users/me/projects/radar on mac: temet-work on mac is older than this daemon (build Y): update it
+```
+
+Any other nonzero exit ends with the first line the command wrote to standard error, such as
 `temet-work exited 1 on mac: /Users/me/.claude.json is not a JSON object`. The daemon tries
 the start again each round, and the line goes once it succeeds.
 

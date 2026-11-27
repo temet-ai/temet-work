@@ -44,7 +44,9 @@ pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<
         #[allow(unused_mut)]
         let mut family = temet_work_runner::Runners::default().daemon_host(daemon_host);
         #[cfg(feature = "runner-herdr")]
-        family.add(Box::new(temet_work_runner_herdr::Herdr::default()));
+        family.add(Box::new(
+            temet_work_runner_herdr::Herdr::default().build(BUILD),
+        ));
         parts.push(Box::new(family));
     }
     #[cfg(feature = "runtime")]

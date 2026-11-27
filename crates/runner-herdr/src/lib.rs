@@ -198,9 +198,12 @@ fn not_on_path(machine: Option<&str>, program: &str) -> String {
 }
 
 /// What `machine.exec` answered for `argv`, as the runner reports it: an exit of
-/// 0 is done; anything else is an error ending with the last line the program
-/// wrote to standard error.
+/// 0 is done; anything else is an error ending with the first line the program
+/// wrote to standard error, where programs put the error ahead of any help. A
+/// program without the command it was given is older than this daemon, whose
+/// build is `build`: the error says to update it.
 fn exec_outcome(
+    build: Option<&str>,
     machine: Option<&str>,
     argv: &[String],
     result: Result<Value, RpcError>,
@@ -220,15 +223,15 @@ fn exec_outcome(
             .unwrap_or_default(),
     ))
     .into_owned();
-    let last = stderr
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map_or_else(String::new, |l| format!(": {l}"));
+    let first = stderr.lines().map(str::trim).find(|l| !l.is_empty());
+    // What every `temet-work` without the command prints, before its usage text.
+    let no_command = argv.get(1).is_some_and(|command| {
+        first.and_then(|l| l.strip_prefix("no command ")) == Some(command.as_str())
+    });
+    let said = first.map_or_else(String::new, |l| format!(": {l}"));
     if result.get("timed_out").and_then(Value::as_bool) == Some(true) {
         return Err(RunnerError::Other(format!(
-            "{program} did not finish on {} within {} s{last}",
+            "{program} did not finish on {} within {} s{said}",
             place(machine),
             EXEC_TIMEOUT.as_secs()
         )));
@@ -237,15 +240,20 @@ fn exec_outcome(
         Some(0) => Ok(()),
         // The shell's answer for a command it cannot find.
         Some(127) => Err(RunnerError::Other(format!(
-            "{} (exit 127){last}",
+            "{} (exit 127){said}",
             not_on_path(machine, program)
         ))),
+        Some(2) if no_command => Err(RunnerError::Other(format!(
+            "{program} on {} is older than this daemon{}: update it",
+            place(machine),
+            build.map_or_else(String::new, |b| format!(" (build {b})"))
+        ))),
         Some(code) => Err(RunnerError::Other(format!(
-            "{program} exited {code} on {}{last}",
+            "{program} exited {code} on {}{said}",
             place(machine)
         ))),
         None => Err(RunnerError::Other(format!(
-            "{program} was ended by signal {} on {}{last}",
+            "{program} was ended by signal {} on {}{said}",
             result
                 .get("signal")
                 .and_then(Value::as_i64)
@@ -435,6 +443,8 @@ pub struct Herdr {
     shared: Arc<Mutex<Shared>>,
     /// Why the event subscription could not be opened, at the last try.
     unreachable: Option<String>,
+    /// The build of the daemon this runner is part of.
+    build: Option<String>,
 }
 
 /// How long a request waits for its answer.
@@ -456,6 +466,14 @@ fn io_error(e: &RunnerError) -> RpcError {
 }
 
 impl Herdr {
+    /// Names `build` as the daemon's, in the error for a program on a machine
+    /// that is older than it.
+    #[must_use]
+    pub fn build(mut self, build: &str) -> Self {
+        self.build = Some(build.to_string());
+        self
+    }
+
     fn path() -> Result<PathBuf, RunnerError> {
         if sandboxed() {
             return Err(RunnerError::Other(
@@ -543,7 +561,7 @@ impl Runner for Herdr {
 
     fn exec(&mut self, machine: Option<&str>, program: &Program) -> Result<(), RunnerError> {
         let result = self.request("machine.exec", exec_params(machine, program));
-        exec_outcome(machine, &program.argv, result)
+        exec_outcome(self.build.as_deref(), machine, &program.argv, result)
     }
 
     fn send(
@@ -695,17 +713,49 @@ mod tests {
     /// `sh: 1: temet-work: not found` and a line break, in base64.
     const NOT_FOUND: &str = "c2g6IDE6IHRlbWV0LXdvcms6IG5vdCBmb3VuZAo=";
 
+    /// `error: unexpected argument '--x'`, a blank line and a `Usage:` line, in
+    /// base64.
+    const BAD_ARGUMENT: &str =
+        "ZXJyb3I6IHVuZXhwZWN0ZWQgYXJndW1lbnQgJy0teCcKClVzYWdlOiB0ZW1ldC13b3JrIFtPUFRJT05TXQo=";
+
+    /// `no command trust-folder`, a blank line and the end of the usage text, in
+    /// base64.
+    const NO_COMMAND: &str = "bm8gY29tbWFuZCB0cnVzdC1mb2xkZXIKCnVzYWdlOiB0ZW1ldC13b3JrIENPTU1BTkQKCkFnZW50cyBhcmUga25vd24KdGhyb3VnaCBURU1FVF9XT1JLX0FHRU5ULCB3aGljaCB0aGUgZGFlbW9uIHNldHMgd2hlbiBpdCBzdGFydHMgdGhlbS4K";
+
     #[test]
-    fn exec_maps_an_exit_of_zero_to_done_and_any_other_to_its_last_error_line() {
+    fn exec_maps_an_exit_of_zero_to_done_and_any_other_to_its_first_error_line() {
         let argv = trust_on_mac().argv;
+        let run = |code, stderr| exec_outcome(None, Some("mac"), &argv, exited(Some(code), stderr));
+        assert_eq!(run(0, ""), Ok(()));
         assert_eq!(
-            exec_outcome(Some("mac"), &argv, exited(Some(0), "")),
-            Ok(())
-        );
-        assert_eq!(
-            exec_outcome(Some("mac"), &argv, exited(Some(1), NOT_JSON)),
+            run(1, NOT_JSON),
             Err(RunnerError::Other(
                 "temet-work exited 1 on mac: /Users/vimes/.claude.json is not a JSON object".into()
+            ))
+        );
+        assert_eq!(
+            run(1, BAD_ARGUMENT),
+            Err(RunnerError::Other(
+                "temet-work exited 1 on mac: error: unexpected argument '--x'".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn exec_says_a_temet_work_without_the_command_is_older_than_the_daemon() {
+        let argv = trust_on_mac().argv;
+        let run = |build| exec_outcome(build, Some("mac"), &argv, exited(Some(2), NO_COMMAND));
+        assert_eq!(
+            run(Some("v0.4-1-gdeadbee")),
+            Err(RunnerError::Other(
+                "temet-work on mac is older than this daemon (build v0.4-1-gdeadbee): update it"
+                    .into()
+            ))
+        );
+        assert_eq!(
+            run(None),
+            Err(RunnerError::Other(
+                "temet-work on mac is older than this daemon: update it".into()
             ))
         );
     }
@@ -714,7 +764,7 @@ mod tests {
     fn exec_maps_exit_127_and_a_missing_program_to_not_on_the_other_machines_path() {
         let argv = trust_on_mac().argv;
         let Err(RunnerError::Other(why)) =
-            exec_outcome(Some("mac"), &argv, exited(Some(127), NOT_FOUND))
+            exec_outcome(None, Some("mac"), &argv, exited(Some(127), NOT_FOUND))
         else {
             panic!("not an error");
         };
@@ -727,7 +777,7 @@ mod tests {
             kind: "spawn_failed".into(),
             message: "cannot start temet-work: No such file or directory (os error 2)".into(),
         });
-        let Err(RunnerError::Other(why)) = exec_outcome(Some("mac"), &argv, missing) else {
+        let Err(RunnerError::Other(why)) = exec_outcome(None, Some("mac"), &argv, missing) else {
             panic!("not an error");
         };
         assert!(why.starts_with("temet-work is not on mac's PATH"), "{why}");
@@ -740,11 +790,11 @@ mod tests {
             json!({"code": null, "signal": 9, "stderr": "", "stdout": "",
                                   "timed_out": true, "truncated": false, "ms": 8000}),
         );
-        let Err(RunnerError::Other(why)) = exec_outcome(Some("mac"), &argv, timed_out) else {
+        let Err(RunnerError::Other(why)) = exec_outcome(None, Some("mac"), &argv, timed_out) else {
             panic!("not an error");
         };
         assert!(why.contains("did not finish on mac within 8 s"), "{why}");
-        let Err(RunnerError::Other(why)) = exec_outcome(Some("mac"), &argv, exited(None, ""))
+        let Err(RunnerError::Other(why)) = exec_outcome(None, Some("mac"), &argv, exited(None, ""))
         else {
             panic!("not an error");
         };
@@ -753,7 +803,8 @@ mod tests {
             kind: "machine_unknown".into(),
             message: "unknown machine \"lancre\"".into(),
         });
-        let Err(RunnerError::Other(why)) = exec_outcome(Some("lancre"), &argv, unknown) else {
+        let Err(RunnerError::Other(why)) = exec_outcome(None, Some("lancre"), &argv, unknown)
+        else {
             panic!("not an error");
         };
         assert!(why.contains("unknown machine \"lancre\""), "{why}");
