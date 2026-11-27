@@ -928,14 +928,16 @@ already done in mike, ask-kit and herdr-core; the routes are in `docs/architectu
    brief is the whole hand-over: the plan's checks, the daemon's results, the earlier
    blocking points and the author's answer to each, with the author's description to be
    read as claims. A later round reads the new commits and raises nothing new about code
-   that has not changed. A disputed point that is held goes to the arbiter, whose ruling
-   names the command it ran. (Finding 4)
+   that has not changed. A disputed point that is held goes to the arbiter at once, and
+   that ruling settles the disputed points only; a ruling names the command the arbiter
+   ran. (Finding 4)
 4. **The record.** A plain approval is a decision. Every merge leaves a record the daemon
    writes from what it ran and saw, and the daemon counts failed verifies, issues merged
-   more than once, follow-up issues, and `blocked` and `unneeded` per project.
-   (Finding 8)
+   more than once, follow-up issues, and `blocked` and `unneeded` per project. `issue`
+   prints the record and `status` the counts. (Finding 8)
 5. **Rules.** A scope, a budget for each brief and counts; trial and revert when there are
-   enough issues to count. (Finding 9)
+   enough issues to count. A rule's effect is counted from what the daemon records on the
+   issues whose briefs carried it. (Finding 9)
 
 Left until a trigger is met:
 
@@ -948,7 +950,7 @@ Left until a trigger is met:
 | A class of change held for a person | A managed project has users of its own or data that cannot be rebuilt; or the merge records show a merge in that class that had to be merged again | 1, 11 |
 | A trial run of a new build before it replaces the live daemon | A deploy of temet-work itself leaves the daemon down or on the wrong build and nobody sees it for a working day; or that happens twice in one month | 11 |
 | A second reviewer on another vendor's model, and a measured catch rate | 50 issues have merged in one project and more than 6 of them merged more than once or drew a follow-up issue | 2, 4 |
-| State files agents cannot write, a stop command, sessions started against sessions captured | Someone who is not one of the authors runs agents with temet-work; or stopping a group by hand takes more than a few minutes | the management section |
+| State files agents cannot write, a stop command | Someone who is not one of the authors runs agents with temet-work; or stopping a group by hand takes more than a few minutes | the management section |
 
 One thing in the meantime needs no code: every group on a repository other people can
 open issues in is given its milestones, so an issue a stranger opens is not taken
@@ -974,8 +976,8 @@ three-round cap was found; a cap of some size is supported, and one study recomm
 single round (finding 4). No published system deploys itself with no person in the path,
 and none reported breaking itself (finding 11). `review_rounds` is a setting, and the
 rounds and rulings in each merge record are what will say whether three is right. Rules
-still end briefs, with the scope and the budget of change 5; the evidence under finding 9
-is against adding them uncounted.
+stay in briefs, with the scope and the budget of change 5, and move from the end of a
+brief to before its task; the evidence under finding 9 is against adding them uncounted.
 
 ## Not found
 
