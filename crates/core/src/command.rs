@@ -501,6 +501,9 @@ impl World {
                 value,
             } => {
                 let scope = self.scope_of(target)?;
+                if role.is_some() {
+                    settings::check_role(key, "--role")?;
+                }
                 self.may_set(by, &scope, *role, key)?;
                 let value = settings::parse_value(key, value)?;
                 self.check_choice(key, &value)?;
@@ -515,6 +518,9 @@ impl World {
             }
             Command::Unset { target, role, key } => {
                 let scope = self.scope_of(target)?;
+                if role.is_some() {
+                    settings::check_role(key, "--role")?;
+                }
                 self.may_set(by, &scope, *role, key)?;
                 settings::spec(key)?;
                 let who = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
@@ -1507,6 +1513,41 @@ mod plan_settings {
         );
     }
 
+    #[test]
+    fn a_role_on_a_setting_not_read_per_role_is_refused() {
+        let mut w = refining();
+        let reviewer = Some(Role::Reviewer);
+        let refiner = AgentId::new("refiner-1");
+        let set_for = |role| set("ankh", role, "review_rounds", "1");
+        let unset_for_reviewer = Command::Unset {
+            target: Target::parse("ankh"),
+            role: reviewer,
+            key: "review_rounds".into(),
+        };
+        // A person and an agent are told the same, and no event comes of it.
+        for by in [None, Some(&refiner)] {
+            for command in [set_for(reviewer), unset_for_reviewer.clone()] {
+                let why = w.events(by, &command).expect_err("refused");
+                assert_eq!(
+                    why,
+                    "review_rounds is the same for every role, so it takes no --role; the \
+                     settings that take a role are: runtime, model, runner, machine, \
+                     permission, remind_after, reminders, starts"
+                );
+            }
+        }
+        let events = run(&mut w, None, &set_for(None));
+        assert!(
+            matches!(events.as_slice(), [Event::SettingSet { role: None, .. }]),
+            "{events:?}"
+        );
+        // With a value for every role there, the reason is still the role.
+        assert!(
+            w.events(None, &unset_for_reviewer)
+                .is_err_and(|e| e.contains("every role") && !e.contains("nothing to unset"))
+        );
+    }
+
     /// A refiner's plan, set and unset of `key`, for every role, are each refused
     /// naming it, and leave nothing behind; a person's set is accepted.
     fn only_a_person_may_set(key: &str, typed: &str, value: Value) {
@@ -1539,7 +1580,8 @@ mod plan_settings {
             Some(Role::Arbiter),
             Some(Role::Investigator),
         ];
-        for role in roles {
+        let per_role = settings::spec(key).expect("a setting").per_role;
+        for role in roles.into_iter().filter(|r| per_role || r.is_none()) {
             refused(&w, &set(role));
             refused(&w, &unset(role));
             // A person's set is accepted, and the value is not an agent's to remove.

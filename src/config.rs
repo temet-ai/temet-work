@@ -109,8 +109,8 @@ pub struct FolderConf {
 type Wanted = BTreeMap<Key, Value>;
 
 /// Reads a `[settings]`-style table at `scope`: scalars are the settings for every
-/// role, a table named for a role holds that role's. In either, a table `model`
-/// holds a model for each runtime it names.
+/// role, a table named for a role holds that role's, of the settings read per role.
+/// In either, a table `model` holds a model for each runtime it names.
 fn read_settings(table: &toml::Table, scope: &Scope, out: &mut Wanted) -> Result<(), String> {
     let at = |scope: &Scope| match scope {
         Scope::Global => "[settings]".to_string(),
@@ -143,7 +143,18 @@ fn read_settings(table: &toml::Table, scope: &Scope, out: &mut Wanted) -> Result
                     at(scope)
                 )
             })?;
+            let name = role.name();
+            let role_table = match scope {
+                Scope::Global => format!("[settings.{name}]"),
+                Scope::Project(id) => format!("[project.settings.{name}] of {id}"),
+                Scope::Area(id) => format!("[area.settings.{name}] of {id}"),
+                Scope::Milestone { .. } | Scope::Task(_) => {
+                    format!("[milestone.settings.{name}] of {scope}")
+                }
+            };
             for (key, value) in inner {
+                settings::check_role(key, "role table")
+                    .map_err(|e| format!("{role_table}: {e}"))?;
                 read(Some(role), key, value)?;
             }
             continue;
@@ -1076,6 +1087,42 @@ model = { beta = "gpt-w" }
         assert!(Config::parse(&milestone).is_err_and(|e| e.contains("speed")));
         let unlisted = format!("{TODAY}\n[[milestone]]\nof = \"nowhere\"\nname = \"M\"\n");
         assert!(Config::parse(&unlisted).is_err_and(|e| e.contains("nowhere")));
+    }
+
+    #[test]
+    fn a_role_table_refuses_a_setting_not_read_per_role() {
+        let area = "[[area]]\nid = \"guild\"\nprojects = [\"radar\"]\n";
+        let milestone = "[[milestone]]\nof = \"radar\"\nname = \"M\"\n";
+        for (table, text) in [
+            (
+                "[settings.reviewer]",
+                format!("[settings]\n[settings.reviewer]\nci = false\n{TODAY}"),
+            ),
+            (
+                "[project.settings.reviewer]",
+                TODAY.replace(
+                    "ci = false\n",
+                    "ci = false\n[project.settings.reviewer]\nci = false\n",
+                ),
+            ),
+            (
+                "[area.settings.reviewer]",
+                format!("{TODAY}\n{area}[area.settings.reviewer]\nci = false\n"),
+            ),
+            (
+                "[milestone.settings.reviewer]",
+                format!("{TODAY}\n{milestone}[milestone.settings.reviewer]\nci = false\n"),
+            ),
+        ] {
+            let why = Config::parse(&text).expect_err(table);
+            assert!(
+                why.starts_with(table)
+                    && why.contains("ci is the same for every role, so it takes no role table"),
+                "{why}"
+            );
+        }
+        Config::parse(&format!("[settings.reviewer]\nmodel = \"opus\"\n{TODAY}"))
+            .expect("the model is read per role");
     }
 
     #[test]

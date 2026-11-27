@@ -649,7 +649,7 @@ mod settings_commands {
         done(ask(
             &mut host,
             None,
-            set("ankh", Some(Role::Reviewer), "review_rounds", "1"),
+            set("ankh", Some(Role::Reviewer), "starts", "1"),
         ));
         let shown = done(ask(
             &mut host,
@@ -661,7 +661,7 @@ mod settings_commands {
         ));
         assert!(shown.starts_with("ankh#1, author\n"), "{shown}");
         assert_eq!(row(&shown, "model"), "opus task, set by person");
-        assert_eq!(row(&shown, "review_rounds"), "3 built in");
+        assert_eq!(row(&shown, "starts"), "3 built in");
         assert_eq!(row(&shown, "runtime"), "fake built in");
         assert_eq!(
             row(&shown, "deploy"),
@@ -676,10 +676,7 @@ mod settings_commands {
                 role: Some(Role::Reviewer),
             },
         ));
-        assert_eq!(
-            row(&for_reviewer, "review_rounds"),
-            "1 project, set by person"
-        );
+        assert_eq!(row(&for_reviewer, "starts"), "1 project, set by person");
         // `temet-work issue` shows the role at work on the issue: the refiner.
         let issue = done(ask(
             &mut host,

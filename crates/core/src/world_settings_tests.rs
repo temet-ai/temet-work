@@ -449,6 +449,53 @@ fn with_no_settings_every_value_is_the_one_the_code_had() {
 }
 
 #[test]
+fn an_old_role_value_for_a_setting_not_read_per_role_replays_as_nothing() {
+    // The lines as an older daemon wrote them.
+    let old = [
+        r#"{"SettingSet":{"scope":{"Project":"ankh"},"role":"Reviewer","key":"review_rounds","value":1,"by":"person"}}"#,
+        r#"{"SettingSet":{"scope":"Global","role":"Reviewer","key":"review_rounds","value":1,"by":"file"}}"#,
+    ];
+    let mut w = working();
+    for line in old {
+        let event: Event = serde_json::from_str(line).expect("still read");
+        assert_eq!(w.apply(&event), vec![]);
+    }
+    assert!(w.settings.is_empty(), "{:?}", w.settings);
+    let issue = id("ankh", "1");
+    let r = w
+        .setting(&issue, Some(Role::Reviewer), "review_rounds")
+        .expect("built in");
+    assert_eq!((r.value, r.level), (Value::Number(3), Level::BuiltIn));
+    let listed = crate::text::settings(
+        &w,
+        &crate::settings::Target::parse("ankh"),
+        Some(Role::Reviewer),
+    )
+    .expect("known");
+    assert!(
+        listed.lines().any(|l| l
+            .split_whitespace()
+            .eq(["review_rounds", "3", "built", "in"])),
+        "{listed}"
+    );
+    let status = crate::text::text(&w, &Default::default());
+    assert!(!status.contains("review_rounds"), "{status}");
+    // Three rounds still.
+    for round in 1..3 {
+        let sent = blocked(&mut w, &issue, round);
+        assert!(sent.iter().any(|e| matches!(e, Effect::RequestFix { .. })));
+    }
+    let last = blocked(&mut w, &issue, 3);
+    assert!(last.iter().any(|e| matches!(
+        e,
+        Effect::StartAgent {
+            role: Role::Arbiter,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn an_older_log_with_commands_and_a_group_model_reads_as_settings() {
     let mut w = working();
     w.apply(&Event::ProjectCommandsSet {
