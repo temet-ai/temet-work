@@ -7,6 +7,7 @@ session_id:
   - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
   - 48c80237-558e-4a4a-a82d-bd96b37f1f46
   - 29b5659a-5fe0-4f00-806c-b1db18d91396
+  - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
 ---
 
 # Commands
@@ -141,10 +142,11 @@ issue. `ROLE` is refiner, author, reviewer, arbiter or investigator; without it 
 for every role. `settings` lists every setting in effect there, each with the level that
 set it (`task, set by refiner-3`, `built in`); `temet-work issue` shows the same for the
 role at work on the issue. `KEY` is a setting's name, or `model.<runtime>`
-(`model.codex`) for the model of one runtime's agents; a plain `model` is the global
-runtime's. A value of the wrong kind, an unknown key, a runtime or runner the build lacks,
-or a `model.<runtime>` for such a runtime is refused with the reason, and the command
-exits 1.
+(`model.codex`) for the model of one runtime's agents; a plain `model` is recorded as the
+global runtime's `model.<runtime>` when it is set, and the reply names that key. A value of
+the wrong kind, an unknown key, a runtime or runner the build lacks, a `model.<runtime>`
+for such a runtime, or a plain `model` where that scope and role run a runtime other than
+the global one is refused with the reason, and the command exits 1.
 
 A refiner may add task-level settings to its plan, other than the nine only a person
 sets: `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`,

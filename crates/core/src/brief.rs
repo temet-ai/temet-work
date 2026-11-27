@@ -61,6 +61,12 @@ fn pull_list(pulls: &[Pulled]) -> String {
         .collect()
 }
 
+/// What a refiner's plain `model` becomes (`docs/settings.md`, "A model belongs
+/// to a runtime").
+const PLAIN_MODEL: &str = "A plain model is recorded as the global runtime's, as \
+model.<that runtime>, when you write it, and is refused when the author runs another runtime; \
+model.<runtime> names the runtime a model is for.";
+
 /// What a reviewer holds a change against, in its brief and again on each later
 /// round. The issue's text stays in its tracker; the reviewer reads it there.
 const HOLD_TO_THE_ISSUE: &str = "\
@@ -171,8 +177,7 @@ pub fn write(
              they are recorded as yours and a person can overturn them. \
              A model you set is the author's only: the models of reviewers, arbiters and refiners are \
              a person's to set. \
-             A plain model is read by the agents of the global runtime; \
-             model.<runtime> names the runtime a model is for. \
+             {PLAIN_MODEL} \
              Only a person sets {persons}: a plan that names one is refused.",
             title = issue.title,
             persons = only_a_persons().join(", "),
@@ -458,6 +463,15 @@ mod tests {
         for key in ["runtime", "runner", "review_rounds"] {
             assert!(named.contains(&key), "{key} is not in {named:?}");
         }
+        assert!(
+            brief.task.contains(
+                "A plain model is recorded as the global runtime's, as model.<that runtime>, \
+                 when you write it, and is refused when the author runs another runtime; \
+                 model.<runtime> names the runtime a model is for."
+            ),
+            "{}",
+            brief.task
+        );
     }
 
     #[test]

@@ -225,8 +225,9 @@ pub const SPECS: [Spec; 17] = [
     Spec {
         key: "model",
         kind: Kind::Text,
-        about: "the model of the global runtime's agents, as model.<runtime> is that of one \
-                runtime's; the runtime's own default when none is set",
+        about: "the model of one runtime's agents, written model.<runtime>; a plain model is \
+                recorded as model.<the global runtime> when it is written; the runtime's own \
+                default when none is set",
         agents: Agents::ForAuthor,
         per_role: true,
     },
@@ -649,19 +650,19 @@ impl World {
         })
     }
 
-    /// The keys that answer `key` over `scope` for `role`, in the order each
-    /// place in the chain is read. A model belongs to a runtime: for `model`
-    /// that is `model.<runtime>` of the runtime that runs there, then the plain
-    /// `model` when that runtime is the global one, so a model written for one
-    /// runtime never reaches another.
+    /// The key that answers `key` over `scope` for `role`. A model belongs to a
+    /// runtime: for `model` that is `model.<runtime>` of the runtime that runs
+    /// there, so a model written for one runtime never reaches another. A plain
+    /// `model` is bound when it is written ([`World::model_key`]), so only a
+    /// world that knows no runtime at all, and so binds none, reads one.
     fn keys_read(&self, scope: &Scope, role: Option<Role>, key: &str) -> Vec<String> {
         if key != "model" {
             return vec![key.to_string()];
         }
-        let runtime = self.resolve(scope, role, "runtime").map(|r| r.value);
-        let named = runtime.as_ref().map(|r| format!("model.{r}"));
-        let plain = (runtime == self.global_runtime()).then(|| key.to_string());
-        named.into_iter().chain(plain).collect()
+        match self.resolve(scope, role, "runtime") {
+            Some(runtime) => vec![format!("model.{}", runtime.value)],
+            None => vec![key.to_string()],
+        }
     }
 
     /// The runtime a plain `model` is for: the global `runtime` for every role,
@@ -671,27 +672,53 @@ impl World {
             .map(|r| r.value)
     }
 
-    /// The key an agent's model for the author is under when a person changes the
-    /// same model by its other name: `model` and the global runtime's
-    /// `model.<runtime>` are one runtime's model, and one is read before the
-    /// other, so a person's change of either, for every role or the author, has
-    /// to take the agent's value under the other away.
-    pub(crate) fn agents_other_model(
+    /// The key a plain `model` is bound to now: `model.<the global runtime>`.
+    /// Every other key, and a plain `model` in a world that knows no runtime,
+    /// is its own. A logged change is bound this way when it is applied, so an
+    /// older log's plain model is the runtime's that was global at that point.
+    pub fn bound_key(&self, key: &str) -> String {
+        match self.global_runtime() {
+            Some(runtime) if key == "model" => format!("model.{runtime}"),
+            _ => key.to_string(),
+        }
+    }
+
+    /// The key a change of `key` at `scope` for `role` is recorded under, as it
+    /// is written: a plain `model` is bound to the global runtime
+    /// ([`World::bound_key`]), so the log says which runtime it is for and a
+    /// later change of the global runtime does not move it. Refused, naming
+    /// `model.<runtime>`, where the runtime in effect for that scope and role is
+    /// not the global one: refiners and the docs read a plain model as the
+    /// global runtime's, and binding it to that one would leave it unread.
+    pub fn model_key(
         &self,
         scope: &Scope,
         role: Option<Role>,
         key: &str,
-    ) -> Option<String> {
-        if !matches!(role, None | Some(Role::Author)) {
-            return None;
+    ) -> Result<String, String> {
+        let bound = self.bound_key(key);
+        if bound == key {
+            return Ok(bound);
         }
-        let global = format!("model.{}", self.global_runtime()?);
-        let other = match key {
-            "model" => global,
-            k if k == global => "model".to_string(),
-            _ => return None,
-        };
-        self.agents_author_value(scope, &other).then_some(other)
+        let global = self.global_runtime().map(|r| r.to_string());
+        let here = self
+            .resolve(scope, role, "runtime")
+            .map(|r| r.value.to_string());
+        match (here, global) {
+            (Some(here), Some(global)) if here != global => {
+                let who =
+                    role.map_or_else(|| "every role".to_string(), |r| format!("the {}", r.name()));
+                let at = match scope {
+                    Scope::Global => "globally".to_string(),
+                    other => format!("at {other}"),
+                };
+                Err(format!(
+                    "a plain model is the global runtime's ({global}), and {who} runs \
+                     {here} {at}: name the runtime, as model.{here}"
+                ))
+            }
+            _ => Ok(bound),
+        }
     }
 
     /// The setting for an issue and role.
@@ -1419,16 +1446,21 @@ mod replay {
             key: "verify".into(),
             by: "refiner-3".into(),
         });
-        let mut w = world(&events);
-        // The build's default is the runtime a plain model is for.
-        w.catalog.insert(
-            "runtime".into(),
-            Choice {
-                key: "runtime".into(),
-                allowed: vec!["alpha".into(), "beta".into()],
-                default: Some("alpha".into()),
-            },
-        );
+        // The build's default is the runtime a plain model is for, so the daemon
+        // puts the build's choices in before it replays the log.
+        let (w, _) = World {
+            catalog: [(
+                "runtime".to_string(),
+                Choice {
+                    key: "runtime".into(),
+                    allowed: vec!["alpha".into(), "beta".into()],
+                    default: Some("alpha".into()),
+                },
+            )]
+            .into(),
+            ..World::default()
+        }
+        .replay_onto(&events);
         let at = |key| {
             w.setting(&IssueId::new("radar", "44"), Some(Role::Author), key)
                 .map(|r| (r.value.to_string(), r.source()))
@@ -1451,7 +1483,7 @@ mod replay {
             .filter(|(_, e)| e.by == "refiner-3")
             .map(|((_, _, key), _)| key.as_str())
             .collect();
-        assert_eq!(agents, ["model"]);
+        assert_eq!(agents, ["model.alpha"]);
     }
 
     #[test]
@@ -1516,6 +1548,111 @@ mod replay {
                 "{role:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_older_logs_plain_model_replays_as_the_model_of_the_runtime_global_at_that_point() {
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        let task = || Scope::Task(IssueId::new("radar", "44"));
+        let mut events = base();
+        // No global runtime yet, so the build's default: alpha.
+        events.push(Event::GroupCreated {
+            group: crate::ids::GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ProjectId::new("radar")],
+            areas: Vec::new(),
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: Some("sonnet".into()),
+            queue_low: None,
+            investigate_every: None,
+        });
+        let guild = || Scope::Area(ProjectId::new("guild"));
+        events.push(set(guild(), None, "model", "haiku", "person"));
+        events.push(Event::SettingUnset {
+            scope: guild(),
+            role: None,
+            key: "model".into(),
+            by: "person".into(),
+        });
+        // Before #93 this was the only way to give reviewers on beta a model.
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "runtime",
+            "beta",
+            "person",
+        ));
+        events.push(set(
+            Scope::Global,
+            Some(Role::Reviewer),
+            "model",
+            "gpt-x",
+            "person",
+        ));
+        events.push(set(task(), None, "model", "opus", "refiner-3"));
+        events.push(set(Scope::Global, None, "runtime", "beta", "person"));
+        // From here a plain model is beta's.
+        events.push(set(
+            radar(),
+            Some(Role::Arbiter),
+            "model",
+            "gpt-y",
+            "person",
+        ));
+        events.push(Event::SettingUnset {
+            scope: Scope::Global,
+            role: Some(Role::Reviewer),
+            key: "model".into(),
+            by: "person".into(),
+        });
+        let (w, _) = World {
+            catalog: [(
+                "runtime".to_string(),
+                Choice {
+                    key: "runtime".into(),
+                    allowed: vec!["alpha".into(), "beta".into()],
+                    default: Some("alpha".into()),
+                },
+            )]
+            .into(),
+            ..World::default()
+        }
+        .replay_onto(&events);
+        let read = |role| {
+            w.setting(&IssueId::new("radar", "44"), Some(role), "model")
+                .map(|r| r.value.to_string())
+        };
+        assert_eq!(read(Role::Author), None, "opus and sonnet are alpha's");
+        assert_eq!(read(Role::Reviewer), None, "gpt-x is alpha's");
+        assert_eq!(read(Role::Arbiter).as_deref(), Some("gpt-y"));
+        let kept: Vec<(Scope, Option<Role>, &str, String)> = w
+            .settings
+            .iter()
+            .filter(|((_, _, key), _)| key.starts_with("model"))
+            .map(|((scope, role, key), e)| {
+                (scope.clone(), *role, key.as_str(), e.value.to_string())
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (
+                    Scope::Global,
+                    Some(Role::Reviewer),
+                    "model.alpha",
+                    "gpt-x".into()
+                ),
+                (radar(), None, "model.alpha", "sonnet".into()),
+                (radar(), Some(Role::Arbiter), "model.beta", "gpt-y".into()),
+                (task(), Some(Role::Author), "model.alpha", "opus".into()),
+            ]
+        );
+        let status = crate::text::text(&w, &Default::default());
+        assert!(
+            status.contains("  global, reviewer: model.alpha = gpt-x, set by person\n"),
+            "{status}"
+        );
     }
 
     #[test]

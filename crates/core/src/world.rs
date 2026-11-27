@@ -70,12 +70,22 @@ pub struct World {
 impl World {
     /// Builds the state from events in order, with every effect they asked for.
     pub fn replay<'a>(events: impl IntoIterator<Item = &'a Event>) -> (Self, Vec<Effect>) {
-        let mut world = Self::default();
+        Self::default().replay_onto(events)
+    }
+
+    /// Builds the state from events in order onto this world, with every effect
+    /// they asked for. A world that already holds the build's catalog binds an
+    /// older log's plain model to the build's default runtime where the log had
+    /// set no global one.
+    pub fn replay_onto<'a>(
+        mut self,
+        events: impl IntoIterator<Item = &'a Event>,
+    ) -> (Self, Vec<Effect>) {
         let mut effects = Vec::new();
         for event in events {
-            effects.extend(world.apply(event));
+            effects.extend(self.apply(event));
         }
-        (world, effects)
+        (self, effects)
     }
 
     /// Applies one event and returns what the daemon must do.
@@ -180,6 +190,8 @@ impl World {
                 value,
                 by,
             } => {
+                // Older logs hold plain models: each is the global runtime's here.
+                let key = &self.bound_key(key);
                 if let Some(role) = settings::kept_role(scope, *role, key, by) {
                     self.overturn_agents_value(scope, role, key, by);
                     self.put(scope, role, key, value, by);
@@ -191,6 +203,7 @@ impl World {
                 key,
                 by,
             } => {
+                let key = &self.bound_key(key);
                 if let Some(role) = settings::kept_role(scope, *role, key, by) {
                     self.overturn_agents_value(scope, role, key, by);
                     self.settings.remove(&(scope.clone(), role, key.clone()));
@@ -207,16 +220,20 @@ impl World {
                 queue_low,
                 investigate_every,
             } => {
-                // Older logs: a group's model, as a setting on what it works on.
+                // Older logs: a group's model, as a setting on what it works on,
+                // for the runtime that is global here.
                 if let Some(m) = model {
+                    let key = self.bound_key("model");
                     let scopes = projects
                         .iter()
                         .map(|p| Scope::Project(p.clone()))
                         .chain(areas.iter().map(|a| Scope::Area(a.clone())));
                     for scope in scopes {
-                        let key = (scope.clone(), None, "model".to_string());
-                        if !self.settings.contains_key(&key) {
-                            self.put(&scope, None, "model", &Value::Text(m.clone()), FILE);
+                        if !self
+                            .settings
+                            .contains_key(&(scope.clone(), None, key.clone()))
+                        {
+                            self.put(&scope, None, &key, &Value::Text(m.clone()), FILE);
                         }
                     }
                 }
