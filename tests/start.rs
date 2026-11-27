@@ -42,3 +42,18 @@ fn a_runner_this_build_lacks_at_any_level_stops_the_daemon_too() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("nonesuch") && err.contains("herdr"), "{err}");
 }
+
+#[cfg(feature = "tracker-jira")]
+#[test]
+fn a_project_on_the_jira_tracker_loads_and_the_daemon_polls_it() {
+    let config = "[[project]]\nid = \"eng\"\ntracker = \"jira\"\nname = \"ENG\"\n";
+    let out = start("start-jira", config);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The sandbox is on, so Jira is not called; the poll's failure shows it was made.
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("TEMET_WORK_SANDBOX"), "{text}");
+}

@@ -280,6 +280,7 @@ dependencies = [
  "temet-work-style",
  "temet-work-tracker",
  "temet-work-tracker-github",
+ "temet-work-tracker-jira",
  "toml",
 ]
 
@@ -382,6 +383,14 @@ dependencies = [
 
 [[package]]
 name = "temet-work-tracker-github"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "temet-work-tracker",
+]
+
+[[package]]
+name = "temet-work-tracker-jira"
 version = "0.0.1"
 dependencies = [
  "serde_json",

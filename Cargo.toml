@@ -24,6 +24,7 @@ temet-work-deploy = { path = "crates/deploy" }
 temet-work-runner = { path = "crates/runner" }
 temet-work-runtime = { path = "crates/runtime" }
 temet-work-tracker-github = { path = "crates/tracker-github" }
+temet-work-tracker-jira = { path = "crates/tracker-jira" }
 temet-work-runner-herdr = { path = "crates/runner-herdr" }
 temet-work-runtime-claude = { path = "crates/runtime-claude" }
 temet-work-runtime-codex = { path = "crates/runtime-codex" }
@@ -51,7 +52,7 @@ publish.workspace = true
 # family. `cargo run --no-default-features --features tracker` builds one part
 # alone; scripts/check-mixes builds every mix that matters.
 [features]
-default = ["tracker", "runner", "runtime", "codehost", "deploy", "store", "style", "mike", "tracker-github", "runner-herdr", "runtime-claude", "runtime-codex", "codehost-github"]
+default = ["tracker", "runner", "runtime", "codehost", "deploy", "store", "style", "mike", "tracker-github", "tracker-jira", "runner-herdr", "runtime-claude", "runtime-codex", "codehost-github"]
 tracker = ["dep:temet-work-tracker"]
 runner = ["dep:temet-work-runner"]
 runtime = ["dep:temet-work-runtime"]
@@ -61,6 +62,7 @@ store = ["dep:temet-work-store"]
 style = ["dep:temet-work-style"]
 mike = ["dep:temet-work-mike"]
 tracker-github = ["tracker", "dep:temet-work-tracker-github"]
+tracker-jira = ["tracker", "dep:temet-work-tracker-jira"]
 runner-herdr = ["runner", "dep:temet-work-runner-herdr"]
 runtime-claude = ["runtime", "dep:temet-work-runtime-claude"]
 runtime-codex = ["runtime", "dep:temet-work-runtime-codex"]
@@ -81,6 +83,7 @@ temet-work-store = { workspace = true, optional = true }
 temet-work-style = { workspace = true, optional = true }
 temet-work-mike = { workspace = true, optional = true }
 temet-work-tracker-github = { workspace = true, optional = true }
+temet-work-tracker-jira = { workspace = true, optional = true }
 temet-work-runner-herdr = { workspace = true, optional = true }
 temet-work-runtime-claude = { workspace = true, optional = true }
 temet-work-runtime-codex = { workspace = true, optional = true }

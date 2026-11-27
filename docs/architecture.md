@@ -48,7 +48,8 @@ says what each crate holds today.
 |---|---|---|
 | `temet-work-core` | nothing in the workspace | The objects (area, project, milestone, issue, plan, check, group, agent, decision, rule), the settings chain (`docs/settings.md`), the work loop as a pure state machine (an event goes in, state and effects come out), commands, and view data with a text form. The `Part` contract. No I/O, no tool or service names, no UI types. |
 | `temet-work-tracker` | core | The tracker contract, a fake, and the contract tests every tracker adapter runs. |
-| `temet-work-tracker-github` | tracker only | GitHub. GitLab and Jira follow as their own crates. |
+| `temet-work-tracker-github` | tracker only | GitHub. GitLab follows as its own crate. |
+| `temet-work-tracker-jira` | tracker only | Jira Cloud (REST v3, `curl`). |
 | `temet-work-runner` | core | The runner contract: start a labelled terminal, read it, send to it, wait on it, follow its events. A fake and the contract tests. |
 | `temet-work-runner-herdr` | runner only | herdr-core. tmux follows as its own crate. |
 | `temet-work-runtime` | core | The agent runtime contract: start a session with a brief and a model, tell working from idle. A fake and the contract tests. |
@@ -75,6 +76,7 @@ What exists today:
 | `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |
 | `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
 | `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
+| `temet-work-tracker-jira` | issues, fix versions as milestones, comments and Done transitions through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
 | `temet-work-codehost` | the contract, a fake and contract tests. The family reads the CI of each pull request in review every 30 seconds and reports it finished, with the names of failing checks; it merges when the loop asks |
 | `temet-work-codehost-github` | pull requests through `gh`, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-deploy` | runs the deploy command after a merge and the verify command after a deploy, each on its own thread; a failed deploy is listed as a problem, a failed verify sends the issue back to ready |
@@ -193,6 +195,6 @@ In this order:
 3. The desktop window on GPUI, drawing the daemon's view data.
 4. Areas, stage 2: one issue across several repositories, merged in order
    (`docs/areas.md`).
-5. A Jira tracker and a GitLab code host.
+5. A GitLab code host.
 6. Overturning a decision by command, and rules proposed from overturns. Done: the loop applies an
    overturn itself, and a kept rule ends every brief written afterwards (`docs/commands.md`).
