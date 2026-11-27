@@ -2,6 +2,7 @@
 session_id:
   - d8b56904-12b7-4f79-b22a-277694261d14
   - e4a814a9-1735-455e-9162-778decf89d5b
+  - d1ccda48-cbb5-44cc-9ea0-c03999c970e9
 ---
 
 # herdr-core: what a daemon can rely on
@@ -330,6 +331,54 @@ added `where: "temet-work / 3"`, which the probe did not set:
 17:28:55.308 +   0.167 events << 203B {"jsonrpc": "2.0", "method": "event", "params": {"data": {"labels": {"by": "T1", "fleet": "temet-work-research", "item": "2", "role": "shell", "where": "temet-work / 3"}}, "seq": 45261, "termi …
 ```
 
+**Naming a space** (checked 27 November 2026, hc 0.1.22, herdr 0.9.5). herdr-core has no method,
+command or label that names a space. `hc schema` has no method or field for spaces
+(`terminal.run`'s `name` names the terminal). `hc --help` has no command for them. `hc --skill`
+says `hc` does not arrange windows and points to `herdr-app --skill`. `herdr workspace --help`
+offers `rename`, but `herdr workspace list` showed the workspaces of `herdr`, the older
+multiplexer, not the app's spaces. The app has its own command, `space.rename`, sent over the
+app's socket, and it keeps spaces in the core's `herdr-app` document, where a space no one had
+named read `"name": ""`. mike sets no space name either (the labels it sets are in
+[mike-fleets.md](mike-fleets.md)). The runner sets none: the daemon talks to herdr-core only, no
+app need be running, and writing the app's document with `doc.set` would change another
+program's state. The app calls an unnamed space after where its first terminal is; in the run
+below that was the folder `textkit-watch`.
+
+**Who writes what** (a real run, 27 November 2026, 21:33 SAST). A second `temet-workd` built from
+the branch of temet-work#89 started a refiner and then an author on a sandbox issue, in a group `watch`. The
+core was on omit, where no app window was open; herdr app 0.1.15 was open on a Mac that has omit
+as a machine. `hc events --label group=watch` showed the same steps for both terminals. For the
+refiner, cut to the type and the fields that matter:
+
+```text
+created   labels agent=refiner-1 group=watch issue=sandbox#32 role=refiner log=1a21e7fd7475c954
+          owner=temet-work herdr.space=sptemet-work-watch
+          herdr.tab=tbtemet-work-watch-sandbox-32 herdr.name="refiner-1 sandbox#32"; keep false
+keep      keep true
+labels    the same, and where="textkit-watch / 1"
+finished  reason killed, signal 9
+removed
+```
+
+- The runner's labels are on `terminal.run`, so the first event already has them.
+- The app then turned `keep` on and added `where`, which reads `<space name> / <tab name>`. The
+  Mac app's `herdr-app ls` listed the space `omit/sptemet-work-watch`, named `textkit-watch`,
+  with the tab `omit/tbtemet-work-watch-sandbox-32`, named `1`, holding the terminal. On seven
+  other temet-work terminals `where` matched the names the app listed, and one's changed from
+  `work / 2` to `work / 4` as tabs moved.
+- The app does not show a terminal without the labels. At 21:34 it listed all 15 of omit's local
+  terminals that had `herdr.space`, and not the one that had neither that label nor a parent.
+  It showed them although omit is another machine to it.
+- The app showed no `herdr.name`: the string is in neither the 0.1.15 nor the 0.1.18 program, and
+  `herdr-app ls` gave temet-work's terminals `"name": null`. The label is there for `hc get`.
+- The daemon's stop ended a kept terminal and removed it. **Read, not run:** `hc --skill` says a
+  kept terminal lost to a signal with no exit code, a crash or a reboot gets a shell in its place,
+  so the daemon would still see a live terminal with the agent's labels. `herdr-app --skill` says
+  closing a pane, tab or space ends the terminals in it.
+- An agent on another machine gets the same labels there; that was not run.
+- An investigator works on no issue, so the runner gives its terminal no `herdr.space` or
+  `herdr.tab`, and the app does not show it.
+
 ### Documents: `doc.get`, `doc.set`
 
 ```text
@@ -424,13 +473,13 @@ Still unknown:
 ### App
 
 Build on:
+- `herdr.space` and `herdr.tab`, set in `terminal.run`, to put a terminal on the app's screens; the app does not show a terminal without them (Labels and listing).
 - `status.msg` and `title` events for a one-line "what it is doing" per item, without reading screens (How agent state shows up).
 - "Open in Herdr" for the terminal itself, since terminals outlive windows (When the Herdr window closes, read only).
 
 Avoid:
+- Treating `where` as fixed: the app writes it, and changes it as tabs move (Labels and listing).
 - Showing agent text from `terminal.read` while it works: only the visible screen comes back, marked incomplete (Reading).
 
 Still unknown:
-- Whether a terminal without `herdr.space` and `herdr.tab` labels can be opened in Herdr; AGENTS.md says such terminals stay out of Herdr's screens (read, not run).
-- Who adds the `where` label, and whether the app may rely on it (Labels).
 - `terminal.attach` for drawing a terminal in the app was not tried.
