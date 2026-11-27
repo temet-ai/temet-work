@@ -409,6 +409,137 @@ fn an_author_takes_a_folder_on_its_issues_machine_and_any_folder_without_one() {
     assert_eq!(plan(&mut w, "1"), vec![author("1", "a-mac")]);
 }
 
+/// The folders watch-mac (on mac) and watch-omit (local), both free; one group
+/// holding WATCH-12 and WATCH-13, planned and depending on the open WATCH-11, with
+/// WATCH-13 pinned to the Mac. `held` is planned first, pinned to this machine, so
+/// it holds watch-omit.
+fn pinned_below_unpinned(held: Option<&str>) -> World {
+    let watch = ProjectId::new("watch");
+    let mut events = vec![Event::ProjectAdded {
+        project: watch.clone(),
+        tracker: "t".into(),
+        name: "ankh-morpork/watch".into(),
+        code_host: None,
+        repo: None,
+    }];
+    for (folder, machine) in [("watch-mac", "mac"), ("watch-omit", "local")] {
+        events.push(Event::FolderAdded {
+            folder: FolderId::new(folder),
+            project: watch.clone(),
+            machine: MachineId::new(machine),
+            path: format!("/srv/{folder}"),
+        });
+    }
+    events.push(Event::GroupCreated {
+        group: GroupId::new("watch"),
+        name: "Night watch".into(),
+        projects: vec![watch],
+        areas: Vec::new(),
+        milestones: Vec::new(),
+        refining_at_once: 4,
+        model: None,
+    });
+    let blocker = id("watch", "WATCH-11");
+    events.extend(
+        held.into_iter()
+            .chain(["WATCH-11", "WATCH-12", "WATCH-13"])
+            .enumerate()
+            .map(|(order, key)| Event::IssueSynced {
+                issue: id("watch", key),
+                title: key.into(),
+                milestone: None,
+                depends_on: if matches!(key, "WATCH-12" | "WATCH-13") {
+                    vec![blocker.clone()]
+                } else {
+                    vec![]
+                },
+                order: order as u64,
+                closed: false,
+            }),
+    );
+    let mut w = World::replay(&events).0;
+    let pin = |w: &mut World, key: &str, on: &str| {
+        machine(w, Scope::Task(id("watch", key)), None, on);
+    };
+    let ready = |w: &mut World, key: &str| {
+        w.apply(&Event::PlanWritten {
+            issue: id("watch", key),
+            plan: crate::model::Plan::default(),
+        })
+    };
+    if let Some(key) = held {
+        pin(&mut w, key, "local");
+        ready(&mut w, key);
+        assert_eq!(
+            w.folders[&FolderId::new("watch-omit")].holder,
+            Some(id("watch", key))
+        );
+    }
+    pin(&mut w, "WATCH-13", "mac");
+    for key in ["WATCH-12", "WATCH-13"] {
+        assert_eq!(ready(&mut w, key), vec![], "WATCH-11 is open");
+    }
+    w
+}
+
+/// Closes WATCH-11, which makes WATCH-12 and WATCH-13 startable at once.
+fn close_blocker(w: &mut World) -> Vec<Effect> {
+    w.apply(&Event::IssueSynced {
+        issue: id("watch", "WATCH-11"),
+        title: "WATCH-11".into(),
+        milestone: None,
+        depends_on: vec![],
+        order: 1,
+        closed: true,
+    })
+}
+
+fn watch_author(key: &str, folder: &str) -> Effect {
+    Effect::StartAgent {
+        group: GroupId::new("watch"),
+        role: Role::Author,
+        issue: id("watch", key),
+        folder: Some(FolderId::new(folder)),
+    }
+}
+
+#[test]
+fn an_unpinned_issue_leaves_a_pinned_issue_its_only_folder() {
+    let mut w = pinned_below_unpinned(None);
+    let effects = close_blocker(&mut w);
+    let authors: Vec<&Effect> = effects
+        .iter()
+        .filter(|e| matches!(e, Effect::StartAgent { .. }))
+        .collect();
+    assert_eq!(
+        authors,
+        [
+            &watch_author("WATCH-12", "watch-omit"),
+            &watch_author("WATCH-13", "watch-mac")
+        ]
+    );
+    assert_eq!(w.machine_waits(), vec![]);
+}
+
+#[test]
+fn an_unpinned_issue_still_takes_the_only_free_folder() {
+    let mut w = pinned_below_unpinned(Some("WATCH-10"));
+    let effects = close_blocker(&mut w);
+    assert!(
+        effects.contains(&watch_author("WATCH-12", "watch-mac")),
+        "{effects:?}"
+    );
+    assert_eq!(
+        w.machine_waits(),
+        vec![crate::placement::Waiting {
+            issue: id("watch", "WATCH-13"),
+            role: Role::Author,
+            machine: MachineId::new("mac"),
+            none_in: None,
+        }]
+    );
+}
+
 #[test]
 fn a_machine_for_one_role_or_one_task_wins_where_the_chain_says() {
     let mut w = machines(&BOTH);
