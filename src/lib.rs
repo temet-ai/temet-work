@@ -62,6 +62,8 @@ pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<
         let mut family = temet_work_codehost::CodeHosts::default();
         #[cfg(feature = "codehost-github")]
         family.add(Box::new(temet_work_codehost_github::GitHub::default()));
+        #[cfg(feature = "codehost-gitlab")]
+        family.add(Box::new(temet_work_codehost_gitlab::GitLab::default()));
         parts.push(Box::new(family));
     }
     #[cfg(feature = "deploy")]
