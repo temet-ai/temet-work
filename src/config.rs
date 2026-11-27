@@ -4,12 +4,17 @@
 //!
 //! The configuration becomes events, so the log records when a project, folder
 //! or group was added or changed. Removing one from the file does not remove it
-//! from the loop yet.
+//! from the loop yet. Settings (`docs/settings.md`) are the exception: the tables
+//! `[settings]`, `[project.settings]`, `[area.settings]` and `[[milestone]]` become
+//! `SettingSet` events recorded as made by the file, and a value that is no longer
+//! in the file is unset again, unless a person or an agent has set it since.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use temet_work_core::ids::{FolderId, GroupId, MachineId, MilestoneId, ProjectId};
+use temet_work_core::model::Role;
+use temet_work_core::settings::{self, FILE, Key, Scope, Value};
 use temet_work_core::world::LOCAL;
 use temet_work_core::{Event, World};
 
@@ -29,6 +34,25 @@ pub struct Config {
     /// Groups.
     #[serde(default, rename = "group")]
     pub groups: Vec<GroupConf>,
+    /// Milestones with settings of their own.
+    #[serde(default, rename = "milestone")]
+    pub milestones: Vec<MilestoneConf>,
+    /// The global settings; a table per role holds that role's.
+    pub settings: Option<toml::Table>,
+}
+
+/// One `[[milestone]]`: settings for the issues of one milestone of a project or
+/// an area.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MilestoneConf {
+    /// The project or area whose tracker names the milestone.
+    pub of: String,
+    /// The milestone's name, as its tracker has it.
+    pub name: String,
+    /// Its settings.
+    #[serde(default)]
+    pub settings: toml::Table,
 }
 
 /// One `[[project]]`.
@@ -56,8 +80,10 @@ pub struct ProjectConf {
     /// The folder `deploy` and `verify` run in; the home folder when left out.
     pub run_in: Option<String>,
     /// Whether its pull requests run CI; `false` leaves the plan's checks to the
-    /// reviewer. True when left out.
+    /// reviewer. True when left out. Read as the project's `ci` setting.
     pub ci: Option<bool>,
+    /// Its settings; a table per role holds that role's.
+    pub settings: Option<toml::Table>,
 }
 
 /// One `[[folder]]`: a checkout agents work in.
@@ -75,6 +101,56 @@ pub struct FolderConf {
     pub path: String,
 }
 
+/// What the file says a setting is, by where, for which role and which setting.
+type Wanted = BTreeMap<Key, Value>;
+
+/// Reads a `[settings]`-style table at `scope`: scalars are the settings for every
+/// role, a table named for a role holds that role's.
+fn read_settings(table: &toml::Table, scope: &Scope, out: &mut Wanted) -> Result<(), String> {
+    let at = |scope: &Scope| match scope {
+        Scope::Global => "[settings]".to_string(),
+        other => format!("the settings of {other}"),
+    };
+    for (key, value) in table {
+        if let toml::Value::Table(inner) = value {
+            let role = Role::parse(key).map_err(|_| {
+                format!(
+                    "{}: {key} is not a setting, and is not a role either; \
+                     the roles are refiner, author, reviewer, arbiter, investigator",
+                    at(scope)
+                )
+            })?;
+            for (key, value) in inner {
+                out.insert(
+                    (scope.clone(), Some(role), key.clone()),
+                    value_of(key, value).map_err(|e| format!("{}: {e}", at(scope)))?,
+                );
+            }
+            continue;
+        }
+        out.insert(
+            (scope.clone(), None, key.clone()),
+            value_of(key, value).map_err(|e| format!("{}: {e}", at(scope)))?,
+        );
+    }
+    Ok(())
+}
+
+/// A setting's value from TOML, checked against what the setting takes.
+fn value_of(key: &str, value: &toml::Value) -> Result<Value, String> {
+    settings::spec(key)?;
+    let value = match value {
+        toml::Value::Boolean(b) => Value::Flag(*b),
+        toml::Value::Integer(n) => {
+            Value::Number(u64::try_from(*n).map_err(|_| format!("{key} cannot be {n}"))?)
+        }
+        toml::Value::String(t) => Value::Text(t.clone()),
+        other => return Err(format!("{key} takes a single value, not {other}")),
+    };
+    settings::check_value(key, &value)?;
+    Ok(value)
+}
+
 /// One `[[area]]`: projects that work together. `docs/areas.md` says why.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,6 +166,8 @@ pub struct AreaConf {
     pub tracker: Option<String>,
     /// The tracker's name for that project (`GLD`).
     pub tracker_project: Option<String>,
+    /// Its settings; a table per role holds that role's.
+    pub settings: Option<toml::Table>,
 }
 
 /// One `[[group]]`.
@@ -114,7 +192,7 @@ pub struct GroupConf {
     #[serde(default = "one")]
     pub refining_at_once: usize,
     /// The model its agents run (`haiku`, `sonnet`); the runtime's default when
-    /// left out.
+    /// left out. Read as the `model` setting of the projects and areas it works on.
     pub model: Option<String>,
 }
 
@@ -195,6 +273,17 @@ impl Config {
                 return Err(format!("project {} names no code_host", p.id));
             }
         }
+        for m in &self.milestones {
+            if !projects.contains(m.of.as_str()) && !areas.contains(m.of.as_str()) {
+                return Err(format!(
+                    "a milestone names {}, which is not a listed project or area",
+                    m.of
+                ));
+            }
+            if m.name.trim().is_empty() {
+                return Err(format!("a milestone of {} has no name", m.of));
+            }
+        }
         let mut groups = BTreeSet::new();
         for g in &self.groups {
             if let Some(a) = g.areas.iter().find(|a| !areas.contains(a.as_str())) {
@@ -212,6 +301,89 @@ impl Config {
                     g.id
                 ));
             }
+        }
+        self.wanted()?;
+        Ok(())
+    }
+
+    /// Every setting the file gives, with the legacy keys read as settings at
+    /// their level: a group's `model` on the projects and areas it works on, a
+    /// project's `ci`, `deploy`, `verify` and `run_in` on the project. A table
+    /// written out wins over a legacy key at the same place.
+    fn wanted(&self) -> Result<Wanted, String> {
+        let mut out = Wanted::new();
+        let mut from_group: BTreeMap<Scope, (String, String)> = BTreeMap::new();
+        for g in &self.groups {
+            let Some(model) = &g.model else { continue };
+            let scopes = g
+                .projects
+                .iter()
+                .map(|p| Scope::Project(ProjectId::new(p)))
+                .chain(g.areas.iter().map(|a| Scope::Area(ProjectId::new(a))));
+            for scope in scopes {
+                if let Some((other, was)) = from_group.get(&scope)
+                    && was != model
+                {
+                    return Err(format!(
+                        "groups {other} and {} give {scope} different models ({was}, {model}); \
+                         set model on {scope} instead",
+                        g.id
+                    ));
+                }
+                from_group.insert(scope.clone(), (g.id.clone(), model.clone()));
+                out.insert(
+                    (scope, None, "model".into()),
+                    value_of("model", &toml::Value::String(model.clone()))?,
+                );
+            }
+        }
+        for p in &self.projects {
+            let scope = Scope::Project(ProjectId::new(&p.id));
+            for (key, value) in [
+                ("deploy", p.deploy.clone().map(toml::Value::String)),
+                ("verify", p.verify.clone().map(toml::Value::String)),
+                ("run_in", p.run_in.clone().map(toml::Value::String)),
+                ("ci", p.ci.filter(|ci| !ci).map(toml::Value::Boolean)),
+            ] {
+                if let Some(v) = value {
+                    out.insert((scope.clone(), None, key.into()), value_of(key, &v)?);
+                }
+            }
+        }
+        if let Some(t) = &self.settings {
+            read_settings(t, &Scope::Global, &mut out)?;
+        }
+        for p in &self.projects {
+            if let Some(t) = &p.settings {
+                read_settings(t, &Scope::Project(ProjectId::new(&p.id)), &mut out)?;
+            }
+        }
+        for a in &self.areas {
+            if let Some(t) = &a.settings {
+                read_settings(t, &Scope::Area(ProjectId::new(&a.id)), &mut out)?;
+            }
+        }
+        let mut seen = BTreeSet::new();
+        for m in &self.milestones {
+            if !seen.insert((&m.of, &m.name)) {
+                return Err(format!("milestone {}:{} is listed twice", m.of, m.name));
+            }
+            let scope = Scope::Milestone {
+                of: ProjectId::new(&m.of),
+                name: m.name.clone(),
+            };
+            read_settings(&m.settings, &scope, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    /// Why this build cannot run with the file's settings: one that names a
+    /// runtime or runner it does not have.
+    pub fn check_build(&self, world: &World) -> Result<(), String> {
+        for ((scope, _, key), value) in self.wanted()? {
+            world
+                .check_choice(&key, &value)
+                .map_err(|e| format!("the settings of {scope}: {e}"))?;
         }
         Ok(())
     }
@@ -238,29 +410,6 @@ impl Config {
                     name: p.name.clone(),
                     code_host: Some(code_host),
                     repo: Some(repo),
-                });
-            }
-        }
-        for p in &self.projects {
-            let id = ProjectId::new(&p.id);
-            let now = world
-                .projects
-                .get(&id)
-                .map(|w| (w.deploy.clone(), w.verify.clone(), w.run_in.clone(), w.ci))
-                .unwrap_or((None, None, None, true));
-            let want = (
-                p.deploy.clone(),
-                p.verify.clone(),
-                p.run_in.clone(),
-                p.ci.unwrap_or(true),
-            );
-            if now != want {
-                out.push(Event::ProjectCommandsSet {
-                    project: id,
-                    deploy: want.0,
-                    verify: want.1,
-                    run_in: want.2,
-                    ci: Some(want.3),
                 });
             }
         }
@@ -300,6 +449,31 @@ impl Config {
                 });
             }
         }
+        // Before the groups, so what a group takes on already has its settings.
+        let wanted = self.wanted().unwrap_or_default();
+        for (key, value) in &wanted {
+            let current = world.settings.get(key);
+            // Not over a value a person or an agent has set since.
+            if current.is_none_or(|e| e.by == FILE && &e.value != value) {
+                out.push(Event::SettingSet {
+                    scope: key.0.clone(),
+                    role: key.1,
+                    key: key.2.clone(),
+                    value: value.clone(),
+                    by: FILE.into(),
+                });
+            }
+        }
+        for (key, entry) in &world.settings {
+            if entry.by == FILE && !wanted.contains_key(key) {
+                out.push(Event::SettingUnset {
+                    scope: key.0.clone(),
+                    role: key.1,
+                    key: key.2.clone(),
+                    by: FILE.into(),
+                });
+            }
+        }
         for g in &self.groups {
             let id = GroupId::new(&g.id);
             let name = g.name.clone().unwrap_or_else(|| g.id.clone());
@@ -313,7 +487,6 @@ impl Config {
                     && w.areas == areas
                     && w.milestones == milestones
                     && w.refining_at_once == refining_at_once
-                    && w.model == g.model
             });
             if !same {
                 out.push(Event::GroupCreated {
@@ -323,7 +496,7 @@ impl Config {
                     areas,
                     milestones,
                     refining_at_once,
-                    model: g.model.clone(),
+                    model: None,
                 });
             }
         }
@@ -359,10 +532,12 @@ milestones = ["Clocks"]
         let config = Config::parse(EXAMPLE).expect("parse");
         let events = config.events(&World::default());
         assert_eq!(events.len(), 4);
-        assert!(
-            matches!(&events[1], Event::ProjectCommandsSet { deploy: Some(d), .. } if d == "make deploy")
-        );
-        assert!(matches!(&events[2], Event::FolderAdded { machine, .. } if machine.0 == LOCAL));
+        assert!(matches!(&events[1], Event::FolderAdded { machine, .. } if machine.0 == LOCAL));
+        assert!(matches!(
+            &events[2],
+            Event::SettingSet { key, value: Value::Text(d), by, .. }
+                if key == "deploy" && d == "make deploy" && by == FILE
+        ));
         let (world, _) = World::replay(&events);
         assert_eq!(config.events(&world), vec![], "nothing new the second time");
     }
@@ -435,6 +610,308 @@ areas = ["guild"]
         assert!(
             Config::parse("[[project]]\nid = \"a\"\ntracker = \"x\"\nname = \"y\"\ncolour = 1")
                 .is_err()
+        );
+    }
+
+    /// Today's configuration file, as the daemon read it before settings.
+    const TODAY: &str = r#"
+[[project]]
+id = "radar"
+tracker = "github"
+name = "temet-ai/radar"
+deploy = "make deploy"
+verify = "make smoke"
+run_in = "/home/me/src/radar-deploy"
+ci = false
+
+[[folder]]
+id = "radar-1"
+project = "radar"
+path = "/home/me/src/radar-1"
+
+[[group]]
+id = "group-1"
+name = "Group 1"
+projects = ["radar"]
+milestones = ["Sign-in rework"]
+refining_at_once = 1
+model = "haiku"
+"#;
+
+    fn world_of(text: &str) -> World {
+        let config = Config::parse(text).expect("parse");
+        let (world, _) = World::replay(&config.events(&World::default()));
+        assert_eq!(config.events(&world), vec![], "nothing new the second time");
+        world
+    }
+
+    #[test]
+    fn todays_file_loads_unchanged_and_its_old_keys_are_settings_at_their_level() {
+        let w = world_of(TODAY);
+        let issue = temet_work_core::ids::IssueId::new("radar", "44");
+        let text = |key| w.setting_text(&issue, None, key);
+        // Before the issue is synced the chain still starts at the project.
+        let at = |key| w.resolve(&Scope::Project(ProjectId::new("radar")), None, key);
+        assert_eq!(text("deploy").as_deref(), Some("make deploy"));
+        assert_eq!(
+            at("verify").map(|r| r.value),
+            Some(Value::Text("make smoke".into()))
+        );
+        assert_eq!(
+            at("run_in").map(|r| r.value),
+            Some(Value::Text("/home/me/src/radar-deploy".into()))
+        );
+        assert_eq!(at("ci").map(|r| r.value), Some(Value::Flag(false)));
+        assert_eq!(
+            at("model").map(|r| r.value),
+            Some(Value::Text("haiku".into()))
+        );
+        assert_eq!(
+            at("model").map(|r| r.level),
+            Some(temet_work_core::settings::Level::Project)
+        );
+        assert!(w.settings.values().all(|e| e.by == FILE));
+        // The group is as it was.
+        assert_eq!(w.groups[&GroupId::new("group-1")].milestones.len(), 1);
+    }
+
+    /// Every table the settings add.
+    const NEW: &str = r#"
+[settings]
+runtime = "alpha"
+model = "sonnet"
+review_rounds = 4
+
+[settings.reviewer]
+runtime = "beta"
+
+[[project]]
+id = "radar"
+tracker = "github"
+name = "temet-ai/radar"
+
+[project.settings]
+model = "haiku"
+ci = false
+
+[project.settings.author]
+permission = "plan"
+
+[[project]]
+id = "ledger"
+name = "temet-ai/ledger"
+code_host = "github"
+
+[[area]]
+id = "guild"
+projects = ["radar", "ledger"]
+tracker = "jira"
+tracker_project = "GLD"
+
+[area.settings]
+merge = "rebase"
+
+[[milestone]]
+of = "radar"
+name = "Sign-in rework"
+
+[milestone.settings]
+model = "opus"
+
+[[milestone]]
+of = "guild"
+name = "Heist"
+
+[milestone.settings]
+starts = 1
+"#;
+
+    #[test]
+    fn every_new_table_becomes_a_setting_event_by_the_file() {
+        let config = Config::parse(NEW).expect("parse");
+        let events = config.events(&World::default());
+        let sets: Vec<&Event> = events
+            .iter()
+            .filter(|e| matches!(e, Event::SettingSet { .. }))
+            .collect();
+        assert_eq!(sets.len(), 10, "{sets:?}");
+        assert!(
+            sets.iter()
+                .all(|e| matches!(e, Event::SettingSet { by, .. } if by == FILE))
+        );
+        let w = world_of(NEW);
+        let get = |scope: Scope, role: Option<Role>, key: &str| {
+            w.settings
+                .get(&(scope, role, key.to_string()))
+                .map(|e| e.value.clone())
+        };
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        assert_eq!(
+            get(Scope::Global, None, "model"),
+            Some(Value::Text("sonnet".into()))
+        );
+        assert_eq!(
+            get(Scope::Global, None, "review_rounds"),
+            Some(Value::Number(4))
+        );
+        assert_eq!(
+            get(Scope::Global, Some(Role::Reviewer), "runtime"),
+            Some(Value::Text("beta".into()))
+        );
+        assert_eq!(get(radar(), None, "ci"), Some(Value::Flag(false)));
+        assert_eq!(
+            get(radar(), Some(Role::Author), "permission"),
+            Some(Value::Text("plan".into()))
+        );
+        assert_eq!(
+            get(Scope::Area(ProjectId::new("guild")), None, "merge"),
+            Some(Value::Text("rebase".into()))
+        );
+        assert_eq!(
+            get(
+                Scope::Milestone {
+                    of: ProjectId::new("radar"),
+                    name: "Sign-in rework".into()
+                },
+                None,
+                "model"
+            ),
+            Some(Value::Text("opus".into()))
+        );
+        assert_eq!(
+            get(
+                Scope::Milestone {
+                    of: ProjectId::new("guild"),
+                    name: "Heist".into()
+                },
+                None,
+                "starts"
+            ),
+            Some(Value::Number(1))
+        );
+    }
+
+    #[test]
+    fn a_table_written_out_wins_over_an_old_key_and_a_changed_file_changes_the_setting() {
+        let text = TODAY.replace(
+            "ci = false\n",
+            "ci = false\n\n[project.settings]\nverify = \"make check\"\nmodel = \"opus\"\n",
+        );
+        let w = world_of(&text);
+        let at = |key| w.resolve(&Scope::Project(ProjectId::new("radar")), None, key);
+        assert_eq!(
+            at("verify").map(|r| r.value),
+            Some(Value::Text("make check".into()))
+        );
+        assert_eq!(
+            at("model").map(|r| r.value),
+            Some(Value::Text("opus".into()))
+        );
+        // The file changes: the value is set again; a table taken out leaves the old
+        // key's value, here the group's model.
+        let again = Config::parse(
+            &text
+                .replace("make check", "make verify")
+                .replace("model = \"opus\"\n", ""),
+        )
+        .expect("parse");
+        let events = again.events(&w);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::SettingSet { key, value: Value::Text(v), .. } if key == "verify" && v == "make verify"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::SettingSet { key, value: Value::Text(v), .. } if key == "model" && v == "haiku"
+        )));
+        // A key taken out with nothing under it is unset.
+        let bare = Config::parse(
+            &text
+                .replace("verify = \"make check\"\n", "")
+                .replace("verify = \"make smoke\"\n", ""),
+        )
+        .expect("parse");
+        assert!(bare.events(&w).iter().any(|e| matches!(
+            e,
+            Event::SettingUnset { key, by, .. } if key == "verify" && by == FILE
+        )));
+    }
+
+    #[test]
+    fn what_a_person_set_is_not_overwritten_by_the_file_on_the_next_read() {
+        let config = Config::parse(NEW).expect("parse");
+        let (mut w, _) = World::replay(&config.events(&World::default()));
+        w.apply(&Event::SettingSet {
+            scope: Scope::Global,
+            role: None,
+            key: "model".into(),
+            value: Value::Text("fable".into()),
+            by: "person".into(),
+        });
+        assert_eq!(config.events(&w), vec![]);
+        assert_eq!(
+            w.settings[&(Scope::Global, None, "model".to_string())].value,
+            Value::Text("fable".into())
+        );
+    }
+
+    #[test]
+    fn a_key_the_daemon_does_not_know_is_an_error_naming_the_key() {
+        for (where_, text) in [
+            ("[settings]\ncolour = \"red\"\n", "colour"),
+            ("[settings.reviewer]\nreview_roundz = 2\n", "review_roundz"),
+            ("[settings.janitor]\nmodel = \"x\"\n", "janitor"),
+        ] {
+            let err = Config::parse(&format!("{where_}{TODAY}")).expect_err(text);
+            assert!(err.contains(text), "{err}");
+        }
+        let in_project = TODAY.replace("ci = false", "ci = false\n[project.settings]\nflavour = 1");
+        assert!(Config::parse(&in_project).is_err_and(|e| e.contains("flavour")));
+        let milestone = format!(
+            "{TODAY}\n[[milestone]]\nof = \"radar\"\nname = \"M\"\n[milestone.settings]\nspeed = 3\n"
+        );
+        assert!(Config::parse(&milestone).is_err_and(|e| e.contains("speed")));
+        let unlisted = format!("{TODAY}\n[[milestone]]\nof = \"nowhere\"\nname = \"M\"\n");
+        assert!(Config::parse(&unlisted).is_err_and(|e| e.contains("nowhere")));
+    }
+
+    #[test]
+    fn a_value_of_the_wrong_kind_is_an_error_and_so_is_a_model_two_groups_disagree_on() {
+        let bad = format!("[settings]\nreview_rounds = \"many\"\n{TODAY}");
+        assert!(
+            Config::parse(&bad)
+                .is_err_and(|e| e.contains("review_rounds") && e.contains("whole number"))
+        );
+        let two = format!(
+            "{TODAY}\n[[group]]\nid = \"group-2\"\nprojects = [\"radar\"]\nmodel = \"opus\"\n"
+        );
+        assert!(Config::parse(&two).is_err_and(|e| e.contains("group-1") && e.contains("group-2")));
+    }
+
+    #[test]
+    fn a_runtime_this_build_lacks_stops_the_start_listing_the_ones_it_has() {
+        use temet_work_core::settings::Choice;
+        let text = format!("[settings]\nruntime = \"nonesuch\"\n{TODAY}");
+        let config = Config::parse(&text).expect("the file is well formed");
+        let mut world = World::default();
+        world.catalog.insert(
+            "runtime".into(),
+            Choice {
+                key: "runtime".into(),
+                allowed: vec!["alpha".into(), "beta".into()],
+                default: Some("alpha".into()),
+            },
+        );
+        let err = config.check_build(&world).expect_err("refused");
+        assert!(
+            err.contains("nonesuch") && err.contains("alpha, beta"),
+            "{err}"
+        );
+        assert!(
+            Config::parse(TODAY)
+                .expect("parse")
+                .check_build(&world)
+                .is_ok()
         );
     }
 }

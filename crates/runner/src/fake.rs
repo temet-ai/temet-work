@@ -65,6 +65,10 @@ impl Runner for FakeRunner {
         self.id
     }
 
+    fn is_default(&self) -> bool {
+        true
+    }
+
     fn start(&mut self, start: &Start) -> Result<TerminalId, RunnerError> {
         let id = TerminalId(format!("t{}", self.next));
         self.next += 1;

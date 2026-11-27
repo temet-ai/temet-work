@@ -93,7 +93,12 @@ pub struct Host {
 
 impl Host {
     /// A host over `world`, already built from the journal's events.
-    pub fn new(world: World, parts: Vec<Box<dyn Part>>, journal: Box<dyn Journal>) -> Self {
+    pub fn new(mut world: World, parts: Vec<Box<dyn Part>>, journal: Box<dyn Journal>) -> Self {
+        world.catalog = parts
+            .iter()
+            .flat_map(|p| p.choices())
+            .map(|c| (c.key.clone(), c))
+            .collect();
         Self {
             world,
             parts,

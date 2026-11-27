@@ -4,16 +4,24 @@
 //! This crate holds the [`Runtime`] contract, a [`FakeRuntime`] and the
 //! [`contract`] every runtime adapter runs. Adapter crates depend on this crate only.
 
-use temet_work_core::model::Role;
+use temet_work_core::settings::Choice;
 use temet_work_core::{Effect, Outcome, Part, World};
 
 /// The core types this contract uses, re-exported so adapters need no other crate.
+pub use temet_work_core::ids::IssueId;
 pub use temet_work_core::launch::{Brief, Program};
+pub use temet_work_core::model::Role;
 
 /// One agent runtime, added by an adapter crate.
 pub trait Runtime: Send {
     /// A short, stable id, the adapter's feature name after `runtime-`.
     fn id(&self) -> &'static str;
+
+    /// Whether this is the runtime used when no setting names one. The build's
+    /// first default one wins.
+    fn is_default(&self) -> bool {
+        false
+    }
 
     /// The program that starts an agent with this brief: its task as the first
     /// prompt, and the model when the brief names one.
@@ -29,12 +37,18 @@ impl Runtime for FakeRuntime {
         "fake"
     }
 
+    fn is_default(&self) -> bool {
+        true
+    }
+
     fn program(&self, brief: &Brief) -> Program {
         let mut argv = vec!["fake-agent".to_string()];
         if let Some(model) = &brief.model {
             argv.push("--model".into());
             argv.push(model.clone());
         }
+        argv.push("--permission".into());
+        argv.push(brief.permission.clone());
         argv.push(brief.task.clone());
         Program {
             argv,
@@ -56,6 +70,7 @@ pub mod contract {
             issue: IssueId::new("contract", "1"),
             task: "Add the contract-check test, then stop.".into(),
             model: model.map(String::from),
+            permission: "auto".into(),
             folder: None,
         }
     }
@@ -77,6 +92,16 @@ pub mod contract {
         if !with_model.argv.iter().any(|a| a == "contract-model") {
             return Err("the brief's model reaches the program".into());
         }
+        let mut ask = brief(None);
+        ask.permission = "contract-permission".into();
+        if !runtime
+            .program(&ask)
+            .argv
+            .iter()
+            .any(|a| a.contains("contract-permission"))
+        {
+            return Err("the brief's permission reaches the program".into());
+        }
         Ok(())
     }
 }
@@ -97,6 +122,49 @@ impl Runtimes {
     pub fn ids(&self) -> Vec<&'static str> {
         self.adapters.iter().map(|a| a.id()).collect()
     }
+
+    /// The id of the runtime used when no setting names one.
+    pub fn default_id(&self) -> Option<&'static str> {
+        self.adapters
+            .iter()
+            .find(|a| a.is_default())
+            .map(|a| a.id())
+    }
+
+    /// The runtime an agent of `role` on `issue` runs: the one its `runtime`
+    /// setting names, else this build's default.
+    fn pick(&self, world: &World, issue: &IssueId, role: Role) -> Result<&dyn Runtime, String> {
+        let named = world.setting_text(issue, Some(role), "runtime");
+        let id = named
+            .as_deref()
+            .or_else(|| self.default_id())
+            .ok_or_else(|| {
+                format!(
+                    "no runtime is set for {issue}'s {}s and this build has no default; \
+                     set runtime globally. This build has: {}",
+                    role.name(),
+                    list(&self.ids())
+                )
+            })?;
+        self.adapters
+            .iter()
+            .find(|a| a.id() == id)
+            .map(|a| a.as_ref())
+            .ok_or_else(|| {
+                format!(
+                    "no runtime \"{id}\" in this build; this build has: {}",
+                    list(&self.ids())
+                )
+            })
+    }
+}
+
+fn list(ids: &[&str]) -> String {
+    if ids.is_empty() {
+        "none".into()
+    } else {
+        ids.join(", ")
+    }
 }
 
 impl Part for Runtimes {
@@ -104,8 +172,16 @@ impl Part for Runtimes {
         "runtime"
     }
 
+    fn choices(&self) -> Vec<Choice> {
+        vec![Choice {
+            key: "runtime".into(),
+            allowed: self.ids().into_iter().map(String::from).collect(),
+            default: self.default_id().map(String::from),
+        }]
+    }
+
     /// Turns the loop's decision to start an agent into a program to run, with
-    /// the first runtime in this build.
+    /// the runtime the `runtime` setting names for that issue and role.
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
         let (group, role, issue, folder) = match effect {
             Effect::StartAgent {
@@ -124,8 +200,9 @@ impl Part for Runtimes {
             }
             _ => return Outcome::NotMine,
         };
-        let Some(runtime) = self.adapters.first() else {
-            return Outcome::Failed("no agent runtime is compiled into this build".into());
+        let runtime = match self.pick(world, issue, role) {
+            Ok(r) => r,
+            Err(e) => return Outcome::Failed(e),
         };
         let Some(launch) = world.launch(&group, role, issue, folder) else {
             return Outcome::Failed(format!("{issue} is not known"));
@@ -192,6 +269,142 @@ mod tests {
     #[test]
     fn the_fake_passes_the_contract() {
         assert_eq!(contract::check(&FakeRuntime), Ok(()));
+    }
+
+    /// A second runtime, so the family always has two to choose between.
+    struct Other;
+
+    impl Runtime for Other {
+        fn id(&self) -> &'static str {
+            "other"
+        }
+        fn program(&self, brief: &Brief) -> Program {
+            Program {
+                argv: vec!["other-agent".into(), brief.task.clone()],
+                env: Vec::new(),
+            }
+        }
+    }
+
+    fn world_with_issue() -> World {
+        use temet_work_core::Event;
+        let mut world = World::default();
+        for key in ["1", "2"] {
+            world.apply(&Event::IssueSynced {
+                issue: IssueId::new("ankh", key),
+                title: format!("issue {key}"),
+                milestone: None,
+                depends_on: vec![],
+                order: 1,
+                closed: false,
+            });
+        }
+        world
+    }
+
+    fn start(role: Role, key: &str) -> Effect {
+        Effect::StartAgent {
+            group: temet_work_core::ids::GroupId::new("watch"),
+            role,
+            issue: IssueId::new("ankh", key),
+            folder: None,
+        }
+    }
+
+    fn program_for(part: &mut Runtimes, world: &World, effect: &Effect) -> String {
+        let Outcome::Done { effects, .. } = part.carry_out(effect, world) else {
+            panic!("not done");
+        };
+        let [Effect::Run { program, .. }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        program.argv[0].clone()
+    }
+
+    #[test]
+    fn two_adapters_the_default_runs_until_a_setting_names_the_other() {
+        use temet_work_core::Event;
+        use temet_work_core::settings::{Scope, Value};
+        let mut world = world_with_issue();
+        let mut part = Runtimes::default();
+        part.add(Box::new(Other));
+        part.add(Box::new(FakeRuntime));
+        assert_eq!(part.ids(), ["other", "fake"]);
+        assert_eq!(part.default_id(), Some("fake"), "not the first one added");
+        world.catalog = part
+            .choices()
+            .into_iter()
+            .map(|c| (c.key.clone(), c))
+            .collect();
+        assert_eq!(
+            program_for(&mut part, &world, &start(Role::Author, "1")),
+            "fake-agent"
+        );
+        // Reviewers of ankh#1 run the other one; its authors and ankh#2 do not.
+        world.apply(&Event::SettingSet {
+            scope: Scope::Task(IssueId::new("ankh", "1")),
+            role: Some(Role::Reviewer),
+            key: "runtime".into(),
+            value: Value::Text("other".into()),
+            by: "person".into(),
+        });
+        assert_eq!(
+            program_for(&mut part, &world, &start(Role::Reviewer, "1")),
+            "other-agent"
+        );
+        assert_eq!(
+            program_for(&mut part, &world, &start(Role::Author, "1")),
+            "fake-agent"
+        );
+        assert_eq!(
+            program_for(&mut part, &world, &start(Role::Reviewer, "2")),
+            "fake-agent"
+        );
+    }
+
+    #[test]
+    fn two_adapters_a_setting_naming_one_the_build_lacks_is_a_problem_listing_the_ones_it_has() {
+        use temet_work_core::Event;
+        use temet_work_core::settings::{Scope, Value};
+        let mut world = world_with_issue();
+        let mut part = Runtimes::default();
+        part.add(Box::new(FakeRuntime));
+        part.add(Box::new(Other));
+        world.apply(&Event::SettingSet {
+            scope: Scope::Global,
+            role: None,
+            key: "runtime".into(),
+            value: Value::Text("nonesuch".into()),
+            by: "file".into(),
+        });
+        assert!(matches!(
+            part.carry_out(&start(Role::Author, "1"), &world),
+            Outcome::Failed(e) if e.contains("nonesuch") && e.contains("fake, other")
+        ));
+    }
+
+    #[test]
+    fn two_adapters_a_build_with_no_default_runtime_needs_one_set() {
+        struct NoDefault;
+        impl Runtime for NoDefault {
+            fn id(&self) -> &'static str {
+                "no-default"
+            }
+            fn program(&self, brief: &Brief) -> Program {
+                Program {
+                    argv: vec!["x".into(), brief.task.clone()],
+                    env: Vec::new(),
+                }
+            }
+        }
+        let world = world_with_issue();
+        let mut part = Runtimes::default();
+        part.add(Box::new(NoDefault));
+        assert_eq!(part.choices()[0].default, None);
+        assert!(matches!(
+            part.carry_out(&start(Role::Author, "1"), &world),
+            Outcome::Failed(e) if e.contains("set runtime globally")
+        ));
     }
 
     struct DropsTheModel;

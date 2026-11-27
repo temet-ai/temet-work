@@ -275,6 +275,7 @@ dependencies = [
  "temet-work-runner-herdr",
  "temet-work-runtime",
  "temet-work-runtime-claude",
+ "temet-work-runtime-codex",
  "temet-work-store",
  "temet-work-style",
  "temet-work-tracker",
@@ -302,6 +303,7 @@ name = "temet-work-core"
 version = "0.0.1"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -342,6 +344,13 @@ dependencies = [
 
 [[package]]
 name = "temet-work-runtime-claude"
+version = "0.0.1"
+dependencies = [
+ "temet-work-runtime",
+]
+
+[[package]]
+name = "temet-work-runtime-codex"
 version = "0.0.1"
 dependencies = [
  "temet-work-runtime",

@@ -175,7 +175,7 @@ fn review_blocks_go_back_to_the_author_then_to_an_arbiter_after_three_rounds() {
             points: vec!["no test for an invalid document".into()],
         },
     };
-    for round in 1..REVIEW_ROUNDS {
+    for round in 1..3 {
         assert_eq!(
             w.apply(&pr),
             vec![Effect::StartReview {
@@ -193,7 +193,7 @@ fn review_blocks_go_back_to_the_author_then_to_an_arbiter_after_three_rounds() {
     }
     w.apply(&pr);
     assert_eq!(
-        w.apply(&block(REVIEW_ROUNDS)),
+        w.apply(&block(3)),
         vec![Effect::StartAgent {
             group: GroupId::new("watch"),
             role: Role::Arbiter,
@@ -201,12 +201,7 @@ fn review_blocks_go_back_to_the_author_then_to_an_arbiter_after_three_rounds() {
             folder: None
         }]
     );
-    assert_eq!(
-        stage(&w, "1"),
-        Stage::Arbitration {
-            round: REVIEW_ROUNDS
-        }
-    );
+    assert_eq!(stage(&w, "1"), Stage::Arbitration { round: 3 });
 }
 
 #[test]
@@ -329,13 +324,13 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
             issue: issue("1"),
             pull: None,
         });
-        for round in 1..=REVIEW_ROUNDS {
+        for round in 1..=3 {
             w.apply(&Event::ReviewFinished {
                 issue: issue("1"),
                 round,
                 verdict: Verdict::Block { points: vec![] },
             });
-            if round < REVIEW_ROUNDS {
+            if round < 3 {
                 w.apply(&Event::PullRequestReady {
                     issue: issue("1"),
                     pull: None,
@@ -481,9 +476,9 @@ fn an_issue_missing_its_agent_gets_one_until_three_have_ended() {
     );
     w.apply(&started("refiner-1", Role::Refiner, "1"));
     assert_eq!(w.missing(), crate::world::Missing::default());
-    for n in 1..=crate::world::MAX_STARTS {
+    for n in 1..=3 {
         w.apply(&ended(&format!("refiner-{n}")));
-        if n < crate::world::MAX_STARTS {
+        if n < 3 {
             assert_eq!(w.missing().start, vec![refiner("1")]);
             w.apply(&started(&format!("refiner-{}", n + 1), Role::Refiner, "1"));
         }
@@ -874,16 +869,12 @@ fn an_area_issue_is_worked_in_the_first_repository_its_plan_names() {
         "{}",
         refiner.brief.task
     );
-    assert!(
-        refiner
-            .brief
-            .task
-            .contains("GLD-12 of GLD in its tracker")
-    );
+    assert!(refiner.brief.task.contains("GLD-12 of GLD in its tracker"));
     let effects = w.apply(&Event::PlanWritten {
         issue: id.clone(),
         plan: Plan {
             repos: vec![ProjectId::new("api"), ProjectId::new("ui")],
+            settings: Default::default(),
             checks: vec![],
         },
     });

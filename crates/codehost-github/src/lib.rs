@@ -148,8 +148,18 @@ impl CodeHost for GitHub {
         parse_pull(&out)
     }
 
-    fn merge(&mut self, repo: &str, number: &str) -> Result<(), CodeHostError> {
-        self.run(&["pr", "merge", number, "-R", repo, "--squash"])
+    fn merge(&mut self, repo: &str, number: &str, how: &str) -> Result<(), CodeHostError> {
+        let flag = match how {
+            "squash" => "--squash",
+            "merge" => "--merge",
+            "rebase" => "--rebase",
+            other => {
+                return Err(CodeHostError::Other(format!(
+                    "no way to merge called {other}; squash, merge or rebase"
+                )));
+            }
+        };
+        self.run(&["pr", "merge", number, "-R", repo, flag])
             .map(|_| ())
     }
 }
@@ -228,6 +238,42 @@ mod tests {
             Checks::Failed {
                 failing: vec!["docs".into(), "deploy".into()]
             }
+        );
+    }
+
+    /// Remembers the arguments it was run with.
+    struct Spy(std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+
+    impl Transport for Spy {
+        fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            self.0
+                .lock()
+                .expect("lock")
+                .push(args.iter().map(ToString::to_string).collect());
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn the_merge_setting_picks_the_flag_gh_gets() {
+        for (how, flag) in [
+            ("squash", "--squash"),
+            ("merge", "--merge"),
+            ("rebase", "--rebase"),
+        ] {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut gh = GitHub::with(Box::new(Spy(seen.clone())));
+            gh.merge("temet-ai/radar", "46", how).expect("merges");
+            let ran = seen.lock().expect("lock").clone();
+            assert_eq!(
+                ran,
+                vec![vec!["pr", "merge", "46", "-R", "temet-ai/radar", flag]]
+            );
+        }
+        let mut gh = GitHub::with(Box::new(Recorded));
+        assert!(
+            gh.merge("temet-ai/radar", "46", "fast-forward")
+                .is_err_and(|e| e.to_string().contains("squash, merge or rebase"))
         );
     }
 

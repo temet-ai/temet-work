@@ -43,7 +43,8 @@ crate, and on no other crate in the workspace.
 | `temet-work-runner` | core | The runner contract: start a labelled terminal, read it, send to it, wait on it, follow its events. A fake and the contract tests. |
 | `temet-work-runner-herdr` | runner only | herdr-core. tmux follows as its own crate. |
 | `temet-work-runtime` | core | The agent runtime contract: start a session with a brief and a model, tell working from idle. A fake and the contract tests. |
-| `temet-work-runtime-claude` | runtime only | Claude Code. Codex follows as its own crate. |
+| `temet-work-runtime-claude` | runtime only | Claude Code. |
+| `temet-work-runtime-codex` | runtime only | Codex. |
 | `temet-work-codehost` | core | The code-host contract: read a pull request and its CI, merge it. A fake and the contract tests. A project's code host can differ from its tracker. |
 | `temet-work-codehost-github` | codehost only | GitHub pull requests. GitLab follows as its own crate. |
 | `temet-work-deploy` | core | Runs a project's deploy and verify commands after a merge. |
@@ -62,7 +63,7 @@ What exists today:
 | `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, and the state as text |
 | `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, and holds text for an agent until its turn ends |
 | `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
-| `temet-work-runtime-claude` | passes the runtime contract |
+| `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting |
 | `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
 | `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-codehost` | the contract, a fake and contract tests. The family reads the CI of each pull request in review every 30 seconds and reports it finished, with the names of failing checks; it merges when the loop asks |
@@ -77,9 +78,6 @@ issue that changes several repositories is not yet.
 
 What does not work yet:
 
-- Runtimes and runners: every agent gets the first one in the build. Settings at every
-  level, from global down to one task (`docs/settings.md`), replace this, and the same
-  chain replaces every fixed value and one-off key the code has today.
 - Any agent or person can run any command; a command is not yet limited to the agent
   whose step it is.
 - Overturning a decision: the loop records an overturn, but no command makes one and no

@@ -87,6 +87,7 @@ fn host_with(journal: Box<dyn temet_work_core::Journal>) -> Host {
                 conflicting: false,
             },
         )],
+        ..FakeCodeHost::default()
     }));
     let deploys = temet_work_deploy::Deploys::with(std::sync::Arc::new(
         |_: &str, _: &std::path::PathBuf, _: &[(String, String)]| Ok(()),
@@ -204,6 +205,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     };
     let plan = Plan {
         repos: Vec::new(),
+        settings: Default::default(),
         checks: vec![Check {
             done_when: "the clock strikes thirteen".into(),
             proven_by: "listening at midnight".into(),
@@ -291,5 +293,248 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     assert!(host.problems().is_empty(), "{:?}", host.problems());
     // The log of a live run, with parts carrying out effects, replays to the same state.
     let logged = kept.0.lock().expect("journal").clone();
-    assert_eq!(&World::replay(&logged).0, host.world());
+    let mut replayed = World::replay(&logged).0;
+    // What the build's parts offer is not in the log.
+    replayed.catalog = host.world().catalog.clone();
+    assert_eq!(&replayed, host.world());
+}
+
+mod settings_commands {
+    use super::*;
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::Command;
+    use temet_work_core::Request;
+    use temet_work_core::event::Event;
+    use temet_work_core::settings::{Scope, Target, Value};
+
+    fn ask(host: &mut Host, by: Option<&str>, command: Command) -> Reply {
+        let request = Request {
+            by: by.map(AgentId::new),
+            command,
+        };
+        answer(host, 1, &request).expect("answer")
+    }
+
+    fn set(
+        target: &str,
+        role: Option<temet_work_core::model::Role>,
+        key: &str,
+        value: &str,
+    ) -> Command {
+        Command::Set {
+            target: Target::parse(target),
+            role,
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    /// The words of the line that lists `key`, after the key.
+    fn row(text: &str, key: &str) -> String {
+        let line = text
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(key))
+            .unwrap_or_else(|| panic!("no {key} in {text}"));
+        line.split_whitespace()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn done(reply: Reply) -> String {
+        match reply {
+            Reply::Done { text } => text,
+            Reply::Refused { why } => panic!("refused: {why}"),
+        }
+    }
+
+    fn refused(reply: Reply) -> String {
+        match reply {
+            Reply::Refused { why } => why,
+            Reply::Done { text } => panic!("done: {text}"),
+        }
+    }
+
+    #[test]
+    fn set_settings_and_unset_go_through_the_daemon_and_are_events_with_who_made_them() {
+        use temet_work_core::model::Role;
+        let kept = Kept::default();
+        let mut host = host_with(Box::new(kept.clone()));
+        host.tick(0).expect("sync");
+        assert_eq!(
+            done(ask(&mut host, None, set("ankh#1", None, "model", "opus"))),
+            "model is opus at ankh#1"
+        );
+        done(ask(
+            &mut host,
+            None,
+            set("ankh", Some(Role::Reviewer), "review_rounds", "1"),
+        ));
+        let shown = done(ask(
+            &mut host,
+            None,
+            Command::Settings {
+                target: Target::parse("ankh#1"),
+                role: Some(Role::Author),
+            },
+        ));
+        assert!(shown.starts_with("ankh#1, author\n"), "{shown}");
+        assert_eq!(row(&shown, "model"), "opus task, set by person");
+        assert_eq!(row(&shown, "review_rounds"), "3 built in");
+        assert_eq!(row(&shown, "runtime"), "fake built in");
+        assert_eq!(
+            row(&shown, "deploy"),
+            "make deploy project",
+            "from the file's project"
+        );
+        let for_reviewer = done(ask(
+            &mut host,
+            None,
+            Command::Settings {
+                target: Target::parse("ankh#1"),
+                role: Some(Role::Reviewer),
+            },
+        ));
+        assert_eq!(
+            row(&for_reviewer, "review_rounds"),
+            "1 project, set by person"
+        );
+        // `temet-work issue` shows the role at work on the issue: the refiner.
+        let issue = done(ask(
+            &mut host,
+            None,
+            Command::Issue {
+                issue: IssueId::new("ankh", "1"),
+            },
+        ));
+        assert!(issue.contains("Settings for the refiner:"), "{issue}");
+        assert!(issue.contains("opus"), "{issue}");
+        // The status lists the events' effect, with who made each.
+        let status = done(ask(&mut host, None, Command::Status));
+        assert!(
+            status.contains("ankh#1: model = opus, set by person"),
+            "{status}"
+        );
+
+        let unset = Command::Unset {
+            target: Target::parse("ankh#1"),
+            role: None,
+            key: "model".into(),
+        };
+        assert_eq!(
+            done(ask(&mut host, None, unset.clone())),
+            "model is no longer set at ankh#1"
+        );
+        assert!(refused(ask(&mut host, None, unset)).contains("nothing to unset"));
+
+        let logged = kept.0.lock().expect("journal").clone();
+        let settings: Vec<&Event> = logged
+            .iter()
+            .filter(|e| matches!(e, Event::SettingSet { .. } | Event::SettingUnset { .. }))
+            .collect();
+        assert_eq!(settings.len(), 4, "{settings:?}");
+        assert!(matches!(
+            settings[0],
+            Event::SettingSet { key, by, .. } if key == "deploy" && by == "file"
+        ));
+        assert!(matches!(
+            settings[1],
+            Event::SettingSet { scope: Scope::Task(_), value: Value::Text(v), by, .. } if v == "opus" && by == "person"
+        ));
+    }
+
+    #[test]
+    fn a_value_of_the_wrong_kind_an_unknown_key_or_an_adapter_the_build_lacks_is_refused_with_why()
+    {
+        let mut host = host();
+        host.tick(0).expect("sync");
+        assert!(
+            refused(ask(
+                &mut host,
+                None,
+                set("ankh", None, "review_rounds", "many")
+            ))
+            .contains("whole number")
+        );
+        assert!(
+            refused(ask(&mut host, None, set("ankh", None, "colour", "red")))
+                .contains("no setting colour")
+        );
+        let why = refused(ask(
+            &mut host,
+            None,
+            set("global", None, "runtime", "nonesuch"),
+        ));
+        assert!(
+            why.contains("nonesuch") && why.contains("this build has: fake"),
+            "{why}"
+        );
+        let why = refused(ask(
+            &mut host,
+            None,
+            set("global", None, "runner", "nonesuch"),
+        ));
+        assert!(why.contains("this build has: fake"), "{why}");
+        assert!(
+            refused(ask(&mut host, None, set("nowhere", None, "model", "x"))).contains("nowhere")
+        );
+        assert!(
+            refused(ask(&mut host, None, set("ankh#9", None, "model", "x")))
+                .contains("no issue ankh#9")
+        );
+        assert!(
+            host.world().settings.values().all(|e| e.by == "file"),
+            "only what the file gave"
+        );
+        // An agent that is not the issue's refiner may not change settings.
+        let why = refused(ask(
+            &mut host,
+            Some("author-9"),
+            set("ankh#1", None, "model", "x"),
+        ));
+        assert!(why.contains("not an agent"), "{why}");
+    }
+
+    #[test]
+    fn a_refused_setting_exits_1_and_a_done_one_exits_0() {
+        use temet_work::socket;
+        let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("settings-exit.sock");
+        let requests = socket::listen(&path).expect("listen");
+        let run = {
+            let path = path.clone();
+            move |args: &[&str]| {
+                std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+                    .args(args)
+                    .env("TEMET_WORK_SOCKET", &path)
+                    .env_remove("TEMET_WORK_AGENT")
+                    .output()
+                    .expect("runs")
+            }
+        };
+        let client = std::thread::spawn({
+            move || {
+                (
+                    run(&["set", "ankh", "review_rounds", "many"]),
+                    run(&["set", "ankh", "review_rounds", "2"]),
+                    run(&["settings", "ankh"]),
+                    run(&["unset", "ankh", "review_rounds"]),
+                )
+            }
+        });
+        let mut host = host();
+        host.tick(0).expect("sync");
+        for _ in 0..4 {
+            let pending = requests
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("a request");
+            let reply = answer(&mut host, 1, &pending.request).expect("answer");
+            pending.answer(reply);
+        }
+        let (bad, good, shown, unset) = client.join().expect("client");
+        assert_eq!(bad.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&bad.stderr).contains("whole number"));
+        assert_eq!(good.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&shown.stdout).contains("review_rounds  2"));
+        assert_eq!(unset.status.code(), Some(0));
+    }
 }

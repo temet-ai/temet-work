@@ -274,30 +274,18 @@ pub mod contract {
     }
 }
 
-/// How often a project is synced, by the daemon's clock.
-pub const SYNC_EVERY_MS: u64 = 60_000;
-
 /// The tracker part: the trackers compiled into this build, in the order they were added.
 ///
-/// It syncs each project from the tracker its configuration names, once a
-/// minute, and reports only what changed. It closes an issue in its tracker when
+/// It syncs each project from the tracker its configuration names, as often as
+/// its `sync_every` setting says (a minute by default), and reports only what changed. It closes an issue in its tracker when
 /// the loop has verified it.
+#[derive(Default)]
 pub struct Trackers {
     adapters: Vec<Box<dyn Tracker>>,
-    every_ms: u64,
+    /// Overrides the `sync_every` setting, for tests.
+    every_ms: Option<u64>,
     synced_at: BTreeMap<ProjectId, u64>,
     errors: BTreeMap<ProjectId, String>,
-}
-
-impl Default for Trackers {
-    fn default() -> Self {
-        Self {
-            adapters: Vec::new(),
-            every_ms: SYNC_EVERY_MS,
-            synced_at: BTreeMap::new(),
-            errors: BTreeMap::new(),
-        }
-    }
 }
 
 /// The events that bring the loop's view of `project` up to `open`, the issues
@@ -437,9 +425,9 @@ impl Trackers {
         self.adapters.iter().map(|a| a.id()).collect()
     }
 
-    /// Syncs every `ms` instead of every minute.
+    /// Syncs every `ms` whatever the `sync_every` setting says.
     pub fn every(mut self, ms: u64) -> Self {
-        self.every_ms = ms;
+        self.every_ms = Some(ms);
         self
     }
 }
@@ -452,10 +440,13 @@ impl Part for Trackers {
     fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
         let mut events = Vec::new();
         for (source, tracker_id, name) in sources(world) {
+            let every = self
+                .every_ms
+                .unwrap_or_else(|| world.source_number(&source, "sync_every") * 1000);
             let due = self
                 .synced_at
                 .get(&source)
-                .is_none_or(|at| now_ms >= at + self.every_ms);
+                .is_none_or(|at| now_ms >= at + every);
             if !due {
                 continue;
             }
@@ -607,16 +598,29 @@ mod tests {
         assert_eq!(first.problem, None);
         assert_eq!(first.events.len(), 2);
         apply(&mut w, &first.events);
-        assert_eq!(
-            part.poll(&w, SYNC_EVERY_MS - 1).events,
-            vec![],
-            "not due yet"
-        );
-        assert_eq!(
-            part.poll(&w, SYNC_EVERY_MS).events,
-            vec![],
-            "nothing changed"
-        );
+        assert_eq!(part.poll(&w, 60_000 - 1).events, vec![], "not due yet");
+        assert_eq!(part.poll(&w, 60_000).events, vec![], "nothing changed");
+    }
+
+    #[test]
+    fn the_sync_every_setting_sets_how_often_a_project_is_synced() {
+        use temet_work_core::settings::{Scope, Value};
+        let mut w = configured();
+        let source = w.projects.keys().next().expect("a project").clone();
+        w.apply(&Event::SettingSet {
+            scope: Scope::Project(source.clone()),
+            role: None,
+            key: "sync_every".into(),
+            value: Value::Number(5),
+            by: "person".into(),
+        });
+        let mut part = Trackers::default();
+        part.add(Box::new(fake()));
+        part.poll(&w, 0);
+        part.poll(&w, 4_999);
+        assert_eq!(part.synced_at[&source], 0, "five seconds have not passed");
+        part.poll(&w, 5_000);
+        assert_eq!(part.synced_at[&source], 5_000);
     }
 
     #[test]

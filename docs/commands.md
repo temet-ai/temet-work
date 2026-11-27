@@ -20,6 +20,9 @@ reports its step done.
 | `temet-work review ISSUE block POINT...` | the reviewer, one argument per thing to fix | in review |
 | `temet-work rule ISSUE approve REASON` | the arbiter | with the arbiter |
 | `temet-work rule ISSUE fix REASON` | the arbiter | with the arbiter |
+| `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines | any |
+| `temet-work unset TARGET [--role ROLE] KEY` | the same | any |
+| `temet-work settings TARGET [--role ROLE]` | anyone | any |
 
 `ISSUE` is `project#key`, such as `radar#44`. A plan file looks like this:
 
@@ -27,6 +30,24 @@ reports its step done.
 checks:
   - done_when: Signing in from radar stores a user token that outlives a restart
     proven_by: cargo nextest run -p radar-slack sign_in, then restart radar and open a channel
+```
+
+`TARGET` is `global`, an area or project id, a milestone as `project:Milestone name`, or an
+issue. `ROLE` is refiner, author, reviewer, arbiter or investigator; without it a value is
+for every role. `settings` lists every setting in effect there, each with the level that
+set it (`task, set by refiner-3`, `built in`); `temet-work issue` shows the same for the
+role at work on the issue. A value of the wrong kind, an unknown key or a runtime or
+runner the build lacks is refused with the reason, and the command exits 1.
+
+A refiner may add task-level settings to its plan; they are recorded as set by it:
+
+```yaml
+checks:
+  - done_when: ...
+    proven_by: ...
+settings:
+  model: opus
+  review_rounds: 5
 ```
 
 A command for an issue at another step is refused, with the step the issue is at. The

@@ -31,6 +31,23 @@ name = "temet-ai/radar"   # the tracker's name for it
 # run_in = "/home/me/src/radar-deploy"   # where both run; the home folder when left out
 # ci = false              # its pull requests run no CI; the plan's checks are left to the reviewer
 
+# Settings (docs/settings.md): [settings] is global, [settings.reviewer] is for one role.
+# [settings]
+# runtime = "claude"
+# model = "sonnet"
+# [settings.reviewer]
+# runtime = "codex"
+#
+# A project's, an area's and a milestone's own: under the project, the area or [[milestone]].
+# [project.settings]
+# model = "haiku"
+#
+# [[milestone]]
+# of = "radar"                 # a project or an area
+# name = "Slack sign-in rework"
+# [milestone.settings]
+# model = "opus"
+
 # A work folder: a checkout an author works in, one issue at a time.
 [[folder]]
 id = "radar-1"
@@ -67,9 +84,16 @@ It refines `refining_at_once` issues at a time. It starts an author on a refined
 when one of the project's folders is free and every issue in the issue's "Depends on"
 lines is done. A project with two folders has at most two authors working at once.
 
-Settings at every level, from global down to one task, are planned (`docs/settings.md`).
-When they are built, a group's `model` and a project's `ci`, `deploy`, `verify` and
-`run_in` are read as settings at their level, so this file keeps working.
+Settings at every level, from global down to one task, are in `docs/settings.md`. The
+tables `[settings]` (with `[settings.<role>]` inside it), `[project.settings]`,
+`[area.settings]` and `[[milestone]]` become `SettingSet` events recorded as set by
+`file`, when the daemon reads the file and again whenever it changes. A group's `model`
+and a project's `ci`, `deploy`, `verify` and `run_in` are still accepted and are read as
+settings at their level, so an existing file behaves as before. A key the daemon does not
+know is an error naming the key. A value that names a runtime or runner the build does
+not have stops the daemon at start, with the ones it has listed, and so does a build with
+no default runtime or runner and no global value for it. What a person or an agent has
+set since is not overwritten by the file; a value taken out of the file is unset.
 
 Each project, folder and group in the file becomes an event in the log the first time the
 daemon reads it, and again whenever it changes. Removing one from the file does not

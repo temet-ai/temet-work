@@ -65,7 +65,9 @@ pub fn write(
              temet-work plan {id} - <<'PLAN'\n\
              checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\
              PLAN\n\
-             Where the issue leaves a choice open, pick the default you would defend and say why in done_when.",
+             Where the issue leaves a choice open, pick the default you would defend and say why in done_when.\n\
+             For an issue that is hard, add a settings: map beside checks: with task-level values, such as model: opus; \
+             they are recorded as yours and a person can overturn them.",
             title = issue.title,
         ),
         Role::Author => format!(
@@ -100,6 +102,10 @@ pub fn write(
         issue: id.clone(),
         task,
         model: None,
+        permission: match crate::settings::builtin("permission") {
+            Some(v) => v.to_string(),
+            None => String::new(),
+        },
         folder,
     }
 }
