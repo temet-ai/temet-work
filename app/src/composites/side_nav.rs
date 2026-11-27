@@ -90,7 +90,7 @@ impl RenderOnce for SideNav {
                         node = node.icon(icon);
                     }
                     if p.waiting > 0 {
-                        node = node.secondary_label(Tag::new(p.waiting.to_string()).minimal(true));
+                        node = node.secondary_label(Tag::new(p.waiting.to_string()));
                     }
                     node
                 },

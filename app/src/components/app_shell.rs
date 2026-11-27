@@ -7,7 +7,9 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, div,
 };
 
-use crate::theme;
+use super::{box_of, type_of};
+use crate::theme::look::{self, State};
+use crate::theme::{size, space, text};
 
 #[derive(IntoElement)]
 pub struct AppShell {
@@ -33,37 +35,41 @@ impl ParentElement for AppShell {
 
 impl RenderOnce for AppShell {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        use theme::{colour, shape, size, space, text};
+        let rest = State::Rest;
+        let shell = look::get(cx, "AppShell", "tm-shell tm-shell-side", rest);
+        let nav = look::get(
+            cx,
+            "AppShell",
+            "tm-shell tm-shell-col tm-shell-nav tm-shell-side",
+            rest,
+        );
+        let main = look::get(
+            cx,
+            "AppShell",
+            "tm-shell tm-shell-col tm-shell-main tm-shell-side",
+            rest,
+        );
         let left = size::col_left(cx, window.viewport_size().width);
-        div()
+        type_of(div(), &shell)
             .size_full()
             .flex()
-            .bg(colour::page(cx))
-            .text_color(colour::text(cx))
+            .bg(shell.background)
             .font_family(text::family(cx))
-            .text_size(text::body(cx))
             .line_height(text::line_height(cx))
             .child(
-                div()
-                    .id("nav")
+                box_of(div().id("nav"), &nav)
                     .flex_none()
                     .w(left)
                     .h_full()
                     .overflow_y_scroll()
-                    .p(space::s4(cx))
-                    .bg(colour::panel(cx))
-                    .border_r(shape::border(cx))
-                    .border_color(colour::edge(cx))
                     .child(div().flex().flex_col().gap(space::s6(cx)).child(self.nav)),
             )
             .child(
-                div()
-                    .id("main")
+                box_of(div().id("main"), &main)
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .overflow_y_scroll()
-                    .p(space::s5(cx))
                     .child(
                         div()
                             .flex()

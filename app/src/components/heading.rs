@@ -3,8 +3,9 @@
 
 use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
 
-use super::{Class, apply};
-use crate::theme;
+use super::{Class, apply, type_of};
+use crate::theme::look::{self, State};
+use crate::theme::space;
 
 /// The heading's size: `page`, the one title of a screen; `pane`, the title of a side pane;
 /// `section`, a group of rows.
@@ -54,34 +55,37 @@ impl Heading {
 
 impl RenderOnce for Heading {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        use theme::{colour, space, text};
-        let mut heading = div()
+        let rest = State::Rest;
+        let look = match self.size {
+            HeadingSize::Page => look::get(cx, "Heading", "tm-heading tm-heading-page", rest),
+            HeadingSize::Pane => look::get(cx, "Heading", "tm-heading tm-heading-pane", rest),
+            HeadingSize::Section => look::get(cx, "Heading", "tm-heading tm-heading-section", rest),
+        };
+        // The look's height is one line of the heading.
+        let mut heading = type_of(div(), &look)
             .flex()
             .items_baseline()
             .justify_between()
             .gap(space::s4(cx))
-            .font_weight(text::heading_weight(cx));
-        heading = match self.size {
-            HeadingSize::Page => heading
-                .text_size(text::page(cx))
-                .line_height(text::page_line_height(cx)),
-            HeadingSize::Pane => heading
-                .mb(space::s3(cx))
-                .text_size(text::pane(cx))
-                .line_height(text::pane_line_height(cx)),
-            HeadingSize::Section => heading.mb(space::s3(cx)).text_size(text::section(cx)),
-        };
+            .line_height(look.height);
+        if self.size != HeadingSize::Page {
+            heading = heading.mb(space::s3(cx));
+        }
         if let Some(class) = self.class_name {
             heading = apply(heading, class, cx);
         }
         heading
             .child(div().min_w_0().child(self.children))
             .children(self.note.map(|note| {
-                div()
+                let look = look::get(
+                    cx,
+                    "Heading",
+                    "tm-heading tm-heading-note tm-heading-section",
+                    rest,
+                );
+                type_of(div(), &look)
                     .flex_none()
-                    .text_size(text::small(cx))
-                    .font_weight(text::normal_weight(cx))
-                    .text_color(colour::muted(cx))
+                    .line_height(look.height)
                     .child(note)
             }))
     }

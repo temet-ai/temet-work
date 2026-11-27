@@ -6,7 +6,6 @@ use gpui::{App, IntoElement, ParentElement, Pixels, RenderOnce, Styled, Window, 
 
 use super::Class;
 use super::table_row::{Layout, TableRow, Th};
-use crate::theme;
 
 #[derive(IntoElement, Default)]
 pub struct HTMLTable {
@@ -62,7 +61,6 @@ impl HTMLTable {
 
 impl RenderOnce for HTMLTable {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        use theme::text;
         let layout = Layout {
             columns: self.colgroup,
             compact: self.compact,
@@ -70,12 +68,11 @@ impl RenderOnce for HTMLTable {
             issues: self.class_name == Some(Class::Issues),
             first: false,
         };
-        let heads = self.thead.into_iter().enumerate().map(|(i, th)| {
-            layout
-                .cell(i, false, cx)
-                .font_weight(text::bold_weight(cx))
-                .child(th.text)
-        });
+        let heads = self
+            .thead
+            .into_iter()
+            .enumerate()
+            .map(|(i, th)| layout.head(i, cx).child(th.text));
         let rows = self.tbody.into_iter().enumerate().map(|(i, mut row)| {
             row.layout = Layout {
                 first: i == 0,

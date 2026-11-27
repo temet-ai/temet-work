@@ -158,3 +158,13 @@ fn every_icon_is_embedded_on_both_grids() {
     }
     assert_eq!(paths.len(), IconName::ALL.len() * 2);
 }
+
+#[test]
+fn every_font_file_the_design_system_lists_is_embedded() {
+    let embedded: HashSet<&str> = temet_work_app::assets::FONTS
+        .iter()
+        .map(|(p, _)| *p)
+        .collect();
+    let listed: HashSet<&str> = theme::font_files().collect();
+    assert_eq!(embedded, listed);
+}

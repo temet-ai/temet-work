@@ -6,8 +6,9 @@ use gpui::{
     div,
 };
 
-use super::Class;
-use crate::theme;
+use super::{Class, box_of, type_of};
+use crate::theme::look::{self, State};
+use crate::theme::space;
 
 #[derive(IntoElement)]
 pub struct ListRow {
@@ -90,14 +91,13 @@ impl ParentElement for ListRow {
 
 impl RenderOnce for ListRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        use theme::{colour, shape, size, space, text};
+        let rest = State::Rest;
         let compact = self.compact;
         // In a group, a compact row's meta wraps under its title rather than being cut short.
         let wraps = compact && self.class_name.contains(&Class::GroupsGroup);
         let meta = self.meta.map(|meta| {
-            let line = div()
-                .text_size(text::small(cx))
-                .text_color(colour::muted(cx));
+            let look = look::get(cx, "ListRow", "tm-row-main tm-row-meta", rest);
+            let line = type_of(div(), &look);
             if wraps {
                 line.flex_grow(1.)
                     .flex_shrink_0()
@@ -124,13 +124,18 @@ impl RenderOnce for ListRow {
         });
         let untitled = self.class_name.contains(&Class::GroupsEmpty);
         let title = (!untitled).then(|| {
-            let title = div().child(self.title);
-            let title = if compact { title.flex_none() } else { title };
-            if self.strong {
-                title.font_weight(text::heading_weight(cx))
+            let look = if self.strong {
+                look::get(
+                    cx,
+                    "ListRow",
+                    "tm-row-main tm-row-strong tm-row-title",
+                    rest,
+                )
             } else {
-                title
-            }
+                look::get(cx, "ListRow", "tm-row-main tm-row-title", rest)
+            };
+            let title = type_of(div(), &look).child(self.title);
+            if compact { title.flex_none() } else { title }
         });
         let mut main = div().flex_1().min_w_0();
         if wraps {
@@ -153,22 +158,20 @@ impl RenderOnce for ListRow {
             main = main.child(div().mt(space::s3(cx)).children(self.children));
         }
 
-        let mut row = div()
-            .flex()
-            .gap(space::s4(cx))
-            .border_t(shape::border(cx))
-            .border_color(colour::edge_quiet(cx));
-        row = if compact {
-            row.items_center()
-                .min_h(size::row_side(cx))
-                .py(space::s1(cx))
-                .px(space::s2(cx))
+        let look = if compact {
+            look::get(cx, "ListRow", "tm-row tm-row-compact", rest)
+        } else if self.inset {
+            look::get(cx, "ListRow", "tm-cut-body tm-row tm-row-inset", rest)
         } else {
-            row.items_start().py(space::s4(cx))
+            look::get(cx, "ListRow", "tm-row", rest)
         };
-        if self.inset {
-            row = row.px(space::s5(cx));
-        }
+        let mut row = box_of(div(), &look).flex().gap(space::s4(cx));
+        row = if compact {
+            // A compact row is one line at the side column's row height, the look's height.
+            row.items_center().min_h(look.height)
+        } else {
+            row.items_start()
+        };
         row.child(main).children(self.end.map(|end| {
             div()
                 .flex_none()

@@ -2,8 +2,6 @@
 //! view. The theme is dark unless `--theme light` or `TEMET_WORK_THEME=light` says otherwise.
 //! The design system's faces are embedded and registered before the theme is put in force.
 
-use std::borrow::Cow;
-
 use gpui::{AppContext, TitlebarOptions, WindowOptions};
 use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
@@ -30,8 +28,7 @@ fn main() {
         .run(move |cx| {
             gpui_component::init(cx);
             // The design system's faces, so the window never depends on what is installed.
-            let faces = assets::FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();
-            if let Err(why) = cx.text_system().add_fonts(faces) {
+            if let Err(why) = cx.text_system().add_fonts(assets::faces()) {
                 eprintln!("could not load the design system's faces: {why}");
             }
             if let Err(why) = theme::apply(cx, &name) {

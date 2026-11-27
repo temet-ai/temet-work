@@ -22,6 +22,16 @@ macro_rules! icons {
     };
 }
 
+/// A face, by its path under `app/assets/fonts/`, and its bytes.
+macro_rules! font {
+    ($path:literal) => {
+        (
+            $path,
+            include_bytes!(concat!("../assets/fonts/", $path)) as &[u8],
+        )
+    };
+}
+
 /// Every embedded file, by its path.
 pub const FILES: &[(&str, &[u8])] = icons![
     "tick-circle",
@@ -72,14 +82,22 @@ impl AssetSource for Assets {
 
 /// The design system's faces, each weight its type scale uses: Archivo for text, Big Shoulders
 /// Display for figures, IBM Plex Mono for code.
-pub const FONTS: &[&[u8]] = &[
-    include_bytes!("../assets/fonts/archivo/Archivo-Regular.ttf"),
-    include_bytes!("../assets/fonts/archivo/Archivo-Medium.ttf"),
-    include_bytes!("../assets/fonts/archivo/Archivo-SemiBold.ttf"),
-    include_bytes!("../assets/fonts/archivo/Archivo-Bold.ttf"),
-    include_bytes!("../assets/fonts/big-shoulders-display/BigShouldersDisplay-SemiBold.ttf"),
-    include_bytes!("../assets/fonts/big-shoulders-display/BigShouldersDisplay-Bold.ttf"),
-    include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-Regular.ttf"),
-    include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-Medium.ttf"),
-    include_bytes!("../assets/fonts/ibm-plex-mono/IBMPlexMono-SemiBold.ttf"),
+pub const FONTS: &[(&str, &[u8])] = &[
+    font!("archivo/Archivo-Regular.ttf"),
+    font!("archivo/Archivo-Medium.ttf"),
+    font!("archivo/Archivo-SemiBold.ttf"),
+    font!("archivo/Archivo-Bold.ttf"),
+    font!("big-shoulders-display/BigShouldersDisplay-SemiBold.ttf"),
+    font!("big-shoulders-display/BigShouldersDisplay-Bold.ttf"),
+    font!("ibm-plex-mono/IBMPlexMono-Regular.ttf"),
+    font!("ibm-plex-mono/IBMPlexMono-Medium.ttf"),
+    font!("ibm-plex-mono/IBMPlexMono-SemiBold.ttf"),
 ];
+
+/// The faces as GPUI's text system takes them.
+pub fn faces() -> Vec<Cow<'static, [u8]>> {
+    FONTS
+        .iter()
+        .map(|(_, bytes)| Cow::Borrowed(*bytes))
+        .collect()
+}

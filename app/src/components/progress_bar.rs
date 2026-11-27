@@ -3,7 +3,8 @@
 
 use gpui::{App, IntoElement, ParentElement, RenderOnce, Styled, Window, div, relative};
 
-use crate::theme::{self, Intent};
+use crate::theme::look::{self, State};
+use crate::theme::{Intent, colour};
 
 #[derive(IntoElement)]
 pub struct ProgressBar {
@@ -39,19 +40,27 @@ impl ProgressBar {
 
 impl RenderOnce for ProgressBar {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        use theme::{colour, size};
-        // The track: `.bp6-dark .bp6-progress-bar { background: var(--tm-edge-quiet) }`
-        // (blueprint-overrides.css), the same role in the light theme.
+        let rest = State::Rest;
+        let track = look::get(cx, "ProgressBar", "progress-bar: default", rest);
+        let meter = look::get(cx, "ProgressBar", "progress-meter: default", rest);
+        // The design system measured the meter with no intent; an intent's meter is that
+        // intent's fill.
+        let fill = match self.intent {
+            Intent::None => meter.background,
+            intent => colour::intent_fill(cx, intent),
+        };
         div()
             .w_full()
-            .h(size::progress(cx))
+            .h(track.height)
             .overflow_hidden()
-            .bg(colour::edge_quiet(cx))
+            .rounded(track.radius)
+            .bg(track.background)
             .child(
                 div()
                     .h_full()
                     .w(relative(self.value))
-                    .bg(colour::intent_fill(cx, self.intent)),
+                    .rounded(meter.radius)
+                    .bg(fill),
             )
     }
 }

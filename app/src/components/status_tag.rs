@@ -4,8 +4,9 @@
 use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
 
 use super::icon::IconName;
-use super::tag::{Size, Tag};
-use crate::theme;
+use super::tag::draw;
+use crate::theme::look::{self, State};
+use crate::theme::{self, Intent};
 
 /// The statuses, as the design system names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,12 +61,12 @@ impl Status {
     }
 }
 
-/// A minimal tag with the status's icon, word and intent.
+/// A minimal tag with the status's icon, word and intent, at the medium size: the size the
+/// design system measured.
 #[derive(IntoElement)]
 pub struct StatusTag {
     status: Status,
     children: Option<SharedString>,
-    size: Size,
 }
 
 impl StatusTag {
@@ -73,7 +74,6 @@ impl StatusTag {
         Self {
             status,
             children: None,
-            size: Size::Medium,
         }
     }
 
@@ -82,24 +82,23 @@ impl StatusTag {
         self.children = Some(children.into());
         self
     }
-
-    /// `medium` beside body text; `large` in a page header.
-    pub fn size(mut self, size: Size) -> Self {
-        self.size = size;
-        self
-    }
 }
 
 impl RenderOnce for StatusTag {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let view = self.status.view();
         let word = self.children.unwrap_or_else(|| view.word.into());
-        div().flex().flex_none().child(
-            Tag::new(word)
-                .minimal(true)
-                .intent(view.intent)
-                .icon(self.status.icon())
-                .size(self.size),
-        )
+        let rest = State::Rest;
+        let look = match view.intent {
+            Intent::None => look::get(cx, "StatusTag", "minimal", rest),
+            Intent::Primary => look::get(cx, "StatusTag", "intent-primary minimal", rest),
+            Intent::Success => look::get(cx, "StatusTag", "intent-success minimal", rest),
+            Intent::Warning => look::get(cx, "StatusTag", "intent-warning minimal", rest),
+            Intent::Danger => look::get(cx, "StatusTag", "intent-danger minimal", rest),
+        };
+        div()
+            .flex()
+            .flex_none()
+            .child(draw(&look, Some(self.status.icon()), word, cx))
     }
 }

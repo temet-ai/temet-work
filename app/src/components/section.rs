@@ -6,7 +6,11 @@ use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
 };
 
-use crate::theme;
+use super::type_of;
+use crate::theme::{
+    self,
+    look::{self, State},
+};
 
 #[derive(IntoElement, Default)]
 pub struct Section {
@@ -55,6 +59,8 @@ impl Section {
 impl RenderOnce for Section {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         use theme::{colour, shape, size, text};
+        // The title has a measured look; the header's rule, height and padding and the
+        // subtitle are Blueprint's and have none, so they take the theme's roles.
         let compact = self.compact;
         let rule = |el: gpui::Div| {
             // Blueprint's own rule, white at 20% in the dark mode and near black at 15% in the
@@ -71,10 +77,16 @@ impl RenderOnce for Section {
                 .child(
                     div()
                         .child(
-                            div()
-                                .font_weight(text::bold_weight(cx))
-                                .text_size(text::body_medium(cx))
-                                .child(title),
+                            type_of(
+                                div(),
+                                &look::get(
+                                    cx,
+                                    "CutPanel",
+                                    "tm-cut-body tm-section-title",
+                                    State::Rest,
+                                ),
+                            )
+                            .child(title),
                         )
                         .children(self.subtitle.map(|subtitle| {
                             div()

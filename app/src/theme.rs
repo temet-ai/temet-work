@@ -35,6 +35,11 @@ pub fn statuses() -> &'static [StatusView] {
     &tokens::STATUS
 }
 
+/// The design system's font files, by their path under `app/assets/fonts/`.
+pub fn font_files() -> impl Iterator<Item = &'static str> {
+    tokens::FONTS.iter().map(|f| f.file)
+}
+
 /// Every stage in StageTag's map, in the order an issue goes through them.
 pub fn stages() -> &'static [StageView] {
     &tokens::STAGES
@@ -337,7 +342,7 @@ fn size_of(token: temet_work_style::Px) -> Pixels {
 pub mod colour {
     use gpui::{App, Hsla};
 
-    use super::{Active, Intent, active, c, is_light, washed};
+    use super::{Intent, active, c};
 
     /// The window's ground.
     pub fn page(cx: &App) -> Hsla {
@@ -400,60 +405,15 @@ pub mod colour {
     }
     /// An intent's solid fill, as a solid button or tag shows it.
     pub fn intent_fill(cx: &App, intent: Intent) -> Hsla {
-        c(fill_token(active(cx), intent))
-    }
-    /// Text and icons on an intent's solid fill.
-    pub fn intent_foreground(cx: &App, intent: Intent) -> Hsla {
         let t = active(cx);
         c(match intent {
-            Intent::None => t.bp_intent_default_foreground,
-            Intent::Primary => t.bp_intent_primary_foreground,
-            Intent::Success => t.bp_intent_success_foreground,
-            Intent::Warning => t.bp_intent_warning_foreground,
-            Intent::Danger => t.bp_intent_danger_foreground,
-        })
-    }
-    /// The ground of a minimal tag in an intent.
-    ///
-    /// Blueprint draws it as the intent's fill at 20% in the dark theme and 10% in the light one
-    /// (`.bp6-tag.bp6-minimal.bp6-intent-*`), and a tag with no intent as a lighter grey at 15%.
-    /// The design system's tokens do not carry a tag's look yet (docs/ui.md, Gaps), so the
-    /// ground is the intent's fill at the strength of the theme's selected-row wash,
-    /// `--tm-selected-fill` (the accent at 20% in the dark theme, 12% in the light one). In the
-    /// dark theme a warning tag has no ground: "In the dark theme a warning tag or callout is
-    /// outlined, without a yellow wash" (Start/Rules).
-    pub fn tag_wash(cx: &App, intent: Intent) -> Hsla {
-        let a = cx.global::<Active>();
-        if intent == Intent::Warning && !is_light(a.name) {
-            return Hsla::transparent_black();
-        }
-        c(washed(
-            fill_token(&a.tokens, intent),
-            a.tokens.tm_selected_fill,
-        ))
-    }
-    /// The outline of a minimal tag, where it has one: a warning tag in the dark theme.
-    /// blueprint-overrides.css draws it as `inset 0 0 0 1px` in the tag's text colour at 60%;
-    /// the nearest token is the warning fill, `--bp-intent-warning-rest`.
-    pub fn tag_outline(cx: &App, intent: Intent) -> Option<Hsla> {
-        let a = cx.global::<Active>();
-        (intent == Intent::Warning && !is_light(a.name)).then(|| c(a.tokens.bp_intent_warning_rest))
-    }
-
-    fn fill_token(t: &super::Tokens, intent: Intent) -> super::Rgba {
-        match intent {
             Intent::None => t.bp_intent_default_rest,
             Intent::Primary => t.bp_intent_primary_rest,
             Intent::Success => t.bp_intent_success_rest,
             Intent::Warning => t.bp_intent_warning_rest,
             Intent::Danger => t.bp_intent_danger_rest,
-        }
+        })
     }
-}
-
-/// A colour with the alpha of another: an intent's fill at the strength of a wash.
-fn washed(colour: Rgba, wash: Rgba) -> Rgba {
-    Rgba((colour.0 >> 8 << 8) | u32::from(wash.a()))
 }
 
 /// Type (Theme/Type). For components only.
@@ -491,10 +451,6 @@ pub mod text {
     pub fn heading_weight(cx: &App) -> FontWeight {
         FontWeight(active(cx).tm_weight_heading)
     }
-    /// The weight of body text, and of a note beside a heading.
-    pub fn normal_weight(cx: &App) -> FontWeight {
-        FontWeight(active(cx).bp_typography_weight_default)
-    }
     /// Blueprint's bold: a table's column heads, a tree's group labels.
     pub fn bold_weight(cx: &App) -> FontWeight {
         FontWeight(active(cx).bp_typography_weight_bold)
@@ -503,23 +459,10 @@ pub mod text {
     pub fn line_height(cx: &App) -> DefiniteLength {
         relative(active(cx).bp_typography_line_height_default)
     }
-    /// The line height of a screen's title.
-    pub fn page_line_height(cx: &App) -> DefiniteLength {
-        relative(active(cx).tm_leading_page)
-    }
-    /// The line height of a side pane's title.
-    pub fn pane_line_height(cx: &App) -> DefiniteLength {
-        relative(active(cx).tm_leading_pane)
-    }
     /// Blueprint's small text, `--bp-typography-size-body-small`: a tag's word, a section's
     /// subtitle (`.bp6-text-small`).
     pub fn body_small(cx: &App) -> Pixels {
         size_of(active(cx).bp_typography_size_body_small)
-    }
-    /// Blueprint's body text, `--bp-typography-size-body-medium`: a large tag's word, a
-    /// section's title.
-    pub fn body_medium(cx: &App) -> Pixels {
-        size_of(active(cx).bp_typography_size_body_medium)
     }
     /// The text face in force: the theme's `--tm-font-text`, or the system's face when it is
     /// not installed.
@@ -645,29 +588,9 @@ pub mod size {
     pub fn icon_large(cx: &App) -> Pixels {
         steps(cx, 5.)
     }
-    /// A tag's least height and width: `min-height: calc(var(--bp-surface-spacing) * 5)`; a
-    /// large tag's, `calc(var(--bp-surface-spacing) * 7.5)`.
-    pub fn tag_min(cx: &App, large: bool) -> Pixels {
-        steps(cx, if large { 7.5 } else { 5. })
-    }
-    /// A tag's line: `line-height: calc(var(--bp-surface-spacing) * 4)`; large, `* 4.5`.
-    pub fn tag_line(cx: &App, large: bool) -> Pixels {
-        steps(cx, if large { 4.5 } else { 4. })
-    }
-    /// A tag's padding at the ends: `padding: ... calc(var(--bp-surface-spacing) * 1.5)`;
-    /// large, `calc(var(--bp-surface-spacing) * 2)`.
-    pub fn tag_pad_x(cx: &App, large: bool) -> Pixels {
-        steps(cx, if large { 2. } else { 1.5 })
-    }
-    /// A tag's padding above and below: `padding: calc(var(--bp-surface-spacing) * 0.5) ...`;
-    /// large, `calc(var(--bp-surface-spacing) * 1.5)`.
-    pub fn tag_pad_y(cx: &App, large: bool) -> Pixels {
-        steps(cx, if large { 1.5 } else { 0.5 })
-    }
-    /// The space after a tag's icon: `.bp6-tag > * { margin-right: var(--bp-surface-spacing) }`;
-    /// large, `calc(var(--bp-surface-spacing) * 2)`.
-    pub fn tag_gap(cx: &App, large: bool) -> Pixels {
-        steps(cx, if large { 2. } else { 1. })
+    /// The space after a tag's icon: `.bp6-tag > * { margin-right: var(--bp-surface-spacing) }`.
+    pub fn tag_gap(cx: &App) -> Pixels {
+        steps(cx, 1.)
     }
     /// A tree row: `.bp6-tree-node-content { height: calc(var(--bp-surface-spacing) * 7.5) }`.
     pub fn tree_row(cx: &App) -> Pixels {
@@ -687,16 +610,6 @@ pub mod size {
     /// `padding-right: var(--bp-surface-spacing)`, `padding: 0 var(--bp-surface-spacing)`.
     pub fn tree_end(cx: &App) -> Pixels {
         steps(cx, 1.)
-    }
-    /// A table cell's side padding: `padding: calc((var(--bp-surface-spacing) * 10 - 18px) * 0.5)`.
-    pub fn cell_pad_x(cx: &App) -> Pixels {
-        px((active(cx).bp_surface_spacing.0 * 10. - 18.) * 0.5)
-    }
-    /// A table cell's padding above and below: as `cell_pad_x`, and in a compact table
-    /// `padding-top: calc((var(--bp-surface-spacing) * 7.5 - 18px) * 0.5)`.
-    pub fn cell_pad_y(cx: &App, compact: bool) -> Pixels {
-        let n = if compact { 7.5 } else { 10. };
-        px((active(cx).bp_surface_spacing.0 * n - 18.) * 0.5)
     }
     /// A section header's least height: `min-height: calc(var(--bp-surface-spacing) * 12.5)`;
     /// compact, `calc(var(--bp-surface-spacing) * 10)`.
@@ -720,15 +633,6 @@ pub mod size {
     /// The space above a section's subtitle: `margin-top: calc(var(--bp-surface-spacing) * 0.5)`.
     pub fn section_subtitle_gap(cx: &App) -> Pixels {
         steps(cx, 0.5)
-    }
-    /// A padded CutPanel's padding: `.tm-cut-body.tm-padded { padding:
-    /// calc(var(--bp-surface-spacing) * 3) }`.
-    pub fn panel_pad(cx: &App) -> Pixels {
-        steps(cx, 3.)
-    }
-    /// A progress bar's height: `height: calc(var(--bp-surface-spacing) * 2)`.
-    pub fn progress(cx: &App) -> Pixels {
-        steps(cx, 2.)
     }
 
     /// The issue table's column widths (`--tm-issue-col-*`). The title takes what is left, and

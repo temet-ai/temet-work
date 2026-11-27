@@ -114,7 +114,13 @@ impl RenderOnce for IssueTable {
         let span = heads.len();
 
         let rows: Vec<TableRow> = if self.issues.is_empty() {
-            vec![TableRow::new("none").child(Td::new("No issues").col_span(span > 0))]
+            vec![
+                TableRow::new("none").child(
+                    Td::new("No issues")
+                        .class_name(Class::IssueQuiet)
+                        .col_span(span > 0),
+                ),
+            ]
         } else {
             self.issues
                 .into_iter()
@@ -134,9 +140,10 @@ impl RenderOnce for IssueTable {
                         .child(Td::new(issue.title).class_name(Class::IssueTitle))
                         .child(Td::element(StageTag::new(issue.stage)));
                     if show_agent {
-                        row = row.child(Td::new(issue.agent.unwrap_or_else(|| "None".into())));
+                        let agent = issue.agent.unwrap_or_else(|| "None".into());
+                        row = row.child(Td::new(agent).class_name(Class::IssueQuiet));
                     }
-                    row.child(Td::new(issue.updated))
+                    row.child(Td::new(issue.updated).class_name(Class::IssueQuiet))
                 })
                 .collect()
         };

@@ -9,8 +9,9 @@ use gpui::{
     Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
 };
 
-use super::{Class, apply};
-use crate::theme;
+use super::{Class, apply, padded, type_of};
+use crate::theme::look::{self, Look, State};
+use crate::theme::{size, space};
 
 /// A column head, `<th>`: bold text.
 pub struct Th {
@@ -80,25 +81,72 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    /// A cell's box in column `i`, with Blueprint's cell padding (`table.bp6-html-table td`),
-    /// or `--tm-space-4` at the sides in an `Issues` table (blueprint-overrides.css).
+    /// A cell's box in column `i`, with the cell padding the design system measured: an
+    /// `Issues` table's cells (`.tm-issues td`), or a compact or a default table's cells.
     pub(crate) fn cell(&self, i: usize, span: bool, cx: &App) -> Div {
-        use theme::{size, space};
-        let pad_x = if self.issues {
-            space::s4(cx)
+        let rest = State::Rest;
+        let look = if self.issues {
+            look::get(cx, "IssueTable", "tm-issue-quiet tm-issues", rest)
+        } else if self.compact {
+            look::get(cx, "HTMLTable", "td: compact interactive", rest)
         } else {
-            size::cell_pad_x(cx)
+            look::get(cx, "HTMLTable", "td: default", rest)
         };
-        let cell = div().px(pad_x).py(size::cell_pad_y(cx, self.compact));
+        let cell = padded(type_of(div(), &look), &look);
         match self.columns.get(i) {
             Some(Some(width)) if !span => cell.flex_none().w(*width),
             _ => cell.flex_1().min_w_0(),
         }
     }
+
+    /// A column head's box: the measured head's type and its padding above and below, and
+    /// the side padding of the table's cells.
+    pub(crate) fn head(&self, i: usize, cx: &App) -> Div {
+        let rest = State::Rest;
+        let head = if self.compact {
+            look::get(cx, "HTMLTable", "th: compact interactive", rest)
+        } else {
+            look::get(cx, "HTMLTable", "th: default", rest)
+        };
+        type_of(self.cell(i, false, cx), &head)
+            .pt(head.padding.top)
+            .pb(head.padding.bottom)
+    }
+
+    /// The ground and lines of a row: selected, the first under the heads, or neither.
+    fn row(&self, selected: bool, state: State, cx: &App) -> Look {
+        match (self.issues, selected, self.first) {
+            (true, true, true) => look::get(
+                cx,
+                "IssueTable",
+                "first-row selected tm-issue-quiet tm-issues",
+                state,
+            ),
+            (true, true, false) => {
+                look::get(cx, "IssueTable", "selected tm-issue-quiet tm-issues", state)
+            }
+            (true, false, true) => look::get(
+                cx,
+                "IssueTable",
+                "first-row tm-issue-quiet tm-issues",
+                state,
+            ),
+            (true, false, false) => look::get(cx, "IssueTable", "tm-issue-quiet tm-issues", state),
+            (false, true, _) => look::get(
+                cx,
+                "HTMLTable",
+                "td: compact first-row interactive selected",
+                state,
+            ),
+            (false, false, true) => look::get(cx, "HTMLTable", "td: first-row", state),
+            (false, false, false) => look::get(cx, "HTMLTable", "td: compact interactive", state),
+        }
+    }
 }
 
 /// How far a line box reaches below its baseline, in the text style in force: the font's
-/// descent plus half the leading.
+/// descent plus half the leading. GPUI gives the descent as a negative offset from the
+/// baseline, as fonts store it.
 fn below_baseline(window: &Window) -> Pixels {
     let style = window.text_style();
     let rem = window.rem_size();
@@ -107,7 +155,7 @@ fn below_baseline(window: &Window) -> Pixels {
     let text = window.text_system();
     let font = text.resolve_font(&style.font());
     let ascent = text.ascent(font, font_size);
-    let descent = text.descent(font, font_size);
+    let descent = text.descent(font, font_size).abs();
     (line - (ascent + descent)) / 2. + descent
 }
 
@@ -157,19 +205,15 @@ impl TableRow {
 
 impl RenderOnce for TableRow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        use theme::{colour, shape, size, space};
         let layout = self.layout;
         // A raised tag's line box: the tag above its baseline, which is its icon's foot, less
         // the raise; then the text's reach below the baseline.
-        let tag_line =
-            size::tag_pad_y(cx, false) + size::icon(cx) - space::s1(cx) + below_baseline(window);
+        let tag = look::get(cx, "IssueTable", "minimal tm-issues tm-status", State::Rest);
+        let tag_line = tag.padding.top + size::icon(cx) - space::s1(cx) + below_baseline(window);
         let cells = self.cells.into_iter().enumerate().map(|(i, td)| {
             let mut cell = layout.cell(i, td.col_span, cx);
             for class in &td.class_name {
                 cell = apply(cell, *class, cx);
-                if *class == Class::IssueKey && layout.issues {
-                    cell = cell.pr(space::s1(cx));
-                }
             }
             match td.content {
                 Content::Text(text) => cell.child(text),
@@ -182,42 +226,22 @@ impl RenderOnce for TableRow {
             }
         });
 
-        let line = |top: bool, colour| {
-            let rule = div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .h(shape::border(cx))
-                .bg(colour);
-            if top { rule.top_0() } else { rule.bottom_0() }
-        };
+        // The row's ground and its lines (inset shadows): the selected row's accent wash with a
+        // line above and below, or Blueprint's line under the column heads on the first row.
+        let rest = layout.row(self.selected, State::Rest, cx);
         let mut row = div()
             .id(self.id)
-            .relative()
             .flex()
             .items_start()
             .w_full()
+            .bg(rest.background)
             .children(cells);
-        if self.selected {
-            let fill = colour::selected_fill(cx);
-            let edge = colour::selected_line(cx);
-            row = row
-                .bg(fill)
-                .child(line(true, edge))
-                .child(line(false, edge));
-        } else {
-            if layout.interactive {
-                let hover = colour::hover(cx);
-                row = row.hover(move |style| style.bg(hover));
-            }
-            if layout.first {
-                // `tbody tr:first-child td { box-shadow: inset 0 1px 0 0 ... }`: Blueprint's
-                // rule under the column heads, whose nearest token is the panel edge.
-                row = row.child(line(true, colour::edge(cx)));
-            }
+        if !rest.shadow.is_empty() {
+            row = row.shadow(rest.shadow);
         }
         if layout.interactive {
-            row = row.cursor_pointer();
+            let hover = layout.row(self.selected, State::Hover, cx).background;
+            row = row.cursor_pointer().hover(move |style| style.bg(hover));
         }
         if let Some(handler) = self.on_click {
             row = row.on_click(move |event, window, cx| handler(event, window, cx));

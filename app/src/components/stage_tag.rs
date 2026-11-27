@@ -4,8 +4,11 @@
 use gpui::{App, IntoElement, ParentElement, RenderOnce, Styled, Window, div};
 
 use super::icon::IconName;
-use super::tag::Tag;
-use crate::theme;
+use super::tag::draw;
+use crate::theme::{
+    self,
+    look::{self, State},
+};
 
 /// The stages an issue goes through, in order, as the design system names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -63,11 +66,13 @@ impl StageTag {
 }
 
 impl RenderOnce for StageTag {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        div().flex().flex_none().child(
-            Tag::new(self.stage.name())
-                .minimal(true)
-                .icon(self.stage.icon()),
-        )
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let look = look::get(cx, "StageTag", "minimal", State::Rest);
+        div().flex().flex_none().child(draw(
+            &look,
+            Some(self.stage.icon()),
+            self.stage.name().into(),
+            cx,
+        ))
     }
 }
