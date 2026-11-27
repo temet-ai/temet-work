@@ -82,6 +82,9 @@ const BLOCKED: &str = "blocked: ";
 /// How problems from an agent whose turn ended in an error are keyed.
 const ERRORED: &str = "errored: ";
 
+/// How problems from an issue a failed verify sent back are keyed.
+const VERIFY_FAILED: &str = "verify failed: ";
+
 /// The most events and effects one call handles before it stops, so a loop
 /// between parts cannot hang the daemon.
 pub const MAX_STEPS: usize = 10_000;
@@ -160,7 +163,33 @@ impl Host {
             problems: BTreeMap::new(),
         };
         host.put_addresses();
+        host.report_verify_failed();
         host
+    }
+
+    /// Lists every issue a failed verify sent back and that is not done yet as
+    /// a problem: its change is merged and deployed, and main does not pass the
+    /// verify check until the fix merges. Rebuilt after each event, so each goes
+    /// when its issue is done.
+    fn report_verify_failed(&mut self) {
+        self.problems.retain(|k, _| !k.starts_with(VERIFY_FAILED));
+        for i in self.world.issues.values() {
+            if !i.verify_failed || i.stage == crate::model::Stage::Done {
+                continue;
+            }
+            let finish = if i.reopen_due {
+                "once the daemon has reopened it in its tracker, closing it there finishes it"
+            } else {
+                "closing it in its tracker finishes it"
+            };
+            self.problems.insert(
+                format!("{VERIFY_FAILED}{}", i.id),
+                format!(
+                    "the merged change of {} failed the verify check and is being fixed; {finish}",
+                    i.id
+                ),
+            );
+        }
     }
 
     /// Puts in the world the web addresses the parts give for each project and
@@ -299,6 +328,7 @@ impl Host {
                 },
             }
         }
+        self.report_verify_failed();
         Ok(())
     }
 

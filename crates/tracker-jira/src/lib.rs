@@ -317,6 +317,45 @@ impl Jira {
         }
     }
 
+    /// Runs the first of `key`'s transitions whose status category `leads`
+    /// accepts. With none, fails with the transitions it has, saying it found
+    /// none `wanted`.
+    fn transition(
+        &mut self,
+        key: &str,
+        leads: fn(&str) -> bool,
+        wanted: &str,
+    ) -> Result<(), TrackerError> {
+        let path = format!("/rest/api/3/issue/{key}/transitions");
+        let listed = self.call("GET", path.clone(), None)?;
+        let transitions = listed
+            .get("transitions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let found = transitions.iter().find(|t| {
+            t.pointer("/to/statusCategory/key")
+                .and_then(Value::as_str)
+                .is_some_and(leads)
+        });
+        let Some(id) = found.and_then(|t| t.get("id")).and_then(Value::as_str) else {
+            let names: Vec<&str> = transitions
+                .iter()
+                .filter_map(|t| t.get("name").and_then(Value::as_str))
+                .collect();
+            return Err(TrackerError::Other(format!(
+                "{key} has no transition {wanted}; its transitions are: {}",
+                if names.is_empty() {
+                    "none".to_string()
+                } else {
+                    names.join(", ")
+                }
+            )));
+        };
+        self.call("POST", path, Some(json!({"transition": {"id": id}})))
+            .map(|_| ())
+    }
+
     fn status_category(&mut self, key: &str) -> Result<String, TrackerError> {
         valid_key(key)?;
         let v = self.call(
@@ -511,32 +550,17 @@ impl Tracker for Jira {
         if self.status_category(key)? == "done" {
             return Ok(());
         }
-        let path = format!("/rest/api/3/issue/{key}/transitions");
-        let listed = self.call("GET", path.clone(), None)?;
-        let transitions = listed
-            .get("transitions")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let done = transitions
-            .iter()
-            .find(|t| t.pointer("/to/statusCategory/key").and_then(Value::as_str) == Some("done"));
-        let Some(id) = done.and_then(|t| t.get("id")).and_then(Value::as_str) else {
-            let names: Vec<&str> = transitions
-                .iter()
-                .filter_map(|t| t.get("name").and_then(Value::as_str))
-                .collect();
-            return Err(TrackerError::Other(format!(
-                "{key} has no transition to a Done status; its transitions are: {}",
-                if names.is_empty() {
-                    "none".to_string()
-                } else {
-                    names.join(", ")
-                }
-            )));
-        };
-        self.call("POST", path, Some(json!({"transition": {"id": id}})))
-            .map(|_| ())
+        self.transition(key, |c| c == "done", "to a Done status")
+    }
+
+    /// Takes the first transition out of the Done status category, as the
+    /// project's workflow lists them.
+    fn reopen(&mut self, project: &str, key: &str) -> Result<(), TrackerError> {
+        let _ = project;
+        if self.status_category(key)? != "done" {
+            return Ok(());
+        }
+        self.transition(key, |c| c != "done", "out of a Done status")
     }
 
     /// Files a task with the milestone as its fix version.
@@ -601,6 +625,7 @@ mod tests {
     const SEARCH: &str = include_str!("../tests/fixtures/demo-search.json");
     const VERSIONS: &str = include_str!("../tests/fixtures/demo-versions.json");
     const TRANSITIONS: &str = include_str!("../tests/fixtures/demo-transitions.json");
+    const DONE_TRANSITIONS: &str = include_str!("../tests/fixtures/demo-transitions-done.json");
 
     fn reply(status: u16, body: &str) -> Result<Reply, TrackerError> {
         Ok(Reply {
@@ -614,8 +639,10 @@ mod tests {
     #[derive(Clone, Default)]
     struct Recorded {
         sent: Arc<Mutex<Vec<Request>>>,
-        /// The status category an issue is in; `done` for DEMO-99.
+        /// Whether an open issue's transitions lead to no Done status.
         no_done_transition: bool,
+        /// Whether DEMO-99, which is done, has no transition out of Done.
+        no_way_out_of_done: bool,
         /// The fields of the issue filed, once one is.
         filed: Arc<Mutex<Option<Value>>>,
     }
@@ -646,6 +673,16 @@ mod tests {
                     200,
                     r#"{"fields":{"status":{"statusCategory":{"key":"done"}}}}"#,
                 ),
+                ("GET", "/rest/api/3/issue/DEMO-99/transitions") => {
+                    if self.no_way_out_of_done {
+                        reply(
+                            200,
+                            r#"{"transitions":[{"id":"51","name":"Archive","to":{"statusCategory":{"key":"done"}}}]}"#,
+                        )
+                    } else {
+                        reply(200, DONE_TRANSITIONS)
+                    }
+                }
                 ("GET", p)
                     if p.starts_with("/rest/api/3/issue/DEMO-") && p.contains("/transitions") =>
                 {
@@ -916,6 +953,42 @@ mod tests {
         }));
         match jira.close("DEMO", "DEMO-41") {
             Err(TrackerError::Other(e)) => assert!(e.contains("Start"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn reopen_takes_the_first_transition_out_of_done() {
+        let (mut jira, sent) = jira();
+        jira.reopen("DEMO", "DEMO-99").expect("reopened");
+        let sent = sent.lock().expect("lock");
+        let r = sent.last().expect("a request");
+        assert_eq!(
+            (r.method, r.path.as_str()),
+            ("POST", "/rest/api/3/issue/DEMO-99/transitions")
+        );
+        // Archive leads to another Done status and comes first.
+        assert_eq!(r.body.as_deref(), Some(r#"{"transition":{"id":"41"}}"#));
+    }
+
+    #[test]
+    fn reopening_an_open_issue_sends_nothing_more() {
+        let (mut jira, sent) = jira();
+        jira.reopen("DEMO", "DEMO-41").expect("already open");
+        assert!(sent.lock().expect("lock").iter().all(|r| r.method == "GET"));
+    }
+
+    #[test]
+    fn an_issue_with_no_way_out_of_done_names_the_transitions_it_has() {
+        let mut jira = Jira::with(Box::new(Recorded {
+            no_way_out_of_done: true,
+            ..Recorded::default()
+        }));
+        match jira.reopen("DEMO", "DEMO-99") {
+            Err(TrackerError::Other(e)) => assert_eq!(
+                e,
+                "DEMO-99 has no transition out of a Done status; its transitions are: Archive"
+            ),
             other => panic!("{other:?}"),
         }
     }

@@ -1,0 +1,5 @@
+{"transitions": [
+  {"id": "51", "name": "Archive", "to": {"name": "Archived", "statusCategory": {"key": "done"}}},
+  {"id": "41", "name": "Reopen", "to": {"name": "To Do", "statusCategory": {"key": "new"}}},
+  {"id": "21", "name": "Back to work", "to": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}}}
+]}

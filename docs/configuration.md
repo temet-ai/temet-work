@@ -208,10 +208,22 @@ issues a person closed in the group's projects and areas, and the investigator f
 them again. The list holds issues the daemon saw open while syncing. A close in the tracker
 counts as a person's unless the daemon made it after verifying the issue, or one of the
 issue's pull requests had merged before it, since a pull request can close its issue as it
-merges. For the same reason the daemon ignores a close of an issue that has a merged pull
-request and is not done: a failed verify sends it back to be fixed, and a person's own close
-after the merge does not finish it. Reopening a done issue clears the merge. A person who
-wants a listed issue built reopens it.
+merges. For the same reason the daemon ignores a close while the issue merges, deploys or is
+verified. Reopening a done issue clears the merge. A person who wants a listed issue built
+reopens it.
+
+When the verify check fails, the issue goes back to its author to be fixed, and the daemon
+reopens it in its tracker, since the merge may have closed it there: GitHub through
+`gh issue reopen`, Jira through the first transition out of the Done status category. It
+posts no comment. It syncs the issue's project at once to do this, and tries again at each
+sync until a sync lists the issue as open. A failed reopen, such as a Jira workflow with no
+transition out of Done, is listed under Problems with the tracker's error, and the daemon
+ignores a close of the issue until the reopen happens. Meanwhile `temet-work issue` shows the
+text from the last sync that listed the issue. A sync that lists the issue as open counts as
+the reopen, whoever reopened it. From then on a close in the tracker is a person's: it
+finishes the issue, stops its agents and frees its work folders, and the investigator does not
+file it again. Until the issue is done, `temet-work status` and the app list it under
+Problems.
 
 The investigation ends when the investigator runs `temet-work investigated GROUP` or its
 session ends. An idle investigator is reminded and then stopped after `remind_after` and
