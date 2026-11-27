@@ -141,7 +141,11 @@ folders has at most two authors working at once.
 A project's `deploy` and `verify` commands run through `sh -c` in its `run_in` folder (your
 home folder when left out), with `TEMET_WORK_ISSUE` (the issue, such as `radar#44`),
 `TEMET_WORK_PROJECT` (the project's id) and `TEMET_WORK_REPO` (the code host's name for its
-repository) set. The daemon reaches herdr-core at `HC_TERMINAL_SOCKET`, else at
+repository) set. One deploy or verify runs per project and `run_in` folder at a time: two
+deploys would both pull and build in one checkout, and a verify compares what is installed
+with that checkout. One asked for while another of the same project or folder runs, or
+while a deploy there waits for its restart (at most ten minutes), starts in a later round.
+Projects with different `run_in` folders deploy side by side. The daemon reaches herdr-core at `HC_TERMINAL_SOCKET`, else at
 `$XDG_RUNTIME_DIR/herdr-core/default.sock`.
 
 Settings at every level, from global down to one task, are in `docs/settings.md`. The
@@ -354,5 +358,10 @@ a restart within ten minutes counts as a failed try, and runs again ten minutes 
 that. The tries of a handed-off deploy add up across rounds until the third; then it waits
 for a person, as any deploy does. A deploy that fails after writing its handoff line has
 the line removed and runs again in ten minutes, unless that was its third try. If the
-daemon that starts is not the build the line names, the issue is listed as a problem with
-both builds, and `temet-work retry ISSUE` deploys it again.
+daemon that starts is not the build the line names, and it has no handoff of its own
+waiting for that issue, it runs the deploy again. It first moves the line to
+`deploy-handoff.stale`, next to `deploy-handoff`, adding its own build, so the file shows
+which build each restart brought up. Those lines count the reruns across the restarts
+they cause: after three for one issue, the issue is listed as a problem naming both
+builds and waits for `temet-work retry ISSUE`. A retry, a recorded `Deployed`, or the
+issue leaving deploying clears its lines.

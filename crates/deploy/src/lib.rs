@@ -9,6 +9,14 @@
 //! `TEMET_WORK_SANDBOX` is set to anything but empty, as it is in every test
 //! run, the real shell runs nothing.
 //!
+//! One deploy or verify runs at a time per project and per `run_in` folder: two
+//! deploys would both pull and build in one checkout, and a verify compares the
+//! installed build with that checkout's commit, which a deploy moves. A command
+//! asked for while another of its project or folder runs, or while a deploy
+//! there waits for its restart, is reported done without starting, and runs
+//! when the loop asks again in a later round. Projects with different folders
+//! run side by side.
+//!
 //! A deploy may restart the daemon that is running it (temet-work deploying
 //! itself). Then the command builds and installs first, records the issue and
 //! the build it installed as a line `ISSUE BUILD` in the file named by
@@ -17,14 +25,22 @@
 //! old daemon does not record `Deployed` for such a deploy; the new daemon does,
 //! when it starts with the build the file names. Until then the deploy counts as
 //! pending and is not run again.
+//!
+//! A daemon that finds a line naming another build, with no deploy of its own
+//! waiting for that issue, runs the deploy again. It first moves the line to the
+//! stale file beside the handoff file, as `ISSUE BUILD RUNNING`, so the reruns
+//! are counted across the restarts they cause: after three for one issue, the
+//! deploy waits for `temet-work retry ISSUE`. A retry, a recorded `Deployed`, or
+//! the issue leaving the deploying stage clears its stale lines.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use temet_work_core::ids::IssueId;
+use temet_work_core::ids::{IssueId, ProjectId};
 use temet_work_core::model::Stage;
 use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
 
@@ -78,6 +94,21 @@ impl Step {
     }
 }
 
+/// Where a command works: the project whose build it installs, and the folder
+/// it runs in when `run_in` is set. Either can be set per milestone or task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Place {
+    project: ProjectId,
+    run_in: Option<PathBuf>,
+}
+
+impl Place {
+    /// Whether two commands would collide: one project, or one `run_in` folder.
+    fn meets(&self, other: &Self) -> bool {
+        self.project == other.project || (self.run_in.is_some() && self.run_in == other.run_in)
+    }
+}
+
 /// How long after a failed deploy it is run again.
 pub const RETRY_AFTER: Duration = Duration::from_secs(600);
 
@@ -91,30 +122,50 @@ struct Failure {
     at: Instant,
 }
 
+/// A deploy that finished and handed the restart off: when, and where it ran.
+struct Handed {
+    at: Instant,
+    place: Place,
+}
+
 /// The environment variable that names the handoff file for a deploy command.
 pub const HANDOFF_VAR: &str = "TEMET_WORK_HANDOFF";
 
-/// What the handoff file says: one line per deploy, `ISSUE BUILD`.
-fn read_handoff(path: &Path) -> Vec<(IssueId, String)> {
+/// The file beside the handoff file that keeps the lines of deploys run again
+/// because another build came up: `ISSUE BUILD RUNNING`, one per rerun.
+fn stale_file(handoff: &Path) -> PathBuf {
+    let mut name = handoff.as_os_str().to_owned();
+    name.push(".stale");
+    PathBuf::from(name)
+}
+
+/// What a handoff or stale file says: one line per deploy, `ISSUE REST`, where
+/// the rest is the build (or for the stale file, the build installed and the
+/// build running).
+fn read_lines(path: &Path) -> Vec<(IssueId, String)> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     text.lines()
         .filter_map(|line| {
-            let (issue, build) = line.trim().split_once(char::is_whitespace)?;
-            Some((IssueId::parse(issue)?, build.trim().to_string()))
+            let (issue, rest) = line.trim().split_once(char::is_whitespace)?;
+            Some((IssueId::parse(issue)?, rest.trim().to_string()))
         })
         .collect()
 }
 
-/// Takes `issue`'s line out of the handoff file, and the file itself when it
-/// was the last one.
-fn clear_handoff(path: &Path, issue: &IssueId) {
-    let rest: Vec<String> = read_handoff(path)
-        .into_iter()
-        .filter(|(i, _)| i != issue)
-        .map(|(i, b)| format!("{i} {b}\n"))
+/// Keeps the lines whose issue `keep` accepts, and removes the file when none
+/// is left. A file with nothing to take out is not touched.
+fn keep_lines(path: &Path, keep: impl Fn(&IssueId) -> bool) {
+    let lines = read_lines(path);
+    let rest: Vec<String> = lines
+        .iter()
+        .filter(|(i, _)| keep(i))
+        .map(|(i, r)| format!("{i} {r}\n"))
         .collect();
+    if rest.len() == lines.len() {
+        return;
+    }
     let _ = if rest.is_empty() {
         std::fs::remove_file(path)
     } else {
@@ -122,10 +173,16 @@ fn clear_handoff(path: &Path, issue: &IssueId) {
     };
 }
 
-/// A command running for an issue, and where its result arrives.
+/// Takes `issue`'s lines out of a handoff or stale file.
+fn clear_lines(path: &Path, issue: &IssueId) {
+    keep_lines(path, |i| i != issue);
+}
+
+/// A command running for an issue, where it runs, and where its result arrives.
 struct Job {
     issue: IssueId,
     step: Step,
+    place: Place,
     done: Receiver<Result<(), String>>,
 }
 
@@ -136,8 +193,8 @@ pub struct Deploys {
     failed: BTreeMap<IssueId, Failure>,
     /// The handoff file and this daemon's own build, when deploys may restart it.
     handoff: Option<(PathBuf, String)>,
-    /// Deploys that finished and handed the restart off, and when.
-    pending: BTreeMap<IssueId, Instant>,
+    /// Deploys that finished and handed the restart off.
+    pending: BTreeMap<IssueId, Handed>,
 }
 
 impl Default for Deploys {
@@ -169,7 +226,7 @@ impl Deploys {
     /// The build a deploy of `issue` handed its restart to, if it did.
     fn handed_to(&self, issue: &IssueId) -> Option<String> {
         let (file, _) = self.handoff.as_ref()?;
-        read_handoff(file)
+        read_lines(file)
             .into_iter()
             .find_map(|(i, b)| (&i == issue).then_some(b))
     }
@@ -178,22 +235,63 @@ impl Deploys {
     pub fn running(&self) -> usize {
         self.running.len()
     }
+
+    /// Whether a command that meets `place` runs, or a deploy there waits for
+    /// its restart (for at most the ten minutes a handoff waits).
+    fn busy(&self, place: &Place) -> bool {
+        self.running.iter().any(|j| j.place.meets(place))
+            || self
+                .pending
+                .values()
+                .any(|h| h.at.elapsed() < RETRY_AFTER && h.place.meets(place))
+    }
+
+    /// Records `issue` as deployed: its handoff line, its stale lines and its
+    /// failures are spent.
+    fn deployed(&mut self, issue: IssueId) -> Event {
+        if let Some((file, _)) = &self.handoff {
+            clear_lines(file, &issue);
+            clear_lines(&stale_file(file), &issue);
+        }
+        self.failed.remove(&issue);
+        Event::Deployed { issue }
+    }
+
+    /// Before a deploy of `issue` runs again: moves a handoff line naming
+    /// another build to the stale file, where it counts as a rerun. When the
+    /// count cannot be kept the deploy does not run, so a restart that keeps
+    /// coming up as another build cannot rebuild for ever.
+    fn set_aside(&self, issue: &IssueId) -> Result<(), String> {
+        let Some((file, own)) = &self.handoff else {
+            return Ok(());
+        };
+        let Some(build) = self.handed_to(issue).filter(|b| b != own) else {
+            return Ok(());
+        };
+        let stale = stale_file(file);
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stale)
+            .and_then(|mut f| f.write_all(format!("{issue} {build} {own}\n").as_bytes()))
+            .map_err(|e| format!("cannot count the rerun in {}: {e}", stale.display()))?;
+        clear_lines(file, issue);
+        Ok(())
+    }
 }
 
 impl Deploys {
     /// What to do about a deploy asked for again when it handed its restart
-    /// off: `None` when it did not, so it runs as usual.
+    /// off: `None` when it did not, or when it is to run again.
     fn handed_off(&mut self, issue: &IssueId) -> Option<Outcome> {
-        let own = self.handoff.as_ref()?.1.clone();
-        if let Some(at) = self.pending.get(issue) {
+        let (file, own) = self.handoff.clone()?;
+        if let Some(handed) = self.pending.get(issue) {
             // This daemon ran the deploy and is waiting to be restarted.
-            if at.elapsed() < RETRY_AFTER {
+            if handed.at.elapsed() < RETRY_AFTER {
                 return Some(Outcome::done());
             }
             self.pending.remove(issue);
-            if let Some((file, _)) = &self.handoff {
-                clear_handoff(file, issue);
-            }
+            clear_lines(&file, issue);
             let tries = self.failed.get(issue).map_or(0, |f| f.tries) + 1;
             self.failed.insert(
                 issue.clone(),
@@ -206,24 +304,30 @@ impl Deploys {
             return None;
         }
         let build = self.handed_to(issue)?;
-        if build != own {
-            return Some(Outcome::Failed(format!(
-                "a deploy installed build {build} and handed the restart off, but this daemon is \
-                 build {own}; the restart did not happen, or it ran an older build \
-                 (run `temet-work retry {issue}` to deploy again)"
-            )));
+        if build == own {
+            // The restart brought the new build: that is the deploy done.
+            return Some(Outcome::Done {
+                events: vec![self.deployed(issue.clone())],
+                effects: Vec::new(),
+            });
         }
-        // The restart brought the new build: that is the deploy done.
-        if let Some((file, _)) = &self.handoff {
-            clear_handoff(file, issue);
+        // Another build came up: the restart started something other than what
+        // was installed, or a later deploy installed over this one. The deploy
+        // runs again, and the line moves to the stale file as it starts.
+        let stale = stale_file(&file);
+        let reruns = read_lines(&stale)
+            .iter()
+            .filter(|(i, _)| i == issue)
+            .count();
+        if reruns < TRIES as usize {
+            return None;
         }
-        self.failed.remove(issue);
-        Some(Outcome::Done {
-            events: vec![Event::Deployed {
-                issue: issue.clone(),
-            }],
-            effects: Vec::new(),
-        })
+        Some(Outcome::Failed(format!(
+            "ran {reruns} times, and each time the daemon that came up was not the build the \
+             deploy installed (now {build} installed, {own} running; every try is in {}); a \
+             person has to look at it, then `temet-work retry {issue}` deploys it again",
+            stale.display()
+        )))
     }
 }
 
@@ -244,27 +348,29 @@ impl Part for Deploys {
                 }
                 Err(TryRecvError::Disconnected) => Err("the command's thread stopped".into()),
             };
-            let Job { issue, step, .. } = job;
+            let Job {
+                issue, step, place, ..
+            } = job;
             match (step, result) {
                 (Step::Deploy, Ok(())) => match self.handed_to(&issue) {
                     // The restart is handed off: this daemon may be gone before
                     // it records anything, so the next one does. Earlier tries
                     // still count, in case the restart never comes.
                     Some(build) if Some(&build) != self.handoff.as_ref().map(|h| &h.1) => {
-                        self.pending.insert(issue, Instant::now());
+                        self.pending.insert(
+                            issue,
+                            Handed {
+                                at: Instant::now(),
+                                place,
+                            },
+                        );
                     }
-                    Some(_) | None => {
-                        if let Some((file, _)) = &self.handoff {
-                            clear_handoff(file, &issue);
-                        }
-                        self.failed.remove(&issue);
-                        events.push(Event::Deployed { issue });
-                    }
+                    Some(_) | None => events.push(self.deployed(issue)),
                 },
                 (Step::Deploy, Err(why)) => {
                     // A failed deploy hands nothing off, whatever it wrote.
                     if let Some((file, _)) = &self.handoff {
-                        clear_handoff(file, &issue);
+                        clear_lines(file, &issue);
                     }
                     let tries = self.failed.get(&issue).map_or(0, |f| f.tries) + 1;
                     self.failed.insert(
@@ -284,15 +390,19 @@ impl Part for Deploys {
             }
         }
         self.running = still;
-        // Forget a failure or a pending deploy once its issue has moved on.
+        // Forget a failure, a pending deploy or a count of reruns once its issue
+        // has moved on.
         let deploying = |issue: &IssueId| {
             world
                 .issues
                 .get(issue)
-                .is_some_and(|i| i.stage == temet_work_core::model::Stage::Deploying)
+                .is_some_and(|i| i.stage == Stage::Deploying)
         };
         self.failed.retain(|issue, _| deploying(issue));
         self.pending.retain(|issue, _| deploying(issue));
+        if let Some((file, _)) = &self.handoff {
+            keep_lines(&stale_file(file), deploying);
+        }
         Polled {
             events,
             problem: None,
@@ -304,8 +414,8 @@ impl Part for Deploys {
             Effect::Deploy { issue } => (issue, Step::Deploy),
             Effect::Verify { issue } => (issue, Step::Verify),
             Effect::Retry { issue } => {
-                // A person asked: forget every failure and any handed-off restart,
-                // and run whichever step the issue is at.
+                // A person asked: forget every failure, any handed-off restart
+                // and the count of reruns, and run whichever step the issue is at.
                 let step = match world.issues.get(issue).map(|i| i.stage) {
                     Some(Stage::Deploying) => Step::Deploy,
                     Some(Stage::Verifying) => Step::Verify,
@@ -314,7 +424,8 @@ impl Part for Deploys {
                 self.failed.remove(issue);
                 self.pending.remove(issue);
                 if let Some((file, _)) = &self.handoff {
-                    clear_handoff(file, issue);
+                    clear_lines(file, issue);
+                    clear_lines(&stale_file(file), issue);
                 }
                 (issue, step)
             }
@@ -359,9 +470,7 @@ impl Part for Deploys {
         };
         let Some(command) = command else {
             let event = match step {
-                Step::Deploy => Event::Deployed {
-                    issue: issue.clone(),
-                },
+                Step::Deploy => self.deployed(issue.clone()),
                 Step::Verify => Event::Verified {
                     issue: issue.clone(),
                     passed: true,
@@ -373,9 +482,22 @@ impl Part for Deploys {
                 effects: Vec::new(),
             };
         };
-        let cwd = world
-            .setting_text(issue, None, "run_in")
-            .map(PathBuf::from)
+        let run_in = world.setting_text(issue, None, "run_in").map(PathBuf::from);
+        let place = Place {
+            project: project.id.clone(),
+            run_in: run_in.clone(),
+        };
+        // Another command of this project or folder runs, or a deploy there
+        // waits for its restart: this one starts when the loop asks again.
+        if self.busy(&place) {
+            return Outcome::done();
+        }
+        if step == Step::Deploy
+            && let Err(why) = self.set_aside(issue)
+        {
+            return Outcome::Failed(why);
+        }
+        let cwd = run_in
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"));
         let mut env = vec![
@@ -398,6 +520,7 @@ impl Part for Deploys {
                 self.running.push(Job {
                     issue: issue.clone(),
                     step,
+                    place,
                     done: rx,
                 });
                 Outcome::done()
@@ -456,8 +579,9 @@ mod tests {
         IssueId::new("ankh", "1")
     }
 
-    /// Polls until the running commands finish: usually within a millisecond,
-    /// at most two seconds when the machine is busy.
+    /// Polls until the running commands finish, giving way to their threads
+    /// between polls: usually within a millisecond, at most two seconds when
+    /// the machine is busy.
     fn settle(part: &mut Deploys, w: &World) -> Polled {
         let mut out = Polled::default();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -468,7 +592,7 @@ mod tests {
             if part.running() == 0 || std::time::Instant::now() > deadline {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::yield_now();
         }
         out
     }
@@ -747,7 +871,7 @@ mod tests {
             assert_eq!(part.carry_out(&deploy, &w), Outcome::done());
             assert_eq!(settle(&mut part, &w).events, []);
             // Ten minutes pass with no restart, and the try is counted.
-            *part.pending.get_mut(&issue()).expect("pending") -= RETRY_AFTER;
+            part.pending.get_mut(&issue()).expect("pending").at -= RETRY_AFTER;
             part.carry_out(&deploy, &w);
             // Then the wait before the next run passes.
             part.failed.get_mut(&issue()).expect("failure").at -= RETRY_AFTER;
@@ -797,36 +921,382 @@ mod tests {
     }
 
     #[test]
-    fn a_handoff_to_another_build_is_a_problem_not_a_deploy() {
+    fn a_handoff_to_another_build_runs_the_deploy_again() {
         let dir = scratch("other");
         let handoff = dir.join("deploy-handoff");
-        std::fs::write(&handoff, "ankh#1 new-build\n").expect("handoff");
-        let mut w = world(Some("make deploy"), None);
+        std::fs::write(&handoff, "ankh#1 X\n").expect("handoff");
+        let mut w = world(
+            Some("echo run >> runs && echo \"$TEMET_WORK_ISSUE Y\" >> \"$TEMET_WORK_HANDOFF\""),
+            None,
+        );
         if let Some(i) = w.issues.get_mut(&issue()) {
             i.stage = Stage::Deploying;
         }
-        let mut part = Deploys::with(shell()).handoff(handoff.clone(), "old-build");
-        let Outcome::Failed(why) = part.carry_out(&Effect::Deploy { issue: issue() }, &w) else {
-            panic!("another build is listed as a problem");
-        };
-        assert!(
-            why.contains("new-build") && why.contains("old-build"),
-            "{why}"
+        let mut part = Deploys::with(real(&dir)).handoff(handoff.clone(), "Y");
+        assert_eq!(
+            part.carry_out(&Effect::Deploy { issue: issue() }, &w),
+            Outcome::done(),
+            "not a problem: the deploy runs again"
         );
+        assert_eq!(
+            std::fs::read_to_string(stale_file(&handoff)).expect("stale file"),
+            "ankh#1 X Y\n",
+            "the line naming X was moved aside before the rerun"
+        );
+        let events = settle(&mut part, &w).events;
+        assert_eq!(events, [Event::Deployed { issue: issue() }]);
+        assert_eq!(runs(&dir), 1);
+        for event in &events {
+            w.apply(event);
+        }
+        assert_eq!(w.issues[&issue()].stage, Stage::Verifying);
+        assert!(!handoff.exists(), "the rerun's own line is spent");
+        assert!(
+            !stale_file(&handoff).exists(),
+            "Deployed clears the count of reruns"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_handoff_reruns_stop_after_three_restarts() {
+        let dir = scratch("stale");
+        let handoff = dir.join("deploy-handoff");
+        std::fs::write(&handoff, "ankh#1 X\n").expect("handoff");
+        // The deploy installs X, but the service keeps starting Y.
+        let mut w = world(
+            Some("echo run >> runs && echo \"$TEMET_WORK_ISSUE X\" >> \"$TEMET_WORK_HANDOFF\""),
+            None,
+        );
+        if let Some(i) = w.issues.get_mut(&issue()) {
+            i.stage = Stage::Deploying;
+        }
+        let deploy = Effect::Deploy { issue: issue() };
+        for restart in 1..=TRIES as usize {
+            // A new daemon at build Y each time, with nothing in memory.
+            let mut part = Deploys::with(real(&dir)).handoff(handoff.clone(), "Y");
+            assert_eq!(part.carry_out(&deploy, &w), Outcome::done());
+            assert_eq!(settle(&mut part, &w).events, [], "handed off to X again");
+            assert_eq!(runs(&dir), restart);
+            let stale = std::fs::read_to_string(stale_file(&handoff)).expect("stale file");
+            assert_eq!(stale, "ankh#1 X Y\n".repeat(restart));
+        }
+        let mut part = Deploys::with(real(&dir)).handoff(handoff.clone(), "Y");
+        let Outcome::Failed(why) = part.carry_out(&deploy, &w) else {
+            panic!("a fourth rerun is left for a person");
+        };
+        assert!(why.contains("a person has to look at it"), "{why}");
         assert!(why.contains("temet-work retry ankh#1"), "{why}");
-        assert!(!why.contains("delete the line"), "{why}");
-        assert!(handoff.exists());
-        // The retry the message names clears the line and runs the deploy.
+        assert!(why.contains("X installed, Y running"), "{why}");
+        assert_eq!(part.running(), 0);
+        assert_eq!(
+            runs(&dir),
+            TRIES as usize,
+            "the command ran exactly three times"
+        );
+        // The retry the message names clears the count and deploys again.
         assert_eq!(
             part.carry_out(&Effect::Retry { issue: issue() }, &w),
             Outcome::done()
         );
-        assert!(!handoff.exists());
+        assert!(!stale_file(&handoff).exists(), "the count is cleared");
+        settle(&mut part, &w);
+        assert_eq!(runs(&dir), TRIES as usize + 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_count_goes_when_its_issue_leaves_deploying() {
+        let dir = scratch("leaves");
+        let handoff = dir.join("deploy-handoff");
+        std::fs::write(stale_file(&handoff), "ankh#1 X Y\nankh#2 X Y\n").expect("stale");
+        let mut w = world(None, None);
+        if let Some(i) = w.issues.get_mut(&issue()) {
+            i.stage = Stage::Deploying;
+        }
+        let other = add_issue(&mut w, "ankh", "2", Stage::Verifying);
+        let mut part = Deploys::with(shell()).handoff(handoff.clone(), "Y");
+        part.poll(&w, 0);
         assert_eq!(
-            settle(&mut part, &w).events,
-            [Event::Deployed { issue: issue() }]
+            std::fs::read_to_string(stale_file(&handoff)).expect("stale"),
+            "ankh#1 X Y\n",
+            "{other} is verifying: its count is gone"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Adds issue `key` of `project` to the world at `stage`.
+    fn add_issue(w: &mut World, project: &str, key: &str, stage: Stage) -> IssueId {
+        let id = IssueId::new(project, key);
+        w.apply(&Event::IssueSynced {
+            issue: id.clone(),
+            title: "Wind the clock".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 2,
+            closed: false,
+        });
+        w.issues.get_mut(&id).expect("synced").stage = stage;
+        id
+    }
+
+    /// Adds project `id`, deploying with `make deploy` in `run_in`.
+    fn add_project(w: &mut World, id: &str, run_in: &str) {
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new(id),
+            tracker: "fake".into(),
+            name: format!("city/{id}"),
+            code_host: None,
+            repo: None,
+        });
+        w.apply(&Event::ProjectCommandsSet {
+            project: ProjectId::new(id),
+            deploy: Some("make deploy".into()),
+            verify: None,
+            run_in: Some(run_in.into()),
+            ci: None,
+        });
+    }
+
+    /// A shell that holds every command until the test opens it, and counts how
+    /// many are inside it at once and which issue each came in for.
+    #[derive(Default)]
+    struct Gate {
+        inside: std::sync::Mutex<Inside>,
+        changed: std::sync::Condvar,
+    }
+
+    #[derive(Default)]
+    struct Inside {
+        now: usize,
+        most: usize,
+        came: Vec<String>,
+        opened: usize,
+    }
+
+    impl Gate {
+        fn shell(self: &Arc<Self>) -> Arc<Shell> {
+            let gate = Arc::clone(self);
+            Arc::new(move |_: &str, _: &PathBuf, env: &[(String, String)]| {
+                let issue = env
+                    .iter()
+                    .find_map(|(k, v)| (k == "TEMET_WORK_ISSUE").then(|| v.clone()))
+                    .unwrap_or_default();
+                let mut inside = gate.inside.lock().map_err(|e| e.to_string())?;
+                inside.now += 1;
+                inside.most = inside.most.max(inside.now);
+                inside.came.push(issue);
+                let ticket = inside.came.len();
+                gate.changed.notify_all();
+                let mut inside = gate
+                    .changed
+                    .wait_while(inside, |i| i.opened < ticket)
+                    .map_err(|e| e.to_string())?;
+                inside.now -= 1;
+                Ok(())
+            })
+        }
+
+        /// Waits until `n` commands have come in, woken by each arrival: at
+        /// once when they have, at most two seconds when the machine is busy.
+        fn came(&self, n: usize) -> Vec<String> {
+            let inside = self.inside.lock().expect("gate");
+            let (inside, _) = self
+                .changed
+                .wait_timeout_while(inside, Duration::from_secs(2), |i| i.came.len() < n)
+                .expect("gate");
+            inside.came.clone()
+        }
+
+        /// The most commands that were inside at once.
+        fn most(&self) -> usize {
+            self.inside.lock().expect("gate").most
+        }
+
+        /// Lets every command that has come in finish.
+        fn open(&self) {
+            let mut inside = self.inside.lock().expect("gate");
+            inside.opened = inside.came.len();
+            self.changed.notify_all();
+        }
+    }
+
+    /// Settles the running commands and applies what they reported, as the
+    /// loop does.
+    fn settle_into(part: &mut Deploys, w: &mut World) -> Vec<Event> {
+        let events = settle(part, w).events;
+        for event in &events {
+            w.apply(event);
+        }
+        events
+    }
+
+    #[test]
+    fn two_deploys_of_one_project_run_one_after_the_other() {
+        let mut w = world(Some("make deploy"), None);
+        w.issues.get_mut(&issue()).expect("issue").stage = Stage::Deploying;
+        let second = add_issue(&mut w, "ankh", "2", Stage::Deploying);
+        let gate = Arc::new(Gate::default());
+        let mut part = Deploys::with(gate.shell());
+        let deploy = |issue: &IssueId| Effect::Deploy {
+            issue: issue.clone(),
+        };
+        // One round asks for both.
+        assert_eq!(part.carry_out(&deploy(&issue()), &w), Outcome::done());
+        assert_eq!(part.carry_out(&deploy(&second), &w), Outcome::done());
+        // Every command that started has come in, and that is the first alone.
+        assert_eq!(gate.came(part.running()), ["ankh#1"]);
+        // A later round, while the first still runs: the second waits again.
+        assert_eq!(part.poll(&w, 1).events, []);
+        assert_eq!(part.carry_out(&deploy(&second), &w), Outcome::done());
+        assert_eq!(part.running(), 1);
+        gate.open();
+        assert_eq!(
+            settle_into(&mut part, &mut w),
+            [Event::Deployed { issue: issue() }]
+        );
+        // The round after: the second runs, alone.
+        assert_eq!(part.carry_out(&deploy(&second), &w), Outcome::done());
+        assert_eq!(gate.came(2), ["ankh#1", "ankh#2"]);
+        gate.open();
+        assert_eq!(
+            settle_into(&mut part, &mut w),
+            [Event::Deployed {
+                issue: second.clone()
+            }]
+        );
+        assert_eq!(gate.most(), 1, "never two at once");
+        assert_eq!(w.issues[&issue()].stage, Stage::Verifying);
+        assert_eq!(w.issues[&second].stage, Stage::Verifying);
+    }
+
+    #[test]
+    fn a_deploy_waiting_for_its_restart_holds_back_its_project() {
+        let dir = scratch("waiting");
+        let handoff = dir.join("deploy-handoff");
+        let mut w = world(
+            Some(
+                "echo \"$TEMET_WORK_ISSUE\" >> runs && \
+                 echo \"$TEMET_WORK_ISSUE new-build\" >> \"$TEMET_WORK_HANDOFF\"",
+            ),
+            None,
+        );
+        w.issues.get_mut(&issue()).expect("issue").stage = Stage::Deploying;
+        let second = add_issue(&mut w, "ankh", "2", Stage::Deploying);
+        let mut part = Deploys::with(real(&dir)).handoff(handoff, "old-build");
+        let deploy = |issue: &IssueId| Effect::Deploy {
+            issue: issue.clone(),
+        };
+        assert_eq!(part.carry_out(&deploy(&issue()), &w), Outcome::done());
+        assert_eq!(settle(&mut part, &w).events, [], "handed off");
+        assert_eq!(part.carry_out(&deploy(&second), &w), Outcome::done());
+        assert_eq!(part.running(), 0, "the second waits for the restart");
+        // Ten minutes pass with no restart: the second runs.
+        part.pending.get_mut(&issue()).expect("pending").at -= RETRY_AFTER;
+        assert_eq!(part.carry_out(&deploy(&second), &w), Outcome::done());
+        settle(&mut part, &w);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("runs")).expect("runs"),
+            "ankh#1\nankh#2\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deploys_of_two_projects_run_side_by_side() {
+        let mut w = world(Some("make deploy"), None);
+        w.issues.get_mut(&issue()).expect("issue").stage = Stage::Deploying;
+        add_project(&mut w, "klatch", "/srv/klatch");
+        let klatch = add_issue(&mut w, "klatch", "1", Stage::Deploying);
+        let gate = Arc::new(Gate::default());
+        let mut part = Deploys::with(gate.shell());
+        for issue in [issue(), klatch.clone()] {
+            assert_eq!(
+                part.carry_out(&Effect::Deploy { issue }, &w),
+                Outcome::done()
+            );
+        }
+        assert_eq!(part.running(), 2);
+        assert_eq!(gate.came(2).len(), 2);
+        assert_eq!(gate.most(), 2, "both at once");
+        gate.open();
+        let mut events = settle(&mut part, &w).events;
+        events.sort_by_key(|e| format!("{e:?}"));
+        assert_eq!(
+            events,
+            [
+                Event::Deployed { issue: issue() },
+                Event::Deployed { issue: klatch }
+            ]
+        );
+    }
+
+    #[test]
+    fn two_projects_in_one_run_in_folder_take_turns() {
+        let mut w = world(Some("make deploy"), None);
+        w.issues.get_mut(&issue()).expect("issue").stage = Stage::Deploying;
+        add_project(&mut w, "morpork", "/srv/ankh/");
+        let morpork = add_issue(&mut w, "morpork", "1", Stage::Deploying);
+        let gate = Arc::new(Gate::default());
+        let mut part = Deploys::with(gate.shell());
+        for issue in [issue(), morpork.clone()] {
+            assert_eq!(
+                part.carry_out(&Effect::Deploy { issue }, &w),
+                Outcome::done()
+            );
+        }
+        assert_eq!(gate.came(part.running()), ["ankh#1"]);
+        gate.open();
+        settle(&mut part, &w);
+        assert_eq!(
+            part.carry_out(&Effect::Deploy { issue: morpork }, &w),
+            Outcome::done()
+        );
+        assert_eq!(gate.came(2), ["ankh#1", "morpork#1"]);
+        gate.open();
+        settle(&mut part, &w);
+        assert_eq!(gate.most(), 1);
+    }
+
+    #[test]
+    fn a_verify_and_a_deploy_of_one_project_do_not_overlap() {
+        let mut w = world(Some("make deploy"), Some("make check"));
+        w.issues.get_mut(&issue()).expect("issue").stage = Stage::Verifying;
+        let deploying = add_issue(&mut w, "ankh", "2", Stage::Deploying);
+        let gate = Arc::new(Gate::default());
+        let mut part = Deploys::with(gate.shell());
+        // A verify runs: a deploy of its project asked after it waits.
+        let verify = Effect::Verify { issue: issue() };
+        let deploy = Effect::Deploy {
+            issue: deploying.clone(),
+        };
+        assert_eq!(part.carry_out(&verify, &w), Outcome::done());
+        assert_eq!(part.carry_out(&deploy, &w), Outcome::done());
+        assert_eq!(gate.came(part.running()), ["ankh#1"]);
+        gate.open();
+        assert!(matches!(
+            settle_into(&mut part, &mut w).as_slice(),
+            [Event::Verified { passed: true, .. }]
+        ));
+        // A deploy runs: a verify of its project asked after it waits.
+        let third = add_issue(&mut w, "ankh", "3", Stage::Verifying);
+        let verify = Effect::Verify {
+            issue: third.clone(),
+        };
+        assert_eq!(part.carry_out(&deploy, &w), Outcome::done());
+        assert_eq!(part.carry_out(&verify, &w), Outcome::done());
+        assert_eq!(gate.came(1 + part.running()), ["ankh#1", "ankh#2"]);
+        gate.open();
+        assert_eq!(
+            settle_into(&mut part, &mut w),
+            [Event::Deployed { issue: deploying }]
+        );
+        // The round after, the verify runs.
+        assert_eq!(part.carry_out(&verify, &w), Outcome::done());
+        assert_eq!(gate.came(3), ["ankh#1", "ankh#2", "ankh#3"]);
+        gate.open();
+        settle(&mut part, &w);
+        assert_eq!(gate.most(), 1, "never two at once");
     }
 
     #[test]
