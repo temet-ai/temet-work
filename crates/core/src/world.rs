@@ -687,6 +687,22 @@ impl World {
         out
     }
 
+    /// The folder an agent on `issue` runs in: its own, else (for a reader) a
+    /// free one of the issue's project when there is one, so it does not work in a
+    /// folder an author is changing.
+    pub fn folder_for(&self, issue: &Issue, folder: Option<&FolderId>) -> Option<&Folder> {
+        match folder {
+            Some(f) => self.folders.get(f),
+            None => {
+                let repo = self.repo_of(issue).map_or(&issue.id.project, |p| &p.id);
+                self.folders
+                    .values()
+                    .find(|f| &f.project == repo && f.holder.is_none())
+                    .or_else(|| self.folders.values().find(|f| &f.project == repo))
+            }
+        }
+    }
+
     /// What starting an agent takes: its id, the machine and folder it runs in,
     /// and its brief. The id is its role and a number, counting every agent of
     /// that role this world has started (`author-3`). An agent with no work
@@ -701,18 +717,7 @@ impl World {
     ) -> Option<Launch> {
         let i = self.issues.get(issue)?;
         let n = self.agents.values().filter(|a| a.role == role).count() + 1;
-        // An agent without a folder of its own reads in a free one when it can,
-        // so it does not work in a folder an author is changing.
-        let place = match folder {
-            Some(f) => self.folders.get(f),
-            None => {
-                let repo = self.repo_of(i).map_or(&issue.project, |p| &p.id);
-                self.folders
-                    .values()
-                    .find(|f| &f.project == repo && f.holder.is_none())
-                    .or_else(|| self.folders.values().find(|f| &f.project == repo))
-            }
-        };
+        let place = self.folder_for(i, folder);
         let path = place.map(|f| std::path::PathBuf::from(&f.path));
         let shared = folder.is_none() && place.is_some_and(|f| f.holder.is_some());
         Some(Launch {

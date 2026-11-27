@@ -217,9 +217,10 @@ impl Host {
                 continue;
             };
             let place = agent
-                .folder
+                .issue
                 .as_ref()
-                .and_then(|f| self.world.folders.get(f))
+                .and_then(|i| self.world.issues.get(i))
+                .and_then(|i| self.world.folder_for(i, agent.folder.as_ref()))
                 .map_or_else(String::new, |f| format!(" in {}", f.path));
             self.problems.insert(
                 format!("{BLOCKED}{}", agent.id),

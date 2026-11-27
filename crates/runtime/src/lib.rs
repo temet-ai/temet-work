@@ -53,9 +53,11 @@ pub fn user_home() -> Option<PathBuf> {
 /// environment: a terminal gets its terminal service's environment, not the
 /// daemon's. They are the proxy variables a capturing proxy needs and the code
 /// host's sign-in, without which `gh` cannot read an issue or open a pull
-/// request. Adapters use this one list, so a variable is added for every runtime
+/// request. `CLAUDE_CONFIG_DIR` goes too, so a session reads the same user files
+/// the daemon marked its folder trusted in. Adapters use this one list, so a variable is added for every runtime
 /// at once.
-pub const PASSED_ON: [&str; 5] = [
+pub const PASSED_ON: [&str; 6] = [
+    "CLAUDE_CONFIG_DIR",
     "HTTPS_PROXY",
     "NO_PROXY",
     "NODE_EXTRA_CA_CERTS",
