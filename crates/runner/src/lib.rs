@@ -198,6 +198,29 @@ struct Message {
     tells: bool,
 }
 
+/// The count of reminders to an agent its issue waits on.
+#[derive(Clone, Copy)]
+struct Count {
+    /// When its clock last started: when the count began, or the last reminder.
+    since: u64,
+    /// The reminders sent.
+    nudges: u32,
+    /// What the latest poll saw the agent doing.
+    saw: Saw,
+}
+
+/// What a poll saw an agent with a [`Count`] doing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Saw {
+    /// Between turns.
+    Idle,
+    /// Stopped on an error, with no limit reset to wait for.
+    Errored,
+    /// In a turn that followed a reminder and an error. The count is kept until
+    /// the turn shows how it ends.
+    Retrying,
+}
+
 /// The runner part: the runners compiled into this build, in the order they were added.
 ///
 /// It starts each agent's program in a labelled terminal with the runner its `runner`
@@ -213,8 +236,8 @@ pub struct Runners {
     /// Agents started since the runner last listed its terminals: a list taken
     /// before they started does not have them.
     started_here: std::collections::BTreeSet<String>,
-    /// Idle agents their issues wait on: since when, and how many reminders.
-    idle: BTreeMap<String, (u64, u32)>,
+    /// The reminder count of each idle or errored agent its issue waits on.
+    counts: BTreeMap<String, Count>,
     /// The daemon's address as another machine reaches it over SSH
     /// (`daemon_host` in the configuration).
     daemon_host: Option<String>,
@@ -303,12 +326,13 @@ impl Runners {
         self.outbox.len()
     }
 
-    /// Sends what is waiting; keeps what the agent cannot take yet.
     /// Reminds an idle agent its issue waits on, `reminders` times (two by default),
     /// `remind_after` minutes (ten) apart; that long after the last reminder it stops
     /// the agent's session, so the loop starts a fresh one. An agent whose turn
     /// ended in an error is idle here, unless it waits for its limit to reset.
-    /// Returns the agents it stopped, as ended.
+    /// A reminder to such an agent starts a turn that may end on the error again,
+    /// so its count is kept while it works, and starts again if that turn ends
+    /// between turns. Returns the agents it stopped, as ended.
     fn remind(
         &mut self,
         world: &World,
@@ -316,49 +340,64 @@ impl Runners {
         now_ms: u64,
     ) -> Vec<Event> {
         let mut events = Vec::new();
-        let waiting: Vec<(String, Role, temet_work_core::ids::IssueId)> = world
-            .agents
-            .values()
-            .filter(|a| {
-                let state = seen.get(&a.id).unwrap_or(&a.state);
-                let idle = match state {
-                    AgentState::Idle => true,
-                    AgentState::Errored { .. } => state.limit_reset(a.continued).is_none(),
-                    _ => false,
-                };
-                idle && world.waiting_on(a)
-            })
-            .filter_map(|a| a.issue.clone().map(|i| (a.id.0.clone(), a.role, i)))
-            .collect();
-        self.idle
-            .retain(|agent, _| waiting.iter().any(|(a, _, _)| a == agent));
-        for (agent, role, issue) in waiting {
-            let (since, nudges) = *self.idle.entry(agent.clone()).or_insert((now_ms, 0));
-            let after_ms = world.setting_number(&issue, Some(role), "remind_after") * 60_000;
-            let reminders = world.setting_number(&issue, Some(role), "reminders");
-            if now_ms < since + after_ms {
+        let mut counts = std::mem::take(&mut self.counts);
+        for a in world.agents.values() {
+            let Some(issue) = a.issue.as_ref().filter(|_| world.waiting_on(a)) else {
+                continue;
+            };
+            let agent = &a.id.0;
+            let before = counts.remove(agent);
+            let state = seen.get(&a.id).unwrap_or(&a.state);
+            let saw = match state {
+                AgentState::Idle => Saw::Idle,
+                AgentState::Errored { .. } if state.limit_reset(a.continued).is_none() => {
+                    Saw::Errored
+                }
+                AgentState::Working { .. } => {
+                    if let Some(count) = before.filter(|c| c.nudges > 0 && c.saw != Saw::Idle) {
+                        let saw = Saw::Retrying;
+                        self.counts.insert(agent.clone(), Count { saw, ..count });
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            // A retry that ends between turns has left the error behind.
+            let mut count = before
+                .filter(|c| !(c.saw == Saw::Retrying && saw == Saw::Idle))
+                .unwrap_or(Count {
+                    since: now_ms,
+                    nudges: 0,
+                    saw,
+                });
+            count.saw = saw;
+            let after_ms = world.setting_number(issue, Some(a.role), "remind_after") * 60_000;
+            let reminders = world.setting_number(issue, Some(a.role), "reminders");
+            if now_ms < count.since + after_ms {
+                self.counts.insert(agent.clone(), count);
                 continue;
             }
-            if u64::from(nudges) < reminders {
-                self.idle.insert(agent.clone(), (now_ms, nudges + 1));
+            if u64::from(count.nudges) < reminders {
+                count.since = now_ms;
+                count.nudges += 1;
+                self.counts.insert(agent.clone(), count);
                 events.extend(self.queue(
                     world,
                     seen,
                     Message {
-                        agent,
+                        agent: agent.clone(),
                         issue: issue.clone(),
-                        text: brief::nudge(role, &issue),
+                        text: brief::nudge(a.role, issue),
                         tells: false,
                     },
                 ));
                 continue;
             }
-            self.idle.remove(&agent);
-            if let Some((i, terminal)) = self.terminals.remove(&agent) {
+            if let Some((i, terminal)) = self.terminals.remove(agent) {
                 let _ = self.adapters[i].stop(&terminal);
             }
             events.push(Event::AgentChanged {
-                agent: AgentId::new(agent),
+                agent: a.id.clone(),
                 state: AgentState::Ended,
             });
         }
@@ -2283,5 +2322,238 @@ mod tests {
             }]
         );
         assert_eq!(screen_of(&handle.fake), format!("{limited}\ncontinue"));
+    }
+
+    const OVERLOADED: &str = "API Error: 529 overloaded";
+
+    /// An author on ankh#1, waited on, whose turn ended on [`OVERLOADED`] and was
+    /// seen at `now_ms`.
+    fn overloaded_author(now_ms: u64) -> (World, Runners, Shared, AgentId) {
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let author = run(&mut part, &mut w, &["claude"]);
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .end_in_error(&TerminalId("t1".into()), OVERLOADED);
+        step(&mut part, &mut w, now_ms);
+        (w, part, handle, author)
+    }
+
+    fn reminders(handle: &Shared) -> usize {
+        screen_of(&handle.fake)
+            .matches("still waiting on you")
+            .count()
+    }
+
+    fn ended(events: &[Event], agent: &AgentId) -> bool {
+        events.contains(&Event::AgentChanged {
+            agent: agent.clone(),
+            state: AgentState::Ended,
+        })
+    }
+
+    fn working(state: &AgentState) -> bool {
+        matches!(state, AgentState::Working { .. })
+    }
+
+    #[test]
+    fn a_fake_terminal_that_keeps_failing_is_working_for_one_call_to_updates() {
+        let t1 = TerminalId("t1".into());
+        let mut fake = FakeRunner::default();
+        fake.start(&Start::default()).expect("start");
+        fake.end_in_error(&t1, OVERLOADED);
+        fake.updates();
+        let statuses = |fake: &mut FakeRunner| -> Vec<Status> {
+            fake.updates().into_iter().map(|u| u.status).collect()
+        };
+        // Not marked: a send ends between turns at once.
+        fake.send(&t1, "again", true).expect("send");
+        assert_eq!(statuses(&mut fake), [Status::Working, Status::Between]);
+
+        fake.end_in_error(&t1, OVERLOADED);
+        fake.keep_failing(&t1);
+        fake.updates();
+        for text in ["once", "twice"] {
+            fake.send(&t1, text, true).expect("send");
+            assert_eq!(statuses(&mut fake), [Status::Working]);
+            let screen = fake.screen(&t1).expect("screen");
+            assert!(screen.ends_with(text), "{screen}");
+            assert_eq!(fake.send(&t1, "more", true), Err(RunnerError::Busy));
+            assert_eq!(statuses(&mut fake), [Status::Error { message: None }]);
+            let screen = fake.screen(&t1).expect("screen");
+            assert!(screen.ends_with(OVERLOADED), "{screen}");
+            assert_eq!(statuses(&mut fake), []);
+        }
+    }
+
+    #[test]
+    fn an_error_that_comes_back_after_each_reminder_is_still_stopped() {
+        let (mut w, mut part, handle, author) = overloaded_author(0);
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .keep_failing(&TerminalId("t1".into()));
+        let minute = |n: u64| n * 60_000;
+        for (n, at) in [(1, minute(10)), (2, minute(20))] {
+            step(&mut part, &mut w, at - 1);
+            assert_eq!(reminders(&handle), n - 1, "not before {at}");
+            step(&mut part, &mut w, at);
+            assert_eq!(reminders(&handle), n);
+            step(&mut part, &mut w, at + 2_000);
+            assert!(working(&w.agents[&author].state), "{:?}", w.agents[&author]);
+            // The turn retries for half a minute, which does not move the clock.
+            step(&mut part, &mut w, at + 30_000);
+            assert_eq!(
+                w.agents[&author].state,
+                AgentState::Errored {
+                    line: OVERLOADED.into(),
+                    resets_ms: None
+                }
+            );
+        }
+        let before = step(&mut part, &mut w, minute(30) - 1);
+        assert!(!ended(&before, &author), "{before:?}");
+        let stopped = step(&mut part, &mut w, minute(30));
+        assert!(ended(&stopped, &author), "{stopped:?}");
+        assert_eq!(reminders(&handle), 2);
+        assert!(
+            w.missing().start.iter().any(|e| matches!(
+                e,
+                Effect::StartAgent {
+                    role: Role::Author,
+                    ..
+                }
+            )),
+            "{:?}",
+            w.missing()
+        );
+    }
+
+    #[test]
+    fn an_errored_agent_whose_reminder_ends_between_turns_starts_the_count_again() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = overloaded_author(0);
+        handle.fake.lock().expect("lock").keep_failing(&t1);
+        let minute = |n: u64| n * 60_000;
+        step(&mut part, &mut w, minute(10));
+        step(&mut part, &mut w, minute(11));
+        assert!(working(&w.agents[&author].state));
+        // This time the turn gets through and ends.
+        handle.fake.lock().expect("lock").unblock(&t1);
+        step(&mut part, &mut w, minute(15));
+        assert_eq!(w.agents[&author].state, AgentState::Idle);
+        for (at, n) in [(24, 1), (25, 2), (30, 2), (34, 2), (35, 3)] {
+            let polled = step(&mut part, &mut w, minute(at));
+            assert!(!ended(&polled, &author), "stopped at {at} min");
+            assert_eq!(reminders(&handle), n, "at {at} min");
+        }
+        let polled = step(&mut part, &mut w, minute(44));
+        assert!(!ended(&polled, &author), "{polled:?}");
+        let stopped = step(&mut part, &mut w, minute(45));
+        assert!(ended(&stopped, &author), "{stopped:?}");
+    }
+
+    #[test]
+    fn an_errored_agent_whose_reminder_ends_on_a_limit_waits_for_the_reset() {
+        let t1 = TerminalId("t1".into());
+        let at = |hh, mm| nov27(hh, mm);
+        let (mut w, mut part, handle, author) = overloaded_author(at(16, 0));
+        handle.fake.lock().expect("lock").keep_failing(&t1);
+        step(&mut part, &mut w, at(16, 10));
+        assert_eq!(reminders(&handle), 1);
+        step(&mut part, &mut w, at(16, 11));
+        assert!(working(&w.agents[&author].state));
+        handle.fake.lock().expect("lock").end_in_error(&t1, LIMIT);
+        step(&mut part, &mut w, at(16, 12));
+        for (hh, mm) in [(16, 20), (16, 30), (16, 42), (17, 40)] {
+            assert_eq!(step(&mut part, &mut w, at(hh, mm)), vec![], "{hh}:{mm:02}");
+        }
+        assert_eq!((continues(&handle.fake), reminders(&handle)), (0, 1));
+        assert_eq!(
+            step(&mut part, &mut w, at(17, 41)),
+            vec![Event::Continued {
+                agent: author.clone(),
+                resets_ms: at(17, 40)
+            }]
+        );
+        step(&mut part, &mut w, at(17, 41) + 2_000);
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .end_in_error(&t1, OVERLOADED);
+        step(&mut part, &mut w, at(17, 42));
+        for (hh, mm, n) in [(17, 51, 1), (17, 52, 2), (18, 2, 3), (18, 11, 3)] {
+            let polled = step(&mut part, &mut w, at(hh, mm));
+            assert!(!ended(&polled, &author), "stopped at {hh}:{mm:02}");
+            assert_eq!(reminders(&handle), n, "at {hh}:{mm:02}");
+            // The reminder's turn: working, then the 529 again.
+            step(&mut part, &mut w, at(hh, mm) + 2_000);
+            step(&mut part, &mut w, at(hh, mm) + 4_000);
+        }
+        let stopped = step(&mut part, &mut w, at(18, 12));
+        assert!(ended(&stopped, &author), "{stopped:?}");
+    }
+
+    #[test]
+    fn an_errored_agent_that_stops_at_a_prompt_starts_the_count_again() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = overloaded_author(0);
+        handle.fake.lock().expect("lock").keep_failing(&t1);
+        let minute = |n: u64| n * 60_000;
+        step(&mut part, &mut w, minute(10));
+        step(&mut part, &mut w, minute(11));
+        assert!(working(&w.agents[&author].state));
+        handle.fake.lock().expect("lock").block(&t1, "permission");
+        step(&mut part, &mut w, minute(12));
+        assert!(matches!(
+            w.agents[&author].state,
+            AgentState::Blocked { .. }
+        ));
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .end_in_error(&t1, OVERLOADED);
+        step(&mut part, &mut w, minute(15));
+        for (at, n) in [(20, 1), (24, 1), (25, 2), (35, 3), (44, 3)] {
+            let polled = step(&mut part, &mut w, minute(at));
+            assert!(!ended(&polled, &author), "stopped at {at} min");
+            assert_eq!(reminders(&handle), n, "at {at} min");
+            step(&mut part, &mut w, minute(at) + 2_000);
+            step(&mut part, &mut w, minute(at) + 4_000);
+        }
+        let stopped = step(&mut part, &mut w, minute(45));
+        assert!(ended(&stopped, &author), "{stopped:?}");
+    }
+
+    #[test]
+    fn an_errored_agent_its_issue_stops_waiting_on_starts_the_count_again() {
+        use temet_work_core::model::Stage;
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = overloaded_author(0);
+        handle.fake.lock().expect("lock").keep_failing(&t1);
+        let minute = |n: u64| n * 60_000;
+        step(&mut part, &mut w, minute(10));
+        step(&mut part, &mut w, minute(11));
+        assert!(working(&w.agents[&author].state));
+        // The issue goes to review while the turn runs, and comes back later.
+        at_stage(&mut w, Stage::InReview { round: 1 });
+        step(&mut part, &mut w, minute(12));
+        at_stage(&mut w, Stage::Fixing { round: 1 });
+        w.issues
+            .get_mut(&IssueId::new("ankh", "1"))
+            .expect("there")
+            .told = true;
+        assert!(w.waiting_on(&w.agents[&author]));
+        step(&mut part, &mut w, minute(15));
+        step(&mut part, &mut w, minute(20));
+        assert_eq!(reminders(&handle), 1, "not on the old count");
+        step(&mut part, &mut w, minute(25));
+        assert_eq!(reminders(&handle), 2);
     }
 }

@@ -123,7 +123,11 @@ daemon's time zone), the daemon types `continue` one minute after it, without st
 and text waiting for the agent goes after that. The reset time is kept in the event log, so a
 restart does not lose it. An error with no reset time it can read, or one that comes back with a
 reset time no later than the one already continued after, is treated as idle: reminded, then
-stopped. A reviewer or arbiter whose approval is in is not
+stopped. A reminder starts a turn, and one that ends on the same error, or on another with no
+reset time to wait for, counts toward the stop, however long the turn worked: the next reminder
+or the stop is still timed from the last reminder. The count starts again when such a turn ends
+between turns, when the agent stops at a prompt or on a limit with a reset time, when it ends,
+and when its issue stops waiting on it. A reviewer or arbiter whose approval is in is not
 waited on while the checks run: it is not reminded, no other is started in its place, and it stays
 until the merge, so after a failed check a reviewer still running hears the next round. A refiner
 stops once its plan is in; the author, reviewer and arbiter stop once the issue's last pull request
