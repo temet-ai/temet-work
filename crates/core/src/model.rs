@@ -47,6 +47,48 @@ pub struct Check {
     pub done_when: String,
     /// The test or command that proves it.
     pub proven_by: String,
+    /// Where it stands, as the loop last learned it: waiting from the plan,
+    /// running from the author's ready, passed or failed from the reviewer's
+    /// verdict. None in a plan from an older log. The loop sets it: a plan sent
+    /// with states has each replaced by waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<CheckState>,
+}
+
+impl Check {
+    /// A check with no state yet.
+    pub fn new(done_when: impl Into<String>, proven_by: impl Into<String>) -> Self {
+        Self {
+            done_when: done_when.into(),
+            proven_by: proven_by.into(),
+            state: None,
+        }
+    }
+}
+
+/// Where one of a plan's checks stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckState {
+    /// The reviewer found that it holds on the current change.
+    Passed,
+    /// CI and the reviewer are checking the current change.
+    Running,
+    /// No change is being checked: none was made yet, or the last one went back
+    /// to its author before the reviewer judged it.
+    Waiting,
+    /// The reviewer found that it does not hold on the current change.
+    Failed,
+}
+
+/// Whether the next review round counts a review point as dealt with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PointState {
+    /// Not judged yet, or the next round kept it open.
+    Open,
+    /// The next round counts it as dealt with.
+    Resolved,
 }
 
 /// The refiner's plan for an issue.
@@ -136,14 +178,66 @@ pub struct Review {
     pub approve: bool,
     /// What a block asked to change; empty for an approval.
     pub points: Vec<String>,
-    /// The author's replies to it, sent with the fix that answers this round
-    /// (`temet-work ready --reply`); empty until then, or when the author sent
-    /// none.
+    /// The author's replies to its points, in their order, sent with the first
+    /// ready after it (`temet-work ready --reply`); empty until then, and in
+    /// older logs.
     #[serde(default)]
     pub replies: Vec<String>,
+    /// Each point's state, in their order: open until the next round judges it,
+    /// then open or resolved. Empty for a round from an older log.
+    #[serde(default)]
+    pub states: Vec<PointState>,
+}
+
+impl Review {
+    /// Whether it is a block with points to answer.
+    pub fn blocks(&self) -> bool {
+        !self.approve && !self.points.is_empty()
+    }
 }
 
 impl Issue {
+    /// The review round whose points the author's next ready answers: the
+    /// latest one, while the issue is being fixed, when it is a block the
+    /// author has not replied to. The first ready after a block answers it,
+    /// whether the review, an arbiter's ruling or a failed check sent the change
+    /// back; a later ready answers none.
+    pub fn block_to_answer(&self) -> Option<&Review> {
+        if !matches!(self.stage, Stage::Fixing { .. }) {
+            return None;
+        }
+        self.reviews
+            .last()
+            .filter(|r| r.blocks() && r.replies.is_empty())
+    }
+
+    /// The review round whose points the verdict on round `round` judges: the
+    /// latest one finished, when `round` is after the first. Round 1 judges
+    /// none.
+    pub fn round_before(&self, round: u8) -> Option<&Review> {
+        self.reviews.last().filter(|_| round > 1)
+    }
+
+    /// Sets each of the plan's checks that has a state to `to`. A check from an
+    /// older log keeps no state.
+    pub fn set_checks(&mut self, to: CheckState) {
+        for c in self.plan.iter_mut().flat_map(|p| p.checks.iter_mut()) {
+            if c.state.is_some() {
+                c.state = Some(to);
+            }
+        }
+    }
+
+    /// Puts each check still running back to waiting: the change went back to
+    /// its author before anyone judged it.
+    pub fn checks_wait(&mut self) {
+        for c in self.plan.iter_mut().flat_map(|p| p.checks.iter_mut()) {
+            if c.state == Some(CheckState::Running) {
+                c.state = Some(CheckState::Waiting);
+            }
+        }
+    }
+
     /// Whether a person closed it, as far as the loop can tell: done, not closed
     /// by the loop after verifying it, and with no pull request of its merged,
     /// since one that merged may have closed it. A closed dependency the loop

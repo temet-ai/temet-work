@@ -17,10 +17,13 @@ temet-work screen AGENT                     what an agent's terminal shows now
 temet-work plan ISSUE FILE                  a refiner's plan, as YAML; FILE - reads it from standard input
 temet-work ready ISSUE PULL|REPO=PULL...     the pull request is open and the checks hold;
                                             PULL is its number, needed the first time;
-                                            --reply TEXT, once for each point of the
-                                            review round the fix answers
+                                            the first ready after a block takes
+                                            --reply TEXT once for each of its points
 temet-work review ISSUE approve
-temet-work review ISSUE block POINT...      what to fix, one argument each
+temet-work review ISSUE block POINT...      what to fix, one argument each; --failed N
+                                            for each check that does not hold, and
+                                            --open N for each point of the round before
+                                            still not dealt with, each counted from 1
 temet-work rule ISSUE approve REASON
 temet-work rule ISSUE fix REASON
 temet-work overturn DECISION OPTION REASON
@@ -52,6 +55,12 @@ pub const JSON: &str = "--json";
 
 /// The flag before each of the author's replies in `ready`.
 const REPLY: &str = "--reply";
+
+/// The flag before each check a reviewer's block finds does not hold.
+const FAILED: &str = "--failed";
+
+/// The flag before each point of the round before a reviewer's block keeps open.
+const OPEN: &str = "--open";
 
 /// What `--json` on a command other than `status` is answered with.
 pub fn json_refused() -> String {
@@ -97,6 +106,31 @@ fn take(args: &[String], flag: &str) -> Result<(Vec<String>, Option<String>), St
         }
     }
     Ok((rest, value))
+}
+
+/// Takes every `flag N` out of `args`, wherever it is, with each N read as a
+/// number counted from 1; `what` says what N counts.
+fn take_numbers(
+    args: &[String],
+    flag: &str,
+    what: &str,
+) -> Result<(Vec<String>, Vec<usize>), String> {
+    let mut rest = Vec::new();
+    let mut numbers = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == flag {
+            let v = it
+                .next()
+                .ok_or_else(|| format!("{flag} needs the number of {what}"))?;
+            numbers.push(v.parse().map_err(|_| {
+                format!("{flag} takes the number of {what}, counted from 1, not {v}")
+            })?);
+        } else {
+            rest.push(a.clone());
+        }
+    }
+    Ok((rest, numbers))
 }
 
 /// Reads the arguments after the program name into a request. `by` is the
@@ -169,16 +203,34 @@ pub fn request(
                 replies,
             }
         }
-        "review" => Command::Review {
-            issue: issue()?,
-            verdict: match arg(2, "approve or block")? {
-                "approve" => Verdict::Approve,
-                "block" => Verdict::Block {
-                    points: args.get(3..).unwrap_or_default().to_vec(),
+        "review" => {
+            let (rest, failed) = take_numbers(
+                args,
+                FAILED,
+                "a check, in the plan's order, that does not hold",
+            )?;
+            let (rest, open) = take_numbers(
+                &rest,
+                OPEN,
+                "a point of the round before, in its order, still not dealt with",
+            )?;
+            let verdict = rest
+                .get(2)
+                .map(String::as_str)
+                .ok_or_else(|| format!("missing approve or block\n\n{USAGE}"))?;
+            Command::Review {
+                issue: issue()?,
+                verdict: match verdict {
+                    "approve" => Verdict::Approve,
+                    "block" => Verdict::Block {
+                        points: rest.get(3..).unwrap_or_default().to_vec(),
+                    },
+                    other => return Err(format!("review takes approve or block, not {other}")),
                 },
-                other => return Err(format!("review takes approve or block, not {other}")),
-            },
-        },
+                failed,
+                open,
+            }
+        }
         "retry" => Command::Retry { issue: issue()? },
         "rule" => Command::Rule {
             issue: issue()?,
@@ -448,8 +500,51 @@ mod tests {
                         "no test for a stopped clock".into(),
                         "the bell is too loud".into()
                     ]
-                }
+                },
+                failed: Vec::new(),
+                open: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn review_reads_each_failed_check_and_open_point_wherever_it_is() {
+        let words = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let review = |line: &[&str]| request(&words(line), None, no_files).map(|r| r.command);
+        assert_eq!(
+            review(&[
+                "review",
+                "watch#4",
+                "--open",
+                "2",
+                "block",
+                "the clapper is loose",
+                "--failed",
+                "2",
+                "--open",
+                "1",
+            ]),
+            Ok(Command::Review {
+                issue: IssueId::new("watch", "4"),
+                verdict: Verdict::Block {
+                    points: vec!["the clapper is loose".into()]
+                },
+                failed: vec![2],
+                open: vec![2, 1],
+            })
+        );
+        // On an approve too: the daemon says why it refuses them.
+        assert!(matches!(
+            review(&["review", "watch#4", "approve", "--failed", "1"]),
+            Ok(Command::Review { verdict: Verdict::Approve, failed, .. }) if failed == [1]
+        ));
+        assert!(
+            review(&["review", "watch#4", "block", "x", "--failed", "two"])
+                .is_err_and(|e| e.contains("--failed takes the number of a check")),
+        );
+        assert!(
+            review(&["review", "watch#4", "block", "--open"])
+                .is_err_and(|e| e.contains("--open needs the number of a point")),
         );
     }
 

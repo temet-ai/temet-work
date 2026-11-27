@@ -894,7 +894,9 @@ impl Part for Runners {
             Effect::RequestFix { issue, points } => {
                 // With no author running there is nothing to send: the loop starts
                 // one, and it hears the fixes in its brief.
-                let Some(author) = world.running(issue, Role::Author) else {
+                let (Some(author), Some(i)) =
+                    (world.running(issue, Role::Author), world.issues.get(issue))
+                else {
                     return Outcome::done();
                 };
                 let told = self.queue(
@@ -903,7 +905,7 @@ impl Part for Runners {
                     Message {
                         agent: author.id.0.clone(),
                         issue: Some(issue.clone()),
-                        text: brief::fixes(issue, points),
+                        text: brief::fixes(i, points),
                         tells: true,
                     },
                 );
@@ -915,7 +917,10 @@ impl Part for Runners {
             // A reviewer still running hears of the next round; with none, a new
             // one is started elsewhere.
             Effect::StartReview { issue, round } => {
-                let Some(reviewer) = world.running(issue, Role::Reviewer) else {
+                let (Some(reviewer), Some(i)) = (
+                    world.running(issue, Role::Reviewer),
+                    world.issues.get(issue),
+                ) else {
                     return Outcome::NotMine;
                 };
                 let told = self.queue(
@@ -924,7 +929,7 @@ impl Part for Runners {
                     Message {
                         agent: reviewer.id.0.clone(),
                         issue: Some(issue.clone()),
-                        text: brief::next_round(issue, *round),
+                        text: brief::next_round(i, *round),
                         tells: true,
                     },
                 );
@@ -1179,7 +1184,7 @@ mod tests {
                 }
             );
             let screen = part.screen(&reviewer.0).expect("screen");
-            let text = brief::next_round(&IssueId::new("ankh", "1"), round);
+            let text = brief::next_round(&w.issues[&IssueId::new("ankh", "1")], round);
             assert!(screen.contains(&text), "{screen}");
         }
     }

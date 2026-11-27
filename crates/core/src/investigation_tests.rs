@@ -1176,6 +1176,8 @@ fn an_issue_closed_after_its_pull_request_merged_is_not_a_persons_close() {
             issue: issue.clone(),
             round: 1,
             verdict: Verdict::Approve,
+            failed: None,
+            open: None,
         },
         Event::ChecksFinished {
             issue: issue.clone(),

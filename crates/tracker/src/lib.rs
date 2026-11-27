@@ -1140,6 +1140,8 @@ mod tests {
                     issue: one.clone(),
                     round: 1,
                     verdict: Verdict::Approve,
+                    failed: None,
+                    open: None,
                 },
                 Event::ChecksFinished {
                     issue: one.clone(),

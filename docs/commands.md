@@ -11,6 +11,7 @@ session_id:
   - 0645e4e2-33bd-43f8-980f-503649da2f15
   - edd1e649-f07a-4d7c-b5c6-ff74b0021fbb
   - c14f6d16-7688-4e50-99d4-32021f0e29db
+  - a8be342d-b7b2-4e65-bf6b-bcd753f14a12
 ---
 
 # Commands
@@ -25,9 +26,9 @@ reports its step done.
 | `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes and agents. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise) | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
-| `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...`, with `--reply TEXT` for each point it answers | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL`. With a fix for a review round or a ruling, each `--reply` answers one of the round's points, in their order: what the author did about it, or why not. The replies are kept with that round and shown with it in `status --json`. A reply is refused when the fix answers no review round: the first pull request, or a fix for CI, a conflict or a refused merge | working, or fixing |
-| `temet-work review ISSUE approve` | only the reviewer working on ISSUE | in review |
-| `temet-work review ISSUE block POINT...` | only the reviewer working on ISSUE, one argument per thing to fix | in review |
+| `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...`, with `--reply TEXT` for each point of the block it answers | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL`. The first ready after a block (from the review, or from an arbiter's fix ruling, where the replies answer the reviewer's last block) carries one `--reply` for each of the block's points, in their order: what the author did about it, or why not. A ready without exactly one reply for each point is refused, and the refusal lists the points and the form to use; any other ready takes no `--reply`. Each reply is kept on its point and shown with it in `status --json`. A ready that starts a review round sets each of the plan's checks to running, since the author reports that every check holds; after a person's overturn has waived the review, the checks keep their state | working, or fixing |
+| `temet-work review ISSUE approve` | only the reviewer working on ISSUE. Every check of the plan is marked passed, and every point of the round before resolved; `--failed` and `--open` are refused | in review |
+| `temet-work review ISSUE block POINT... [--failed N ...] [--open N ...]` | only the reviewer working on ISSUE, one argument per thing to fix. `--failed N`, once for each check that does not hold, counts from 1 in the plan's order; every check left unnamed is marked passed. After round 1, `--open N`, once for each point of the round before that is still not dealt with, counts from 1 in that round's order: the point stays open and joins this block's points, so the author fixes it again and the next round judges it again. Every point left unnamed is resolved, and a block may consist of kept points alone. The reviewer's brief and each next-round message number the checks and the round before's points this way, each point with the author's reply. A number the plan or the round before does not have is refused, and so is `--open` in round 1 | in review |
 | `temet-work retry ISSUE` | a person only | deploying or verifying: runs the deploy (or verify) again, at once unless a deploy or verify of the same project or `run_in` folder is running, and clears its failure count, its ten-minute wait and its reruns in `deploy-handoff.stale`, so a deploy that failed three times gets three fresh tries |
 | `temet-work rule ISSUE approve REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
 | `temet-work rule ISSUE fix REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
@@ -176,7 +177,9 @@ and prints the reply as indented JSON: projects with the web addresses of their 
 code, milestones, groups, the issues that are not done and the count of done ones, agents,
 decisions and problems (`crates/core/src/view.rs`; what it carries is listed in
 `docs/privacy.md`). Issue ids are `project#key`, each stage and agent state is a
-fixed word with the text form's words beside it, and decision options are numbered from 1.
+fixed word with the text form's words beside it, each check's state (`passed`, `running`,
+`waiting`, `failed`) and each review point's state (`open`, `resolved`) is a fixed word, and
+decision options are numbered from 1.
 Times, such as when an issue last changed, are milliseconds since 1970, and due dates are
 `YYYY-MM-DD`; a value temet-work does not know, such as a due date the tracker does not
 give, is `null`. `--json` on any other command is refused

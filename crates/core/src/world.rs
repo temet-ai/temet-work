@@ -20,8 +20,8 @@ use crate::ids::{
 use crate::launch::Launch;
 use crate::model::Decision;
 use crate::model::{
-    Addresses, Agent, AgentState, Area, DecisionKind, Folder, Group, INVESTIGATE_EVERY,
-    Investigation, Issue, Project, Review, Role, Rule, RuleState, Stage,
+    Addresses, Agent, AgentState, Area, CheckState, DecisionKind, Folder, Group, INVESTIGATE_EVERY,
+    Investigation, Issue, PointState, Project, Review, Role, Rule, RuleState, Stage,
 };
 use crate::settings::{self, FILE, Scope, Value};
 
@@ -126,7 +126,8 @@ impl Updated {
 /// A mark of an issue's record: two records with different marks differ. Text
 /// that changes only together with the issue's stage or with a count, its plan,
 /// what it is to fix, its review points and the author's replies, is marked by
-/// its count, so marking every issue after every event stays cheap.
+/// its count, so marking every issue after every event stays cheap. The checks'
+/// and points' states are short, so they are marked whole.
 fn mark(i: &Issue) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
@@ -140,6 +141,12 @@ fn mark(i: &Issue) -> u64 {
     (i.told, i.fix_keeps_round, i.round, i.closed_by_loop).hash(&mut h);
     let replies: usize = i.reviews.iter().map(|r| r.replies.len()).sum();
     (i.has_merged, i.review_waived, i.reviews.len(), replies).hash(&mut h);
+    for c in i.plan.iter().flat_map(|p| &p.checks) {
+        c.state.hash(&mut h);
+    }
+    for r in &i.reviews {
+        r.states.hash(&mut h);
+    }
     h.finish()
 }
 
@@ -553,9 +560,9 @@ impl World {
                     .get(issue)
                     .and_then(|i| self.repos_of(i).into_iter().next());
                 if let Some(i) = self.issues.get_mut(issue) {
-                    // The author's replies go on the review round its fix answers.
-                    if let Some(round) = Self::answered_round(i)
-                        && let Some(r) = i.reviews.iter_mut().rev().find(|r| r.round == round)
+                    // The author's replies go on the block this ready answers.
+                    if i.block_to_answer().is_some()
+                        && let Some(r) = i.reviews.last_mut()
                     {
                         r.replies.extend(replies.iter().cloned());
                     }
@@ -587,6 +594,11 @@ impl World {
                         i.told = false;
                         i.fix_keeps_round = false;
                         if !i.review_waived {
+                            // The author reports that every check holds, all at
+                            // once; CI and the reviewer check that now. With the
+                            // review waived no one will judge them, so they keep
+                            // their state.
+                            i.set_checks(CheckState::Running);
                             out.push(Effect::StartReview {
                                 issue: issue.clone(),
                                 round,
@@ -599,6 +611,8 @@ impl World {
                 issue,
                 round,
                 verdict,
+                failed,
+                open,
             } => {
                 let rounds = self.setting_number(issue, None, "review_rounds");
                 let arbiter_running = self.running(issue, Role::Arbiter).is_some();
@@ -607,14 +621,21 @@ impl World {
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == (Stage::InReview { round: *round })
                 {
+                    Self::judge(i, *round, failed.as_deref(), open.as_deref());
+                    let points = match verdict {
+                        Verdict::Approve => Vec::new(),
+                        Verdict::Block { points } => points.clone(),
+                    };
                     i.reviews.push(Review {
                         round: *round,
                         reviewer,
                         approve: matches!(verdict, Verdict::Approve),
-                        points: match verdict {
-                            Verdict::Approve => Vec::new(),
-                            Verdict::Block { points } => points.clone(),
+                        // A point is open until the next round judges it.
+                        states: match open {
+                            Some(_) => vec![PointState::Open; points.len()],
+                            None => Vec::new(),
                         },
+                        points,
                         replies: Vec::new(),
                     });
                     // The latest verdict counts: a block takes an approval back.
@@ -1321,6 +1342,7 @@ impl World {
         out: &mut Vec<Effect>,
     ) {
         out.extend(arbiters);
+        i.checks_wait();
         i.stage = Stage::Fixing { round };
         i.fix.clone_from(&points);
         i.told = false;
@@ -1381,13 +1403,35 @@ impl World {
         }
     }
 
-    /// The review round an issue's next pull request answers: the round it is
-    /// being fixed for, when a review or a ruling sent it back. A fix for CI, a
-    /// conflict or a refused merge answers no review round.
-    pub fn answered_round(issue: &Issue) -> Option<u8> {
-        match issue.stage {
-            Stage::Fixing { round } if !issue.fix_keeps_round => Some(round),
-            _ => None,
+    /// What a reviewer's verdict on round `round` of `i` says beside approve or
+    /// block, from a verdict line that gives it: each of the plan's checks is
+    /// failed when `failed` names it and passed otherwise, and each point of the
+    /// round before stays open when `open` names it and is resolved otherwise.
+    /// Unlike a ready, such a line marks a check from an older plan too, since
+    /// it names every check.
+    fn judge(i: &mut Issue, round: u8, failed: Option<&[usize]>, open: Option<&[usize]>) {
+        if let Some(failed) = failed {
+            for (n, c) in (1..).zip(i.plan.iter_mut().flat_map(|p| p.checks.iter_mut())) {
+                c.state = Some(if failed.contains(&n) {
+                    CheckState::Failed
+                } else {
+                    CheckState::Passed
+                });
+            }
+        }
+        if let Some(open) = open
+            && i.round_before(round).is_some()
+            && let Some(before) = i.reviews.last_mut()
+        {
+            before.states = (1..=before.points.len())
+                .map(|n| {
+                    if open.contains(&n) {
+                        PointState::Open
+                    } else {
+                        PointState::Resolved
+                    }
+                })
+                .collect();
         }
     }
 
@@ -1628,3 +1672,7 @@ mod tests;
 #[cfg(test)]
 #[path = "world_settings_tests.rs"]
 mod settings_scope;
+
+#[cfg(test)]
+#[path = "world_states_tests.rs"]
+mod states;

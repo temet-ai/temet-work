@@ -303,6 +303,8 @@ mod tests {
         Command::Review {
             issue: IssueId::new("ankh", "1"),
             verdict: Verdict::Approve,
+            failed: Vec::new(),
+            open: Vec::new(),
         }
     }
 

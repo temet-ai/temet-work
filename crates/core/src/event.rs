@@ -243,8 +243,22 @@ pub enum Event {
         issue: IssueId,
         /// The round.
         round: u8,
-        /// The verdict.
+        /// The verdict. A block's points end with the points of the round before
+        /// that it keeps open.
         verdict: Verdict,
+        /// The plan's checks the reviewer found do not hold, counted from 1 in
+        /// the plan's order: each is marked failed and every other check passed.
+        /// Given, empty for an approve, on every verdict since checks had states;
+        /// none in older logs, whose verdicts mark no check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed: Option<Vec<usize>>,
+        /// The points of the round before that this verdict keeps open, counted
+        /// from 1 in that round's order: each stays open and every other point of
+        /// that round is resolved. Given, empty when it keeps none, on every
+        /// verdict since points had states, and the points of a block given it
+        /// start open; none in older logs, whose verdicts judge no point.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open: Option<Vec<usize>>,
     },
     /// CI and the plan's checks finished on the current change.
     ChecksFinished {

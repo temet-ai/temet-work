@@ -375,6 +375,7 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
         checks: vec![Check {
             done_when: "the clock strikes thirteen".into(),
             proven_by: "listening at midnight".into(),
+            state: None,
         }],
     };
     run(
@@ -462,6 +463,7 @@ fn a_refiners_plan_naming_runtime_is_refused_and_the_author_runs_claude_in_plan_
             checks: vec![Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
+                state: None,
             }],
         },
     };
@@ -713,6 +715,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         checks: vec![Check {
             done_when: "the clock strikes thirteen".into(),
             proven_by: "listening at midnight".into(),
+            state: None,
         }],
     };
     run(
@@ -755,13 +758,22 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         verdict: Verdict::Block {
             points: vec!["no test for a stopped clock".into()],
         },
+        failed: vec![1],
+        open: Vec::new(),
     };
     assert_eq!(
         run(&mut host, "reviewer-1", block),
         "ankh#1 is fixing, round 1"
     );
+    // The first ready after the block replies to its point.
+    let replied = Command::Ready {
+        issue: issue.clone(),
+        pull: None,
+        pulls: Default::default(),
+        replies: vec!["added a test that stops the clock".into()],
+    };
     assert_eq!(
-        run(&mut host, "author-1", ready),
+        run(&mut host, "author-1", replied),
         "ankh#1 is in review, round 2"
     );
     let reviewers: Vec<&str> = host
@@ -782,6 +794,8 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     let approve = Command::Review {
         issue: issue.clone(),
         verdict: Verdict::Approve,
+        failed: Vec::new(),
+        open: Vec::new(),
     };
     run(&mut host, "reviewer-1", approve);
     host.tick(2).expect("CI read");
@@ -1002,6 +1016,7 @@ mod settings_commands {
                 checks: vec![Check {
                     done_when: "the clock strikes thirteen".into(),
                     proven_by: "listening at midnight".into(),
+                    state: None,
                 }],
             },
         };
@@ -1899,6 +1914,7 @@ areas = ["guild"]
                     checks: vec![Check {
                         done_when: "both show the guild".into(),
                         proven_by: "looking".into(),
+                        state: None,
                     }],
                 },
             },
@@ -1934,6 +1950,8 @@ areas = ["guild"]
             Command::Review {
                 issue: issue.clone(),
                 verdict: Verdict::Approve,
+                failed: Vec::new(),
+                open: Vec::new(),
             },
         ));
         f.host.tick(1).expect("CI read, then ui merges");
@@ -2142,6 +2160,7 @@ projects = ["ankh"]
             checks: vec![Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
+                state: None,
             }],
         };
         let plan = Command::Plan {
@@ -2163,6 +2182,8 @@ projects = ["ankh"]
         let approve = Command::Review {
             issue: issue.clone(),
             verdict: Verdict::Approve,
+            failed: Vec::new(),
+            open: Vec::new(),
         };
         run(&mut host, issue, Role::Reviewer, approve);
     }
@@ -3017,6 +3038,8 @@ refining_at_once = 2
             command: Command::Review {
                 issue: IssueId::new("ankh", "1"),
                 verdict: temet_work_core::Verdict::Approve,
+                failed: Vec::new(),
+                open: Vec::new(),
             },
         })
         .expect("line");
