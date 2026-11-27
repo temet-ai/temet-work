@@ -143,8 +143,8 @@ fn id_part(text: &str) -> String {
 /// terminal that has `herdr.space` and `herdr.tab`, and makes the space or tab
 /// when it does not know the id. The issue label names its project
 /// (`ankh#WATCH-12`), so two projects' issues with one key get two tabs. A start
-/// without a `group`, `issue` and `agent` label, as the runner contract's are,
-/// gets none.
+/// without a `group`, `issue` and `agent` label, as the runner contract's and an
+/// investigator's are, gets none.
 fn app_labels(labels: &BTreeMap<String, String>) -> Option<[(&'static str, String); 3]> {
     let (group, issue) = (labels.get("group")?, labels.get("issue")?);
     let agent = labels.get("agent")?;
