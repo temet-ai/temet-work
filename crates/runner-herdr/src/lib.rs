@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use temet_work_runner::{Runner, RunnerError, Start, Status, TerminalId, Update};
+use temet_work_runner::{Program, Runner, RunnerError, Start, Status, TerminalId, Update};
 
 /// The label every terminal this client starts carries, and the subscription's filter.
 const OWNER: (&str, &str) = ("owner", "temet-work");
@@ -154,6 +154,130 @@ fn run_params(start: &Start) -> Value {
         params["on"] = Value::String(machine.clone());
     }
     params
+}
+
+/// The `machine.exec` parameters for running `program` to its end: its
+/// arguments as given, no shell, a timeout, and `on` for another machine.
+fn exec_params(machine: Option<&str>, program: &Program) -> Value {
+    let mut params = json!({
+        "argv": program.argv,
+        "timeout": EXEC_TIMEOUT.as_secs(),
+    });
+    if !program.env.is_empty() {
+        params["env"] = Value::Object(
+            program
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect(),
+        );
+    }
+    if let Some(machine) = machine {
+        params["on"] = Value::String(machine.to_string());
+    }
+    params
+}
+
+/// Where a program ran, in words.
+fn place(machine: Option<&str>) -> String {
+    machine.map_or_else(|| "this machine".to_string(), String::from)
+}
+
+/// Why a program could not run, when the shell's or the core's answer means
+/// it is not on the `PATH` there. herdr-core runs it with that machine's core's
+/// own environment, which can differ from an SSH session's.
+fn not_on_path(machine: Option<&str>, program: &str) -> String {
+    let (whose, on) = match machine {
+        Some(m) => (format!("{m}'s"), format!(" --on {m}")),
+        None => ("this machine's".to_string(), String::new()),
+    };
+    format!(
+        "{program} is not on {whose} PATH for programs herdr-core runs there; \
+         `hc exec{on} which {program}` checks it"
+    )
+}
+
+/// What `machine.exec` answered for `argv`, as the runner reports it: an exit of
+/// 0 is done; anything else is an error ending with the last line the program
+/// wrote to standard error.
+fn exec_outcome(
+    machine: Option<&str>,
+    argv: &[String],
+    result: Result<Value, RpcError>,
+) -> Result<(), RunnerError> {
+    let program = argv.first().map_or("the program", String::as_str);
+    let result = match result {
+        Ok(r) => r,
+        Err(e) if e.kind == "spawn_failed" && e.message.contains("No such file") => {
+            return Err(RunnerError::Other(not_on_path(machine, program)));
+        }
+        Err(e) => return Err(rpc(e)),
+    };
+    let stderr = String::from_utf8_lossy(&unbase64(
+        result
+            .get("stderr")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    ))
+    .into_owned();
+    let last = stderr
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map_or_else(String::new, |l| format!(": {l}"));
+    if result.get("timed_out").and_then(Value::as_bool) == Some(true) {
+        return Err(RunnerError::Other(format!(
+            "{program} did not finish on {} within {} s{last}",
+            place(machine),
+            EXEC_TIMEOUT.as_secs()
+        )));
+    }
+    match result.get("code").and_then(Value::as_i64) {
+        Some(0) => Ok(()),
+        // The shell's answer for a command it cannot find.
+        Some(127) => Err(RunnerError::Other(format!(
+            "{} (exit 127){last}",
+            not_on_path(machine, program)
+        ))),
+        Some(code) => Err(RunnerError::Other(format!(
+            "{program} exited {code} on {}{last}",
+            place(machine)
+        ))),
+        None => Err(RunnerError::Other(format!(
+            "{program} was ended by signal {} on {}{last}",
+            result
+                .get("signal")
+                .and_then(Value::as_i64)
+                .map_or_else(|| "?".to_string(), |s| s.to_string()),
+            place(machine)
+        ))),
+    }
+}
+
+/// Decodes standard base64, as herdr-core sends a program's output. Padding,
+/// line breaks and anything else outside the alphabet are skipped.
+fn unbase64(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => continue,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(u8::try_from((acc >> bits) & 0xff).unwrap_or_default());
+            acc &= (1 << bits) - 1;
+        }
+    }
+    out
 }
 
 fn status_of(state: Option<&str>, kind: Option<&str>) -> Status {
@@ -316,6 +440,10 @@ pub struct Herdr {
 /// How long a request waits for its answer.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a program run to its end may take. Under [`REQUEST_TIMEOUT`], so the
+/// core ends it and answers before the request stops waiting.
+const EXEC_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// How long the event connection may stay silent; the core sends a heartbeat
 /// every 15 s, so a longer silence means the connection is dead.
 const EVENTS_TIMEOUT: Duration = Duration::from_secs(45);
@@ -413,6 +541,11 @@ impl Runner for Herdr {
             })
     }
 
+    fn exec(&mut self, machine: Option<&str>, program: &Program) -> Result<(), RunnerError> {
+        let result = self.request("machine.exec", exec_params(machine, program));
+        exec_outcome(machine, &program.argv, result)
+    }
+
     fn send(
         &mut self,
         terminal: &TerminalId,
@@ -508,6 +641,130 @@ mod tests {
     fn a_start_on_another_machine_sends_on_and_a_local_one_does_not() {
         assert_eq!(run_params(&start_on(Some("mac")))["on"], "mac");
         assert!(run_params(&start_on(None)).get("on").is_none());
+    }
+
+    fn trust_on_mac() -> Program {
+        Program {
+            argv: ["temet-work", "trust-folder", "claude", "/Users/vimes/watch"]
+                .map(String::from)
+                .to_vec(),
+            env: vec![(
+                "CLAUDE_CONFIG_DIR".into(),
+                "/Users/vimes/.claude-watch".into(),
+            )],
+        }
+    }
+
+    #[test]
+    fn exec_sends_its_arguments_as_given_with_the_machine_and_the_environment() {
+        let params = exec_params(Some("mac"), &trust_on_mac());
+        assert_eq!(params["on"], "mac");
+        assert_eq!(
+            params["argv"],
+            json!(["temet-work", "trust-folder", "claude", "/Users/vimes/watch"])
+        );
+        assert_eq!(
+            params["env"],
+            json!({"CLAUDE_CONFIG_DIR": "/Users/vimes/.claude-watch"})
+        );
+        assert!(params.get("line").is_none(), "no shell");
+        assert!(
+            params["timeout"]
+                .as_u64()
+                .is_some_and(|t| t < REQUEST_TIMEOUT.as_secs())
+        );
+        let here = exec_params(None, &Program::default());
+        assert!(
+            here.get("on").is_none() && here.get("env").is_none(),
+            "{here}"
+        );
+    }
+
+    /// `machine.exec`'s answer for a program that exited `code` having written
+    /// `stderr`, base64 as the core sends it.
+    fn exited(code: Option<i64>, stderr: &str) -> Result<Value, RpcError> {
+        Ok(
+            json!({"code": code, "signal": null, "stderr": stderr, "stdout": "",
+                  "timed_out": false, "truncated": false, "ms": 9}),
+        )
+    }
+
+    /// `/Users/vimes/.claude.json is not a JSON object` and a line break, in base64.
+    const NOT_JSON: &str = "L1VzZXJzL3ZpbWVzLy5jbGF1ZGUuanNvbiBpcyBub3QgYSBKU09OIG9iamVjdAo=";
+
+    /// `sh: 1: temet-work: not found` and a line break, in base64.
+    const NOT_FOUND: &str = "c2g6IDE6IHRlbWV0LXdvcms6IG5vdCBmb3VuZAo=";
+
+    #[test]
+    fn exec_maps_an_exit_of_zero_to_done_and_any_other_to_its_last_error_line() {
+        let argv = trust_on_mac().argv;
+        assert_eq!(
+            exec_outcome(Some("mac"), &argv, exited(Some(0), "")),
+            Ok(())
+        );
+        assert_eq!(
+            exec_outcome(Some("mac"), &argv, exited(Some(1), NOT_JSON)),
+            Err(RunnerError::Other(
+                "temet-work exited 1 on mac: /Users/vimes/.claude.json is not a JSON object".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn exec_maps_exit_127_and_a_missing_program_to_not_on_the_other_machines_path() {
+        let argv = trust_on_mac().argv;
+        let Err(RunnerError::Other(why)) =
+            exec_outcome(Some("mac"), &argv, exited(Some(127), NOT_FOUND))
+        else {
+            panic!("not an error");
+        };
+        assert!(
+            why.starts_with("temet-work is not on mac's PATH") && why.contains("exit 127"),
+            "{why}"
+        );
+        // herdr-core runs argv with no shell: a missing program is its error.
+        let missing = Err(RpcError {
+            kind: "spawn_failed".into(),
+            message: "cannot start temet-work: No such file or directory (os error 2)".into(),
+        });
+        let Err(RunnerError::Other(why)) = exec_outcome(Some("mac"), &argv, missing) else {
+            panic!("not an error");
+        };
+        assert!(why.starts_with("temet-work is not on mac's PATH"), "{why}");
+    }
+
+    #[test]
+    fn exec_reports_a_timeout_a_signal_and_an_unknown_machine() {
+        let argv = trust_on_mac().argv;
+        let timed_out = Ok(
+            json!({"code": null, "signal": 9, "stderr": "", "stdout": "",
+                                  "timed_out": true, "truncated": false, "ms": 8000}),
+        );
+        let Err(RunnerError::Other(why)) = exec_outcome(Some("mac"), &argv, timed_out) else {
+            panic!("not an error");
+        };
+        assert!(why.contains("did not finish on mac within 8 s"), "{why}");
+        let Err(RunnerError::Other(why)) = exec_outcome(Some("mac"), &argv, exited(None, ""))
+        else {
+            panic!("not an error");
+        };
+        assert!(why.contains("ended by signal"), "{why}");
+        let unknown = Err(RpcError {
+            kind: "machine_unknown".into(),
+            message: "unknown machine \"lancre\"".into(),
+        });
+        let Err(RunnerError::Other(why)) = exec_outcome(Some("lancre"), &argv, unknown) else {
+            panic!("not an error");
+        };
+        assert!(why.contains("unknown machine \"lancre\""), "{why}");
+    }
+
+    #[test]
+    fn decodes_base64_with_and_without_padding() {
+        assert_eq!(unbase64("Ygo="), b"b\n");
+        assert_eq!(unbase64("aGVsbG8"), b"hello");
+        assert_eq!(unbase64("aGVs\nbG8="), b"hello");
+        assert_eq!(unbase64(""), b"");
     }
 
     #[test]

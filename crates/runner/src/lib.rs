@@ -126,6 +126,17 @@ pub trait Runner: Send {
     /// Starts a program in a new labelled terminal.
     fn start(&mut self, start: &Start) -> Result<TerminalId, RunnerError>;
 
+    /// Runs `program` to its end on `machine` (this one when `None`), with no
+    /// terminal, its arguments as given and no shell. A program that cannot be
+    /// started, ends with a nonzero exit or runs out of time is an error that
+    /// says why, ending with the last line it wrote to standard error.
+    fn exec(&mut self, machine: Option<&str>, program: &Program) -> Result<(), RunnerError> {
+        let _ = (machine, program);
+        Err(RunnerError::NotBuilt(
+            "running a program to its end without a terminal".into(),
+        ))
+    }
+
     /// Types `text` and presses Enter. With `only_if_idle`, a terminal in a turn
     /// refuses with [`RunnerError::Busy`]; otherwise the text waits for the next
     /// turn. A terminal at a prompt always refuses with [`RunnerError::Blocked`].
@@ -544,7 +555,11 @@ impl Part for Runners {
 
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
         match effect {
-            Effect::Run { launch, program } => {
+            Effect::Run {
+                launch,
+                program,
+                before,
+            } => {
                 let brief = &launch.brief;
                 let chosen = match self.pick(world, &brief.issue, brief.role) {
                     Ok(i) => i,
@@ -594,8 +609,29 @@ impl Part for Runners {
                     labels,
                     machine,
                 };
+                let place = start.machine.as_deref().unwrap_or("this machine");
+                // The folder is trusted on its own machine first; an agent started
+                // in a folder that is not would stop at the runtime's prompt.
+                if let Some(before) = before {
+                    if let Err(e) = runner.exec(start.machine.as_deref(), before) {
+                        return Outcome::Failed(format!(
+                            "cannot trust {} on {place}: {e}",
+                            start.cwd.display()
+                        ));
+                    }
+                    eprintln!(
+                        "trusted: {} on {place}, for {}",
+                        start.cwd.display(),
+                        launch.agent
+                    );
+                }
                 match runner.start(&start) {
                     Ok(terminal) => {
+                        eprintln!(
+                            "started: {} on {place} in {} (terminal {terminal})",
+                            launch.agent,
+                            start.cwd.display()
+                        );
                         self.terminals
                             .insert(launch.agent.0.clone(), (chosen, terminal));
                         self.started_here.insert(launch.agent.0.clone());
@@ -712,7 +748,8 @@ mod tests {
             .expect("launch");
         let agent = launch.agent.clone();
         let run = Effect::Run {
-            launch,
+            launch: Box::new(launch),
+            before: None,
             program: Program {
                 argv: argv.iter().map(|a| a.to_string()).collect(),
                 env: vec![],
@@ -817,7 +854,8 @@ mod tests {
             .expect("launch");
         let reviewer = launch.agent.clone();
         let run = Effect::Run {
-            launch,
+            launch: Box::new(launch),
+            before: None,
             program: Program {
                 argv: vec!["cat".into()],
                 env: vec![],
@@ -1131,7 +1169,8 @@ mod tests {
             )
             .expect("launch");
         let run = Effect::Run {
-            launch,
+            launch: Box::new(launch),
+            before: None,
             program: Program {
                 argv: vec!["cat".into()],
                 env: vec![],
@@ -1212,6 +1251,9 @@ mod tests {
         fn stop(&mut self, terminal: &TerminalId) -> Result<(), RunnerError> {
             self.0.stop(terminal)
         }
+        fn exec(&mut self, _machine: Option<&str>, program: &Program) -> Result<(), RunnerError> {
+            self.0.exec(None, program)
+        }
         fn updates(&mut self) -> Vec<Update> {
             self.0.updates()
         }
@@ -1247,7 +1289,8 @@ mod tests {
             )
             .expect("launch");
         let run = Effect::Run {
-            launch,
+            launch: Box::new(launch),
+            before: None,
             program: Program {
                 argv: vec!["cat".into()],
                 env: vec![],
@@ -1259,6 +1302,121 @@ mod tests {
         };
         let got = starts.lock().expect("starts").clone();
         (got, problem)
+    }
+
+    /// The program that trusts the `run` helper's folder on its machine.
+    fn trust_far() -> Program {
+        Program {
+            argv: ["temet-work", "trust-folder", "fake", "/work"]
+                .map(String::from)
+                .to_vec(),
+            env: vec![],
+        }
+    }
+
+    /// Asks `part` to start an author on ankh#1 in a work folder `/work` on
+    /// `machine`, with `before` run first.
+    fn run_on(part: &mut Runners, machine: &str, before: Option<Program>) -> Outcome {
+        let mut w = world();
+        w.apply(&Event::FolderAdded {
+            folder: FolderId::new("f2"),
+            project: ProjectId::new("ankh"),
+            machine: MachineId::new(machine),
+            path: "/work".into(),
+        });
+        let launch = w
+            .launch(
+                &GroupId::new("watch"),
+                Role::Author,
+                &IssueId::new("ankh", "1"),
+                Some(&FolderId::new("f2")),
+            )
+            .expect("launch");
+        let run = Effect::Run {
+            launch: Box::new(launch),
+            before,
+            program: Program {
+                argv: vec!["cat".into()],
+                env: vec![],
+            },
+        };
+        part.carry_out(&run, &w)
+    }
+
+    /// The calls a fake was given, in a few words each.
+    fn calls_of(calls: &fake::Calls) -> Vec<String> {
+        calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .map(|c| match c {
+                fake::Call::Exec { machine, program } => format!(
+                    "exec on {}: {}",
+                    machine.as_deref().unwrap_or("here"),
+                    program.argv.join(" ")
+                ),
+                fake::Call::Start(s) => {
+                    format!("start on {}", s.machine.as_deref().unwrap_or("here"))
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_folder_on_another_machine_is_trusted_there_before_its_agent_starts_on_every_start() {
+        let fake = FakeRunner::default();
+        let calls = fake.calls();
+        let mut part = Runners::default().daemon_host(Some("omit".into()));
+        part.add(Box::new(fake));
+        // Twice: a folder trusted by an earlier start is trusted again, and the
+        // agent still starts.
+        for round in 1..=2 {
+            let outcome = run_on(&mut part, "far", Some(trust_far()));
+            assert!(
+                matches!(&outcome, Outcome::Done { events, .. }
+                    if matches!(events.as_slice(), [Event::AgentStarted { .. }])),
+                "start {round}: {outcome:?}"
+            );
+        }
+        let trust = "exec on far: temet-work trust-folder fake /work";
+        assert_eq!(
+            calls_of(&calls),
+            [trust, "start on far", trust, "start on far"]
+        );
+    }
+
+    #[test]
+    fn a_start_with_nothing_to_run_first_runs_nothing_first() {
+        let fake = FakeRunner::default();
+        let calls = fake.calls();
+        let mut part = Runners::default().daemon_host(Some("omit".into()));
+        part.add(Box::new(fake));
+        run_on(&mut part, "far", None);
+        run_on(&mut part, LOCAL, None);
+        assert_eq!(calls_of(&calls), ["start on far", "start on here"]);
+    }
+
+    #[test]
+    fn a_trust_that_fails_on_the_other_machine_fails_the_start_and_opens_no_terminal() {
+        let fake = FakeRunner::default().exec_fails(RunnerError::Other(
+            "temet-work exited 1: /Users/vimes/.claude.json is not a JSON object".into(),
+        ));
+        let calls = fake.calls();
+        let mut part = Runners::default().daemon_host(Some("omit".into()));
+        part.add(Box::new(fake));
+        let Outcome::Failed(why) = run_on(&mut part, "far", Some(trust_far())) else {
+            panic!("started");
+        };
+        assert_eq!(
+            why,
+            "cannot trust /work on far: temet-work exited 1: /Users/vimes/.claude.json is not \
+             a JSON object"
+        );
+        assert_eq!(
+            calls_of(&calls),
+            ["exec on far: temet-work trust-folder fake /work"],
+            "no terminal is started"
+        );
     }
 
     fn env_of(start: &Start) -> BTreeMap<&str, &str> {
@@ -1361,6 +1519,9 @@ mod tests {
         }
         fn stop(&mut self, terminal: &TerminalId) -> Result<(), RunnerError> {
             self.0.stop(terminal)
+        }
+        fn exec(&mut self, machine: Option<&str>, program: &Program) -> Result<(), RunnerError> {
+            self.0.exec(machine, program)
         }
         fn updates(&mut self) -> Vec<Update> {
             self.0.updates()

@@ -47,15 +47,7 @@ pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<
         parts.push(Box::new(family));
     }
     #[cfg(feature = "runtime")]
-    {
-        #[allow(unused_mut)]
-        let mut family = temet_work_runtime::Runtimes::default();
-        #[cfg(feature = "runtime-claude")]
-        family.add(Box::new(temet_work_runtime_claude::Claude));
-        #[cfg(feature = "runtime-codex")]
-        family.add(Box::new(temet_work_runtime_codex::Codex));
-        parts.push(Box::new(family));
-    }
+    parts.push(Box::new(runtimes()));
     #[cfg(feature = "codehost")]
     {
         #[allow(unused_mut)]
@@ -81,6 +73,36 @@ pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<
     #[cfg(feature = "mike")]
     parts.push(Box::new(temet_work_mike::Mike));
     parts
+}
+
+/// The runtime family, with each runtime compiled into this build.
+#[cfg(feature = "runtime")]
+fn runtimes() -> temet_work_runtime::Runtimes {
+    #[allow(unused_mut)]
+    let mut family = temet_work_runtime::Runtimes::default();
+    #[cfg(feature = "runtime-claude")]
+    family.add(Box::new(temet_work_runtime_claude::Claude));
+    #[cfg(feature = "runtime-codex")]
+    family.add(Box::new(temet_work_runtime_codex::Codex));
+    family
+}
+
+/// Marks `folder` trusted for the runtime `runtime` in its user files on this
+/// machine, as the daemon does before an agent starts in a folder on its own
+/// machine. `temet-work trust-folder` runs this; the daemon runs that on the
+/// machine a folder on another machine is on.
+#[cfg_attr(not(feature = "runtime"), allow(unused_variables))]
+pub fn trust_folder(runtime: &str, folder: &Path) -> Result<(), String> {
+    #[cfg(feature = "runtime")]
+    {
+        runtimes().trust(runtime, folder)
+    }
+    #[cfg(not(feature = "runtime"))]
+    {
+        Err(format!(
+            "no runtime \"{runtime}\" in this build: it was built without runtimes"
+        ))
+    }
 }
 
 /// Opens the event log at `path` and rebuilds the state from it. A build

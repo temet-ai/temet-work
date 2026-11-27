@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use crate::contract::Harness;
-use crate::{Runner, RunnerError, Start, Status, TerminalId, Update};
+use crate::{Program, Runner, RunnerError, Start, Status, TerminalId, Update};
 
 #[derive(Clone, Debug)]
 struct Term {
@@ -22,11 +22,30 @@ pub struct FakeRunner {
     terms: BTreeMap<TerminalId, Term>,
     pending: Vec<Update>,
     starts: Starts,
+    calls: Calls,
+    exec_error: Option<RunnerError>,
 }
 
 /// Every [`Start`] a fake runner was given, shared so a test can read them after
 /// the runner has been boxed into a part.
 pub type Starts = std::sync::Arc<std::sync::Mutex<Vec<Start>>>;
+
+/// A call a fake runner was given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Call {
+    /// A program run to its end on a machine (this one when `None`).
+    Exec {
+        /// The machine.
+        machine: Option<String>,
+        /// The program.
+        program: Program,
+    },
+    /// A terminal started.
+    Start(Start),
+}
+
+/// Every `exec` and `start` a fake runner was given, in order, shared like [`Starts`].
+pub type Calls = std::sync::Arc<std::sync::Mutex<Vec<Call>>>;
 
 impl Default for FakeRunner {
     fn default() -> Self {
@@ -43,12 +62,27 @@ impl FakeRunner {
             terms: BTreeMap::new(),
             pending: Vec::new(),
             starts: Starts::default(),
+            calls: Calls::default(),
+            exec_error: None,
         }
     }
 
     /// The starts this runner is given, in order.
     pub fn starts(&self) -> Starts {
         self.starts.clone()
+    }
+
+    /// The `exec` and `start` calls this runner is given, in order.
+    pub fn calls(&self) -> Calls {
+        self.calls.clone()
+    }
+
+    /// Makes every `exec` fail with `error`, as a program that exits nonzero
+    /// or a machine that cannot be reached does.
+    #[must_use]
+    pub fn exec_fails(mut self, error: RunnerError) -> Self {
+        self.exec_error = Some(error);
+        self
     }
 
     fn update(&mut self, terminal: &TerminalId, doing: Option<String>) {
@@ -92,6 +126,9 @@ impl Runner for FakeRunner {
         if let Ok(mut starts) = self.starts.lock() {
             starts.push(start.clone());
         }
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(Call::Start(start.clone()));
+        }
         // A terminal on another machine is addressed `machine/t1`, as herdr-core does.
         let id = TerminalId(match &start.machine {
             Some(m) => format!("{m}/t{}", self.next),
@@ -115,6 +152,24 @@ impl Runner for FakeRunner {
         );
         self.update(&id, None);
         Ok(id)
+    }
+
+    /// Runs nothing: it records the call, and fails as told to by
+    /// [`FakeRunner::exec_fails`], or when the program is [`FAIL_PROGRAM`].
+    fn exec(&mut self, machine: Option<&str>, program: &Program) -> Result<(), RunnerError> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(Call::Exec {
+                machine: machine.map(String::from),
+                program: program.clone(),
+            });
+        }
+        if let Some(e) = &self.exec_error {
+            return Err(e.clone());
+        }
+        if program.argv.first().map(String::as_str) == Some(FAIL_PROGRAM) {
+            return Err(RunnerError::Other(format!("{FAIL_PROGRAM} exited 1")));
+        }
+        Ok(())
     }
 
     fn send(
@@ -168,6 +223,9 @@ impl Runner for FakeRunner {
 
 /// A program name the fake starts already stopped at a prompt.
 pub const PROMPT_PROGRAM: &str = "fake-prompt";
+
+/// A program the fake runs to a nonzero exit, as `false` does everywhere.
+pub const FAIL_PROGRAM: &str = "false";
 
 /// The contract harness for [`FakeRunner`].
 pub struct FakeHarness;

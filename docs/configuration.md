@@ -155,13 +155,14 @@ not have stops the daemon at start, with the ones it has listed, and so does a b
 no default runtime or runner and no global value for it. What a person or an agent has
 set since is not overwritten by the file; a value taken out of the file is unset.
 
-Listing a folder under `[[folder]]` is your choice to let agents work in it. Before an
-agent starts in a folder on this machine, the `claude` runtime marks the folder trusted
+Listing a folder under `[[folder]]` is your choice to let agents work in it. Before each
+agent starts in a folder, the `claude` runtime marks the folder trusted
 (`hasTrustDialogAccepted`) in Claude Code's own user file, `.claude.json` in the folder
 `CLAUDE_CONFIG_DIR` names, else in your home folder. It changes only that folder's entry
-and leaves a folder already trusted alone. A folder on another machine cannot be trusted
-from here. An agent stopped at a prompt the daemon cannot answer is listed under Problems
-with its name, its folder and the prompt, and the line goes when the agent goes on or ends.
+and leaves a folder already trusted alone. For a folder on another machine this happens
+on that machine, in its user file ("A work folder on another machine", below). An agent
+stopped at a prompt the daemon cannot answer is listed under Problems with its name, its
+folder and the prompt, and the line goes when the agent goes on or ends.
 
 Each project, folder and group in the file becomes an event in the log the first time the
 daemon reads it, and again whenever it changes. Removing one from the file does not
@@ -201,7 +202,7 @@ The other machine needs five things, and each has a command that checks it:
 |---|---|
 | SSH access from the daemon's machine | `ssh -o BatchMode=yes mac true` on the daemon's machine |
 | SSH access back to the daemon's machine, under the name in `daemon_host` | `ssh -o BatchMode=yes omit true` on the other machine |
-| `temet-work` on the `PATH` a non-interactive SSH session gets | `ssh mac temet-work parts`, and `ssh omit temet-work parts` from there |
+| `temet-work` on the `PATH` a non-interactive SSH session gets, and on the one herdr-core runs programs with there | `ssh mac temet-work parts` and `hc exec --on mac temet-work parts`, and `ssh omit temet-work parts` from the other machine |
 | `temet-work` at the daemon's build | `ssh mac 'TEMET_WORK_DAEMON=ssh://omit temet-work status'`: at another build it is refused, naming both builds |
 | The checkout at `path`, and the agent runtime (such as `claude`) | `ssh mac 'cd /Users/me/projects/radar && git status -sb && command -v claude'` |
 
@@ -214,9 +215,34 @@ too old to send its build is refused as build `unknown` on `the other machine`. 
 clones of one commit can describe it differently (other tags, or a longer short hash),
 and those count as different builds.
 
-On a new machine, start `claude --permission-mode auto` once in the work folder and answer
-"Allow this read outside the working directories?" with "Yes, and keep allowing". An unattended
-agent stops at that prompt on its first read outside the folder.
+Before each agent starts in a folder on another machine, the daemon trusts the folder
+there: herdr-core runs `temet-work trust-folder claude PATH` on that machine, with no
+shell, and with `CLAUDE_CONFIG_DIR` when the daemon has it. That command marks the folder
+trusted in the machine's own `.claude.json`, as the daemon does for a folder on its own
+machine, and writes nothing when the folder already is. The daemon's log has a line for
+each step, in this order:
+
+```text
+trusted: /Users/me/projects/radar on mac, for author-1
+started: author-1 on mac in /Users/me/projects/radar (terminal mac/t3)
+```
+
+When the step fails, no terminal is started, and the start is listed under Problems in one
+line naming the folder, the machine and the reason, such as the command missing from the
+`PATH` herdr-core uses there:
+
+```text
+run author-1: cannot trust /Users/me/projects/radar on mac: temet-work is not on mac's PATH for programs herdr-core runs there; `hc exec --on mac which temet-work` checks it
+```
+
+A nonzero exit ends with the last line the command wrote, such as
+`temet-work exited 1 on mac: /Users/me/.claude.json is not a JSON object`. The daemon tries
+the start again each round, and the line goes once it succeeds.
+
+The daemon does not answer Claude Code's other first-run prompt, "Allow this read outside
+the working directories?". On a new machine, start `claude --permission-mode auto` once in
+the work folder and answer it with "Yes, and keep allowing": an unattended agent stops at
+that prompt on its first read outside the folder.
 
 A failed hop says which step failed in one line: `could not connect` (ssh, either
 direction), `no answer within 60 s`, `temet-work is not on the other machine's PATH`,

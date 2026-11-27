@@ -133,4 +133,10 @@ The hidden command `temet-work relay` copies one request line from standard inpu
 local socket and the reply line back; it exits 4 when no daemon answers. When `--build`
 is missing or is not its own build, it does not contact the daemon and replies with a
 refusal: `temet-work on NAME is build X, the daemon is build Y: update it`.
+The hidden command `temet-work trust-folder RUNTIME PATH` marks PATH trusted for the
+runtime in its user files on the machine it runs on, as the daemon does before an agent
+starts in a folder on its own machine. For a folder on another machine the daemon runs it
+on that machine through herdr-core. It exits 0 when the folder is trusted or already was,
+and 1 with the reason on one line of standard error otherwise; a runtime that needs no
+folder trusted, such as `codex`, exits 0 and writes nothing.
 `docs/configuration.md` says how to set up a work folder on another machine.

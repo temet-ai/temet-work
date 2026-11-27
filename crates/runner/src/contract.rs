@@ -119,6 +119,18 @@ pub fn check_on(
         "a send to a stopped terminal is refused as gone",
     )?;
 
+    let program = |name: &str| Program {
+        argv: vec![name.to_string()],
+        env: Vec::new(),
+    };
+    runner
+        .exec(machine.as_deref(), &program("true"))
+        .map_err(|e| format!("exec a program that exits 0: {e}"))?;
+    ensure(
+        runner.exec(machine.as_deref(), &program("false")).is_err(),
+        "a program run to its end that exits nonzero is an error",
+    )?;
+
     if let Some(argv) = harness.prompt_program() {
         let p = runner
             .start(&start(argv, "contract-2", harness.folder(), machine))
