@@ -1945,13 +1945,24 @@ mod senders {
         requests: &Receiver<Pending>,
         client: std::thread::JoinHandle<T>,
     ) -> T {
+        serve_seeing(host, requests, client).0
+    }
+
+    /// [`serve`], also returning the peer the socket read for each request.
+    fn serve_seeing<T>(
+        host: &mut Host,
+        requests: &Receiver<Pending>,
+        client: std::thread::JoinHandle<T>,
+    ) -> (T, Vec<Peer>) {
+        let mut seen = Vec::new();
         while !client.is_finished() {
             if let Ok(p) = requests.recv_timeout(std::time::Duration::from_millis(2)) {
                 let reply = answer(host, 1, &p.request, &p.peer).expect("answer");
+                seen.push(p.peer.clone());
                 p.answer(reply);
             }
         }
-        client.join().expect("client")
+        (client.join().expect("client"), seen)
     }
 
     /// The exit code and both outputs, trimmed.
@@ -2013,6 +2024,20 @@ mod senders {
         args: &[&str],
         input: &str,
     ) -> (Option<i32>, String, String) {
+        let built = Path::new(env!("CARGO_BIN_EXE_temet-work"));
+        under_program(built, socket, parent, child, args, input)
+    }
+
+    /// [`under_with`], running `program` as the command.
+    #[cfg(target_os = "linux")]
+    fn under_program(
+        program: &Path,
+        socket: &Path,
+        parent: (&str, &str),
+        child: Option<(&str, &str)>,
+        args: &[&str],
+        input: &str,
+    ) -> (Option<i32>, String, String) {
         use std::io::Write;
         let set: Vec<String> = match child {
             None => ["-u", "TEMET_WORK_AGENT", "-u", SECRET_VAR]
@@ -2027,7 +2052,7 @@ mod senders {
         let mut child = std::process::Command::new("sh")
             .args(["-c", "env \"$@\"; exit $?", "sh"])
             .args(&set)
-            .arg(env!("CARGO_BIN_EXE_temet-work"))
+            .arg(program)
             .args(args)
             .env("TEMET_WORK_SOCKET", socket)
             .env_remove("TEMET_WORK_DAEMON")
@@ -2463,6 +2488,32 @@ refining_at_once = 2
         temet_work_core::Digest::from_bytes(&bytes).0
     }
 
+    /// A new folder in the temp dir that only this user can write, removed when
+    /// dropped, so a failed test leaves nothing in it either.
+    #[cfg(target_os = "linux")]
+    struct Private(PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl Private {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            // A random name, and `create` fails on a folder someone else made.
+            let dir = std::env::temp_dir().join(format!("temet-work-test-{}", &fresh()[..16]));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .expect("a new folder");
+            Self(dir)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for Private {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// The commands a person may run and an agent may not.
     const PERSONS: [&[&str]; 7] = [
         &["rule", "ankh#1", "approve", "the", "bell", "is", "fine"],
@@ -2582,6 +2633,71 @@ refining_at_once = 2
                     &approve,
                 )
             }
+        });
+        let own = serve(&mut host, &requests, client);
+        assert_eq!(own.0, Some(0), "{own:?}");
+        assert!(host.world().issues[&issue].review_ok, "approved");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stolen_secret_from_a_sender_that_cannot_be_read_is_refused() {
+        let sock = scratch("unreadable").join("daemon.sock");
+        // A copy with no read bit runs non-dumpable, so its environ is root's.
+        // It goes to the temp dir: on a busy project disk the copy alone can
+        // take seconds. `install` writes it, so no thread here holds it open
+        // when it runs.
+        let copy = Private::new();
+        let hidden = copy.0.join("temet-work");
+        let installed = std::process::Command::new("install")
+            .args(["-m", "111", env!("CARGO_BIN_EXE_temet-work")])
+            .arg(&hidden)
+            .status()
+            .expect("install runs");
+        assert!(installed.success(), "{installed}");
+        let requests = socket::listen(&sock).expect("listen");
+        let (author, reviewer) = (fresh(), fresh());
+        let mut host = tree_host(
+            &[
+                ("author-1", Role::Author, &author),
+                ("reviewer-1", Role::Reviewer, &reviewer),
+            ],
+            Stage::InReview { round: 1 },
+        );
+        let approve = ["review", "ankh#1", "approve"];
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            let (author, reviewer) = (author.clone(), reviewer.clone());
+            move || {
+                under_program(
+                    &hidden,
+                    &sock,
+                    ("author-1", &author),
+                    Some(("reviewer-1", &reviewer)),
+                    &approve,
+                    "",
+                )
+            }
+        });
+        let (stolen, seen) = serve_seeing(&mut host, &requests, client);
+        // Run as root the copy would be readable, and this test would prove nothing.
+        assert!(
+            matches!(&seen[..], [Peer::Unreadable { .. }]),
+            "the daemon read the sender: {seen:?}"
+        );
+        assert_eq!(stolen.0, Some(1), "{stolen:?}");
+        assert!(
+            stolen.2.contains(
+                "names reviewer-1 but comes from inside author-1's process tree, which holds author-1's secret"
+            ),
+            "{stolen:?}"
+        );
+        let issue = IssueId::new("ankh", "1");
+        assert!(!host.world().issues[&issue].review_ok, "still in review");
+        // The reviewer's own temet-work sends the same command, and it counts.
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            move || as_agent(&sock, "reviewer-1", Some(&reviewer), &approve)
         });
         let own = serve(&mut host, &requests, client);
         assert_eq!(own.0, Some(0), "{own:?}");
