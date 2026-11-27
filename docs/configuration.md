@@ -2,6 +2,7 @@
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
   - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
+  - 48c80237-558e-4a4a-a82d-bd96b37f1f46
 ---
 
 # Configuring temet-workd
@@ -85,7 +86,8 @@ name = "temet-ai/radar"   # the tracker's name for it
 # run_in = "/home/me/src/radar-deploy"   # where both run; the home folder when left out
 # ci = false              # its pull requests run no CI; the plan's checks are left to the reviewer
 
-# Settings (docs/settings.md): [settings] is global, [settings.reviewer] is for one role.
+# Settings (docs/settings.md): [settings] is global, [settings.reviewer] is for one role,
+# and takes only the settings that take a role (docs/settings.md, Roles).
 # A model belongs to a runtime, so a `model` table names the runtime each one is for.
 # [settings]
 # runtime = "claude"
@@ -159,8 +161,9 @@ any of them, or in a role's table, gives a model per runtime: `[settings.model]`
 `claude = "sonnet"` is the setting `model.claude`. A group's `model` and a project's
 `ci`, `deploy`, `verify` and `run_in` are still accepted and are read as settings at their
 level, so an existing file behaves as before. A key the daemon does not know is an error
-naming the key. A value that names a runtime or runner the build does not have, or a model
-for such a runtime, stops the daemon at start, with the ones it has listed, and so does a
+naming the key, and so is a key in a role's table that takes no role (`docs/settings.md`,
+Roles). A value that names a runtime or runner the build does not have, or a model for
+such a runtime, stops the daemon at start, with the ones it has listed, and so does a
 build with no default runtime or runner and no global value for it. What a person or an
 agent has set since is not overwritten by the file; a value taken out of the file is
 unset.

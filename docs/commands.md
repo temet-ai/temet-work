@@ -5,6 +5,7 @@ session_id:
   - 26cd49d9-7565-4506-b988-a9b64ed0fa45
   - 7d9306de-2941-41bd-8a60-efad6ed38f2a
   - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
+  - 48c80237-558e-4a4a-a82d-bd96b37f1f46
 ---
 
 # Commands
@@ -28,8 +29,8 @@ reports its step done.
 | `temet-work overturn DECISION OPTION REASON` | a person only; `DECISION` and `OPTION` are the numbers `status` lists (options count from 1), `REASON` is required | any, if the decision exists, the option is another than the one chosen, and the reason is not empty. What it changes depends on the issue: see below |
 | `temet-work proposal RULE keep` | a person only: the rule moves to kept and ends every brief written from then on | the rule is proposed |
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
-| `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify` and `run_in`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role | any for a person; refining for a refiner |
-| `temet-work unset TARGET [--role ROLE] KEY` | the same | any for a person; refining for a refiner |
+| `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify` and `run_in`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role. `--role` is for the settings that take a role (`docs/settings.md`, Roles) | any for a person; refining for a refiner |
+| `temet-work unset TARGET [--role ROLE] KEY` | the same, `--role` included | any for a person; refining for a refiner |
 | `temet-work settings TARGET [--role ROLE]` | anyone | any |
 
 ## Who may run a step

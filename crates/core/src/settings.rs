@@ -195,6 +195,9 @@ pub struct Spec {
     pub about: &'static str,
     /// Whether an agent may set it.
     pub agents: Agents,
+    /// Whether it is read for the role of an agent, so that a role can have its
+    /// own value. One that is not is the same for every role.
+    pub per_role: bool,
 }
 
 /// The modes an agent can be started in, which `permission` takes one of.
@@ -217,6 +220,7 @@ pub const SPECS: [Spec; 16] = [
             "a runtime may not follow permission, so the runtime decides what an agent \
              may do without asking",
         ),
+        per_role: true,
     },
     Spec {
         key: "model",
@@ -224,6 +228,7 @@ pub const SPECS: [Spec; 16] = [
         about: "the model of the global runtime's agents, as model.<runtime> is that of one \
                 runtime's; the runtime's own default when none is set",
         agents: Agents::ForAuthor,
+        per_role: true,
     },
     Spec {
         key: "runner",
@@ -233,12 +238,14 @@ pub const SPECS: [Spec; 16] = [
             "it follows from the person's machines, not from the issue, and a value for \
              one issue replaces the one a person chose for a role",
         ),
+        per_role: true,
     },
     Spec {
         key: "machine",
         kind: Kind::Text,
         about: "the machine of the work folder an agent is given; any machine when none is set",
         agents: Agents::May,
+        per_role: true,
     },
     Spec {
         key: "permission",
@@ -247,6 +254,7 @@ pub const SPECS: [Spec; 16] = [
         agents: Agents::MayNot(
             "it decides what every later agent on the issue may do without asking",
         ),
+        per_role: true,
     },
     Spec {
         key: "review_rounds",
@@ -256,6 +264,7 @@ pub const SPECS: [Spec; 16] = [
             "it decides how many rounds of review an issue gets before the arbiter rules, \
              so fewer rounds weaken its review",
         ),
+        per_role: false,
     },
     Spec {
         key: "ci",
@@ -265,60 +274,70 @@ pub const SPECS: [Spec; 16] = [
             "ci false takes the CI gate off the code the issue's own author writes, \
              in every repository the issue changes",
         ),
+        per_role: false,
     },
     Spec {
         key: "deploy",
         kind: Kind::Text,
         about: "the command run after a merge",
         agents: Agents::MayNot("the daemon runs it as a shell command after a merge"),
+        per_role: false,
     },
     Spec {
         key: "verify",
         kind: Kind::Text,
         about: "the command run after a deploy",
         agents: Agents::MayNot("the daemon runs it after a deploy"),
+        per_role: false,
     },
     Spec {
         key: "run_in",
         kind: Kind::Text,
         about: "the folder deploy and verify run in",
         agents: Agents::MayNot("it is the folder deploy and verify run in"),
+        per_role: false,
     },
     Spec {
         key: "merge",
         kind: Kind::OneOf(&["squash", "merge", "rebase"]),
         about: "how the code host merges a pull request",
         agents: Agents::May,
+        per_role: false,
     },
     Spec {
         key: "remind_after",
         kind: Kind::Count(1),
         about: "minutes an agent its issue waits on may sit idle before it is reminded",
         agents: Agents::May,
+        per_role: true,
     },
     Spec {
         key: "reminders",
         kind: Kind::Count(0),
         about: "reminders before an idle agent is stopped",
         agents: Agents::May,
+        per_role: true,
     },
     Spec {
         key: "starts",
         kind: Kind::Count(1),
         about: "agents of one role started on one issue before the loop gives up",
         agents: Agents::May,
+        per_role: true,
     },
     Spec {
         key: "sync_every",
         kind: Kind::Count(1),
         about: "seconds between syncs of a project with its tracker",
         agents: Agents::May,
+        per_role: false,
     },
     Spec {
         key: "ci_every",
         kind: Kind::Count(1),
         about: "seconds between reads of a pull request's CI",
         agents: Agents::May,
+        per_role: false,
     },
 ];
 
@@ -343,6 +362,25 @@ pub fn spec(key: &str) -> Result<&'static Spec, String> {
         let keys: Vec<&str> = specs().map(|s| s.key).collect();
         format!("no setting {key}; the settings are: {}", keys.join(", "))
     })
+}
+
+/// Whether `key` is read per role.
+fn per_role(key: &str) -> bool {
+    spec(key).is_ok_and(|s| s.per_role)
+}
+
+/// Refuses a role for `key` when it is not read per role, since such a value
+/// would have no effect. `named` is what the caller gave the role with.
+pub fn check_role(key: &str, named: &str) -> Result<(), String> {
+    if spec(key)?.per_role {
+        return Ok(());
+    }
+    let keys: Vec<&str> = specs().filter(|s| s.per_role).map(|s| s.key).collect();
+    Err(format!(
+        "{key} is the same for every role, so it takes no {named}; the settings that \
+         take a role are: {}",
+        keys.join(", ")
+    ))
 }
 
 /// The value in the code for `key`, used when no level sets one. The runtime and
@@ -399,16 +437,21 @@ pub(crate) fn recorded_role(role: Option<Role>, key: &str, by: &str) -> Option<R
 }
 
 /// The role the loop keeps a logged change under, or `None` when it leaves the
-/// change out. Logs from before agents were refused hold changes an agent made
-/// for one issue that it may no longer make: of a setting only a person sets,
-/// left out, and of a setting that is now the author's only, for every role
-/// (read as the author's) or for another role (left out).
+/// change out. Older logs hold a role's value of a setting that is not read per
+/// role, which never had an effect and is left out. Logs from before agents were
+/// refused hold changes an agent made for one issue that it may no longer make:
+/// of a setting only a person sets, left out, and of a setting that is now the
+/// author's only, for every role (read as the author's) or for another role (left
+/// out).
 pub(crate) fn kept_role(
     scope: &Scope,
     role: Option<Role>,
     key: &str,
     by: &str,
 ) -> Option<Option<Role>> {
+    if role.is_some() && spec(key).is_ok_and(|s| !s.per_role) {
+        return None;
+    }
     if !matches!(scope, Scope::Task(_)) || !is_agent(by) {
         return Some(role);
     }
@@ -565,8 +608,10 @@ impl World {
     /// every role only), and which level set it. Within a level the role's own
     /// value comes before the value for every role; across levels the nearer one
     /// comes first. The build's own value is the last resort. `model` answers
-    /// for the runtime that runs there ([`World::keys_read`]).
+    /// for the runtime that runs there ([`World::keys_read`]). A key that is not
+    /// read per role is answered as for no role.
     pub fn resolve(&self, scope: &Scope, role: Option<Role>, key: &str) -> Option<Resolved> {
+        let role = role.filter(|_| per_role(key));
         let keys = self.keys_read(scope, role, key);
         for (level, at) in self.chain(scope) {
             let get = |role: Option<Role>| {
@@ -998,6 +1043,36 @@ mod level {
                 "verify",
             ]
         );
+    }
+
+    #[test]
+    fn each_setting_says_whether_it_is_read_per_role() {
+        let per = [
+            "runtime",
+            "model",
+            "runner",
+            "machine",
+            "permission",
+            "remind_after",
+            "reminders",
+            "starts",
+        ];
+        let every = [
+            "review_rounds",
+            "ci",
+            "deploy",
+            "verify",
+            "run_in",
+            "merge",
+            "sync_every",
+            "ci_every",
+        ];
+        for (keys, per_role) in [(per, true), (every, false)] {
+            for key in keys {
+                assert_eq!(spec(key).map(|s| s.per_role), Ok(per_role), "{key}");
+            }
+        }
+        assert_eq!(per.len() + every.len(), SPECS.len(), "a key is in neither");
     }
 
     #[test]

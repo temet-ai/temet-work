@@ -396,8 +396,8 @@ mod settings {
             Event::SettingSet {
                 scope: Scope::Project(ProjectId::new("radar")),
                 role: Some(Role::Reviewer),
-                key: "merge".into(),
-                value: Value::Text("rebase".into()),
+                key: "permission".into(),
+                value: Value::Text("plan".into()),
                 by: "person".into(),
             },
         ] {
@@ -439,15 +439,80 @@ radar#44, author
             "{for_reviewer}"
         );
         assert!(
-            for_reviewer.contains("merge          rebase  project"),
+            for_reviewer.contains("permission     plan    project"),
             "{for_reviewer}"
         );
         let for_author = settings(&w, &Target::parse("radar"), Some(Role::Author)).expect("ok");
         assert!(
-            for_author.contains("merge          squash  built in"),
+            for_author.contains("permission     auto    built in"),
             "{for_author}"
         );
         assert!(settings(&w, &Target::parse("nowhere"), None).is_err());
+    }
+
+    #[test]
+    fn the_listing_shows_a_setting_not_read_per_role_without_the_role() {
+        use crate::model::Stage;
+        let mut w = world();
+        let id = IssueId::new("radar", "44");
+        let radar = Scope::Project(ProjectId::new("radar"));
+        let every = [
+            ("review_rounds", Value::Number(2), Value::Number(1)),
+            ("ci", Value::Flag(false), Value::Flag(true)),
+            ("merge", text_of("rebase"), text_of("merge")),
+            ("deploy", text_of("make deploy"), text_of("make other")),
+            ("verify", text_of("make smoke"), text_of("make other")),
+            ("run_in", text_of("/srv/radar"), text_of("/srv/other")),
+            ("sync_every", Value::Number(90), Value::Number(1)),
+            ("ci_every", Value::Number(45), Value::Number(1)),
+        ];
+        // Even a role's value that is nearer than the one for every role is passed
+        // over.
+        for (key, for_all, for_reviewers) in &every {
+            w.put(&Scope::Global, None, key, for_all, crate::settings::FILE);
+            w.put(
+                &radar,
+                Some(Role::Reviewer),
+                key,
+                for_reviewers,
+                crate::settings::FILE,
+            );
+        }
+        w.put(
+            &radar,
+            Some(Role::Reviewer),
+            "model",
+            &text_of("haiku"),
+            crate::settings::FILE,
+        );
+        w.issues.get_mut(&id).expect("synced").stage = Stage::InReview { round: 1 };
+        let target = Target::parse("radar");
+        let listed = settings(&w, &target, Some(Role::Reviewer)).expect("known");
+        let view = issue(&w, &id).expect("known");
+        assert!(view.contains("Settings for the reviewer:\n"), "{view}");
+        for (key, for_all, _) in &every {
+            let want = Some(format!("{for_all} global"));
+            assert_eq!(row(&listed, key), want, "{key}: {listed}");
+            assert_eq!(row(&view, key), want, "{key}: {view}");
+        }
+        assert_eq!(
+            w.setting_number(&id, Some(Role::Reviewer), "review_rounds"),
+            w.setting_number(&id, None, "review_rounds")
+        );
+        assert_eq!(w.setting_number(&id, None, "review_rounds"), 2);
+        assert_eq!(row(&listed, "model").as_deref(), Some("haiku project"));
+    }
+
+    fn text_of(value: &str) -> Value {
+        Value::Text(value.into())
+    }
+
+    /// The words that follow `key` on the line of `listing` that lists it.
+    fn row(listing: &str, key: &str) -> Option<String> {
+        listing.lines().find_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some(key)).then(|| words.collect::<Vec<_>>().join(" "))
+        })
     }
 
     #[test]
@@ -677,7 +742,7 @@ Problems
             "{all}"
         );
         assert!(
-            all.contains("  radar, reviewer: merge = rebase, set by person\n"),
+            all.contains("  radar, reviewer: permission = plan, set by person\n"),
             "{all}"
         );
     }

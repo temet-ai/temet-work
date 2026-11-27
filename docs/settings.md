@@ -3,6 +3,7 @@ session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
   - 30de12a8-8bb8-4310-a59b-8d5267ce0b97
   - 7d9306de-2941-41bd-8a60-efad6ed38f2a
+  - 48c80237-558e-4a4a-a82d-bd96b37f1f46
 ---
 
 # Settings: defaults at every level
@@ -36,22 +37,29 @@ everyone `runtime = "claude"`, reviewers on that project run Claude, because the
 is asked before the area. For them to run Codex there, the project names its reviewers
 too.
 
+Only a setting that is read for the role of an agent takes a role: those marked yes under
+Per role in the table below. Every other is the same for every role. A role on one of
+those is refused, naming the key: by `set` and `unset` with `--role`, and by the daemon
+when it reads a role table in its configuration, such as `[settings.reviewer]`, and then
+it does not start. A listing for a role shows such a setting at the value for every role,
+which is the one in effect.
+
 ## The settings
 
-| Setting | Built in | Read by |
-|---|---|---|
-| `runtime` | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
-| `model` | the runtime's own default | the agent's brief, so the runtime adapter. A model belongs to one runtime: `model.<runtime>` (`model.codex`) names it, and a plain `model` is the global runtime's ("A model belongs to a runtime", below) |
-| `runner` | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
-| `machine` | none: any machine | the loop, per issue and role, when it picks a work folder (below) |
-| `permission` | `auto` (or `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`) | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
-| `review_rounds` | 3 | the loop, per issue |
-| `ci` | true | the code-host family, per issue |
-| `deploy`, `verify`, `run_in` | none | the deploy part, per issue |
-| `merge` | `squash` (or `merge`, `rebase`) | the code host's merge |
-| `remind_after`, `reminders` | 10 minutes, 2 | the runner family, per agent's issue and role |
-| `starts` | 3 agents of one role on one issue | the loop, per issue and role |
-| `sync_every`, `ci_every` | 60 s, 30 s | the tracker family for each project or area; the code-host family for each issue |
+| Setting | Per role | Built in | Read by |
+|---|---|---|---|
+| `runtime` | yes | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
+| `model` | yes | the runtime's own default | the agent's brief, so the runtime adapter. A model belongs to one runtime: `model.<runtime>` (`model.codex`) names it, and a plain `model` is the global runtime's ("A model belongs to a runtime", below) |
+| `runner` | yes | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
+| `machine` | yes | none: any machine | the loop, per issue and role, when it picks a work folder (below) |
+| `permission` | yes | `auto` (or `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`) | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
+| `review_rounds` | no | 3 | the loop, per issue |
+| `ci` | no | true | the code-host family, per issue |
+| `deploy`, `verify`, `run_in` | no | none | the deploy part, per issue |
+| `merge` | no | `squash` (or `merge`, `rebase`) | the code host's merge |
+| `remind_after`, `reminders` | yes | 10 minutes, 2 | the runner family, per agent's issue and role |
+| `starts` | yes | 3 agents of one role on one issue | the loop, per issue and role |
+| `sync_every`, `ci_every` | no | 60 s, 30 s | the tracker family for each project or area; the code-host family for each issue |
 
 The table is the resolver's: `temet-work settings` lists the same keys, and the code reads
 every one of them through it. A setting with no value and no built-in value, such as
@@ -199,8 +207,9 @@ model. So a person's `set` or `unset` of either on the task, with no role or for
 author, also drops the refiner's value under the other name, which could otherwise be
 read first.
 
-Eight settings only a person sets, at any level and for any role. An agent's plan, `set` or
-`unset` that names one is refused with the reason, and a refused plan is not recorded:
+Eight settings only a person sets, at any level and for any role they take. An agent's
+plan, `set` or `unset` that names one is refused with the reason, and a refused plan is
+not recorded:
 
 | Key | Why only a person sets it |
 |---|---|
@@ -221,6 +230,10 @@ agent's.
 Likewise, a log written before a refiner's `model` was the author's may hold one set for
 an issue for every role, which is read as the author's, or for another role, which is left
 out. An issue refined before the upgrade is then reviewed on the person's model.
+
+A log written before a role was refused on a setting that takes none may hold one set for a
+role. It never had an effect, and the daemon reads the log and leaves it out, so neither
+`temet-work settings` nor `status` lists it.
 
 Every change, from the file, a command or a plan, is a `SettingSet` or `SettingUnset`
 event in the log with who made it: `file`, `person`, or the agent's id. A later event
@@ -257,6 +270,10 @@ level. `temet-work status` lists every value with the level it is set at and who
   (`World::resolve`) answers "what is this setting for this issue and role, and which
   level set it". Parts ask the world for a setting instead of reading their own fields
   or constants.
+- Each setting's `Spec` says whether it is read per role (`per_role`). `World::resolve`
+  drops the role for one that is not, so the listings and the parts get the same answer.
+  `tests/settings.rs` fails when a reader passes a role the `Spec` does not allow for, or
+  passes none for a setting that takes one.
 - Each setting's `Spec` says whether an agent may set it: `May`, `ForAuthor` (a refiner
   may, for the author only: `model`) or `MayNot`. The plan check, `set`, `unset` and the
   replay of a log all read that, so a new key has to say which it is.
