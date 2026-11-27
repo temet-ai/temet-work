@@ -142,20 +142,24 @@ fn id_part(text: &str) -> String {
 /// per group, a tab in it per issue, and the agent's name. The app shows a
 /// terminal that has `herdr.space` and `herdr.tab`, and makes the space or tab
 /// when it does not know the id. The issue label names its project
-/// (`ankh#WATCH-12`), so two projects' issues with one key get two tabs. A start
-/// without a `group`, `issue` and `agent` label, as the runner contract's and an
-/// investigator's are, gets none.
+/// (`ankh#WATCH-12`), so two projects' issues with one key get two tabs. An agent
+/// on no issue, an investigator, gets a tab in its group's space named for its
+/// role, and its group in its name where an issue would be. A start without a
+/// `group` and an `agent` label, as the runner contract's are, gets none.
 fn app_labels(labels: &BTreeMap<String, String>) -> Option<[(&'static str, String); 3]> {
-    let (group, issue) = (labels.get("group")?, labels.get("issue")?);
-    let agent = labels.get("agent")?;
-    let group = id_part(group);
+    let (group, agent) = (labels.get("group")?, labels.get("agent")?);
+    let (tab, about) = match labels.get("issue") {
+        Some(issue) => (issue, issue),
+        None => (labels.get("role")?, group),
+    };
+    let space = id_part(group);
     Some([
-        ("herdr.space", format!("sptemet-work-{group}")),
+        ("herdr.space", format!("sptemet-work-{space}")),
         (
             "herdr.tab",
-            format!("tbtemet-work-{group}-{}", id_part(issue)),
+            format!("tbtemet-work-{space}-{}", id_part(tab)),
         ),
-        ("herdr.name", format!("{agent} {issue}")),
+        ("herdr.name", format!("{agent} {about}")),
     ])
 }
 
@@ -806,7 +810,26 @@ mod tests {
     }
 
     #[test]
-    fn a_start_without_a_group_or_an_issue_gets_no_app_labels() {
+    fn an_investigator_gets_its_groups_space_and_a_tab_of_its_own() {
+        let labels = [
+            ("agent", "investigator-1"),
+            ("group", "watch"),
+            ("role", "investigator"),
+        ];
+        let params = run_params(&Start {
+            labels: labels.map(|(k, v)| (k.to_string(), v.to_string())).into(),
+            ..Start::default()
+        });
+        assert_eq!(params["labels"]["herdr.space"], "sptemet-work-watch");
+        assert_eq!(
+            params["labels"]["herdr.tab"],
+            "tbtemet-work-watch-investigator"
+        );
+        assert_eq!(params["labels"]["herdr.name"], "investigator-1 watch");
+    }
+
+    #[test]
+    fn a_start_without_a_group_gets_no_app_labels() {
         let app_keys = |labels: &[(&str, &str)]| {
             let params = run_params(&Start {
                 labels: labels
@@ -824,7 +847,6 @@ mod tests {
         };
         // The runner contract's own terminals.
         assert_eq!(app_keys(&[("item", "contract-1"), ("role", "contract")]), 0);
-        assert_eq!(app_keys(&[("agent", "author-1"), ("group", "watch")]), 0);
         assert_eq!(app_keys(&[("agent", "author-1"), ("issue", "ankh#1")]), 0);
     }
 
