@@ -257,10 +257,7 @@ impl Part for CodeHosts {
         let waiting: Vec<(IssueId, String)> = world
             .issues
             .values()
-            .filter(|i| {
-                matches!(i.stage, Stage::InReview { .. } | Stage::Arbitration { .. })
-                    && i.checks_ok.is_none()
-            })
+            .filter(|i| matches!(i.stage, Stage::InReview { .. } | Stage::Arbitration { .. }))
             .filter_map(|i| i.pull.clone().map(|p| (i.id.clone(), p)))
             .collect();
         self.errors
@@ -290,6 +287,18 @@ impl Part for CodeHosts {
                     continue;
                 }
             };
+            // A conflict is caught on every read, even after CI finished.
+            if pull.state == PullState::Open && pull.conflicting {
+                events.push(Event::PullConflicts { issue });
+                continue;
+            }
+            if world
+                .issues
+                .get(&issue)
+                .is_some_and(|i| i.checks_ok.is_some())
+            {
+                continue;
+            }
             // No checks yet usually means CI has not started on the new commit; only
             // a project that runs no CI leaves the plan's checks to the reviewer.
             let runs_ci = world.setting_flag(&issue, None, "ci");
@@ -489,6 +498,31 @@ mod tests {
             ]
         );
         assert_eq!(part.poll(&w, 30_000 - 1).events, vec![], "not due yet");
+    }
+
+    #[test]
+    fn a_conflict_is_reported_on_every_read_even_after_ci_finished() {
+        let mut w = in_review();
+        if let Some(i) = w.issues.get_mut(&IssueId::new("ankh", "1")) {
+            i.checks_ok = Some(true);
+        }
+        let mut host = fake();
+        host.pulls[0].1.conflicting = true;
+        let mut part = CodeHosts::default();
+        part.add(Box::new(host));
+        let polled = part.poll(&w, 0);
+        assert!(polled.events.contains(&Event::PullConflicts {
+            issue: IssueId::new("ankh", "1")
+        }));
+        let mut clean = CodeHosts::default();
+        clean.add(Box::new(fake()));
+        assert!(
+            !clean
+                .poll(&w, 0)
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::PullConflicts { .. }))
+        );
     }
 
     #[test]

@@ -496,6 +496,16 @@ impl World {
                     self.release(folder, &mut out);
                 }
             }
+            Event::PullConflicts { issue } => {
+                if let Some(i) = self.issues.get_mut(issue)
+                    && let Stage::InReview { round } | Stage::Arbitration { round } = i.stage
+                {
+                    i.review_ok = false;
+                    let points =
+                        vec!["the pull request conflicts with the branch it merges into".into()];
+                    Self::send_back(i, round, points, true, &mut out);
+                }
+            }
             Event::MergeRefused { issue, reason } => {
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Merging

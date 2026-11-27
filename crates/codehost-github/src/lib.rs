@@ -196,6 +196,22 @@ mod tests {
     }
 
     #[test]
+    fn only_conflicting_counts_as_a_conflict_and_unknown_does_not() {
+        for (mergeable, want) in [
+            ("CONFLICTING", true),
+            ("MERGEABLE", false),
+            ("UNKNOWN", false),
+        ] {
+            let json = json!({"number": 1, "state": "OPEN", "mergeable": mergeable}).to_string();
+            assert_eq!(
+                parse_pull(&json).expect("parses").conflicting,
+                want,
+                "{mergeable}"
+            );
+        }
+    }
+
+    #[test]
     fn passes_the_code_host_contract_on_recorded_output() {
         let mut gh = GitHub::with(Box::new(Recorded));
         assert_eq!(
