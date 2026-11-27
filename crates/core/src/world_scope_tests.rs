@@ -370,3 +370,37 @@ fn an_issue_that_left_its_groups_scope_shows_its_stage_and_out_of_scope() {
     let shown = crate::text::issue(&w, &issue("2")).unwrap_or_default();
     assert!(shown.contains("\nStage: ready, out of scope\n"), "{shown}");
 }
+
+#[test]
+fn an_arbiter_that_ruled_is_stopped_and_not_waited_on_when_its_paused_issue_returns_to_arbitration()
+{
+    let mut w = arbitrating();
+    w.apply(&started("arbiter-1", Role::Arbiter, "1"));
+    let effects = w.apply(&ruling(false));
+    assert!(
+        effects.contains(&Effect::StopAgent {
+            agent: AgentId::new("arbiter-1")
+        }),
+        "its step is done once its ruling is in: {effects:?}"
+    );
+    w.apply(&Event::Told { issue: issue("1") });
+    w.apply(&pull_ready());
+    assert_eq!(stage(&w, "1"), Stage::InReview { round: 4 });
+    w.apply(&moved("1", "m9"));
+    assert_eq!(w.apply(&block(4)), vec![], "no arbiter");
+    assert_eq!(stage(&w, "1"), Stage::Arbitration { round: 4 });
+    assert!(!waited_on(&w, "arbiter-1"), "it ruled on the last dispute");
+    // The runner reports the stop; back in scope a fresh arbiter hears the new dispute.
+    w.apply(&ended("arbiter-1"));
+    assert_eq!(w.missing(), Missing::default());
+    w.apply(&moved("1", "m1"));
+    assert_eq!(
+        w.missing().start,
+        vec![Effect::StartAgent {
+            group: GroupId::new("watch"),
+            role: Role::Arbiter,
+            issue: issue("1"),
+            folder: None
+        }]
+    );
+}

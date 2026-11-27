@@ -473,10 +473,14 @@ impl World {
             }
             Event::DecisionMade { decision } => {
                 self.decisions.insert(decision.id, decision.clone());
+                // The arbiter's work is done once its ruling is in; a later
+                // arbitration starts a fresh one, which hears that dispute.
+                let done = self.stop(&decision.issue, &[Role::Arbiter]);
                 if let DecisionKind::Ruling { approve } = decision.kind
                     && let Some(i) = self.issues.get_mut(&decision.issue)
                     && let Stage::Arbitration { round } = i.stage
                 {
+                    out.extend(done);
                     if approve {
                         i.review_ok = true;
                         Self::try_merge(i, &mut out);
@@ -722,8 +726,8 @@ impl World {
     /// its issue is refining, an author while it is worked on, a reviewer that has
     /// heard its round, an arbiter while the issue is with the arbiter. Once a
     /// reviewer's or arbiter's approval is in, the issue waits on the checks, not
-    /// on that agent. On a paused issue an author that has not heard its fixes has
-    /// finished its step, and is left idle.
+    /// on that agent. An arbiter that has ruled on the issue has finished its step,
+    /// and so has an author on a paused issue that has not heard its fixes.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
         let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
             return false;
@@ -731,7 +735,14 @@ impl World {
         match (i.stage, agent.role) {
             (Stage::Refining, Role::Refiner) | (Stage::Working, Role::Author) => true,
             (Stage::Fixing { .. }, Role::Author) => i.told || !self.paused(i),
-            (Stage::Arbitration { .. }, Role::Arbiter) => !i.review_ok,
+            (Stage::Arbitration { .. }, Role::Arbiter) => {
+                !i.review_ok
+                    && !self.decisions.values().any(|d| {
+                        d.issue == i.id
+                            && d.by == agent.id
+                            && matches!(d.kind, DecisionKind::Ruling { .. })
+                    })
+            }
             (Stage::InReview { .. }, Role::Reviewer) => i.told && !i.review_ok,
             _ => false,
         }

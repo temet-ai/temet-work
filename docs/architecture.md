@@ -127,12 +127,14 @@ stopped. A reminder starts a turn, and one that ends on the same error, or on an
 reset time to wait for, counts toward the stop, however long the turn worked: the next reminder
 or the stop is still timed from the last reminder. The count starts again when such a turn ends
 between turns, when the agent stops at a prompt or on a limit with a reset time, when it ends,
-and when its issue stops waiting on it. A reviewer or arbiter whose approval is in is not
+and when its issue stops waiting on it. A reviewer whose approval is in is not
 waited on while the checks run: it is not reminded, no other is started in its place, and it stays
 until the merge, so after a failed check a reviewer still running hears the next round. A refiner
-stops once its plan is in; the author, reviewer and arbiter stop once the issue's last pull request
-merges. A group has no coordinator agent: in the research fleet the standing seat waited 25 of its
-28 minutes, and in mike's larger runs such seats were where the token and turn costs came from
+stops once its plan is in and an arbiter once its ruling is in, so a later arbitration on the issue
+starts a fresh arbiter that hears that dispute; an approval by ruling is not replaced while the
+checks run. The author and reviewer stop once the issue's last pull request merges. A group has
+no coordinator agent: in the research fleet the standing seat waited 25 of its 28 minutes, and in
+mike's larger runs such seats were where the token and turn costs came from
 (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
 
 A group takes for refining, and starts authors on, only issues its milestones, projects and
