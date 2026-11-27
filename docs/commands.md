@@ -30,7 +30,9 @@ reports its step done.
 | `temet-work overturn DECISION OPTION REASON` | a person only; `DECISION` and `OPTION` are the numbers `status` lists (options count from 1), `REASON` is required | any, if the decision exists, the option is another than the one chosen, and the reason is not empty. What it changes depends on the issue: see below |
 | `temet-work proposal RULE keep` | a person only: the rule moves to kept and ends every brief written from then on | the rule is proposed |
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
-| `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify` and `run_in`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role. `--role` is for the settings that take a role (`docs/settings.md`, Roles) | any for a person; refining for a refiner |
+| `temet-work file PROJECT TITLE BODY [--milestone M]` | only the investigator of a group whose investigation is running, for a project or area its group takes issues from; `BODY` `-` reads it from standard input. The reply names the new issue and how a "Depends on" line names it | no issue: while the group's investigation runs. The milestone is the last in the group's list when none is named; one the group does not take is refused, and a group with no milestones files with none. A title an open issue of that project already has is refused |
+| `temet-work investigated GROUP` | only the investigator of GROUP whose investigation is running: the investigation ends and the investigator's session is stopped | no issue: while GROUP's investigation runs |
+| `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`, `run_in` and `investigate`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role. `--role` is for the settings that take a role (`docs/settings.md`, Roles) | any for a person; refining for a refiner |
 | `temet-work unset TARGET [--role ROLE] KEY` | the same, `--role` included | any for a person; refining for a refiner |
 | `temet-work settings TARGET [--role ROLE]` | anyone | any |
 
@@ -51,6 +53,9 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
   and `unset`.
 - `status`, `issue`, `screen` and `settings` are open to anyone. `set` and `unset` keep
   their own rule, in the table.
+- `file` and `investigated` belong to a group's running investigator, which works for its
+  group and on no issue. A person, another agent, or an investigator whose investigation
+  has ended is refused with the reason; a person files issues in the tracker itself.
 
 ## How the daemon knows who sent a command
 
@@ -134,12 +139,12 @@ runtime's. A value of the wrong kind, an unknown key, a runtime or runner the bu
 or a `model.<runtime>` for such a runtime is refused with the reason, and the command
 exits 1.
 
-A refiner may add task-level settings to its plan, other than the eight only a person
-sets: `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify` and
-`run_in` (`docs/settings.md`, "Setting them"). What it sets is recorded as set by it. Its
-`model` or `model.<runtime>`, from the plan or from its `set`, is for the author only:
-the models of reviewers, arbiters and refiners are a person's to set, and a person's
-`set` on the issue with no role overturns the refiner's value. A plan with settings:
+A refiner may add task-level settings to its plan, other than the nine only a person
+sets: `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`,
+`run_in` and `investigate` (`docs/settings.md`, "Setting them"). What it sets is recorded
+as set by it. Its `model` or `model.<runtime>`, from the plan or from its `set`, is for the
+author only: the models of reviewers, arbiters and refiners are a person's to set, and a
+person's `set` on the issue with no role overturns the refiner's value. A plan with settings:
 
 ```yaml
 checks:
@@ -157,7 +162,7 @@ command was not understood or no daemon answered.
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
 `status`, `issue`, `screen` and `settings`; `act` adds `plan`, `ready`, `review`, `rule`,
-`retry`, `overturn`, `proposal`, `set` and `unset`.
+`retry`, `overturn`, `proposal`, `file`, `investigated`, `set` and `unset`.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.

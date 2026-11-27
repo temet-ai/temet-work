@@ -146,11 +146,30 @@ fn host_from(
     daemon_host: Option<&str>,
     issues: Vec<(String, TrackedIssue)>,
 ) -> (Host, Starts) {
+    host_tracking(
+        world,
+        journal,
+        runtimes,
+        config,
+        daemon_host,
+        FakeTracker {
+            issues,
+            ..FakeTracker::default()
+        },
+    )
+}
+
+/// A host on `world`, with every family's fake and `tracker` as its tracker.
+fn host_tracking(
+    world: World,
+    journal: Box<dyn temet_work_core::Journal>,
+    runtimes: temet_work_runtime::Runtimes,
+    config: &str,
+    daemon_host: Option<&str>,
+    tracker: FakeTracker,
+) -> (Host, Starts) {
     let mut trackers = temet_work_tracker::Trackers::default();
-    trackers.add(Box::new(FakeTracker {
-        issues,
-        ..FakeTracker::default()
-    }));
+    trackers.add(Box::new(tracker));
     let mut runners = temet_work_runner::Runners::default();
     let fake = FakeRunner::default();
     let starts = fake.starts();
@@ -410,7 +429,14 @@ fn a_folder_on_another_machine_needs_daemon_host_before_an_agent_starts_there() 
         Some("omit"),
     );
     host.tick(0).expect("tick");
-    assert_eq!(host.world().agents.len(), 1, "{:?}", host.problems());
+    // The refiner, and the investigator of a group short of work: both on mac.
+    let machines: Vec<&str> = host
+        .world()
+        .agents
+        .values()
+        .map(|a| a.machine.0.as_str())
+        .collect();
+    assert_eq!(machines, ["mac", "mac"], "{:?}", host.problems());
 }
 
 #[test]
@@ -2101,20 +2127,21 @@ refining_at_once = 2
         ] {
             ask(&mut host, Request::new(None, command));
         }
-        // Two agents here and one on mac, each with its own secret.
+        // Three agents here (the group's investigator among them) and one on mac,
+        // each with its own secret.
         let started = starts.lock().expect("starts").clone();
         let machines: Vec<Option<&str>> = started.iter().map(|s| s.machine.as_deref()).collect();
-        assert_eq!(machines.len(), 3, "{machines:?}");
-        assert_eq!(machines.iter().filter(|m| m.is_none()).count(), 2);
+        assert_eq!(machines.len(), 4, "{machines:?}");
+        assert_eq!(machines.iter().filter(|m| m.is_none()).count(), 3);
         assert!(machines.contains(&Some("mac")), "{machines:?}");
-        let secrets: Vec<String> = ["refiner-1", "refiner-2", "author-1"]
+        let secrets: Vec<String> = ["refiner-1", "refiner-2", "author-1", "investigator-1"]
             .iter()
             .map(|a| secret(&starts, a))
             .collect();
         let mut distinct = secrets.clone();
         distinct.sort();
         distinct.dedup();
-        assert_eq!(distinct.len(), 3);
+        assert_eq!(distinct.len(), 4);
         drop(host);
         let written = std::fs::read_to_string(&log).expect("log");
         shown.push(temet_work_core::text::text(
@@ -2646,5 +2673,189 @@ refining_at_once = 2
             );
         }
         assert_eq!(status.0, Some(0), "{status:?}");
+    }
+}
+
+mod investigations {
+    use super::*;
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::Event;
+    use temet_work_core::ids::GroupId;
+    use temet_work_tracker::TrackedMilestone;
+
+    const SHORT: &str = r#"
+[[project]]
+id = "ankh"
+tracker = "fake"
+name = "city/ankh"
+
+[[folder]]
+id = "ankh-1"
+project = "ankh"
+path = "."
+
+[[group]]
+id = "watch"
+name = "Night watch"
+projects = ["ankh"]
+milestones = ["First"]
+refining_at_once = 2
+"#;
+
+    /// A host whose group, with one issue to refine and a free slot, is short of work.
+    fn short() -> (Host, Starts, Kept) {
+        let kept = Kept::default();
+        let mut one = tracked("city/ankh", "1", 1);
+        one.1.milestone = Some("First".into());
+        let (host, starts) = host_tracking(
+            World::default(),
+            Box::new(kept.clone()),
+            fake_runtimes(),
+            SHORT,
+            None,
+            FakeTracker {
+                issues: vec![one],
+                milestones: vec![(
+                    "city/ankh".into(),
+                    TrackedMilestone {
+                        title: "First".into(),
+                        open: 1,
+                    },
+                )],
+                ..FakeTracker::default()
+            },
+        );
+        (host, starts, kept)
+    }
+
+    fn ask(host: &mut Host, request: Request) -> Reply {
+        answer(host, 1_000, &request, &Peer::Unchecked).expect("answer")
+    }
+
+    fn file(title: &str) -> Command {
+        Command::File {
+            project: temet_work_core::ids::ProjectId::new("ankh"),
+            title: title.into(),
+            body: "Wind it nightly.\nDepends on #1".into(),
+            milestone: None,
+        }
+    }
+
+    fn starts_on(kept: &Kept, issue: &IssueId) -> usize {
+        kept.0
+            .lock()
+            .expect("journal")
+            .iter()
+            .filter(|e| matches!(e, Event::AgentStarted { issue: Some(i), .. } if i == issue))
+            .count()
+    }
+
+    #[test]
+    fn an_issue_the_investigator_files_gets_a_refiner_at_once_and_the_next_sync_adds_nothing() {
+        let (mut host, starts, kept) = short();
+        host.tick(0).expect("tick");
+        let investigator = &host.world().agents[&AgentId::new("investigator-1")];
+        assert_eq!(
+            (investigator.issue.as_ref(), investigator.folder.as_ref()),
+            (None, None),
+            "{:?}",
+            host.problems()
+        );
+        // Cloned, so the lock is not held while the investigator's requests read it.
+        let labels = starts.lock().expect("starts")[1].labels.clone();
+        assert_eq!(labels.get("role").map(String::as_str), Some("investigator"));
+        assert_eq!(labels.get("issue"), None);
+
+        let reply = ask(
+            &mut host,
+            from(&starts, Some("investigator-1"), file("Wind the clock")),
+        );
+        let Reply::Done { text } = reply else {
+            panic!("{reply:?}");
+        };
+        assert_eq!(
+            text,
+            "filed ankh#2 in milestone First; an issue of ankh that waits for it says: Depends on #2"
+        );
+        let filed = IssueId::new("ankh", "2");
+        let issue = &host.world().issues[&filed];
+        assert_eq!(issue.stage, Stage::Refining, "in the loop at once");
+        assert_eq!(issue.depends_on, [IssueId::new("ankh", "1")]);
+        assert_eq!(starts_on(&kept, &filed), 1, "a refiner on it");
+        let g = host.world().groups[&GroupId::new("watch")].clone();
+        assert_eq!(
+            host.world().queue(&g),
+            2,
+            "it counts toward the queue at once"
+        );
+        assert!(
+            kept.0
+                .lock()
+                .expect("journal")
+                .contains(&Event::IssueFiled {
+                    group: GroupId::new("watch"),
+                    agent: AgentId::new("investigator-1"),
+                    issue: filed.clone(),
+                    title: "Wind the clock".into(),
+                    milestone: Some(temet_work_core::ids::MilestoneId::new("First")),
+                })
+        );
+
+        // The next sync finds the issue as filed: nothing changes, nobody else starts.
+        let before = kept.0.lock().expect("journal").len();
+        assert_eq!(host.tick(60_000), Ok(0), "no events from the sync");
+        assert_eq!(starts_on(&kept, &filed), 1);
+        assert_eq!(
+            kept.0.lock().expect("journal").len(),
+            before,
+            "nothing logged"
+        );
+
+        // The same title again is the plainest duplicate.
+        let again = ask(
+            &mut host,
+            from(&starts, Some("investigator-1"), file("Wind the clock")),
+        );
+        assert!(
+            matches!(&again, Reply::Refused { why } if why.contains("ankh#2 is open with the title")),
+            "{again:?}"
+        );
+        let person = ask(&mut host, Request::new(None, file("Ring the bell")));
+        assert!(matches!(person, Reply::Refused { .. }), "{person:?}");
+
+        // Its word ends the investigation and stops its session.
+        let done = ask(
+            &mut host,
+            from(
+                &starts,
+                Some("investigator-1"),
+                Command::Investigated {
+                    group: GroupId::new("watch"),
+                },
+            ),
+        );
+        assert!(
+            matches!(&done, Reply::Done { text } if text.contains("ended with 1 issue filed")),
+            "{done:?}"
+        );
+        assert_eq!(
+            host.world().agents[&AgentId::new("investigator-1")].state,
+            temet_work_core::model::AgentState::Ended
+        );
+        assert_eq!(
+            kept.0.lock().expect("journal").last(),
+            Some(&Event::InvestigationEnded {
+                group: GroupId::new("watch"),
+                at_ms: 1_000,
+                filed: 1,
+            })
+        );
+        let Reply::Done { text } = ask(&mut host, Request::new(None, Command::Status)) else {
+            panic!("status");
+        };
+        assert!(
+            text.contains("; last investigated 1970-01-01 00:00 UTC, filed 1 issue"),
+            "{text}"
+        );
     }
 }

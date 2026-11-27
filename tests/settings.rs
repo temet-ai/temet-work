@@ -12,10 +12,12 @@ use temet_work_core::settings::{spec, specs};
 
 /// The methods of the world that read a setting; the key is their last argument.
 /// The role is the one before it, for those that take one.
-const READERS: [(&str, bool); 7] = [
+const READERS: [(&str, bool); 9] = [
     ("setting", true),
     ("setting_text", true),
     ("setting_number", true),
+    ("text_at", true),
+    ("number_at", true),
     ("setting_flag", true),
     ("resolve", true),
     ("source_number", false),

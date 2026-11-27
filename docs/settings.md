@@ -60,6 +60,7 @@ which is the one in effect.
 | `remind_after`, `reminders` | yes | 10 minutes, 2 | the runner family, per agent's issue and role |
 | `starts` | yes | 3 agents of one role on one issue | the loop, per issue and role |
 | `sync_every`, `ci_every` | no | 60 s, 30 s | the tracker family for each project or area; the code-host family for each issue |
+| `investigate` | no | none | the investigator's brief, under each project's name: lines a person adds, such as the parts of the code another team owns |
 
 The table is the resolver's: `temet-work settings` lists the same keys, and the code reads
 every one of them through it. A setting with no value and no built-in value, such as
@@ -90,7 +91,14 @@ and `opus` on the milestone's. Reviewers run Codex, so none of those models reac
 when it gets none. `temet-work status` lists each value under the key it was set with.
 
 How many issues a group refines at once stays on the group: it is how much the group
-takes on, not how a piece of work is done.
+takes on, not how a piece of work is done. So do `queue_low` and `investigate_every`, which
+say when the group starts an investigator (`docs/configuration.md`).
+
+An investigator works for its group and on no issue, so its settings (`runtime`, `model`,
+`runner`, `machine`, `permission`, `remind_after`, `reminders`) are read at the project
+level of the first repository the group covers: its first project, else the first project
+of its first area. `investigate` is read at each project's level, for that project's lines. A value at a
+task or milestone level reaches no investigator.
 
 ## Which machine an agent runs on
 
@@ -207,7 +215,7 @@ model. So a person's `set` or `unset` of either on the task, with no role or for
 author, also drops the refiner's value under the other name, which could otherwise be
 read first.
 
-Eight settings only a person sets, at any level and for any role they take. An agent's
+Nine settings only a person sets, at any level and for any role they take. An agent's
 plan, `set` or `unset` that names one is refused with the reason, and a refused plan is
 not recorded:
 
@@ -221,6 +229,7 @@ not recorded:
 | `run_in` | it is the folder `deploy` and `verify` run in |
 | `permission` | it decides what every later agent on the issue may do without asking |
 | `ci` | `false` takes the CI gate off the code the issue's own author writes, in every repository the issue changes |
+| `investigate` | it is text written into every later investigator's brief |
 
 A log written before agents were refused may hold one of these set or unset for an issue by
 an agent. The daemon reads such a log and leaves that change out, so the issue takes the

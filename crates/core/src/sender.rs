@@ -193,6 +193,8 @@ impl Command {
             Self::Rule { .. } => "rule",
             Self::Overturn { .. } => "overturn",
             Self::Proposal { .. } => "proposal",
+            Self::File { .. } => "file",
+            Self::Investigated { .. } => "investigated",
         }
     }
 

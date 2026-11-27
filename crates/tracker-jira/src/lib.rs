@@ -510,7 +510,60 @@ impl Tracker for Jira {
         self.call("POST", path, Some(json!({"transition": {"id": id}})))
             .map(|_| ())
     }
+
+    /// Files a task with the milestone as its fix version.
+    fn create(
+        &mut self,
+        project: &str,
+        title: &str,
+        body: &str,
+        milestone: Option<&str>,
+    ) -> Result<TrackedIssue, TrackerError> {
+        valid_project(project)?;
+        let mut fields = json!({
+            "project": {"key": project},
+            "summary": title,
+            "issuetype": {"name": ISSUE_TYPE},
+        });
+        let doc = document(body);
+        if doc["content"].as_array().is_some_and(|c| !c.is_empty()) {
+            fields["description"] = doc.clone();
+        }
+        if let Some(m) = milestone {
+            fields["fixVersions"] = json!([{"name": m}]);
+        }
+        let made = self.call(
+            "POST",
+            "/rest/api/3/issue".into(),
+            Some(json!({"fields": fields})),
+        )?;
+        let key = made
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| TrackerError::Other("Jira named no key for the new issue".into()))?;
+        valid_key(key)?;
+        let order = key
+            .rsplit('-')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_default();
+        // As Jira will list it: its description read back as plain text.
+        let body = flatten(&doc);
+        Ok(TrackedIssue {
+            key: key.to_string(),
+            title: title.to_string(),
+            depends_on: depends_on(&body),
+            body,
+            milestone: milestone.map(String::from),
+            order,
+            closed: false,
+        })
+    }
 }
+
+/// The issue type a filed issue gets: the one every Jira Cloud software
+/// project has.
+const ISSUE_TYPE: &str = "Task";
 
 #[cfg(test)]
 mod tests {
@@ -529,11 +582,14 @@ mod tests {
     }
 
     /// Replays Jira output recorded from a made-up project, DEMO, and notes each request.
+    /// An issue filed through it is listed afterwards, as Jira lists it.
     #[derive(Clone, Default)]
     struct Recorded {
         sent: Arc<Mutex<Vec<Request>>>,
         /// The status category an issue is in; `done` for DEMO-99.
         no_done_transition: bool,
+        /// The fields of the issue filed, once one is.
+        filed: Arc<Mutex<Option<Value>>>,
     }
 
     impl Transport for Recorded {
@@ -541,7 +597,22 @@ mod tests {
             self.sent.lock().expect("lock").push(r.clone());
             let path = r.path.as_str();
             match (r.method, path) {
-                ("POST", "/rest/api/3/search/jql") => reply(200, SEARCH),
+                ("POST", "/rest/api/3/issue") => {
+                    let body: Value =
+                        serde_json::from_str(r.body.as_deref().unwrap_or("{}")).expect("json");
+                    *self.filed.lock().expect("lock") = Some(body["fields"].clone());
+                    reply(201, r#"{"id":"10042","key":"DEMO-42"}"#)
+                }
+                ("POST", "/rest/api/3/search/jql") => {
+                    let Some(fields) = self.filed.lock().expect("lock").clone() else {
+                        return reply(200, SEARCH);
+                    };
+                    let mut page: Value = serde_json::from_str(SEARCH).expect("json");
+                    if let Some(issues) = page["issues"].as_array_mut() {
+                        issues.push(json!({"key": "DEMO-42", "fields": fields}));
+                    }
+                    reply(200, &page.to_string())
+                }
                 ("GET", "/rest/api/3/project/DEMO/versions") => reply(200, VERSIONS),
                 ("GET", p) if p.starts_with("/rest/api/3/issue/DEMO-99?") => reply(
                     200,
@@ -600,6 +671,58 @@ mod tests {
             temet_work_tracker::contract::check(&mut jira, &ReadOnly),
             Ok(())
         );
+    }
+
+    struct MayFile;
+
+    impl temet_work_tracker::contract::Harness for MayFile {
+        fn project(&self) -> String {
+            "DEMO".into()
+        }
+        fn writable_issue(&self) -> Option<String> {
+            None
+        }
+        fn may_create(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn creates_a_task_with_its_fix_version_on_recorded_output() {
+        let (mut checked, _) = jira();
+        assert_eq!(
+            temet_work_tracker::contract::check(&mut checked, &MayFile),
+            Ok(())
+        );
+        let (mut filing, sent) = jira();
+        let created = filing
+            .create(
+                "DEMO",
+                "Mend the clock",
+                "Wind it.\n\nDepends on DEMO-41",
+                Some("Later"),
+            )
+            .expect("created");
+        assert_eq!(
+            (created.key.as_str(), created.order, created.body.as_str()),
+            ("DEMO-42", 42, "Wind it.\nDepends on DEMO-41")
+        );
+        assert_eq!(created.depends_on, ["DEMO-41"]);
+        let sent = sent.lock().expect("lock");
+        let r = sent.last().expect("a request");
+        assert_eq!((r.method, r.path.as_str()), ("POST", "/rest/api/3/issue"));
+        let body: Value = serde_json::from_str(r.body.as_deref().expect("body")).expect("json");
+        assert_eq!(body["fields"]["project"]["key"], "DEMO");
+        assert_eq!(body["fields"]["summary"], "Mend the clock");
+        assert_eq!(body["fields"]["issuetype"]["name"], "Task");
+        assert_eq!(body["fields"]["fixVersions"][0]["name"], "Later");
+        assert_eq!(body["fields"]["description"]["type"], "doc");
+        drop(sent);
+        let (mut refused, _) = jira();
+        assert!(matches!(
+            refused.create("not a key", "x", "", None),
+            Err(TrackerError::NotFound(_))
+        ));
     }
 
     #[test]

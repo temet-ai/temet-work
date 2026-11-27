@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use temet_work_core::ids::{FolderId, GroupId, MachineId, MilestoneId, ProjectId};
-use temet_work_core::model::Role;
+use temet_work_core::model::{INVESTIGATE_EVERY, Role};
 use temet_work_core::settings::{self, FILE, Key, Scope, Value};
 use temet_work_core::world::LOCAL;
 use temet_work_core::{Event, World};
@@ -222,6 +222,13 @@ pub struct GroupConf {
     /// The model its agents run (`haiku`, `sonnet`); the runtime's default when
     /// left out. Read as the `model` setting of the projects and areas it works on.
     pub model: Option<String>,
+    /// Below how many issues in its work queue it starts an investigator; twice
+    /// the work folders of its projects (2 with none) when left out, and 0 for
+    /// never.
+    pub queue_low: Option<usize>,
+    /// Minutes from the end of its last investigation before another may start;
+    /// 120 when left out.
+    pub investigate_every: Option<u64>,
 }
 
 fn local() -> String {
@@ -314,6 +321,13 @@ impl Config {
         }
         let mut groups = BTreeSet::new();
         for g in &self.groups {
+            if g.investigate_every == Some(0) {
+                return Err(format!(
+                    "group {} has investigate_every 0: it takes at least 1 minute, so a group with \
+                     nothing left to plan does not investigate in a loop",
+                    g.id
+                ));
+            }
             if let Some(a) = g.areas.iter().find(|a| !areas.contains(a.as_str())) {
                 return Err(format!(
                     "group {} names area {a}, which is not listed",
@@ -515,6 +529,8 @@ impl Config {
                     && w.areas == areas
                     && w.milestones == milestones
                     && w.refining_at_once == refining_at_once
+                    && w.queue_low == g.queue_low
+                    && w.investigate_every == g.investigate_every.unwrap_or(INVESTIGATE_EVERY)
             });
             if !same {
                 out.push(Event::GroupCreated {
@@ -525,6 +541,8 @@ impl Config {
                     milestones,
                     refining_at_once,
                     model: None,
+                    queue_low: g.queue_low,
+                    investigate_every: g.investigate_every,
                 });
             }
         }
@@ -595,6 +613,39 @@ milestones = ["Clocks"]
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn a_group_reads_queue_low_and_investigate_every_or_leaves_them_to_the_defaults() {
+        let group = |config: &Config| {
+            let (world, _) = World::replay(&config.events(&World::default()));
+            world.groups[&GroupId::new("watch")].clone()
+        };
+        let plain = Config::parse(EXAMPLE).expect("parse");
+        let g = group(&plain);
+        assert_eq!((g.queue_low, g.investigate_every), (None, 120));
+        let set = Config::parse(&EXAMPLE.replace(
+            "milestones = [\"Clocks\"]",
+            "milestones = [\"Clocks\"]\nqueue_low = 5\ninvestigate_every = 30",
+        ))
+        .expect("parse");
+        let g = group(&set);
+        assert_eq!((g.queue_low, g.investigate_every), (Some(5), 30));
+        // A change of either is sent again; the same values are not.
+        let (world, _) = World::replay(&plain.events(&World::default()));
+        assert!(matches!(
+            set.events(&world).as_slice(),
+            [Event::GroupCreated {
+                queue_low: Some(5),
+                investigate_every: Some(30),
+                ..
+            }]
+        ));
+        let (world, _) = World::replay(&set.events(&World::default()));
+        assert_eq!(set.events(&world), vec![]);
+        let never = EXAMPLE.replace("milestones = [\"Clocks\"]", "investigate_every = 0");
+        let why = Config::parse(&never).expect_err("0 minutes");
+        assert!(why.contains("investigate_every 0"), "{why}");
     }
 
     const AREA: &str = r#"

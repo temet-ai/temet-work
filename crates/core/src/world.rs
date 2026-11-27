@@ -18,8 +18,8 @@ use crate::ids::{AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, Pro
 use crate::launch::Launch;
 use crate::model::Decision;
 use crate::model::{
-    Agent, AgentState, Area, DecisionKind, Folder, Group, Issue, Project, Role, Rule, RuleState,
-    Stage,
+    Agent, AgentState, Area, DecisionKind, Folder, Group, INVESTIGATE_EVERY, Investigation, Issue,
+    Project, Role, Rule, RuleState, Stage,
 };
 use crate::settings::{self, FILE, Scope, Value};
 
@@ -56,6 +56,8 @@ pub struct World {
     pub decisions: BTreeMap<DecisionId, Decision>,
     /// Rules proposed from overturned decisions, by id.
     pub rules: BTreeMap<RuleId, Rule>,
+    /// Each group's investigation: the one running, else its last.
+    pub investigations: BTreeMap<GroupId, Investigation>,
     /// Settings by level, role and key (`docs/settings.md`).
     pub settings: BTreeMap<crate::settings::Key, crate::settings::Entry>,
     /// What the build's adapters offer for the settings that name one, put in by
@@ -202,6 +204,8 @@ impl World {
                 milestones,
                 refining_at_once,
                 model,
+                queue_low,
+                investigate_every,
             } => {
                 // Older logs: a group's model, as a setting on what it works on.
                 if let Some(m) = model {
@@ -225,6 +229,8 @@ impl World {
                         areas: areas.clone(),
                         milestones: milestones.clone(),
                         refining_at_once: (*refining_at_once).max(1),
+                        queue_low: *queue_low,
+                        investigate_every: investigate_every.unwrap_or(INVESTIGATE_EVERY),
                     },
                 );
             }
@@ -613,6 +619,66 @@ impl World {
                     Self::send_back(i, round, vec![point], true, &mut out);
                 }
             }
+            Event::InvestigationStarted {
+                group,
+                agent,
+                at_ms,
+            } => {
+                let open = self
+                    .investigations
+                    .get(group)
+                    .is_some_and(Investigation::running);
+                if self.groups.contains_key(group) && !open {
+                    let since_ms = self.investigations.get(group).map(|i| i.started_ms);
+                    self.investigations.insert(
+                        group.clone(),
+                        Investigation {
+                            group: group.clone(),
+                            agent: agent.clone(),
+                            started_ms: *at_ms,
+                            since_ms,
+                            ended_ms: None,
+                            filed: Vec::new(),
+                            done: false,
+                        },
+                    );
+                    out.push(Effect::Investigate {
+                        group: group.clone(),
+                    });
+                }
+            }
+            Event::IssueFiled {
+                group,
+                agent,
+                issue,
+                ..
+            } => {
+                if let Some(i) = self.investigations.get_mut(group)
+                    && i.running()
+                    && &i.agent == agent
+                    && !i.filed.contains(issue)
+                {
+                    i.filed.push(issue.clone());
+                }
+            }
+            Event::Investigated { group, agent } => {
+                if let Some(i) = self.investigations.get_mut(group)
+                    && i.running()
+                    && &i.agent == agent
+                {
+                    i.done = true;
+                    out.extend(self.stop_agent(agent));
+                }
+            }
+            Event::InvestigationEnded { group, at_ms, .. } => {
+                if let Some(i) = self.investigations.get_mut(group)
+                    && i.running()
+                {
+                    i.ended_ms = Some(*at_ms);
+                    let agent = i.agent.clone();
+                    out.extend(self.stop_agent(&agent));
+                }
+            }
             Event::Retried { issue } => {
                 if self
                     .issues
@@ -727,8 +793,12 @@ impl World {
     /// heard its round, an arbiter while the issue is with the arbiter. Once a
     /// reviewer's or arbiter's approval is in, the issue waits on the checks, not
     /// on that agent. An arbiter that has ruled on the issue has finished its step,
-    /// and so has an author on a paused issue that has not heard its fixes.
+    /// and so has an author on a paused issue that has not heard its fixes. A
+    /// group's investigation waits on its investigator until it says it is done.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
+        if self.investigates(agent) {
+            return true;
+        }
         let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
             return false;
         };
@@ -767,9 +837,13 @@ impl World {
     /// running author or reviewer that has not heard its fixes or its new round is
     /// told again. After the `starts` setting's number of agents of one role on one
     /// issue it gives up, and says so. A paused issue gets nothing until it is back
-    /// in its group's scope, and then what its stage needs.
+    /// in its group's scope, and then what its stage needs. A running investigation
+    /// whose investigator never started gets one.
     pub fn missing(&self) -> Missing {
-        let mut out = Missing::default();
+        let mut out = Missing {
+            start: self.missing_investigators(),
+            ..Missing::default()
+        };
         for i in self.issues.values().filter(|i| !self.paused(i)) {
             // A merge, deploy or verify lost to a restart or a failure is asked for
             // again; the parts that do them do not repeat work already done or running.
@@ -890,7 +964,8 @@ impl World {
     /// that role this world has started (`author-3`). An agent with no work
     /// folder of its own runs in a folder of its project without holding it.
     /// `None` when the issue is unknown, or when such an agent has no folder on
-    /// the machine its `machine` setting names.
+    /// the machine its `machine` setting names. An investigator works for its
+    /// group, not on an issue: it starts through [`World::launch_investigator`].
     pub fn launch(
         &self,
         group: &GroupId,
@@ -898,6 +973,9 @@ impl World {
         issue: &IssueId,
         folder: Option<&FolderId>,
     ) -> Option<Launch> {
+        if role == Role::Investigator {
+            return None;
+        }
         let i = self.issues.get(issue)?;
         if folder.is_none() && !self.has_place(i, role) {
             return None;

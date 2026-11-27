@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use temet_work_core::settings::Choice;
+use temet_work_core::settings::{Choice, Scope};
 use temet_work_core::world::LOCAL;
 use temet_work_core::{Effect, Outcome, Part, World};
 
@@ -152,7 +152,7 @@ pub mod contract {
     fn brief(model: Option<&str>) -> Brief {
         Brief {
             role: Role::Author,
-            issue: IssueId::new("contract", "1"),
+            issue: Some(IssueId::new("contract", "1")),
             task: "Add the contract-check test, then stop.".into(),
             model: model.map(String::from),
             permission: "auto".into(),
@@ -247,16 +247,17 @@ impl Runtimes {
             .map(|a| a.id())
     }
 
-    /// The runtime an agent of `role` on `issue` runs: the one its `runtime`
-    /// setting names, else this build's default.
-    fn pick(&self, world: &World, issue: &IssueId, role: Role) -> Result<&dyn Runtime, String> {
-        let named = world.setting_text(issue, Some(role), "runtime");
+    /// The runtime an agent of `role` runs at `scope` (its issue's, or its
+    /// group's for an agent with none): the one its `runtime` setting names, else
+    /// this build's default.
+    fn pick(&self, world: &World, scope: &Scope, role: Role) -> Result<&dyn Runtime, String> {
+        let named = world.text_at(scope, Some(role), "runtime");
         let id = named
             .as_deref()
             .or_else(|| self.default_id())
             .ok_or_else(|| {
                 format!(
-                    "no runtime is set for {issue}'s {}s and this build has no default; \
+                    "no runtime is set for {scope}'s {}s and this build has no default; \
                      set runtime globally. This build has: {}",
                     role.name(),
                     list(&self.ids())
@@ -305,27 +306,38 @@ impl Part for Runtimes {
                 role,
                 issue,
                 folder,
-            } => (group.clone(), *role, issue, folder.as_ref()),
+            } => (group.clone(), *role, Some(issue), folder.as_ref()),
             // A review with no reviewer running starts one; a running one is
             // told of the next round elsewhere.
             Effect::StartReview { issue, .. } if world.running(issue, Role::Reviewer).is_none() => {
                 let Some(group) = world.issues.get(issue).and_then(|i| i.group.clone()) else {
                     return Outcome::Failed(format!("{issue} has no group to review it"));
                 };
-                (group, Role::Reviewer, issue, None)
+                (group, Role::Reviewer, Some(issue), None)
             }
+            Effect::Investigate { group } => (group.clone(), Role::Investigator, None, None),
             _ => return Outcome::NotMine,
         };
-        let runtime = match self.pick(world, issue, role) {
+        let scope = world.agent_scope(&group, issue);
+        let runtime = match self.pick(world, &scope, role) {
             Ok(r) => r,
             Err(e) => return Outcome::Failed(e),
         };
-        let Some(launch) = world.launch(&group, role, issue, folder) else {
-            return Outcome::Failed(format!(
-                "cannot start a {} on {issue}: it is not known, or no work folder is on the \
-                 machine its `machine` setting names",
-                role.name()
-            ));
+        let launch = match issue {
+            Some(issue) => world.launch(&group, role, issue, folder),
+            None => world.launch_investigator(&group),
+        };
+        let Some(launch) = launch else {
+            return Outcome::Failed(match issue {
+                Some(issue) => format!(
+                    "cannot start a {} on {issue}: it is not known, or no work folder is on the \
+                     machine its `machine` setting names",
+                    role.name()
+                ),
+                None => {
+                    format!("cannot start an investigator for {group}: it runs no investigation")
+                }
+            });
         };
         // A folder on this machine is trusted here before the agent starts in it.
         // One on another machine is trusted there, by the program the runner runs
@@ -789,5 +801,69 @@ mod tests {
             panic!("started");
         };
         assert!(why.contains("/work/a") && why.contains("no way"), "{why}");
+    }
+
+    #[test]
+    fn an_investigation_starts_its_investigator_with_the_runtime_of_its_groups_project() {
+        use temet_work_core::Event;
+        use temet_work_core::ids::{AgentId, GroupId, ProjectId};
+        use temet_work_core::settings::{Scope, Value};
+        let mut world = World::default();
+        let watch = GroupId::new("watch");
+        for e in [
+            Event::ProjectAdded {
+                project: ProjectId::new("ankh"),
+                tracker: "fake".into(),
+                name: "city/ankh".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::GroupCreated {
+                group: watch.clone(),
+                name: "Night watch".into(),
+                projects: vec![ProjectId::new("ankh")],
+                areas: vec![],
+                milestones: vec![],
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+            Event::SettingSet {
+                scope: Scope::Project(ProjectId::new("ankh")),
+                role: Some(Role::Investigator),
+                key: "runtime".into(),
+                value: Value::Text("other".into()),
+                by: "person".into(),
+            },
+        ] {
+            world.apply(&e);
+        }
+        let mut part = Runtimes::default();
+        part.add(Box::new(FakeRuntime));
+        part.add(Box::new(Other));
+        let investigate = Effect::Investigate {
+            group: watch.clone(),
+        };
+        assert!(
+            matches!(part.carry_out(&investigate, &world), Outcome::Failed(why) if why.contains("runs no investigation")),
+            "no investigation, no investigator"
+        );
+        world.apply(&Event::InvestigationStarted {
+            group: watch,
+            agent: AgentId::new("investigator-1"),
+            at_ms: 0,
+        });
+        assert_eq!(program_for(&mut part, &world, &investigate), "other-agent");
+        let Outcome::Done { effects, .. } = part.carry_out(&investigate, &world) else {
+            panic!("not done");
+        };
+        let [Effect::Run { launch, .. }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(
+            (launch.agent.0.as_str(), launch.brief.issue.as_ref()),
+            ("investigator-1", None)
+        );
     }
 }

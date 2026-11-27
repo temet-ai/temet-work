@@ -133,13 +133,54 @@ impl Host {
             .unwrap_or_else(|| Err(format!("no part in this build shows {agent}'s terminal")))
     }
 
-    /// Logs and applies `event`, then carries out everything it leads to.
+    /// Logs and applies `event`, then carries out everything it leads to, and
+    /// ends the investigations that it ended (`World::investigation_events`).
     pub fn handle(&mut self, now_ms: u64, event: Event) -> Result<(), String> {
-        self.run(now_ms, vec![Work::Event(event)])
+        self.run(now_ms, vec![Work::Event(event)])?;
+        self.investigations(now_ms, false)
     }
 
-    /// Starts the agents issues need and do not have (`World::missing`).
+    /// Carries out `effect` now, offered to the parts in order, and returns the
+    /// events it led to, or why it failed. A command that waits for a part's
+    /// answer, such as filing an issue, goes through here. The outer error stops
+    /// the daemon: an event could not be logged.
+    pub fn perform(
+        &mut self,
+        now_ms: u64,
+        effect: &Effect,
+    ) -> Result<Result<Vec<Event>, String>, String> {
+        match self.offer(effect) {
+            Outcome::Done { events, effects } => {
+                self.problems.remove(&effect.describe());
+                let mut stack: Vec<Work> = effects.into_iter().rev().map(Work::Effect).collect();
+                stack.extend(events.iter().cloned().rev().map(Work::Event));
+                self.run(now_ms, stack)?;
+                self.investigations(now_ms, false)?;
+                Ok(Ok(events))
+            }
+            Outcome::Failed(why) => Ok(Err(why)),
+            Outcome::NotMine => Ok(Err(format!(
+                "no part in this build can {}",
+                effect.describe()
+            ))),
+        }
+    }
+
+    /// Logs and applies what the clock makes due at `now_ms`: the end of each
+    /// investigation whose investigator is done, and, when `start`, the start of
+    /// one for each group short of work.
+    fn investigations(&mut self, now_ms: u64, start: bool) -> Result<(), String> {
+        let due = self.world.investigation_events(now_ms, start);
+        if due.is_empty() {
+            return Ok(());
+        }
+        self.run(now_ms, due.into_iter().rev().map(Work::Event).collect())
+    }
+
+    /// Starts an investigation for each group short of work, then the agents
+    /// issues and investigations need and do not have (`World::missing`).
     pub fn recover(&mut self, now_ms: u64) -> Result<(), String> {
+        self.investigations(now_ms, true)?;
         let missing = self.world.missing();
         self.problems.retain(|k, _| !k.starts_with(GAVE_UP));
         for line in missing.given_up {

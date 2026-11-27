@@ -30,16 +30,17 @@ impl Part for Brains {
         "brains"
     }
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
-        let Effect::StartAgent {
-            group,
-            role,
-            issue,
-            folder,
-        } = effect
-        else {
-            return Outcome::NotMine;
+        let launch = match effect {
+            Effect::StartAgent {
+                group,
+                role,
+                issue,
+                folder,
+            } => world.launch(group, *role, issue, folder.as_ref()),
+            Effect::Investigate { group } => world.launch_investigator(group),
+            _ => return Outcome::NotMine,
         };
-        let Some(launch) = world.launch(group, *role, issue, folder.as_ref()) else {
+        let Some(launch) = launch else {
             return Outcome::Failed("unknown issue".into());
         };
         let program = Program {
@@ -83,7 +84,7 @@ impl Part for Terms {
                 agent: launch.agent.clone(),
                 group: launch.group.clone(),
                 role: launch.brief.role,
-                issue: Some(launch.brief.issue.clone()),
+                issue: launch.brief.issue.clone(),
                 machine: launch.machine.clone(),
                 folder: launch.folder.clone(),
                 secret_digest: None,
@@ -116,6 +117,8 @@ fn setup(refining_at_once: usize) -> Vec<Event> {
             milestones: vec![],
             refining_at_once,
             model: None,
+            queue_low: None,
+            investigate_every: None,
         },
     ]
 }
@@ -158,6 +161,58 @@ fn a_synced_issue_starts_a_refiner_through_the_parts_and_logs_it() {
     let logged = journal.0.lock().expect("journal").clone();
     assert_eq!(logged.len(), 5);
     assert!(matches!(logged[4], Event::AgentStarted { .. }));
+}
+
+#[test]
+fn a_tick_starts_one_investigator_for_a_group_short_of_work_and_logs_its_start_and_end() {
+    let journal = Shared::default();
+    let mut h = host(
+        vec![Box::new(Brains), Box::new(Terms::default())],
+        journal.clone(),
+    );
+    h.tick(1_000).expect("tick");
+    h.tick(2_000).expect("tick");
+    let me = AgentId::new("investigator-1");
+    let logged = journal.0.lock().expect("journal").clone();
+    let since_setup = &logged[3..];
+    assert_eq!(
+        since_setup,
+        [
+            Event::InvestigationStarted {
+                group: GroupId::new("watch"),
+                agent: me.clone(),
+                at_ms: 1_000,
+            },
+            Event::AgentStarted {
+                agent: me.clone(),
+                group: GroupId::new("watch"),
+                role: Role::Investigator,
+                issue: None,
+                machine: MachineId::new("morpork"),
+                folder: None,
+                secret_digest: None,
+            },
+        ],
+        "one start, the second tick none"
+    );
+    // Its word ends the investigation at once, stamped with the host's clock.
+    h.handle(
+        3_000,
+        Event::Investigated {
+            group: GroupId::new("watch"),
+            agent: me,
+        },
+    )
+    .expect("handle");
+    let logged = journal.0.lock().expect("journal").clone();
+    assert_eq!(
+        logged.last(),
+        Some(&Event::InvestigationEnded {
+            group: GroupId::new("watch"),
+            at_ms: 3_000,
+            filed: 0,
+        })
+    );
 }
 
 #[test]

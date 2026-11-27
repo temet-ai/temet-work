@@ -79,9 +79,9 @@ What exists today:
 | `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, holds text for an agent until its turn ends, and types `continue` into an agent whose usage limit has reset |
 | `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
 | `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |
-| `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
-| `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
-| `temet-work-tracker-jira` | issues, fix versions as milestones, comments and Done transitions through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
+| `temet-work-tracker` | the contract (issues, milestones, comment, close, create), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
+| `temet-work-tracker-github` | issues and milestones through `gh`, and issues filed with `gh issue create`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
+| `temet-work-tracker-jira` | issues, fix versions as milestones, comments, new issues and Done transitions through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
 | `temet-work-codehost` | the contract, a fake and contract tests. The family reads each pull request in review every 30 seconds, reports a conflict, and reports CI finished once it has on all of an issue's pull requests, with the names of failing checks; it merges them when the loop asks, in the plan's order, each after the previous repository's main pipeline passed |
 | `temet-work-codehost-github` | pull requests through `gh`, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-codehost-gitlab` | merge requests through `glab` and its sign-in, merged with `--squash`, `--rebase` or neither; a pipeline reads as failed once a job that may not fail has failed; passes the contract on recorded output and, read only, against GitLab (`--features live`) |
@@ -152,6 +152,12 @@ An issue with a pull request merged still merges the rest, deploys and is verifi
 between repositories would leave main branches that do not match, and a merged change has to
 deploy to match main. When the issue is covered again, `World::missing` starts or tells the
 agent its stage needs, or asks for the merge.
+
+When a group's work queue runs short, the daemon starts one investigator for it, which holds
+no folder, reads the group's projects and files the next issues through `temet-work file`
+(`docs/configuration.md`). The daemon counts the queue, keeps to one investigator per group
+and waits `investigate_every` between investigations; the clock comes into the core as the
+time `Host::tick` takes, and each investigation's start and end times are on its events.
 
 ## How parts meet
 

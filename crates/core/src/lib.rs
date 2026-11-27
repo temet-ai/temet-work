@@ -11,6 +11,7 @@ pub mod effect;
 pub mod event;
 pub mod host;
 pub mod ids;
+pub mod investigation;
 pub mod launch;
 pub mod model;
 pub mod placement;

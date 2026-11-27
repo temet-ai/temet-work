@@ -230,7 +230,7 @@ mod tests {
         use temet_work_runtime::{IssueId, Role};
         let brief = Brief {
             role: Role::Author,
-            issue: IssueId::new("a", "1"),
+            issue: Some(IssueId::new("a", "1")),
             task: "do it".into(),
             model: None,
             permission: "plan".into(),

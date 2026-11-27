@@ -211,7 +211,7 @@ const PERMISSIONS: &[&str] = &[
 ];
 
 /// Every setting, in the order they are listed.
-pub const SPECS: [Spec; 16] = [
+pub const SPECS: [Spec; 17] = [
     Spec {
         key: "runtime",
         kind: Kind::Text,
@@ -337,6 +337,14 @@ pub const SPECS: [Spec; 16] = [
         kind: Kind::Count(1),
         about: "seconds between reads of a pull request's CI",
         agents: Agents::May,
+        per_role: false,
+    },
+    Spec {
+        key: "investigate",
+        kind: Kind::Text,
+        about: "lines added to the investigator's brief under the project's name, such as \
+                parts of the code another team owns",
+        agents: Agents::MayNot("it is text written into every later investigator's brief"),
         per_role: false,
     },
 ];
@@ -699,7 +707,18 @@ impl World {
     /// The setting as a whole number; the built-in one when a level holds a value of
     /// another kind.
     pub fn setting_number(&self, issue: &IssueId, role: Option<Role>, key: &str) -> u64 {
-        match self.setting(issue, role, key).map(|r| r.value) {
+        self.number_at(&Scope::Task(issue.clone()), role, key)
+    }
+
+    /// The setting over `scope`'s chain as text, when it has a value.
+    pub fn text_at(&self, scope: &Scope, role: Option<Role>, key: &str) -> Option<String> {
+        self.resolve(scope, role, key).map(|r| r.value.to_string())
+    }
+
+    /// The setting over `scope`'s chain as a whole number; the built-in one when a
+    /// level holds a value of another kind.
+    pub fn number_at(&self, scope: &Scope, role: Option<Role>, key: &str) -> u64 {
+        match self.resolve(scope, role, key).map(|r| r.value) {
             Some(Value::Number(n)) => n,
             _ => match builtin(key) {
                 Some(Value::Number(n)) => n,
@@ -1024,7 +1043,8 @@ mod level {
     }
 
     #[test]
-    fn only_a_person_sets_ci_deploy_permission_review_rounds_run_in_runner_runtime_and_verify() {
+    fn only_a_person_sets_ci_deploy_investigate_permission_review_rounds_run_in_runner_runtime_and_verify()
+     {
         let mut keys: Vec<&str> = specs()
             .filter(|s| matches!(s.agents, Agents::MayNot(_)))
             .map(|s| s.key)
@@ -1035,6 +1055,7 @@ mod level {
             [
                 "ci",
                 "deploy",
+                "investigate",
                 "permission",
                 "review_rounds",
                 "run_in",
@@ -1066,8 +1087,9 @@ mod level {
             "merge",
             "sync_every",
             "ci_every",
+            "investigate",
         ];
-        for (keys, per_role) in [(per, true), (every, false)] {
+        for (keys, per_role) in [(&per[..], true), (&every[..], false)] {
             for key in keys {
                 assert_eq!(spec(key).map(|s| s.per_role), Ok(per_role), "{key}");
             }
@@ -1623,6 +1645,8 @@ mod unknown_adapter {
             milestones: vec![crate::ids::MilestoneId::new("Sign-in")],
             refining_at_once: 1,
             model: None,
+            queue_low: None,
+            investigate_every: None,
         });
         let refiner = AgentId::new("refiner-1");
         w.apply(&Event::AgentStarted {

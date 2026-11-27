@@ -20,6 +20,8 @@ fn watch(projects: &[&str], areas: &[&str], milestones: &[&str]) -> Event {
         milestones: milestones.iter().map(|m| MilestoneId::new(*m)).collect(),
         refining_at_once: 1,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     }
 }
 
@@ -286,6 +288,8 @@ fn a_merge_under_way_finishes_and_deploys_after_its_issue_leaves_scope() {
         milestones: vec![MilestoneId::new("m1")],
         refining_at_once: 2,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     };
     assert_eq!(w.apply(&narrowed), vec![]);
     assert!(w.out_of_scope(&w.issues[&gld()]));
@@ -321,6 +325,8 @@ fn a_ready_issue_moved_into_another_groups_milestones_is_taken_by_that_group() {
         milestones: vec![MilestoneId::new("m2")],
         refining_at_once: 1,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     };
     let (mut w, _) = World::replay(&[
         group(&["m1"], 1),
