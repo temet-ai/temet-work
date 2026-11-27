@@ -398,14 +398,14 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         pull: Some("57".into()),
         pulls: Default::default(),
     };
-    // The refiner is told whose step ready is before the loop looks at stages,
-    // and the author's own ready is accepted.
+    // The refiner was stopped once its plan was in, so nothing may name it any
+    // more; the author's own ready is accepted.
     let wrong = from(&starts, Some("refiner-1"), ready.clone());
     assert_eq!(
         answer(&mut host, 1, &wrong, &Peer::Unchecked).expect("answer"),
         Reply::Refused {
-            why: "ready for ankh#1 is the author's: author-1 is working on it; \
-                  you are refiner-1"
+            why: "refiner-1 has ended, so no request may name it; an agent the issue \
+                  still needs is started again with a new id"
                 .into()
         }
     );
@@ -2069,8 +2069,15 @@ refining_at_once = 2
                 .expect("line")
             })
             .collect();
+        // Two of them: refiner-0 still running, refiner-9 ended.
+        for agent in ["refiner-0", "refiner-9"] {
+            lines.push(format!(
+                r#"{{"seq":{},"at_ms":0,"event":{{"AgentStarted":{{"agent":"{agent}","group":"watch","role":"Refiner","issue":{{"project":"ankh","key":"2"}},"machine":"local","folder":null}}}}}}"#,
+                lines.len() + 1
+            ));
+        }
         lines.push(format!(
-            r#"{{"seq":{},"at_ms":0,"event":{{"AgentStarted":{{"agent":"refiner-0","group":"watch","role":"Refiner","issue":{{"project":"ankh","key":"2"}},"machine":"local","folder":null}}}}}}"#,
+            r#"{{"seq":{},"at_ms":0,"event":{{"AgentChanged":{{"agent":"refiner-9","state":"Ended"}}}}}}"#,
             lines.len() + 1
         ));
         let entries: Vec<temet_work_store::Entry> = lines
@@ -2112,7 +2119,12 @@ refining_at_once = 2
                 text: "ankh#1 is working".into()
             }
         );
-        // ankh#2 waits for the one folder; the plan counts.
+        // The ended one is refused; the running one is taken by its id, and as
+        // ankh#2 waits for the one folder, the plan counts.
+        assert!(matches!(
+            ask("refiner-9", None, plan("2")),
+            Reply::Refused { why } if why.starts_with("refiner-9 has ended")
+        ));
         assert_eq!(
             ask("refiner-0", None, plan("2")),
             Reply::Done {

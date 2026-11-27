@@ -58,14 +58,18 @@ itself is in no log, reply, status or issue text.
 
 - A command that names an agent, a read included, is refused unless it carries that
   agent's secret. The refusal names the agent and says what was wrong: no secret, a wrong
-  one, another agent's, or an id this daemon did not start. An agent started before
-  agents had secrets has no digest in the log and is taken by its id until it ends.
+  one, another agent's, or an id this daemon did not start. A command that names an agent
+  whose session has ended is refused too. An agent started before agents had secrets has
+  no digest in the log and is taken by its id until it ends.
 - On Linux the daemon also reads the process that sent the command, through its socket
   (`SO_PEERCRED`), and that process's parents in `/proc`, and looks in each one's
   environment for a secret it issued. A command that names agent A from inside agent B's
   process tree is refused, even with A's own secret, so an agent that reads another
-  agent's secret from `/proc` cannot use it from inside its own process tree. The tree is read for a command that came
-  through `temet-work relay` too: the relay's mark only adds refusals.
+  agent's secret from `/proc` cannot use it from inside its own process tree. For a
+  command that came through `temet-work relay` the tree read is the relay's own, on the
+  daemon's machine under `sshd`, which says nothing of the machine the command came from.
+  The relay's mark only adds refusals, so a process on the daemon's machine that sets it
+  is still judged by its own tree.
 - A command that names no agent is a person's. It may read from anywhere. A command that
   changes something (`rule`, `overturn`, `retry`, `proposal`, `set` and `unset`) is
   refused when it carries an agent's secret; when, on Linux, the sending process or one of
@@ -84,6 +88,9 @@ Agents run as the same user as the daemon, so this does not stop an agent that:
   that agent;
 - edits the daemon's files or its event log;
 - logs in to the daemon's machine over SSH and runs `temet-work` there, outside the relay;
+- runs on another machine and reads another agent's secret from that machine's `/proc`:
+  through the relay it passes as that agent, since the daemon cannot see the processes
+  there;
 - types into a person's terminal.
 
 On macOS the daemon checks secrets but not process trees, because `SO_PEERCRED` and

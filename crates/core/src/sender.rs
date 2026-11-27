@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::Command;
 use crate::ids::AgentId;
-use crate::model::Agent;
+use crate::model::{Agent, AgentState};
 use crate::world::World;
 
 /// The SHA-256 digest of an agent's secret, as 64 lowercase hex digits. It can
@@ -79,7 +79,8 @@ impl World {
     ///
     /// A request that names an agent needs that agent's secret, for every
     /// command, reads included; an agent started before secrets existed (no
-    /// digest on record) is taken by its id. Either way, a secret this daemon
+    /// digest on record) is taken by its id until it ends. A request that names
+    /// an agent whose session has ended is refused. Either way, a secret this daemon
     /// gave another agent in the sender's process tree refuses it. A request
     /// that names no agent may read anything; one that changes something is
     /// refused when it carries an agent's secret, comes from inside an agent's
@@ -135,6 +136,14 @@ impl World {
         let Some(agent) = self.agents.get(by) else {
             return Err(format!("{by} is not an agent this daemon started"));
         };
+        // Nothing speaks for a session that is over: not a process it left
+        // behind, and not another agent naming an older agent that has no digest.
+        if agent.state == AgentState::Ended {
+            return Err(format!(
+                "{by} has ended, so no request may name it; an agent the issue still needs \
+                 is started again with a new id"
+            ));
+        }
         match (&agent.secret_digest, &sender.proof, carried) {
             (_, _, Some(other)) if other.id != *by => {
                 return Err(format!(
@@ -220,13 +229,24 @@ mod tests {
         }
     }
 
-    /// An author and a reviewer with secrets, and an arbiter started before
-    /// secrets existed.
+    /// An author and a reviewer with secrets, an arbiter started before secrets
+    /// existed, and two agents that have ended: a reviewer with no digest and
+    /// one with a digest.
     fn world() -> World {
         World::replay(&[
             started("author-1", Role::Author, Some(d("a"))),
             started("reviewer-1", Role::Reviewer, Some(d("b"))),
             started("arbiter-1", Role::Arbiter, None),
+            started("reviewer-0", Role::Reviewer, None),
+            started("reviewer-2", Role::Reviewer, Some(d("e"))),
+            Event::AgentChanged {
+                agent: AgentId::new("reviewer-0"),
+                state: crate::model::AgentState::Ended,
+            },
+            Event::AgentChanged {
+                agent: AgentId::new("reviewer-2"),
+                state: crate::model::AgentState::Ended,
+            },
         ])
         .0
     }
@@ -344,6 +364,34 @@ mod tests {
             why.contains("arbiter-1") && why.contains("author-1's process tree"),
             "{why}"
         );
+    }
+
+    #[test]
+    fn an_agent_that_has_ended_is_refused_however_the_request_came() {
+        let w = world();
+        // The ended reviewer with no digest, named with no secret: through the
+        // relay from a clean tree, and where no tree can be read.
+        for s in [
+            relayed(Some("reviewer-0"), None, Peer::Read(vec![])),
+            sender(Some("reviewer-0"), None, Peer::Unchecked),
+        ] {
+            assert_eq!(
+                w.admit(&s, &approve()),
+                Err(
+                    "reviewer-0 has ended, so no request may name it; an agent the issue \
+                     still needs is started again with a new id"
+                        .into()
+                )
+            );
+        }
+        // An ended agent with a digest, even with its own secret, and for a read.
+        let why = w
+            .admit(
+                &sender(Some("reviewer-2"), Some("e"), Peer::Unchecked),
+                &Command::Status,
+            )
+            .expect_err("refused");
+        assert!(why.starts_with("reviewer-2 has ended"), "{why}");
     }
 
     #[test]
