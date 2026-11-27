@@ -1,6 +1,7 @@
 ---
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
+  - 30de12a8-8bb8-4310-a59b-8d5267ce0b97
 ---
 
 # Settings: defaults at every level
@@ -42,7 +43,7 @@ too.
 | `model` | the runtime's own default | the agent's brief, so the runtime adapter |
 | `runner` | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
 | `machine` | none: any machine | the loop, per issue and role, when it picks a work folder (below) |
-| `permission` | `auto` | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
+| `permission` | `auto` (or `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`) | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
 | `review_rounds` | 3 | the loop, per issue |
 | `ci` | true | the code-host family, per issue |
 | `deploy`, `verify`, `run_in` | none | the deploy part, per issue |
@@ -134,8 +135,25 @@ temet-work settings radar#44 --role author
 A refiner can set task-level values in its plan, as a `settings:` map next to `checks:`,
 such as a stronger model for an issue it judges hard. That is a decision like any other:
 recorded as set by the refiner, and open to overturning with `temet-work set`. A refiner
-can set the task level of the issue it is refining and nothing wider; no other agent can
-set anything, and a wider level is a person's.
+can set and unset the task level of the issue it is refining, and only while that issue is
+refining: once its plan is in, a `set` or `unset` from it is refused with the stage the
+issue is at. No other agent can set anything, and a wider level is a person's.
+
+Five settings only a person sets, at any level and for any role. An agent's plan, `set` or
+`unset` that names one is refused with the reason, and a refused plan is not recorded:
+
+| Key | Why only a person sets it |
+|---|---|
+| `deploy` | the daemon runs it as a shell command after a merge |
+| `verify` | the daemon runs it after a deploy |
+| `run_in` | it is the folder `deploy` and `verify` run in |
+| `permission` | it decides what every later agent on the issue may do without asking |
+| `ci` | `false` takes the CI gate off the code the issue's own author writes, in every repository the issue changes |
+
+A log written before agents were refused may hold one of these set or unset for an issue by
+an agent. The daemon reads such a log and leaves that change out, so the issue takes the
+value of the next level, or the built-in one, and `temet-work settings` does not list the
+agent's.
 
 Every change, from the file, a command or a plan, is a `SettingSet` or `SettingUnset`
 event in the log with who made it: `file`, `person`, or the agent's id. A later event
@@ -172,6 +190,8 @@ level. `temet-work status` lists every value with the level it is set at and who
   (`World::resolve`) answers "what is this setting for this issue and role, and which
   level set it". Parts ask the world for a setting instead of reading their own fields
   or constants.
+- Each setting's `Spec` says whether an agent may set it. The plan check, `set`, `unset`
+  and the replay of a log all read that, so a new key has to say which it is.
 - A family reports the adapters in its build and its default one; the host puts them in
   the world, which is how a value naming an adapter the build lacks is refused. The
   runtime family picks its adapter by `runtime`, the runner family by `runner`. The Codex
@@ -189,3 +209,8 @@ level. `temet-work status` lists every value with the level it is set at and who
 - Groups set no defaults. A group decides which work it takes; the chain decides how that
   work is done.
 - Within a level the role comes first; across levels the nearer level comes first.
+- Only a person sets `ci`. `ci = false` takes the CI gate off the code the issue's own
+  author writes, in every repository the issue changes, so no agent decides it.
+- An agent may still set `merge`. It takes only `squash`, `merge` or `rebase`, is applied
+  after review and CI have passed, runs nothing, and changes only the shape of the history
+  on `main`.

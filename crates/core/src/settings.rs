@@ -4,6 +4,7 @@
 //! one resolver answers "what is this setting for this issue and role, and which
 //! level set it". Nothing here reads a file or a clock.
 
+use crate::command::PERSON;
 use crate::ids::{IssueId, ProjectId};
 use crate::model::Role;
 use crate::world::World;
@@ -160,6 +161,15 @@ pub enum Kind {
     Flag,
 }
 
+/// Whether an agent may set and unset a setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Agents {
+    /// A refiner may, for the issue it is refining, while it is refining.
+    May,
+    /// Only a person does; why, in words that follow "because".
+    MayNot(&'static str),
+}
+
 /// One setting the daemon knows.
 #[derive(Clone, Copy, Debug)]
 pub struct Spec {
@@ -169,7 +179,19 @@ pub struct Spec {
     pub kind: Kind,
     /// What it means, in a line, with its unit.
     pub about: &'static str,
+    /// Whether an agent may set it.
+    pub agents: Agents,
 }
+
+/// The modes an agent can be started in, which `permission` takes one of.
+const PERMISSIONS: &[&str] = &[
+    "default",
+    "acceptEdits",
+    "plan",
+    "auto",
+    "dontAsk",
+    "bypassPermissions",
+];
 
 /// Every setting, in the order they are listed.
 pub const SPECS: [Spec; 16] = [
@@ -177,81 +199,102 @@ pub const SPECS: [Spec; 16] = [
         key: "runtime",
         kind: Kind::Text,
         about: "the agent runtime an agent runs",
+        agents: Agents::May,
     },
     Spec {
         key: "model",
         kind: Kind::Text,
         about: "the model an agent runs; the runtime's own default when none is set",
+        agents: Agents::May,
     },
     Spec {
         key: "runner",
         kind: Kind::Text,
         about: "where an agent's terminal runs",
+        agents: Agents::May,
     },
     Spec {
         key: "machine",
         kind: Kind::Text,
         about: "the machine of the work folder an agent is given; any machine when none is set",
+        agents: Agents::May,
     },
     Spec {
         key: "permission",
-        kind: Kind::Text,
+        kind: Kind::OneOf(PERMISSIONS),
         about: "how an agent's runtime asks about what it may do",
+        agents: Agents::MayNot(
+            "it decides what every later agent on the issue may do without asking",
+        ),
     },
     Spec {
         key: "review_rounds",
         kind: Kind::Count(1),
         about: "review rounds before the arbiter rules",
+        agents: Agents::May,
     },
     Spec {
         key: "ci",
         kind: Kind::Flag,
         about: "whether pull requests run CI; false leaves the plan's checks to the reviewer",
+        agents: Agents::MayNot(
+            "ci false takes the CI gate off the code the issue's own author writes, \
+             in every repository the issue changes",
+        ),
     },
     Spec {
         key: "deploy",
         kind: Kind::Text,
         about: "the command run after a merge",
+        agents: Agents::MayNot("the daemon runs it as a shell command after a merge"),
     },
     Spec {
         key: "verify",
         kind: Kind::Text,
         about: "the command run after a deploy",
+        agents: Agents::MayNot("the daemon runs it after a deploy"),
     },
     Spec {
         key: "run_in",
         kind: Kind::Text,
         about: "the folder deploy and verify run in",
+        agents: Agents::MayNot("it is the folder deploy and verify run in"),
     },
     Spec {
         key: "merge",
         kind: Kind::OneOf(&["squash", "merge", "rebase"]),
         about: "how the code host merges a pull request",
+        agents: Agents::May,
     },
     Spec {
         key: "remind_after",
         kind: Kind::Count(1),
         about: "minutes an agent its issue waits on may sit idle before it is reminded",
+        agents: Agents::May,
     },
     Spec {
         key: "reminders",
         kind: Kind::Count(0),
         about: "reminders before an idle agent is stopped",
+        agents: Agents::May,
     },
     Spec {
         key: "starts",
         kind: Kind::Count(1),
         about: "agents of one role started on one issue before the loop gives up",
+        agents: Agents::May,
     },
     Spec {
         key: "sync_every",
         kind: Kind::Count(1),
         about: "seconds between syncs of a project with its tracker",
+        agents: Agents::May,
     },
     Spec {
         key: "ci_every",
         kind: Kind::Count(1),
         about: "seconds between reads of a pull request's CI",
+        agents: Agents::May,
     },
 ];
 
@@ -301,7 +344,17 @@ pub fn check_value(key: &str, value: &Value) -> Result<(), String> {
     }
 }
 
-/// Reads what a person typed as the value of `key`.
+/// Whether the loop leaves a logged change out: an agent's change, for one
+/// issue, of a setting only a person sets. Logs from before agents were refused
+/// hold such changes.
+pub(crate) fn ignored(scope: &Scope, key: &str, by: &str) -> bool {
+    matches!(scope, Scope::Task(_))
+        && by != FILE
+        && by != PERSON
+        && spec(key).is_ok_and(|s| s.agents != Agents::May)
+}
+
+/// Reads what was typed as the value of `key`.
 pub fn parse_value(key: &str, raw: &str) -> Result<Value, String> {
     let value = match spec(key)?.kind {
         Kind::Flag => match raw {
@@ -775,6 +828,48 @@ mod level {
     }
 
     #[test]
+    fn only_a_person_sets_deploy_verify_run_in_permission_and_ci() {
+        let mut keys: Vec<&str> = specs()
+            .filter(|s| s.agents != Agents::May)
+            .map(|s| s.key)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["ci", "deploy", "permission", "run_in", "verify"]);
+    }
+
+    #[test]
+    fn permission_takes_one_of_the_modes() {
+        let modes = [
+            "default",
+            "acceptEdits",
+            "plan",
+            "auto",
+            "dontAsk",
+            "bypassPermissions",
+        ];
+        for mode in modes {
+            assert_eq!(
+                parse_value("permission", mode),
+                Ok(Value::Text(mode.into()))
+            );
+        }
+        let set = crate::command::Command::Set {
+            target: Target::parse("global"),
+            role: None,
+            key: "permission".into(),
+            value: "yolo".into(),
+        };
+        assert_eq!(
+            world(&base()).events(None, &set),
+            Err(format!(
+                "permission takes one of {}, not yolo",
+                modes.join(", ")
+            ))
+        );
+        assert_eq!(builtin("permission"), Some(Value::Text("auto".into())));
+    }
+
+    #[test]
     fn a_value_of_the_wrong_kind_is_refused_with_the_reason() {
         assert!(parse_value("review_rounds", "many").is_err_and(|e| e.contains("whole number")));
         assert!(parse_value("review_rounds", "0").is_err());
@@ -1012,6 +1107,66 @@ mod replay {
             2,
             "the role's own value is a key of its own"
         );
+    }
+
+    #[test]
+    fn an_older_log_with_an_agent_set_deploy_or_permission_ignores_it() {
+        let radar = || Scope::Project(ProjectId::new("radar"));
+        let task = || Scope::Task(IssueId::new("radar", "44"));
+        let by_refiner = |key: &str, value: Value| Event::SettingSet {
+            scope: task(),
+            role: None,
+            key: key.into(),
+            value,
+            by: "refiner-3".into(),
+        };
+        let text = |value: &str| Value::Text(value.into());
+        let mut events = base();
+        events.push(set(radar(), None, "deploy", "make deploy", FILE));
+        events.push(set(radar(), None, "permission", "plan", "person"));
+        events.push(set(task(), None, "verify", "make smoke", "person"));
+        events.extend([
+            by_refiner("deploy", text("make mine")),
+            by_refiner("run_in", text("/tmp/mine")),
+            by_refiner("permission", text("bypassPermissions")),
+            by_refiner("verify", text("true")),
+            by_refiner("ci", Value::Flag(false)),
+            by_refiner("model", text("opus")),
+        ]);
+        events.push(set(
+            task(),
+            Some(Role::Author),
+            "permission",
+            "bypassPermissions",
+            "refiner-3",
+        ));
+        // Nor does an agent's unset take away what a person set.
+        events.push(Event::SettingUnset {
+            scope: task(),
+            role: None,
+            key: "verify".into(),
+            by: "refiner-3".into(),
+        });
+        let w = world(&events);
+        let at = |key| {
+            w.setting(&IssueId::new("radar", "44"), Some(Role::Author), key)
+                .map(|r| (r.value.to_string(), r.source()))
+        };
+        let is = |value: &str, source: &str| Some((value.to_string(), source.to_string()));
+        assert_eq!(at("deploy"), is("make deploy", "project"));
+        assert_eq!(at("permission"), is("plan", "project, set by person"));
+        assert_eq!(at("verify"), is("make smoke", "task, set by person"));
+        assert_eq!(at("run_in"), None);
+        assert_eq!(at("ci"), is("true", "built in"));
+        assert_eq!(at("model"), is("opus", "task, set by refiner-3"));
+        // `temet-work settings` and `status` read these, so neither lists the rest.
+        let agents: Vec<&str> = w
+            .settings
+            .iter()
+            .filter(|(_, e)| e.by == "refiner-3")
+            .map(|((_, _, key), _)| key.as_str())
+            .collect();
+        assert_eq!(agents, ["model"]);
     }
 
     #[test]

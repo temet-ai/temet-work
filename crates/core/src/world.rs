@@ -19,7 +19,7 @@ use crate::model::{
     Agent, AgentState, Area, DecisionKind, Folder, Group, Issue, Project, Role, Rule, RuleState,
     Stage,
 };
-use crate::settings::{FILE, Scope, Value};
+use crate::settings::{self, FILE, Scope, Value};
 
 /// What [`World::missing`] finds.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -175,11 +175,20 @@ impl World {
                 key,
                 value,
                 by,
-            } => self.put(scope, *role, key, value, by),
-            Event::SettingUnset {
-                scope, role, key, ..
             } => {
-                self.settings.remove(&(scope.clone(), *role, key.clone()));
+                if !settings::ignored(scope, key, by) {
+                    self.put(scope, *role, key, value, by);
+                }
+            }
+            Event::SettingUnset {
+                scope,
+                role,
+                key,
+                by,
+            } => {
+                if !settings::ignored(scope, key, by) {
+                    self.settings.remove(&(scope.clone(), *role, key.clone()));
+                }
             }
             Event::GroupCreated {
                 group,

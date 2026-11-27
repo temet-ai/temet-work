@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::event::{Event, Verdict};
 use crate::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
 use crate::model::{Decision, DecisionKind, Plan, Role, Rule, RuleState, Stage};
-use crate::settings::{self, Scope, Target};
+use crate::settings::{self, Agents, Scope, Target};
 use crate::text::stage;
 use crate::world::World;
 
@@ -205,20 +205,34 @@ impl World {
         })
     }
 
-    /// Why `by` may not change a setting at `scope`: an agent may only give the
-    /// issue it is refining task-level settings in its plan or by command.
-    fn may_set(&self, by: Option<&AgentId>, scope: &Scope) -> Result<(), String> {
+    /// Why `by` may not change `key` at `scope`. A person may change any setting
+    /// anywhere. An agent may change what the setting's [`settings::Spec`] leaves
+    /// to agents, and only as the refiner of the issue at `scope`, in its plan or
+    /// by command, while that issue is refining.
+    fn may_set(&self, by: Option<&AgentId>, scope: &Scope, key: &str) -> Result<(), String> {
         let Some(by) = by else {
             return Ok(());
         };
         let Some(agent) = self.agents.get(by) else {
             return Err(format!("{by} is not an agent this daemon started"));
         };
+        if let Agents::MayNot(why) = settings::spec(key)?.agents {
+            return Err(format!("only a person sets {key}, because {why}"));
+        }
         match scope {
             Scope::Task(issue)
                 if agent.role == Role::Refiner && agent.issue.as_ref() == Some(issue) =>
             {
-                Ok(())
+                match self.issues.get(issue).map(|i| i.stage) {
+                    Some(Stage::Refining) => Ok(()),
+                    Some(now) => Err(format!(
+                        "{} may change settings of {issue} only while it is refining; \
+                         it is {} now",
+                        agent.id,
+                        stage(now)
+                    )),
+                    None => Err(format!("there is no issue {issue}")),
+                }
             }
             Scope::Task(_) => Err(format!(
                 "{} may change settings of the issue it is refining only",
@@ -300,8 +314,10 @@ impl World {
                 if plan.checks.is_empty() {
                     return Err("a plan needs at least one check".into());
                 }
+                let task = Scope::Task(issue.clone());
                 for (key, value) in &plan.settings {
-                    settings::check_value(key, value)
+                    self.may_set(by, &task, key)
+                        .and_then(|()| settings::check_value(key, value))
                         .and_then(|()| self.check_choice(key, value))
                         .map_err(|e| format!("the plan's settings: {e}"))?;
                 }
@@ -412,7 +428,7 @@ impl World {
                 value,
             } => {
                 let scope = self.scope_of(target)?;
-                self.may_set(by, &scope)?;
+                self.may_set(by, &scope, key)?;
                 let value = settings::parse_value(key, value)?;
                 self.check_choice(key, &value)?;
                 Event::SettingSet {
@@ -425,7 +441,7 @@ impl World {
             }
             Command::Unset { target, role, key } => {
                 let scope = self.scope_of(target)?;
-                self.may_set(by, &scope)?;
+                self.may_set(by, &scope, key)?;
                 settings::spec(key)?;
                 if !self
                     .settings
@@ -1210,6 +1226,159 @@ mod plan_settings {
             w.check(Some(&refiner), &bad)
                 .is_err_and(|e| e.contains("review_rounds"))
         );
+    }
+
+    /// A refiner's plan, set and unset of `key`, for every role, are each refused
+    /// naming it, and leave nothing behind; a person's set is accepted.
+    fn only_a_person_may_set(key: &str, typed: &str, value: Value) {
+        let mut w = refining();
+        let refiner = AgentId::new("refiner-1");
+        let set = |role| Command::Set {
+            target: Target::Issue(issue()),
+            role,
+            key: key.into(),
+            value: typed.into(),
+        };
+        let unset = |role| Command::Unset {
+            target: Target::Issue(issue()),
+            role,
+            key: key.into(),
+        };
+        let refused = |w: &World, command: &Command| {
+            let why = w.events(Some(&refiner), command).expect_err("refused");
+            assert!(
+                why.contains(&format!("only a person sets {key}, because ")),
+                "{why}"
+            );
+        };
+        refused(&w, &plan(&[(key, value.clone())]));
+        let roles = [
+            None,
+            Some(Role::Refiner),
+            Some(Role::Author),
+            Some(Role::Reviewer),
+            Some(Role::Arbiter),
+            Some(Role::Investigator),
+        ];
+        for role in roles {
+            refused(&w, &set(role));
+            refused(&w, &unset(role));
+            // A person's set is accepted, and the value is not an agent's to remove.
+            let events = w.events(None, &set(role)).expect("a person may set it");
+            assert_eq!(
+                events,
+                vec![Event::SettingSet {
+                    scope: Scope::Task(issue()),
+                    role,
+                    key: key.into(),
+                    value: value.clone(),
+                    by: PERSON.into(),
+                }]
+            );
+            apply_all(&mut w, &events);
+            refused(&w, &unset(role));
+            assert!(
+                w.events(None, &unset(role)).is_ok(),
+                "a person may unset it"
+            );
+        }
+        assert_eq!(w.issues[&issue()].stage, Stage::Refining, "no plan is in");
+        assert_eq!(w.issues[&issue()].plan, None);
+    }
+
+    #[test]
+    fn an_agent_may_not_set_deploy() {
+        only_a_person_may_set("deploy", "make deploy", Value::Text("make deploy".into()));
+    }
+
+    #[test]
+    fn an_agent_may_not_set_verify() {
+        only_a_person_may_set("verify", "make smoke", Value::Text("make smoke".into()));
+    }
+
+    #[test]
+    fn an_agent_may_not_set_run_in() {
+        only_a_person_may_set("run_in", "/srv/ankh", Value::Text("/srv/ankh".into()));
+    }
+
+    #[test]
+    fn an_agent_may_not_set_ci() {
+        only_a_person_may_set("ci", "false", Value::Flag(false));
+    }
+
+    #[test]
+    fn an_agent_may_not_set_permission() {
+        let bypass = Value::Text("bypassPermissions".into());
+        only_a_person_may_set("permission", "bypassPermissions", bypass);
+        // A person's value reaches the next agent's brief.
+        let mut w = refining();
+        let set = Command::Set {
+            target: Target::Issue(issue()),
+            role: None,
+            key: "permission".into(),
+            value: "plan".into(),
+        };
+        let events = w.events(None, &set).expect("a person may");
+        apply_all(&mut w, &events);
+        let events = w
+            .events(Some(&AgentId::new("refiner-1")), &plan(&[]))
+            .expect("accepted");
+        apply_all(&mut w, &events);
+        let launch = w
+            .launch(&GroupId::new("watch"), Role::Author, &issue(), None)
+            .expect("known");
+        assert_eq!(launch.brief.permission, "plan");
+    }
+
+    #[test]
+    fn a_refiners_plan_may_still_set_merge_and_model() {
+        let mut w = refining();
+        let command = plan(&[
+            ("merge", Value::Text("rebase".into())),
+            ("model", Value::Text("opus".into())),
+        ]);
+        let events = w
+            .events(Some(&AgentId::new("refiner-1")), &command)
+            .expect("accepted");
+        apply_all(&mut w, &events);
+        for (key, value) in [("merge", "rebase"), ("model", "opus")] {
+            let r = w.setting(&issue(), None, key).expect("set");
+            assert_eq!(r.value, Value::Text(value.into()));
+            assert_eq!(r.source(), "task, set by refiner-1");
+        }
+    }
+
+    #[test]
+    fn a_refiners_set_after_its_issue_left_refining_is_refused() {
+        let mut w = refining();
+        let refiner = AgentId::new("refiner-1");
+        let set = Command::Set {
+            target: Target::Issue(issue()),
+            role: None,
+            key: "model".into(),
+            value: "opus".into(),
+        };
+        let unset = Command::Unset {
+            target: Target::Issue(issue()),
+            role: None,
+            key: "model".into(),
+        };
+        let events = w.events(Some(&refiner), &set).expect("while refining");
+        apply_all(&mut w, &events);
+        assert!(w.events(Some(&refiner), &unset).is_ok(), "while refining");
+        let events = w.events(Some(&refiner), &plan(&[])).expect("accepted");
+        apply_all(&mut w, &events);
+        for command in [&set, &unset] {
+            assert_eq!(
+                w.events(Some(&refiner), command),
+                Err(
+                    "refiner-1 may change settings of ankh#1 only while it is refining; \
+                     it is ready now"
+                        .into()
+                )
+            );
+        }
+        assert!(w.events(None, &unset).is_ok(), "a person still may");
     }
 
     #[test]
