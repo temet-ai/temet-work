@@ -187,9 +187,20 @@ pub struct Runners {
     started_here: std::collections::BTreeSet<String>,
     /// Idle agents their issues wait on: since when, and how many reminders.
     idle: BTreeMap<String, (u64, u32)>,
+    /// The daemon's address as another machine reaches it over SSH
+    /// (`daemon_host` in the configuration).
+    daemon_host: Option<String>,
 }
 
 impl Runners {
+    /// Sets the daemon's address as other machines reach it, `daemon_host` in the
+    /// configuration. Without it no agent starts on another machine.
+    #[must_use]
+    pub fn daemon_host(mut self, host: Option<String>) -> Self {
+        self.daemon_host = host.filter(|h| !h.is_empty());
+        self
+    }
+
     /// Adds a runner. The root package calls this once per compiled-in adapter.
     pub fn add(&mut self, adapter: Box<dyn Runner>) {
         self.adapters.push(adapter);
@@ -360,10 +371,31 @@ impl Runners {
     }
 }
 
-/// What an agent needs to reach the daemon that started it: the folder of the
-/// daemon's own programs first on `PATH`, so `temet-work` is the matching command
-/// line, and the daemon's socket when it was given one.
-fn daemon_env() -> Vec<(String, String)> {
+/// What an agent needs to reach the daemon that started it. A local agent gets
+/// the folder of the daemon's own programs first on `PATH`, so `temet-work` is the
+/// matching command line, and the daemon's socket when it was given one. An agent
+/// on another machine gets `TEMET_WORK_DAEMON=ssh://HOST` instead: a path on the
+/// daemon's machine means nothing there, and the other machine needs `temet-work`
+/// on its own `PATH`.
+fn daemon_env(
+    remote_daemon_host: Option<&str>,
+    socket: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
+    if let Some(host) = remote_daemon_host {
+        // The daemon's own socket rides in the address, so a second daemon on the
+        // same machine is reached too; none means the default there.
+        let socket = socket.unwrap_or_default();
+        if !socket.is_empty() && !socket.starts_with('/') {
+            return Err(format!(
+                "this daemon's TEMET_WORK_SOCKET is the relative path {socket}: an agent on another \
+                 machine cannot find it, so give the daemon an absolute path"
+            ));
+        }
+        return Ok(vec![(
+            DAEMON_VAR.to_string(),
+            format!("ssh://{host}{socket}"),
+        )]);
+    }
     let mut env = Vec::new();
     if let Some(dir) = std::env::current_exe()
         .ok()
@@ -378,8 +410,11 @@ fn daemon_env() -> Vec<(String, String)> {
             socket.to_string_lossy().into_owned(),
         ));
     }
-    env
+    Ok(env)
 }
+
+/// The variable that tells `temet-work` how to reach the daemon.
+const DAEMON_VAR: &str = "TEMET_WORK_DAEMON";
 
 fn state_of(status: &Status, doing: Option<&str>) -> Option<AgentState> {
     match status {
@@ -531,7 +566,24 @@ impl Part for Runners {
                 program
                     .env
                     .push((AGENT_VAR.to_string(), launch.agent.0.clone()));
-                program.env.extend(daemon_env());
+                let machine = (launch.machine.0 != LOCAL).then(|| launch.machine.0.clone());
+                let remote = match (&machine, &self.daemon_host) {
+                    (None, _) => None,
+                    (Some(_), Some(host)) => Some(host.as_str()),
+                    (Some(m), None) => {
+                        return Outcome::Failed(format!(
+                            "{} would run on the machine {m} (`machine` of its [[folder]]), but \
+                             `daemon_host` is not set in config.toml: set it to this machine's \
+                             name as {m} reaches it over SSH, so the agent can report back",
+                            launch.agent
+                        ));
+                    }
+                };
+                let socket = std::env::var("TEMET_WORK_SOCKET").ok();
+                match daemon_env(remote, socket.as_deref()) {
+                    Ok(env) => program.env.extend(env),
+                    Err(why) => return Outcome::Failed(why),
+                }
                 let start = Start {
                     program,
                     cwd: brief
@@ -540,7 +592,7 @@ impl Part for Runners {
                         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
                         .unwrap_or_else(|| PathBuf::from("/")),
                     labels,
-                    machine: (launch.machine.0 != LOCAL).then(|| launch.machine.0.clone()),
+                    machine,
                 };
                 match runner.start(&start) {
                     Ok(terminal) => {
@@ -1131,6 +1183,149 @@ mod tests {
         part.add(Box::new(FakeRunner::named("second")));
         assert_eq!(part.ids(), ["first", "second"]);
         assert_eq!(part.id(), "runner");
+    }
+
+    /// A runner that ignores the machine of a start.
+    struct IgnoresMachine(FakeRunner);
+
+    impl Runner for IgnoresMachine {
+        fn id(&self) -> &'static str {
+            "ignores-machine"
+        }
+        fn start(&mut self, start: &Start) -> Result<TerminalId, RunnerError> {
+            self.0.start(&Start {
+                machine: None,
+                ..start.clone()
+            })
+        }
+        fn send(
+            &mut self,
+            terminal: &TerminalId,
+            text: &str,
+            only_if_idle: bool,
+        ) -> Result<(), RunnerError> {
+            self.0.send(terminal, text, only_if_idle)
+        }
+        fn screen(&mut self, terminal: &TerminalId) -> Result<String, RunnerError> {
+            self.0.screen(terminal)
+        }
+        fn stop(&mut self, terminal: &TerminalId) -> Result<(), RunnerError> {
+            self.0.stop(terminal)
+        }
+        fn updates(&mut self) -> Vec<Update> {
+            self.0.updates()
+        }
+    }
+
+    #[test]
+    fn the_contract_rejects_a_runner_that_ignores_the_machine() {
+        let mut runner = IgnoresMachine(FakeRunner::default());
+        let mut harness = fake::FakeHarness;
+        let err = contract::check(&mut runner, &mut harness).expect_err("must fail");
+        assert!(err.contains("machine"), "{err}");
+    }
+
+    /// Starts the `run` helper's author on a work folder on `machine`.
+    fn start_on(machine: &str, daemon_host: Option<&str>) -> (Vec<Start>, Option<String>) {
+        let mut w = world();
+        w.apply(&Event::FolderAdded {
+            folder: FolderId::new("f2"),
+            project: ProjectId::new("ankh"),
+            machine: MachineId::new(machine),
+            path: "/work".into(),
+        });
+        let fake = FakeRunner::default();
+        let starts = fake.starts();
+        let mut part = Runners::default().daemon_host(daemon_host.map(String::from));
+        part.add(Box::new(fake));
+        let launch = w
+            .launch(
+                &GroupId::new("watch"),
+                Role::Author,
+                &IssueId::new("ankh", "1"),
+                Some(&FolderId::new("f2")),
+            )
+            .expect("launch");
+        let run = Effect::Run {
+            launch,
+            program: Program {
+                argv: vec!["cat".into()],
+                env: vec![],
+            },
+        };
+        let problem = match part.carry_out(&run, &w) {
+            Outcome::Failed(why) => Some(why),
+            _ => None,
+        };
+        let got = starts.lock().expect("starts").clone();
+        (got, problem)
+    }
+
+    fn env_of(start: &Start) -> BTreeMap<&str, &str> {
+        start
+            .program
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn an_agent_on_another_machine_reaches_the_daemon_over_ssh() {
+        let (starts, problem) = start_on("mac", Some("omit"));
+        assert_eq!(problem, None);
+        let env = env_of(&starts[0]);
+        assert_eq!(starts[0].machine.as_deref(), Some("mac"));
+        assert_eq!(env.get("TEMET_WORK_DAEMON"), Some(&"ssh://omit"));
+        assert!(!env.contains_key("TEMET_WORK_SOCKET"), "{env:?}");
+        assert!(!env.contains_key("PATH"), "{env:?}");
+        assert!(env.contains_key("TEMET_WORK_AGENT"));
+    }
+
+    #[test]
+    fn the_daemons_own_socket_rides_in_the_address() {
+        assert_eq!(
+            daemon_env(Some("omit"), Some("/run/user/1000/temet-work/daemon.sock")),
+            Ok(vec![(
+                "TEMET_WORK_DAEMON".to_string(),
+                "ssh://omit/run/user/1000/temet-work/daemon.sock".to_string()
+            )])
+        );
+    }
+
+    #[test]
+    fn a_relative_daemon_socket_is_a_problem_for_a_remote_agent_not_a_silent_default() {
+        let why = daemon_env(Some("omit"), Some("daemon.sock")).expect_err("refused");
+        assert!(
+            why.contains("TEMET_WORK_SOCKET") && why.contains("absolute"),
+            "{why}"
+        );
+        assert!(
+            daemon_env(None, Some("daemon.sock")).is_ok(),
+            "a local agent is unaffected"
+        );
+    }
+
+    #[test]
+    fn a_local_agent_keeps_the_environment_it_had() {
+        let (starts, problem) = start_on(LOCAL, Some("omit"));
+        assert_eq!(problem, None);
+        let env = env_of(&starts[0]);
+        assert_eq!(starts[0].machine, None);
+        assert!(!env.contains_key("TEMET_WORK_DAEMON"), "{env:?}");
+        assert!(env["PATH"].contains(':'), "{env:?}");
+        assert!(env.contains_key("TEMET_WORK_AGENT"));
+    }
+
+    #[test]
+    fn no_agent_starts_on_another_machine_without_daemon_host() {
+        let (starts, problem) = start_on("mac", None);
+        assert!(starts.is_empty());
+        let why = problem.expect("a problem");
+        assert!(
+            why.contains("daemon_host") && why.contains("machine"),
+            "{why}"
+        );
     }
 
     #[test]

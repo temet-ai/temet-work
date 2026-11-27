@@ -128,6 +128,34 @@ fn rpc(e: RpcError) -> RunnerError {
     RunnerError::Other(format!("herdr-core: {} ({})", e.message, e.kind))
 }
 
+/// The `terminal.run` parameters for a start: `on` names the machine, and is
+/// left out for a terminal on this one.
+fn run_params(start: &Start) -> Value {
+    let mut labels = start.labels.clone();
+    labels.insert(OWNER.0.into(), OWNER.1.into());
+    let mut params = json!({
+        "argv": start.program.argv,
+        "cwd": start.cwd,
+        "labels": labels,
+        "no_notify": true,
+        "no_parent": true,
+    });
+    if !start.program.env.is_empty() {
+        params["env"] = Value::Object(
+            start
+                .program
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect(),
+        );
+    }
+    if let Some(machine) = &start.machine {
+        params["on"] = Value::String(machine.clone());
+    }
+    params
+}
+
 fn status_of(state: Option<&str>, kind: Option<&str>) -> Status {
     match state {
         Some("idle" | "done") => Status::Between,
@@ -374,28 +402,7 @@ impl Runner for Herdr {
     }
 
     fn start(&mut self, start: &Start) -> Result<TerminalId, RunnerError> {
-        let mut labels = start.labels.clone();
-        labels.insert(OWNER.0.into(), OWNER.1.into());
-        let mut params = json!({
-            "argv": start.program.argv,
-            "cwd": start.cwd,
-            "labels": labels,
-            "no_notify": true,
-            "no_parent": true,
-        });
-        if !start.program.env.is_empty() {
-            params["env"] = Value::Object(
-                start
-                    .program
-                    .env
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                    .collect(),
-            );
-        }
-        if let Some(machine) = &start.machine {
-            params["on"] = Value::String(machine.clone());
-        }
+        let params = run_params(start);
         let result = self.request("terminal.run", params).map_err(rpc)?;
         result
             .get("address")
@@ -489,6 +496,19 @@ impl Runner for Herdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn start_on(machine: Option<&str>) -> Start {
+        Start {
+            machine: machine.map(String::from),
+            ..Start::default()
+        }
+    }
+
+    #[test]
+    fn a_start_on_another_machine_sends_on_and_a_local_one_does_not() {
+        assert_eq!(run_params(&start_on(Some("mac")))["on"], "mac");
+        assert!(run_params(&start_on(None)).get("on").is_none());
+    }
 
     #[test]
     fn maps_idle_and_done_to_between_turns() {

@@ -51,6 +51,12 @@ impl temet_work_core::Journal for Kept {
     }
 }
 
+fn fake_runtimes() -> temet_work_runtime::Runtimes {
+    let mut runtimes = temet_work_runtime::Runtimes::default();
+    runtimes.add(Box::new(FakeRuntime));
+    runtimes
+}
+
 fn host() -> Host {
     host_with(Box::new(Memory::default()))
 }
@@ -64,6 +70,15 @@ fn host_with(journal: Box<dyn temet_work_core::Journal>) -> Host {
 fn host_with_runtimes(
     journal: Box<dyn temet_work_core::Journal>,
     runtimes: temet_work_runtime::Runtimes,
+) -> Host {
+    host_on(journal, runtimes, CONFIG, None)
+}
+
+fn host_on(
+    journal: Box<dyn temet_work_core::Journal>,
+    runtimes: temet_work_runtime::Runtimes,
+    config: &str,
+    daemon_host: Option<&str>,
 ) -> Host {
     let mut trackers = temet_work_tracker::Trackers::default();
     trackers.add(Box::new(FakeTracker {
@@ -83,6 +98,7 @@ fn host_with_runtimes(
     }));
     let mut runners = temet_work_runner::Runners::default();
     runners.add(Box::new(FakeRunner::default()));
+    let runners = runners.daemon_host(daemon_host.map(String::from));
     let mut code_hosts = temet_work_codehost::CodeHosts::default().every(0);
     code_hosts.add(Box::new(FakeCodeHost {
         pulls: vec![(
@@ -110,7 +126,7 @@ fn host_with_runtimes(
         ],
         journal,
     );
-    for event in Config::parse(CONFIG).expect("config").events(host.world()) {
+    for event in Config::parse(config).expect("config").events(host.world()) {
         host.handle(0, event).expect("config event");
     }
     host
@@ -212,6 +228,29 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
     assert!(reviewer.contains("$ codex --approve-for-me "), "{reviewer}");
     let author = screen(&mut host, "author-1");
     assert!(author.contains("$ fake-agent "), "{author}");
+}
+
+#[test]
+fn a_folder_on_another_machine_needs_daemon_host_before_an_agent_starts_there() {
+    let config = CONFIG.replace("path = \".\"", "machine = \"mac\"\npath = \"/work/ankh\"");
+    let mut host = host_on(Box::new(Memory::default()), fake_runtimes(), &config, None);
+    host.tick(0).expect("tick");
+    assert!(host.world().agents.is_empty(), "no agent started");
+    let problems = host
+        .problems()
+        .values()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        problems.contains("machine")
+            && problems.contains("daemon_host")
+            && problems.contains("mac"),
+        "{problems}"
+    );
+    let mut host = host_on(Box::new(Memory::default()), fake_runtimes(), &config, Some("omit"));
+    host.tick(0).expect("tick");
+    assert_eq!(host.world().agents.len(), 1, "{:?}", host.problems());
 }
 
 #[test]
@@ -620,4 +659,222 @@ mod settings_commands {
         assert!(String::from_utf8_lossy(&shown.stdout).contains("review_rounds  2"));
         assert_eq!(unset.status.code(), Some(0));
     }
+}
+
+/// A stub `ssh` in its own folder: it drops ssh's options and the host and runs
+/// the rest here, with `temet-work` the one this build made and the daemon's
+/// socket set, as the far machine's own environment would.
+fn stub_ssh(name: &str, socket: &std::path::Path, body: Option<&str>) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("stub-{name}"));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let script = body.map(String::from).unwrap_or_else(|| {
+        format!(
+            "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -o|-p) shift 2;; -*) shift;; *) break;; esac; done\nshift\nTEMET_WORK_SOCKET={} PATH={}:$PATH exec \"$@\"\n",
+            socket.display(),
+            std::path::Path::new(env!("CARGO_BIN_EXE_temet-work")).parent().expect("bin dir").display()
+        )
+    });
+    let path = dir.join("ssh");
+    std::fs::write(&path, script).expect("stub");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+#[test]
+fn the_same_request_gets_equal_replies_through_the_socket_and_through_ssh() {
+    use temet_work::socket::{self, Local, Ssh, Transport};
+    use temet_work_core::{Command, Request};
+
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("transports.sock");
+    let requests = socket::listen(&path).expect("listen");
+    let stub = stub_ssh("equal", &path, None);
+    let client = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let request = Request {
+                by: Some(AgentId::new("author-9")),
+                command: Command::Status,
+            };
+            let local = Local { path }.send(&request);
+            let ssh = Ssh {
+                target: "stub".into(),
+                port: None,
+                socket: None,
+                program: stub.display().to_string(),
+            }
+            .send(&request);
+            (local, ssh)
+        })
+    };
+    let mut host = host();
+    host.tick(0).expect("tick");
+    for _ in 0..2 {
+        let pending = requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a request");
+        let reply = socket::answer(&mut host, 1, &pending.request).expect("answer");
+        pending.answer(reply);
+    }
+    let (local, ssh) = client.join().expect("client");
+    assert!(local.is_ok(), "{local:?}");
+    assert_eq!(local, ssh);
+}
+
+#[test]
+fn an_address_with_a_path_reaches_that_daemons_socket() {
+    use temet_work::socket::{self, Ssh, Transport};
+    use temet_work_core::{Command, Request};
+
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("second.sock");
+    let requests = socket::listen(&path).expect("listen");
+    // The stub's own socket is another, dead one: only the path in the address can win.
+    let dead = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("dead.sock");
+    let stub = stub_ssh("second", &dead, None);
+    let socket = path.display().to_string();
+    let client = std::thread::spawn(move || {
+        Ssh {
+            target: "stub".into(),
+            port: None,
+            socket: Some(socket),
+            program: stub.display().to_string(),
+        }
+        .send(&Request {
+            by: None,
+            command: Command::Status,
+        })
+    });
+    let mut host = host();
+    host.tick(0).expect("tick");
+    let pending = requests
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("a request");
+    let reply = socket::answer(&mut host, 1, &pending.request).expect("answer");
+    pending.answer(reply);
+    assert!(client.join().expect("client").is_ok());
+}
+
+#[test]
+fn an_agent_commands_arrive_over_ssh_as_its_own() {
+    use temet_work::socket;
+
+    let sock = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ssh-agent.sock");
+    let requests = socket::listen(&sock).expect("listen");
+    let stub = stub_ssh("agent", &sock, None);
+    let plan = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ssh-plan.yaml");
+    std::fs::write(
+        &plan,
+        "checks:\n  - done_when: the clock strikes thirteen\n    proven_by: listening at midnight\n",
+    )
+    .expect("plan");
+    let client = std::thread::spawn(move || {
+        let run = |by: &str, args: &[&str]| {
+            let path = format!(
+                "{}:{}",
+                stub.parent().expect("dir").display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let out = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+                .args(args)
+                .env("PATH", path)
+                .env("TEMET_WORK_DAEMON", "ssh://stub")
+                .env_remove("TEMET_WORK_SOCKET")
+                .env("TEMET_WORK_AGENT", by)
+                .output()
+                .expect("run");
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).trim().to_string(),
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            )
+        };
+        let plan_arg = plan.display().to_string();
+        vec![
+            run("refiner-1", &["plan", "ankh#1", &plan_arg]),
+            run("author-1", &["ready", "ankh#1", "57"]),
+            run("reviewer-1", &["review", "ankh#1", "approve"]),
+        ]
+    });
+    let mut host = host();
+    host.tick(0).expect("tick");
+    let mut by = Vec::new();
+    for _ in 0..3 {
+        let pending = requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a request");
+        by.push(pending.request.by.clone().map(|a| a.0));
+        let reply = socket::answer(&mut host, 1, &pending.request).expect("answer");
+        pending.answer(reply);
+    }
+    assert_eq!(
+        by,
+        [
+            Some("refiner-1".to_string()),
+            Some("author-1".to_string()),
+            Some("reviewer-1".to_string())
+        ]
+    );
+    let got = client.join().expect("client");
+    assert_eq!(got[0].0, Some(0), "{got:?}");
+    assert_eq!(got[1].1, "ankh#1 is in review, round 1", "{got:?}");
+    assert_eq!(got[2].0, Some(0), "{got:?}");
+}
+
+#[test]
+fn a_failed_ssh_hop_says_which_step_failed() {
+    use temet_work::socket::{Ssh, Transport};
+    use temet_work_core::{Command, Request};
+
+    let nowhere = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("nobody.sock");
+    let _ = std::fs::remove_file(&nowhere);
+    let request = Request {
+        by: None,
+        command: Command::Status,
+    };
+    let via = |name: &str, body: Option<&str>| {
+        let stub = stub_ssh(name, &nowhere, body);
+        Ssh {
+            target: "stub".into(),
+            port: None,
+            socket: None,
+            program: stub.display().to_string(),
+        }
+        .send(&request)
+    };
+    assert_eq!(
+        via(
+            "255",
+            Some(
+                "#!/bin/sh\necho 'ssh: connect to host stub port 22: Connection refused' >&2\nexit 255\n"
+            )
+        ),
+        Err(
+            "ssh stub: could not connect: ssh: connect to host stub port 22: Connection refused"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        via("127", Some("#!/bin/sh\necho 'sh: temet-work: not found' >&2\nexit 127\n")),
+        Err("ssh stub: temet-work is not on the other machine's PATH: install it there, on the PATH a non-interactive ssh gets".to_string())
+    );
+    let e = via("nodaemon", None).expect_err("no daemon");
+    assert!(
+        e.starts_with("ssh stub: no temet-work daemon answers at ") && e.contains("nobody.sock"),
+        "{e}"
+    );
+}
+
+#[test]
+fn relay_with_no_daemon_exits_non_zero_saying_so() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+        .arg("relay")
+        .env(
+            "TEMET_WORK_SOCKET",
+            std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("none.sock"),
+        )
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no temet-work daemon answers at "));
 }

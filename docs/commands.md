@@ -63,3 +63,9 @@ began on code that has since changed.
 
 The daemon listens at `$TEMET_WORK_SOCKET`, else `$XDG_RUNTIME_DIR/temet-work/daemon.sock`,
 one JSON request per line and one JSON reply per line.
+
+`TEMET_WORK_DAEMON` picks how a command reaches the daemon: unset or empty is the local
+socket above; `ssh://[USER@]HOST[:PORT][/SOCKET/PATH]` runs `ssh -o BatchMode=yes HOST temet-work relay`, with `--socket SOCKET/PATH` when the address has a path.
+The hidden command `temet-work relay` copies one request line from standard input to the
+local socket and the reply line back; it exits 4 when no daemon answers.
+`docs/configuration.md` says how to set up a work folder on another machine.

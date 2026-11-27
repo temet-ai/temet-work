@@ -22,6 +22,10 @@ use temet_work_core::{Event, World};
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// This machine as other machines reach it over SSH (`omit`, or a name from
+    /// their `~/.ssh/config`). Needed when a `[[folder]]` is on another machine.
+    #[serde(default)]
+    pub daemon_host: Option<String>,
     /// Projects.
     #[serde(default, rename = "project")]
     pub projects: Vec<ProjectConf>,
@@ -526,6 +530,13 @@ name = "Night watch"
 projects = ["ankh"]
 milestones = ["Clocks"]
 "#;
+
+    #[test]
+    fn reads_the_daemon_host() {
+        let c = Config::parse("daemon_host = \"omit\"\n").expect("config");
+        assert_eq!(c.daemon_host.as_deref(), Some("omit"));
+        assert_eq!(Config::parse("").expect("config").daemon_host, None);
+    }
 
     #[test]
     fn becomes_events_once() {

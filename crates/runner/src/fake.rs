@@ -21,7 +21,12 @@ pub struct FakeRunner {
     next: u64,
     terms: BTreeMap<TerminalId, Term>,
     pending: Vec<Update>,
+    starts: Starts,
 }
+
+/// Every [`Start`] a fake runner was given, shared so a test can read them after
+/// the runner has been boxed into a part.
+pub type Starts = std::sync::Arc<std::sync::Mutex<Vec<Start>>>;
 
 impl Default for FakeRunner {
     fn default() -> Self {
@@ -37,7 +42,13 @@ impl FakeRunner {
             next: 1,
             terms: BTreeMap::new(),
             pending: Vec::new(),
+            starts: Starts::default(),
         }
+    }
+
+    /// The starts this runner is given, in order.
+    pub fn starts(&self) -> Starts {
+        self.starts.clone()
     }
 
     fn update(&mut self, terminal: &TerminalId, doing: Option<String>) {
@@ -70,7 +81,14 @@ impl Runner for FakeRunner {
     }
 
     fn start(&mut self, start: &Start) -> Result<TerminalId, RunnerError> {
-        let id = TerminalId(format!("t{}", self.next));
+        if let Ok(mut starts) = self.starts.lock() {
+            starts.push(start.clone());
+        }
+        // A terminal on another machine is addressed `machine/t1`, as herdr-core does.
+        let id = TerminalId(match &start.machine {
+            Some(m) => format!("{m}/t{}", self.next),
+            None => format!("t{}", self.next),
+        });
         self.next += 1;
         let status = if start.program.argv.first().map(String::as_str) == Some(PROMPT_PROGRAM) {
             Status::Blocked {
@@ -157,6 +175,14 @@ impl Harness for FakeHarness {
 
     fn prompt_program(&self) -> Option<Vec<String>> {
         Some(vec![PROMPT_PROGRAM.into()])
+    }
+
+    fn machine(&self) -> Option<String> {
+        Some("elsewhere".into())
+    }
+
+    fn reached(&self, machine: &str, terminal: &TerminalId) -> bool {
+        terminal.0.starts_with(&format!("{machine}/"))
     }
 
     fn settle(&mut self, _runner: &mut dyn Runner) {}

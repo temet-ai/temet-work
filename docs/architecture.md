@@ -27,8 +27,16 @@ them. Nothing in the loop waits on a person.
 | The desktop app (GPUI) | Nothing. It draws the daemon's view data and sends commands. |
 | `temet-work`, the CLI, and its MCP server | Nothing. They send the same commands and read the same view data as the app, so an agent sees what a person sees. |
 
-The app, the CLI and the MCP server reach the daemon over a local socket. A command
-exists once, in the daemon, and every front end uses it by name.
+The app, the CLI and the MCP server reach the daemon through one transport interface
+(`Transport` in `src/socket.rs`): a client sends a request and gets a reply, and has no
+idea how it travelled. There are two implementations, the daemon's local socket and
+SSH (`ssh HOST temet-work relay`, which copies one JSON line to the daemon's socket on
+its machine). `TEMET_WORK_DAEMON` picks one. The address carries the daemon's socket as its path
+(`ssh://omit/run/user/1000/temet-work/daemon.sock`), because sshd passes no environment
+and a second daemon on one machine has to be told apart; no path means the default
+socket. A TCP transport with a token, on a private
+network, can be added as a later issue without changing the callers. A command exists
+once, in the daemon, and every front end uses it by name.
 
 ## Crates
 
@@ -78,6 +86,8 @@ issue that changes several repositories is not yet.
 
 What does not work yet:
 
+- A TCP transport with a token is not built: the daemon is reached over its local
+  socket, or over SSH from another machine.
 - Any agent or person can run any command; a command is not yet limited to the agent
   whose step it is.
 - Overturning a decision: the loop records an overturn, but no command makes one and no

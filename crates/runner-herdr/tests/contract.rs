@@ -32,6 +32,18 @@ impl Harness for Live {
         None
     }
 
+    fn machine(&self) -> Option<String> {
+        // A machine added to this core (`hc machine add`); the run on another
+        // machine happens only when the variable names one.
+        std::env::var("TEMET_WORK_CONTRACT_MACHINE")
+            .ok()
+            .filter(|m| !m.is_empty())
+    }
+
+    fn reached(&self, machine: &str, terminal: &temet_work_runner::TerminalId) -> bool {
+        terminal.0.starts_with(&format!("{machine}/"))
+    }
+
     fn settle(&mut self, _runner: &mut dyn Runner) {
         std::thread::sleep(Duration::from_millis(1500));
     }
