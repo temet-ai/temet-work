@@ -47,6 +47,26 @@ project offers are its unreleased, unarchived versions. An issue depends on the 
 names on a line starting "Depends on" and on those that block it with an "is blocked by" link.
 Closing an issue takes the transition that leads to a Done status.
 
+## GitLab code host
+
+A project whose merge requests are on GitLab names the code host `gitlab`, whatever its tracker:
+
+```toml
+[[project]]
+id = "rota"
+tracker = "github"
+name = "example-org/rota"
+code_host = "gitlab"
+repo = "example-group/sub/rota"   # the full group path, with every namespace
+```
+
+`repo` is the full path with its namespaces. The adapter runs `glab`, so `glab` must be
+signed in (`glab auth login`) for the daemon's user, and no token goes in this file. It
+reaches the host `glab` uses by default; for another one, set `GITLAB_HOST` for the daemon.
+A pipeline reads as failed as soon as a job that may not fail has failed. A merge request is
+merged at once, in the way the `merge` setting says (`squash`, `merge` or `rebase`), and
+`glab` is not asked to remove its source branch.
+
 ## Example
 
 ```toml
@@ -55,7 +75,7 @@ Closing an issue takes the transition that leads to a Done status.
 id = "radar"              # short id, used in issue ids such as radar#44
 tracker = "github"        # the tracker adapter
 name = "temet-ai/radar"   # the tracker's name for it
-# code_host = "github"    # where its pull requests are; the tracker when left out
+# code_host = "github"    # where its pull requests are ("github" or "gitlab"); the tracker when left out
 # repo = "temet-ai/radar" # the code host's name for it; name when left out
 # deploy = "make deploy"  # run after a merge; merged counts as deployed when left out
 # verify = "make smoke"   # run after a deploy; deployed counts as verified when left out

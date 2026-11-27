@@ -1,0 +1,18 @@
+[package]
+name = "temet-work-codehost-gitlab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+temet-work-codehost.workspace = true
+serde_json.workspace = true
+
+[features]
+# Runs tests/contract.rs against GitLab (read only).
+live = []
+
+[lints]
+workspace = true

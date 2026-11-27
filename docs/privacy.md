@@ -7,6 +7,7 @@
 | To | What | When |
 |---|---|---|
 | GitHub, through `gh` | Reads issues, milestones, pull requests and their CI; comments on and closes issues; merges pull requests with `--squash` | Issues every 60 s; a pull request every 30 s while it is in review; comments, closes and merges when the loop calls for them |
+| GitLab, through `glab`, for a project whose `code_host` is `gitlab` | Reads merge requests, their pipelines and jobs; merges merge requests | A merge request every 30 s while it is in review; merges when the loop calls for them |
 | herdr-core, over its local socket | Starts, reads, sends text to and stops agents' terminals, with the environment each agent gets (`SECURITY.md`) | Every 2 s, and with each command |
 | Anthropic, through the Claude Code sessions it starts | What Claude Code itself sends | While an agent runs |
 | Nothing else | No telemetry. The daemon has no network client of its own. | |
@@ -16,7 +17,7 @@
 | Folder | What | Moved by |
 |---|---|---|
 | `~/.config/temet-work/` | `config.toml`, which temet-work reads at start and does not write | `XDG_CONFIG_HOME`, or `temet-workd --config FILE` |
-| `~/.local/state/temet-work/` | `events.jsonl`, the event log, which includes the text `gh` returns when it refuses a merge and the output of each verify command | `XDG_STATE_HOME`, or `temet-workd --log FILE` |
+| `~/.local/state/temet-work/` | `events.jsonl`, the event log, which includes the text `gh` or `glab` returns when it refuses a merge and the output of each verify command | `XDG_STATE_HOME`, or `temet-workd --log FILE` |
 | `$XDG_RUNTIME_DIR/temet-work/` | `daemon.sock`, the daemon's socket; it is in `~/.local/state/temet-work/` when `XDG_RUNTIME_DIR` is not set | `TEMET_WORK_SOCKET` |
 
 The Mac uses the same paths.

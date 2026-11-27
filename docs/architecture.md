@@ -56,7 +56,8 @@ says what each crate holds today.
 | `temet-work-runtime-claude` | runtime only | Claude Code. |
 | `temet-work-runtime-codex` | runtime only | Codex. |
 | `temet-work-codehost` | core | The code-host contract: read a pull request and its CI, merge it. A fake and the contract tests. A project's code host can differ from its tracker. |
-| `temet-work-codehost-github` | codehost only | GitHub pull requests. GitLab follows as its own crate. |
+| `temet-work-codehost-github` | codehost only | GitHub pull requests. |
+| `temet-work-codehost-gitlab` | codehost only | GitLab merge requests. |
 | `temet-work-deploy` | core | Runs a project's deploy and verify commands after a merge. |
 | `temet-work-store` | core | SQLite and the event log. |
 | `temet-work-style` | core | The style guide: tokens, the generated palette, the ban list as data, and the check used when reviewing UI work. |
@@ -79,6 +80,7 @@ What exists today:
 | `temet-work-tracker-jira` | issues, fix versions as milestones, comments and Done transitions through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
 | `temet-work-codehost` | the contract, a fake and contract tests. The family reads the CI of each pull request in review every 30 seconds and reports it finished, with the names of failing checks; it merges when the loop asks |
 | `temet-work-codehost-github` | pull requests through `gh`, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
+| `temet-work-codehost-gitlab` | merge requests through `glab` and its sign-in, merged with `--squash`, `--rebase` or neither; a pipeline reads as failed once a job that may not fail has failed; passes the contract on recorded output and, read only, against GitLab (`--features live`) |
 | `temet-work-deploy` | runs the deploy command after a merge and the verify command after a deploy, each on its own thread; a failed deploy is listed as a problem, a failed verify sends the issue back to ready |
 | `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |
 | style, mike | skeletons |
@@ -195,6 +197,6 @@ In this order:
 3. The desktop window on GPUI, drawing the daemon's view data.
 4. Areas, stage 2: one issue across several repositories, merged in order
    (`docs/areas.md`).
-5. A GitLab code host.
+5. A GitLab code host. Done: `temet-work-codehost-gitlab`. GitLab as a tracker is not built.
 6. Overturning a decision by command, and rules proposed from overturns. Done: the loop applies an
    overturn itself, and a kept rule ends every brief written afterwards (`docs/commands.md`).

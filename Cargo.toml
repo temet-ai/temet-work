@@ -20,6 +20,7 @@ temet-work-core = { path = "crates/core" }
 temet-work-tracker = { path = "crates/tracker" }
 temet-work-codehost = { path = "crates/codehost" }
 temet-work-codehost-github = { path = "crates/codehost-github" }
+temet-work-codehost-gitlab = { path = "crates/codehost-gitlab" }
 temet-work-deploy = { path = "crates/deploy" }
 temet-work-runner = { path = "crates/runner" }
 temet-work-runtime = { path = "crates/runtime" }
@@ -52,7 +53,7 @@ publish.workspace = true
 # family. `cargo run --no-default-features --features tracker` builds one part
 # alone; scripts/check-mixes builds every mix that matters.
 [features]
-default = ["tracker", "runner", "runtime", "codehost", "deploy", "store", "style", "mike", "tracker-github", "tracker-jira", "runner-herdr", "runtime-claude", "runtime-codex", "codehost-github"]
+default = ["tracker", "runner", "runtime", "codehost", "deploy", "store", "style", "mike", "tracker-github", "tracker-jira", "runner-herdr", "runtime-claude", "runtime-codex", "codehost-github", "codehost-gitlab"]
 tracker = ["dep:temet-work-tracker"]
 runner = ["dep:temet-work-runner"]
 runtime = ["dep:temet-work-runtime"]
@@ -67,6 +68,7 @@ runner-herdr = ["runner", "dep:temet-work-runner-herdr"]
 runtime-claude = ["runtime", "dep:temet-work-runtime-claude"]
 runtime-codex = ["runtime", "dep:temet-work-runtime-codex"]
 codehost-github = ["codehost", "dep:temet-work-codehost-github"]
+codehost-gitlab = ["codehost", "dep:temet-work-codehost-gitlab"]
 
 [dependencies]
 temet-work-core.workspace = true
@@ -88,6 +90,7 @@ temet-work-runner-herdr = { workspace = true, optional = true }
 temet-work-runtime-claude = { workspace = true, optional = true }
 temet-work-runtime-codex = { workspace = true, optional = true }
 temet-work-codehost-github = { workspace = true, optional = true }
+temet-work-codehost-gitlab = { workspace = true, optional = true }
 
 [dev-dependencies]
 temet-work-runtime-codex.workspace = true

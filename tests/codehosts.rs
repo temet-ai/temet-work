@@ -1,0 +1,109 @@
+//! A project's `code_host` picks its adapter, whatever its tracker is, and a
+//! GitLab project's repository is the full group path.
+
+#![cfg(all(feature = "codehost-github", feature = "codehost-gitlab"))]
+
+use std::sync::{Arc, Mutex};
+
+use temet_work_codehost::CodeHosts;
+use temet_work_core::ids::{IssueId, ProjectId};
+use temet_work_core::model::Stage;
+use temet_work_core::{Event, Part, World};
+
+type Seen = Arc<Mutex<Vec<String>>>;
+
+struct Gh(Seen);
+
+impl temet_work_codehost_github::Transport for Gh {
+    fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+        self.0.lock().expect("lock").push(args.join(" "));
+        Ok(r#"{"number":5,"state":"OPEN","mergeable":"MERGEABLE","statusCheckRollup":[{"__typename":"CheckRun","name":"rust","status":"COMPLETED","conclusion":"SUCCESS"}]}"#.into())
+    }
+}
+
+struct Gl(Seen);
+
+impl temet_work_codehost_gitlab::Transport for Gl {
+    fn glab(&mut self, args: &[&str]) -> Result<String, String> {
+        self.0.lock().expect("lock").push(args.join(" "));
+        if args.iter().any(|a| a.contains("/jobs")) {
+            return Ok(r#"[{"name":"unit-tests","status":"failed","allow_failure":false}]"#.into());
+        }
+        Ok(r#"{"iid":6,"state":"opened","has_conflicts":false,"pipeline":{"id":1,"status":"failed"},"head_pipeline":{"id":1,"status":"failed"}}"#.into())
+    }
+}
+
+fn world() -> World {
+    let mut w = World::default();
+    // A Jira project with its code on GitHub, and a GitHub project with its code on GitLab.
+    for (id, tracker, host, repo) in [
+        ("watch", "jira", "github", "ankh-morpork/watch"),
+        ("guild", "github", "gitlab", "ankh-morpork/guilds/thieves"),
+    ] {
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new(id),
+            tracker: tracker.into(),
+            name: "NAME".into(),
+            code_host: Some(host.into()),
+            repo: Some(repo.into()),
+        });
+        let issue = IssueId::new(id, "1");
+        w.apply(&Event::IssueSynced {
+            issue: issue.clone(),
+            title: "an issue".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        if let Some(i) = w.issues.get_mut(&issue) {
+            i.stage = Stage::InReview { round: 1 };
+            i.pull = Some(if id == "watch" { "5" } else { "6" }.into());
+        }
+    }
+    w
+}
+
+#[test]
+fn each_project_reads_its_pull_request_through_the_adapter_its_code_host_names() {
+    let (gh, gl) = (Seen::default(), Seen::default());
+    let mut part = CodeHosts::default();
+    part.add(Box::new(temet_work_codehost_github::GitHub::with(
+        Box::new(Gh(gh.clone())),
+    )));
+    part.add(Box::new(temet_work_codehost_gitlab::GitLab::with(
+        Box::new(Gl(gl.clone())),
+    )));
+    assert_eq!(part.ids(), ["github", "gitlab"]);
+    let polled = part.poll(&world(), 0);
+    assert_eq!(polled.problem, None);
+    assert_eq!(
+        polled.events,
+        vec![
+            Event::ChecksFinished {
+                issue: IssueId::new("guild", "1"),
+                passed: false,
+                failing: vec!["unit-tests".into()],
+            },
+            Event::ChecksFinished {
+                issue: IssueId::new("watch", "1"),
+                passed: true,
+                failing: vec![],
+            },
+        ]
+    );
+    let gh = gh.lock().expect("lock").clone();
+    let gl = gl.lock().expect("lock").clone();
+    assert_eq!(gh.len(), 1);
+    assert!(
+        gh[0].starts_with("pr view 5 -R ankh-morpork/watch"),
+        "{gh:?}"
+    );
+    assert_eq!(
+        gl,
+        [
+            "api projects/ankh-morpork%2Fguilds%2Fthieves/merge_requests/6",
+            "api projects/ankh-morpork%2Fguilds%2Fthieves/pipelines/1/jobs?scope[]=failed&per_page=100"
+        ]
+    );
+}
