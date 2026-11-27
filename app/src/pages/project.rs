@@ -291,20 +291,24 @@ impl Render for Project {
                 }
             }
             Some(by) => {
-                let all = view
+                let all: Vec<IssueSummary> = view
                     .milestones
                     .iter()
                     .flat_map(|m| m.issues.clone())
                     .collect();
+                let mut panel =
+                    MilestonePanel::new("All issues").summary(all_issues_summary(&view.milestones));
+                // With no issues at all the panel says so, as an empty milestone does.
+                if all.is_empty() {
+                    panel = panel.total(0);
+                }
                 shell = shell.child(
-                    MilestonePanel::new("All issues")
-                        .summary(all_issues_summary(&view.milestones))
-                        .child(
-                            IssueTable::new("issues-all", all)
-                                .group_by(by)
-                                .selected(selected.clone())
-                                .on_select(on_select),
-                        ),
+                    panel.child(
+                        IssueTable::new("issues-all", all)
+                            .group_by(by)
+                            .selected(selected.clone())
+                            .on_select(on_select),
+                    ),
                 );
             }
         }

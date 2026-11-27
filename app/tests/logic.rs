@@ -134,6 +134,12 @@ fn a_milestone_says_what_is_done_and_when_it_is_due() {
         Some("3 issues")
     );
     assert_eq!(subtitle(None, None, None, None), None);
+    // A milestone with no issues says only when it is due, whatever summary it is given.
+    assert_eq!(
+        subtitle(Some(0), Some(0), Some("20 Feb"), Some("3 issues")).as_deref(),
+        Some("due 20 Feb")
+    );
+    assert_eq!(subtitle(Some(0), Some(0), None, None), None);
     assert_eq!(progress(0, 0), 0.);
     assert_eq!(progress(7, 14), 0.5);
 }

@@ -6,6 +6,7 @@ use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
 };
 
+use super::issue_table::IssueTable;
 use crate::components::cut_panel::CutPanel;
 use crate::components::progress_bar::ProgressBar;
 use crate::components::section::{Section, SectionCard};
@@ -66,13 +67,16 @@ impl ParentElement for MilestonePanel {
 }
 
 /// The line under the panel's title: the summary, or how many are done and when it is due,
-/// as "7 / 12 done · due 12 Dec".
+/// as "7 / 12 done · due 12 Dec". A milestone with no issues says only when it is due.
 pub fn subtitle(
     done: Option<usize>,
     total: Option<usize>,
     due: Option<&str>,
     summary: Option<&str>,
 ) -> Option<String> {
+    if total == Some(0) {
+        return due.map(|d| format!("due {d}"));
+    }
     if let Some(summary) = summary {
         return Some(summary.to_string());
     }
@@ -103,11 +107,15 @@ impl RenderOnce for MilestonePanel {
             self.due.as_deref(),
             self.summary.as_deref(),
         );
+        let name = self.name.clone();
         let mut section = Section::new().compact(true).title(self.name);
         if let Some(line) = line {
             section = section.subtitle(line);
         }
-        if let Some((done, total)) = self.done.zip(self.total) {
+        // With `total` 0 the panel shows only its name, its due date and "No issues": no done
+        // figure, no bar, no table head; the children are left out.
+        let empty = self.total == Some(0);
+        if let Some((done, total)) = self.done.zip(self.total).filter(|_| !empty) {
             section = section.right_element(
                 div().w(size::meter_inline(cx)).child(
                     ProgressBar::new()
@@ -116,7 +124,15 @@ impl RenderOnce for MilestonePanel {
                 ),
             );
         }
-        CutPanel::new()
-            .child(section.child(SectionCard::new().padded(false).children(self.children)))
+        let card = SectionCard::new().padded(false);
+        let card = if empty {
+            card.child(IssueTable::new(
+                SharedString::from(format!("issues-{name}")),
+                Vec::new(),
+            ))
+        } else {
+            card.children(self.children)
+        };
+        CutPanel::new().child(section.child(card))
     }
 }

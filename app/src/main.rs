@@ -6,7 +6,7 @@ use gpui::{AppContext, TitlebarOptions, WindowOptions};
 use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
 use temet_work_app::pages::project::Project;
-use temet_work_app::{sample, theme};
+use temet_work_app::{launch, sample, theme};
 
 /// The window's app id, which the compositor shows as its class.
 const APP_ID: &str = "temet-work";
@@ -21,6 +21,10 @@ fn theme_name(args: &[String], env: Option<String>) -> String {
 }
 
 fn main() {
+    // Run again with the text gamma and contrast set, unless the person set them (`launch`).
+    if let Some(code) = launch::with_text_rendering() {
+        std::process::exit(code);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let name = theme_name(&args, std::env::var("TEMET_WORK_THEME").ok());
     gpui_platform::application()

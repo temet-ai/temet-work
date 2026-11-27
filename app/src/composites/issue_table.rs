@@ -1,6 +1,7 @@
 //! IssueTable (`temet-issuetable`): issues as a table of key, title, stage, agent and last
 //! change. Every table takes the theme's column widths, so columns line up from panel to panel.
-//! A narrow table leaves out the Agent column. With no issues it says "No issues".
+//! A narrow table leaves out the Agent column. With no issues it draws no table and no head
+//! row, only "No issues".
 
 use std::rc::Rc;
 
@@ -169,6 +170,12 @@ pub fn colgroup(columns: &IssueColumns, show_stage: bool, show_agent: bool) -> V
 
 impl RenderOnce for IssueTable {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // With no issues it is not a table, so it draws no head row, only "No issues".
+        if self.issues.is_empty() {
+            return classed(Class::NoIssues, cx)
+                .child("No issues")
+                .into_any_element();
+        }
         let columns = size::issue_columns(cx);
         // The table's width, measured after layout; until then it is taken as wide.
         let width: Entity<Pixels> = window.use_keyed_state(self.id.clone(), cx, |_, _| Pixels::MAX);
@@ -219,13 +226,7 @@ impl RenderOnce for IssueTable {
             .class_name(Class::Issues)
             .colgroup(colgroup(&columns, show_stage, show_agent))
             .thead(heads);
-        if self.issues.is_empty() {
-            table = table.tbody([TableRow::new("none").child(
-                Td::new("No issues")
-                    .class_name(Class::IssueQuiet)
-                    .col_span(true),
-            )]);
-        } else if let Some(by) = self.group_by {
+        if let Some(by) = self.group_by {
             // Each group is a body of its own, under a row with its stage or name and count.
             for (stage, name, issues) in grouped(self.issues, by) {
                 let label = match stage {
@@ -256,6 +257,11 @@ impl RenderOnce for IssueTable {
         )
         .absolute()
         .size_full();
-        div().relative().w_full().child(table).child(measure)
+        div()
+            .relative()
+            .w_full()
+            .child(table)
+            .child(measure)
+            .into_any_element()
     }
 }

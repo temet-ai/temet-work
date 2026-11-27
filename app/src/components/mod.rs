@@ -13,7 +13,7 @@
 use gpui::{App, Div, ParentElement, Pixels, SharedString, Styled, div, font};
 
 use crate::theme::look::{self, Look, State};
-use crate::theme::{colour, space, text};
+use crate::theme::{colour, size, space, text};
 
 /// The design system's intents, as the components' `intent` props take them.
 pub use crate::theme::Intent;
@@ -107,6 +107,9 @@ pub enum Class {
     /// `.tm-issue-quiet`: an issue's agent and last change, and any other cell of an `Issues`
     /// table.
     IssueQuiet,
+    /// `.tm-issue-quiet` on the padded SectionCard an empty IssueTable draws in place of a
+    /// table: "No issues", muted.
+    NoIssues,
     /// `.tm-issues` on an HTMLTable: its rows and cells take IssueTable's looks, and a tag in
     /// a cell is raised so its word lines up with the text beside it.
     Issues,
@@ -194,6 +197,11 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
             let quiet = look::get(cx, "IssueTable", "tm-issue-quiet tm-issues", rest);
             padded(type_of(el, &quiet), &quiet)
         }
+        // The export has no look for it yet: the muted role, and a compact section card's
+        // padding (`.bp6-section.bp6-compact .bp6-section-card.bp6-padded`).
+        Class::NoIssues => el
+            .text_color(colour::muted(cx))
+            .p(size::section_pad(cx, true)),
         Class::IssueGroup => el.flex().items_center().gap(space::s4(cx)),
         // Measured nowhere: `font-weight: default; color: muted`.
         Class::IssueCount => el

@@ -13,7 +13,7 @@ use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
 use temet_work_app::composites::issue_pane::IssueTab;
 use temet_work_app::pages::project::{Grouping, Project};
-use temet_work_app::{sample, theme};
+use temet_work_app::{launch, sample, theme};
 
 /// One shot: its name, theme, window size, and the page's state.
 struct Shot {
@@ -78,12 +78,20 @@ const SHOTS: &[Shot] = &[
         ..shot("dark-1440-no-needs", "dark", 1440., 900.)
     },
     Shot {
+        needs: false,
+        ..shot("light-1440-no-needs", "light", 1440., 900.)
+    },
+    Shot {
         selected: "WATCH-47",
         ..shot("dark-1440-facts-only", "dark", 1440., 900.)
     },
 ];
 
 fn main() -> gpui::Result<()> {
+    // Draw with the app's text gamma and contrast, unless set (`temet_work_app::launch`).
+    if let Some(code) = launch::with_text_rendering() {
+        std::process::exit(code);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(dir) = args.first() else {
         anyhow_exit("usage: shots DIR [NAME...]");
