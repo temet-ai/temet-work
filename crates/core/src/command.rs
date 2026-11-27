@@ -404,11 +404,11 @@ impl World {
     /// The effect a `file` command becomes: an issue to file in the tracker of
     /// `project`, for the investigator `by`. Refused for anyone but a group's
     /// running investigator, for a project or area its group does not take issues
-    /// from, for a milestone the group does not take, and for a title an open
-    /// issue of that project already has (the plainest duplicate; judging whether
-    /// an open issue covers it otherwise is the investigator's). The milestone is
-    /// the last of the group's when none is named, and none for a group that names
-    /// none.
+    /// from, for a milestone the group does not take, and for a title that an
+    /// issue of that project already has, open or closed by a person (the
+    /// plainest duplicate; judging whether one covers it otherwise is the
+    /// investigator's). The milestone is the last of the group's when none is
+    /// named, and none for a group that names none.
     pub fn filing(&self, by: Option<&AgentId>, command: &Command) -> Result<Effect, String> {
         let Command::File {
             project,
@@ -456,14 +456,22 @@ impl World {
             None => self.filing_milestone(group),
         };
         let same = |t: &str| t.trim().eq_ignore_ascii_case(title);
-        if let Some(open) = self
-            .issues
-            .values()
-            .find(|i| &i.id.project == project && i.stage != Stage::Done && same(&i.title))
-        {
+        let titled = || {
+            self.issues
+                .values()
+                .filter(|i| &i.id.project == project && same(&i.title))
+        };
+        if let Some(open) = titled().find(|i| i.stage != Stage::Done) {
             return Err(format!(
                 "{} is open with the title \"{}\" already; file an issue no open one covers",
                 open.id, open.title
+            ));
+        }
+        if let Some(closed) = titled().find(|i| i.closed_by_a_person()) {
+            return Err(format!(
+                "{} was closed by a person with the title \"{}\"; do not file it again: a person \
+                 who wants it built reopens it",
+                closed.id, closed.title
             ));
         }
         Ok(Effect::File {

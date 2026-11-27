@@ -568,17 +568,183 @@ fn file_is_refused_for_an_open_issue_with_the_same_title() {
         .filing(Some(&me), &file("ankh", " ", None))
         .expect_err("no title");
     assert_eq!(empty, "an issue needs a title");
-    // A done issue with that title is no duplicate.
+    // An issue the loop closed after verifying it is no duplicate.
     let mut w = w;
-    w.apply(&Event::IssueSynced {
-        issue: IssueId::new("ankh", "1"),
-        title: "issue 1".into(),
-        milestone: Some(MilestoneId::new("First")),
-        depends_on: vec![],
-        order: 1,
-        closed: true,
-    });
+    close_by_loop(&mut w, "ankh", "1");
     assert!(w.filing(Some(&me), &file("ankh", "issue 1", None)).is_ok());
+}
+
+/// Syncs `project#key` as the tracker lists it, `closed` or open.
+fn titled(w: &mut World, project: &str, key: &str, title: &str, order: u64, closed: bool) {
+    w.apply(&Event::IssueSynced {
+        issue: IssueId::new(project, key),
+        title: title.into(),
+        milestone: None,
+        depends_on: vec![],
+        order,
+        closed,
+    });
+}
+
+/// A person closes `project#key` in the tracker after the loop saw it open.
+fn close_by_person(w: &mut World, project: &str, key: &str, title: &str, order: u64) {
+    titled(w, project, key, title, order, false);
+    titled(w, project, key, title, order, true);
+}
+
+/// The loop closes `project#key`, which it holds, after verifying it.
+fn close_by_loop(w: &mut World, project: &str, key: &str) {
+    let issue = IssueId::new(project, key);
+    w.issues.get_mut(&issue).expect("held").stage = Stage::Verifying;
+    w.apply(&Event::Verified {
+        issue: issue.clone(),
+        passed: true,
+        output: String::new(),
+    });
+    assert!(w.issues[&issue].closed_by_loop, "{issue}");
+}
+
+fn brief_of(w: &World) -> String {
+    w.launch_investigator(&watch()).expect("launch").brief.task
+}
+
+/// The line of `brief` that lists the issues a person closed.
+fn closed_line(brief: &str) -> Option<&str> {
+    brief
+        .lines()
+        .find(|l| l.starts_with("A person closed these issues."))
+}
+
+#[test]
+fn the_brief_lists_the_issues_a_person_closed() {
+    let mut w = investigating();
+    let none = brief_of(&w);
+    assert_eq!(closed_line(&none), None, "{none}");
+    assert!(!none.contains("a person closed"), "{none}");
+
+    // The tracker's order, not the keys': 12 is older than 3.
+    close_by_person(&mut w, "ankh", "3", "Wind the clock", 30);
+    close_by_person(&mut w, "ankh", "12", "Oil the gate", 20);
+    // Closed by the loop after verifying.
+    titled(&mut w, "ankh", "4", "Sweep the yard", 40, false);
+    close_by_loop(&mut w, "ankh", "4");
+    // A closed dependency the loop never saw open.
+    titled(&mut w, "ankh", "5", "", 0, true);
+    // A project the group does not take.
+    close_by_person(&mut w, "klatch", "6", "Roast the beans", 10);
+    // Closed and then reopened.
+    close_by_person(&mut w, "ankh", "8", "Paint the door", 50);
+    titled(&mut w, "ankh", "8", "Paint the door", 50, false);
+
+    let brief = brief_of(&w);
+    assert_eq!(
+        closed_line(&brief),
+        Some(
+            "A person closed these issues. Never file one of them again, because closing an \
+             issue is how a person says no, and a person who wants it built reopens it: \
+             ankh#12 Oil the gate; ankh#3 Wind the clock"
+        ),
+        "{brief}"
+    );
+    for not in [
+        "Sweep the yard",
+        "ankh#5",
+        "Roast the beans",
+        "Paint the door",
+    ] {
+        assert!(!brief.contains(not), "{not:?} is in:\n{brief}");
+    }
+    for line in [
+        "2. The open issues of each project, and the ones a person closed, listed below, so you \
+         know what is covered already and what was turned down.",
+        "Never file an issue that an open one, or one a person closed, already covers. Change no \
+         file.",
+    ] {
+        assert!(brief.contains(line), "missing {line:?} in:\n{brief}");
+    }
+}
+
+#[test]
+fn the_brief_lists_a_persons_closes_in_the_groups_areas() {
+    let mut w = investigating();
+    w.apply(&Event::AreaDefined {
+        area: ProjectId::new("guild"),
+        name: "Thieves' Guild".into(),
+        projects: vec![ProjectId::new("klatch")],
+        tracker: "fake".into(),
+        tracker_name: "GLD".into(),
+    });
+    w.apply(&Event::GroupCreated {
+        group: watch(),
+        name: "Night watch".into(),
+        projects: vec![ankh()],
+        areas: vec![ProjectId::new("guild")],
+        milestones: vec![MilestoneId::new("First")],
+        refining_at_once: 1,
+        model: None,
+        queue_low: None,
+        investigate_every: None,
+    });
+    // Listed whatever its milestone: these have none.
+    close_by_person(&mut w, "guild", "2", "Count the purses", 1);
+    close_by_person(&mut w, "klatch", "6", "Roast the beans", 2);
+    let brief = brief_of(&w);
+    let line = closed_line(&brief).expect("the line");
+    assert!(
+        line.ends_with(": guild#2 Count the purses; klatch#6 Roast the beans"),
+        "{line}"
+    );
+}
+
+#[test]
+fn file_is_refused_for_an_issue_a_person_closed() {
+    let mut w = investigating();
+    let me = AgentId::new("investigator-1");
+    close_by_person(&mut w, "ankh", "3", "Wind the clock", 3);
+    let why = w
+        .filing(Some(&me), &file("ankh", "  wind the CLOCK ", None))
+        .expect_err("a person said no");
+    assert_eq!(
+        why,
+        "ankh#3 was closed by a person with the title \"Wind the clock\"; do not file it again: a \
+         person who wants it built reopens it"
+    );
+    // The same title of an issue the loop closed after verifying it is filed.
+    titled(&mut w, "ankh", "4", "Sweep the yard", 4, false);
+    close_by_loop(&mut w, "ankh", "4");
+    assert!(
+        w.filing(Some(&me), &file("ankh", "Sweep the yard", None))
+            .is_ok()
+    );
+    // A close in another project says nothing about this one.
+    close_by_person(&mut w, "klatch", "6", "Roast the beans", 6);
+    assert!(
+        w.filing(Some(&me), &file("ankh", "Roast the beans", None))
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_person_closed_issue_stays_refused_in_later_investigations() {
+    let mut w = short(None);
+    close_by_person(&mut w, "ankh", "3", "Wind the clock", 3);
+    tick(&mut w, 0);
+    end(&mut w, 10 * MINUTE);
+    let started = tick(&mut w, 130 * MINUTE);
+    let [second] = started.as_slice() else {
+        panic!("{started:?}");
+    };
+    assert_eq!(second.agent, AgentId::new("investigator-2"));
+    assert_eq!(w.investigations[&watch()].since_ms, Some(0));
+    let line = closed_line(&second.brief.task).expect("still listed");
+    assert!(line.ends_with(": ankh#3 Wind the clock"), "{line}");
+    let why = w
+        .filing(Some(&second.agent), &file("ankh", "Wind the clock", None))
+        .expect_err("still refused");
+    assert!(
+        why.starts_with("ankh#3 was closed by a person with the title"),
+        "{why}"
+    );
 }
 
 #[test]

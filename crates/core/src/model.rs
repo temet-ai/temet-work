@@ -118,6 +118,14 @@ pub struct Issue {
 }
 
 impl Issue {
+    /// Whether a person closed it, as far as the loop can tell: done, and not
+    /// closed by the loop after verifying it. A closed dependency the loop never
+    /// saw open has no title and does not count. An investigator files none of
+    /// these again; reopening one in the tracker takes it off this list.
+    pub fn closed_by_a_person(&self) -> bool {
+        self.stage == Stage::Done && !self.closed_by_loop && !self.title.is_empty()
+    }
+
     /// Takes every work folder the issue holds, the first one first.
     pub fn take_folders(&mut self) -> Vec<FolderId> {
         self.folder

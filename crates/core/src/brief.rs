@@ -260,6 +260,8 @@ pub struct Investigating<'a> {
     pub group: &'a crate::model::Group,
     /// Where it files issues.
     pub covered: Vec<Covered>,
+    /// The issues there that a person closed, in the tracker's order.
+    pub closed: Vec<&'a Issue>,
     /// Each repository's `investigate` setting, under the repository's name.
     pub notes: Vec<(ProjectId, String)>,
     /// The milestone its issues get when it names none.
@@ -340,13 +342,37 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
     } else {
         format!("What the projects add:\n{notes}")
     };
+    // With none a person closed, the brief says nothing of them.
+    let (read_open, never, closed) = if what.closed.is_empty() {
+        (
+            "The open issues of each project, so you know what is covered already.",
+            "Never file an issue an open one already covers.",
+            String::new(),
+        )
+    } else {
+        let list: Vec<String> = what
+            .closed
+            .iter()
+            .map(|i| format!("{} {}", i.id, i.title))
+            .collect();
+        (
+            "The open issues of each project, and the ones a person closed, listed below, so you \
+             know what is covered already and what was turned down.",
+            "Never file an issue that an open one, or one a person closed, already covers.",
+            format!(
+                "A person closed these issues. Never file one of them again, because closing an \
+                 issue is how a person says no, and a person who wants it built reopens it: {}\n",
+                list.join("; ")
+            ),
+        )
+    };
     let task = format!(
         "Investigate for group {name} ({id}): its work queue is short. Find the work that should \
          come next and file an issue for each item.\n\
          {folder_note}It takes issues from:\n{covered}{milestone}\
          Read, in this order:\n\
          1. Each project's docs, for work they plan that is not built yet.\n\
-         2. The open issues of each project, so you know what is covered already.\n\
+         2. {read_open}\n\
          3. The pull requests merged {since}, for defects you can show in that work.\n\
          Then file one issue for each planned item no open issue covers, and one for each defect \
          you can show in merged work:\n\
@@ -356,8 +382,8 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
          PROJECT is one of the ids above. The reply names the new issue and the Depends on line \
          an issue that waits for it carries: file the issue another waits for first, and end the \
          waiting one's body with that line.\n\
-         Never file an issue an open one already covers. Change no file.\n\
-         {notes}\
+         {never} Change no file.\n\
+         {closed}{notes}\
          When you have filed every issue you found, run: temet-work investigated {id}",
         name = g.name,
         id = g.id,

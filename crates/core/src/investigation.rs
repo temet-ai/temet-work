@@ -14,7 +14,7 @@ use crate::effect::Effect;
 use crate::event::Event;
 use crate::ids::{AgentId, GroupId, IssueId, MachineId, MilestoneId, ProjectId};
 use crate::launch::Launch;
-use crate::model::{AgentState, Folder, Group, Investigation, Role, Stage};
+use crate::model::{AgentState, Folder, Group, Investigation, Issue, Role, Stage};
 use crate::settings::Scope;
 use crate::world::{LOCAL, World};
 
@@ -262,11 +262,14 @@ impl World {
         let investigation = self.investigating(group)?;
         let scope = self.agent_scope(group, None);
         let place = self.investigator_folder(g);
-        let covered = self
-            .group_sources(g)
-            .into_iter()
-            .map(|source| self.covered(&source))
+        let sources = self.group_sources(g);
+        let covered = sources.iter().map(|source| self.covered(source)).collect();
+        let mut closed: Vec<&Issue> = self
+            .issues
+            .values()
+            .filter(|i| sources.contains(&i.id.project) && i.closed_by_a_person())
             .collect();
+        closed.sort_by_key(|i| i.order);
         let notes = self
             .group_repos(g)
             .into_iter()
@@ -290,6 +293,7 @@ impl World {
                     &brief::Investigating {
                         group: g,
                         covered,
+                        closed,
                         notes,
                         milestone: self.filing_milestone(g),
                         since: investigation.since_ms.map(utc),

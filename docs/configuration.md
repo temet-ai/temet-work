@@ -179,7 +179,11 @@ first), and files an issue for each planned item no open issue covers and for ea
 it can show (`temet-work file`, `docs/commands.md`). Each goes in the last milestone of the
 group's list unless it names another the group takes, and is in the loop as soon as it is
 filed. A project's `investigate` setting adds lines to the investigator's brief
-(`docs/settings.md`).
+(`docs/settings.md`). Closing an issue is how a person says no to it: the brief lists the
+issues a person closed in the group's projects and areas, and the investigator files none of
+them again. The list holds issues the daemon saw open while syncing, and any close in the
+tracker counts as a person's unless the daemon made it after verifying the issue. A person
+who wants one of them built reopens it.
 
 The investigation ends when the investigator runs `temet-work investigated GROUP` or its
 session ends. An idle investigator is reminded and then stopped after `remind_after` and
