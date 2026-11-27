@@ -115,7 +115,7 @@ function load(ui) {
     ancestor = false;
   }
   if (!ancestor || !pushed(measured)) fail(`the looks in ${file} were measured at ${measured}, which is not a pushed ancestor of ${head.slice(0, 7)}`);
-  for (const key of ["version", "settings", "themes", "fonts", "status", "stages", "parts", "components"]) {
+  for (const key of ["version", "settings", "themes", "units", "fonts", "status", "stages", "parts", "components"]) {
     if (!(key in data)) fail(`${file} has no "${key}"`);
   }
   return { data, ui, from: `@temet-ai/design ${data.version}, commit ${head.slice(0, 7)} (looks measured at ${measured.slice(0, 7)})` };
@@ -138,32 +138,39 @@ const shadow = (layers) =>
     .map((l) => `Shadow { inset: ${l.inset}, x: Px(${float(l.x)}), y: Px(${float(l.y)}), blur: Px(${float(l.blur)}), spread: Px(${float(l.spread)}), colour: ${rgba(l.color)} }`)
     .join(", ")}]`;
 
-/** The unit of a bare number: the export's `units` map when it has one, else the token's name. */
-function unitOf(name, units) {
-  if (units && units[name]) return { px: "px", ms: "duration", number: "number" }[units[name]] || fail(`unknown unit ${units[name]} for ${name}`);
-  if (/^--tm-d-|duration/.test(name)) return "duration";
-  if (/weight|line-height|leading|z-index|opacity|motion-reduced/.test(name)) return "number";
-  return "px";
-}
+/** The export's unit for each token, as this script's kinds. */
+const UNITS = { colour: "colour", px: "px", ms: "duration", curve: "curve", number: "number", fonts: "font", shadow: "shadow" };
 
-function classify(name, value, units) {
-  if (typeof value === "string") return { kind: "colour", rust: rgba(value), doc: colourDoc(value) };
-  if (typeof value === "number") {
-    const kind = unitOf(name, units);
-    if (kind === "duration") return { kind, rust: `Duration::from_millis(${Math.round(value)})`, doc: `${value}ms` };
-    if (kind === "px") return { kind, rust: `Px(${float(value)})`, doc: `${value}px` };
-    return { kind, rust: float(value), doc: `${value}` };
+/** A token's value as Rust, by the unit the export gives it; null when the value does not fit it. */
+function classify(name, value, unit) {
+  const kind = UNITS[unit];
+  if (!kind) fail(`${name} has a unit this script does not know: ${unit}`);
+  const ok = {
+    colour: typeof value === "string",
+    px: typeof value === "number",
+    duration: typeof value === "number",
+    number: typeof value === "number",
+    curve: Array.isArray(value) && value.length === 4 && value.every((v) => typeof v === "number"),
+    font: Array.isArray(value) && value.every((v) => typeof v === "string"),
+    shadow: Array.isArray(value) && value.every((v) => v && typeof v === "object"),
+  }[kind];
+  if (!ok) return null;
+  switch (kind) {
+    case "colour":
+      return { kind, rust: rgba(value), doc: colourDoc(value) };
+    case "px":
+      return { kind, rust: `Px(${float(value)})`, doc: `${value}px` };
+    case "duration":
+      return { kind, rust: `Duration::from_millis(${Math.round(value)})`, doc: `${value}ms` };
+    case "number":
+      return { kind, rust: float(value), doc: `${value}` };
+    case "curve":
+      return { kind, rust: `Curve(${value.map(float).join(", ")})`, doc: `cubic-bezier(${value.join(", ")})` };
+    case "font":
+      return { kind, rust: `&[${value.map((f) => JSON.stringify(f)).join(", ")}]`, doc: value.join(", ") };
+    default:
+      return { kind, rust: shadow(value), doc: `${value.length} layer${value.length === 1 ? "" : "s"}` };
   }
-  if (Array.isArray(value) && value.length === 4 && value.every((v) => typeof v === "number")) {
-    return { kind: "curve", rust: `Curve(${value.map(float).join(", ")})`, doc: `cubic-bezier(${value.join(", ")})` };
-  }
-  if (Array.isArray(value) && value.every((v) => typeof v === "string")) {
-    return { kind: "font", rust: `&[${value.map((f) => JSON.stringify(f)).join(", ")}]`, doc: value.join(", ") };
-  }
-  if (Array.isArray(value) && value.every((v) => v && typeof v === "object")) {
-    return { kind: "shadow", rust: shadow(value), doc: `${value.length} layer${value.length === 1 ? "" : "s"}` };
-  }
-  return null;
 }
 
 /** One theme's tokens, classified and sorted by name. */
@@ -172,8 +179,9 @@ function tokensOf(theme, units) {
     .filter((n) => KEEP.some((re) => re.test(n)) && !DROP.some((re) => re.test(n)))
     .sort();
   return names.map((name) => {
-    const t = classify(name, theme[name], units);
-    if (!t) fail(`${name} has a value this script cannot read: ${JSON.stringify(theme[name])}`);
+    if (!(name in units)) fail(`${name} has no unit in the export's "units"`);
+    const t = classify(name, theme[name], units[name]);
+    if (!t) fail(`${name} is not a ${units[name]}: ${JSON.stringify(theme[name])}`);
     return { name, ...t };
   });
 }
@@ -227,7 +235,9 @@ function rust(data, from) {
   out.push("//! theme's default; the user's settings win over it, for the tokens in [`SETTINGS`].");
   out.push("//!");
   out.push("//! A theme's `looks` are its parts as the design system's stories draw them, measured per");
-  out.push("//! component, variant (the element's classes) and state.");
+  out.push("//! component, variant and state. A variant is named by the classes of the element and of its");
+  out.push("//! part's root or nearest tm-* ancestor, sorted (`intent-primary minimal tm-row-end tm-status`),");
+  out.push("//! with the sub-element first where a part has several (`th: default`).");
   out.push("");
   out.push("use std::time::Duration;");
   out.push("");

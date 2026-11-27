@@ -130,8 +130,9 @@ pub enum State {
 pub struct Look {
     /// The part, as the design system names it: `Tag`, `ListRow`.
     pub component: &'static str,
-    /// The element's variant classes, such as `intent-primary minimal` or `tm-row tm-row-compact`,
-    /// or `default`.
+    /// The classes of the element and of its part's root or nearest tm-* ancestor, sorted, such as
+    /// `intent-primary minimal tm-row-end tm-status`; with the sub-element first where a part has
+    /// several (`th: default`); or `default`.
     pub variant: &'static str,
     pub state: State,
     /// Fully transparent when the element has no fill.

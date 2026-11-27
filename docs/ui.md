@@ -182,9 +182,6 @@ its row above takes the part's id in place of "gap". The composites, AppShell, H
 PropertyList, Meter and ListRow are on the design system's branch `fleet/temet-workers`, which
 has not merged to its main yet, and `crates/style/src/tokens.rs` is synced from that branch.
 
-- A unit for each number in the token export (px, ms or none). Until it lands,
-  `scripts/sync-tokens` takes the unit from the token's name: `--tm-d-*` and `*duration*` are
-  ms; weights, line heights, leading, z-indexes and opacities have none; the rest are px.
 - TerminalView and AgentPane, once temet-work sends their definitions.
 
 ## Checks
