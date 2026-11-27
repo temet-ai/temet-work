@@ -376,8 +376,11 @@ removed
   so the daemon would still see a live terminal with the agent's labels. `herdr-app --skill` says
   closing a pane, tab or space ends the terminals in it.
 - An agent on another machine gets the same labels there; that was not run.
-- An investigator works on no issue, so the runner gives its terminal no `herdr.space` or
-  `herdr.tab`, and the app does not show it.
+- An investigator works on no issue. The runner gives its terminal its group's space, a tab
+  named for its role and a name of agent and group. In a second run (27 November, 21:55) the
+  terminal of `investigator-1` carried `herdr.space=sptemet-work-watch`,
+  `herdr.tab=tbtemet-work-watch-investigator` and `herdr.name="investigator-1 watch"`, and the
+  Mac's app listed it in that space and tab.
 
 ### Documents: `doc.get`, `doc.set`
 
