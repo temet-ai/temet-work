@@ -9,11 +9,40 @@ use crate::ids::ProjectId;
 use crate::launch::Brief;
 use crate::model::{Issue, Role};
 
+/// A work folder an author holds: the project it is a checkout of, the code
+/// host's name for that repository, and where it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Held {
+    /// The project.
+    pub project: ProjectId,
+    /// The code host's name for the repository.
+    pub repo: String,
+    /// Where the folder is on its machine.
+    pub path: String,
+}
+
+/// The pull requests of an issue that changes several repositories, one per line.
+fn pull_list(issue: &Issue) -> String {
+    issue
+        .pulls
+        .iter()
+        .map(|(repo, number)| {
+            let merged = if issue.merged.contains(repo) {
+                " (merged already)"
+            } else {
+                ""
+            };
+            format!("- {repo}: pull request {number}{merged}\n")
+        })
+        .collect()
+}
+
 /// Writes the brief for an agent of `role` on `issue`, run in `folder`.
 /// `shared` says the folder is held by another issue's author, so the agent must
 /// not change it.
 /// `source` is the tracker's name for where the issue comes from, and `repos`
-/// the repositories of its area when it comes from an area's tracker.
+/// the repositories of its area when it comes from an area's tracker. `held` is
+/// the author's work folders, one per repository the plan names.
 pub fn write(
     role: Role,
     issue: &Issue,
@@ -21,6 +50,7 @@ pub fn write(
     repos: &[ProjectId],
     folder: Option<PathBuf>,
     shared: bool,
+    held: &[Held],
 ) -> Brief {
     let id = &issue.id;
     let source = source.map_or_else(
@@ -57,6 +87,37 @@ pub fn write(
     } else {
         ""
     };
+    let several = held.len() > 1;
+    let folders = if several {
+        let list: String = held
+            .iter()
+            .map(|h| format!("- {} ({}): {}\n", h.project, h.repo, h.path))
+            .collect();
+        format!(
+            "This change spans several repositories. You hold a folder in each; you start in the first:\n{list}\
+             Make the branch and open the pull requests yourself: use the same branch name in every repository \
+             and open one pull request in each.\n"
+        )
+    } else {
+        String::new()
+    };
+    let ready = if several {
+        let names: Vec<String> = held
+            .iter()
+            .map(|h| format!("{}=<pull request number>", h.project))
+            .collect();
+        names.join(" ")
+    } else {
+        "<pull request number>".to_string()
+    };
+    let pulls = if issue.pulls.len() > 1 {
+        format!(
+            "It changes several repositories; review every one of its pull requests:\n{}",
+            pull_list(issue)
+        )
+    } else {
+        String::new()
+    };
     let task = match role {
         Role::Refiner => format!(
             "Refine {id}: {title}. It is {source}.\n\
@@ -73,13 +134,13 @@ pub fn write(
         Role::Author => format!(
             "Work on {id}: {title}. It is {source}.\n\
              This folder is yours until the change merges. Make a branch, change the code and open a pull request.\n\
-             {fixes}The plan's checks, each to hold before you finish:\n{checks}\
-             When the pull request is open and every check holds, run: temet-work ready {id} <pull request number>",
+             {folders}{fixes}The plan's checks, each to hold before you finish:\n{checks}\
+             When the pull request is open and every check holds, run: temet-work ready {id} {ready}",
             title = issue.title,
         ),
         Role::Reviewer => format!(
             "Review the pull request for {id}: {title}. It is {source}.\n\
-             The plan's checks:\n{checks}\
+             {pulls}The plan's checks:\n{checks}\
              {folder_note}Read the whole change, not only the last commit. Run the checks yourself where you can.\n\
              Then run: temet-work review {id} approve\n\
              or: temet-work review {id} block \"<what to fix>\" [\"<what else>\" ...]",
@@ -87,7 +148,7 @@ pub fn write(
         ),
         Role::Arbiter => format!(
             "Review rounds on {id} ({title}) ran out. It is {source}.\n\
-             Read the pull request, the review points and the author's answers. Decide whether it merges.\n\
+             {pulls}Read the pull request, the review points and the author's answers. Decide whether it merges.\n\
              Then run: temet-work rule {id} approve \"<why>\"\n\
              or: temet-work rule {id} fix \"<what must change, and why>\"",
             title = issue.title,
@@ -131,7 +192,9 @@ pub fn next_round(issue: &IssueId, round: u8) -> String {
 pub fn nudge(role: Role, issue: &IssueId) -> String {
     let command = match role {
         Role::Refiner => format!("temet-work plan {issue} - with the plan as YAML"),
-        Role::Author => format!("temet-work ready {issue} <pull request number>"),
+        Role::Author => format!(
+            "temet-work ready {issue} <pull request number>, or repo=number for each repository it changes"
+        ),
         Role::Reviewer => format!("temet-work review {issue} approve, or block with what to fix"),
         Role::Arbiter => format!("temet-work rule {issue} approve or fix, with the reason"),
         Role::Investigator => return format!("{issue} is still waiting on your answer."),

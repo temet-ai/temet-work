@@ -15,7 +15,7 @@ reports its step done.
 | `temet-work issue ISSUE` | anyone: the issue in full, with its plan, pull request, fixes and agents | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
-| `temet-work ready ISSUE PULL` | only the author working on ISSUE, once the pull request is open and the plan's checks hold; `PULL` is its number, needed the first time | working, or fixing |
+| `temet-work ready ISSUE PULL` or `ready ISSUE REPO=PULL...` | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL` | working, or fixing |
 | `temet-work review ISSUE approve` | only the reviewer working on ISSUE | in review |
 | `temet-work review ISSUE block POINT...` | only the reviewer working on ISSUE, one argument per thing to fix | in review |
 | `temet-work retry ISSUE` | a person only | deploying or verifying: runs the deploy (or verify) again at once and clears its failure count and ten-minute wait, so a deploy that failed three times gets three fresh tries |

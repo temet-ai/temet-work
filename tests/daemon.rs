@@ -212,6 +212,7 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
         Command::Ready {
             issue,
             pull: Some("57".into()),
+            pulls: Default::default(),
         },
     );
     assert!(host.problems().is_empty(), "{:?}", host.problems());
@@ -284,6 +285,7 @@ fn commands_reach_the_daemon_over_its_socket() {
                 ask(Command::Ready {
                     issue: IssueId::new("ankh", "1"),
                     pull: Some("57".into()),
+                    pulls: Default::default(),
                 }),
             )
         })
@@ -352,6 +354,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     let ready = Command::Ready {
         issue: issue.clone(),
         pull: Some("57".into()),
+        pulls: Default::default(),
     };
     // The refiner is told whose step ready is before the loop looks at stages,
     // and the author's own ready is accepted.
@@ -999,4 +1002,243 @@ fn a_deploy_that_restarts_the_daemon_is_recorded_by_the_new_one() {
         "verify ran once"
     );
     assert!(!handoff.exists());
+}
+
+/// An area of two repositories, ui and svc, whose issue changes both.
+mod two_repositories {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::ids::{FolderId, ProjectId};
+    use temet_work_core::model::{Check, Plan};
+    use temet_work_core::{Command, Request, Verdict};
+
+    const AREA: &str = r#"
+[[area]]
+id = "guild"
+projects = ["ui", "svc"]
+tracker = "fake"
+tracker_project = "GLD"
+
+[area.settings]
+deploy = "make deploy"
+
+[[project]]
+id = "ui"
+name = "group/ui"
+code_host = "fake"
+
+[[project]]
+id = "svc"
+name = "group/svc"
+code_host = "fake"
+
+[[folder]]
+id = "ui-1"
+project = "ui"
+path = "."
+
+[[folder]]
+id = "svc-1"
+project = "svc"
+path = "."
+
+[[group]]
+id = "watch"
+name = "Night watch"
+areas = ["guild"]
+"#;
+
+    struct Fixture {
+        host: Host,
+        merges: Arc<Mutex<Vec<String>>>,
+        mains: Arc<Mutex<std::collections::BTreeMap<String, Checks>>>,
+        deploys: Arc<Mutex<usize>>,
+        kept: Kept,
+    }
+
+    fn pull(number: &str, checks: Checks) -> Pull {
+        Pull {
+            number: number.into(),
+            state: PullState::Open,
+            checks,
+            conflicting: false,
+        }
+    }
+
+    fn fixture(ui: Checks, svc: Checks) -> Fixture {
+        let mut trackers = temet_work_tracker::Trackers::default();
+        trackers.add(Box::new(FakeTracker {
+            issues: vec![(
+                "GLD".into(),
+                TrackedIssue {
+                    key: "GLD-1".into(),
+                    title: "Show the guild on both".into(),
+                    body: String::new(),
+                    milestone: None,
+                    depends_on: vec![],
+                    order: 1,
+                    closed: false,
+                },
+            )],
+            ..FakeTracker::default()
+        }));
+        let mut runners = temet_work_runner::Runners::default();
+        runners.add(Box::new(FakeRunner::default()));
+        let fake = FakeCodeHost {
+            pulls: vec![
+                ("group/ui".into(), pull("12", ui)),
+                ("group/svc".into(), pull("34", svc)),
+            ],
+            ..FakeCodeHost::default()
+        };
+        let merges = fake.merged_repos.clone();
+        let mains = fake.mains.clone();
+        let mut code_hosts = temet_work_codehost::CodeHosts::default().every(0);
+        code_hosts.add(Box::new(fake));
+        let deploys = Arc::new(Mutex::new(0));
+        let counted = deploys.clone();
+        let deploy = temet_work_deploy::Deploys::with(Arc::new(
+            move |_: &str, _: &std::path::PathBuf, _: &[(String, String)]| {
+                *counted.lock().expect("lock") += 1;
+                Ok(())
+            },
+        ));
+        let kept = Kept::default();
+        let mut host = Host::new(
+            World::default(),
+            vec![
+                Box::new(trackers),
+                Box::new(runners.daemon_host(None)),
+                Box::new(fake_runtimes()),
+                Box::new(code_hosts),
+                Box::new(deploy),
+            ],
+            Box::new(kept.clone()),
+        );
+        for event in Config::parse(AREA).expect("config").events(host.world()) {
+            host.handle(0, event).expect("config event");
+        }
+        Fixture {
+            host,
+            merges,
+            mains,
+            deploys,
+            kept,
+        }
+    }
+
+    fn run(host: &mut Host, by: &str, command: Command) -> Reply {
+        let request = Request {
+            by: Some(AgentId::new(by)),
+            command,
+        };
+        answer(host, 1, &request).expect("answer")
+    }
+
+    fn done(reply: Reply) -> String {
+        match reply {
+            Reply::Done { text } => text,
+            Reply::Refused { why } => panic!("refused: {why}"),
+        }
+    }
+
+    /// Takes GLD-1 to the author's `ready` naming both pull requests.
+    fn in_review(f: &mut Fixture) -> IssueId {
+        f.host.tick(0).expect("sync");
+        let issue = IssueId::new("guild", "GLD-1");
+        done(run(
+            &mut f.host,
+            "refiner-1",
+            Command::Plan {
+                issue: issue.clone(),
+                plan: Plan {
+                    repos: vec![ProjectId::new("ui"), ProjectId::new("svc")],
+                    settings: Default::default(),
+                    checks: vec![Check {
+                        done_when: "both show the guild".into(),
+                        proven_by: "looking".into(),
+                    }],
+                },
+            },
+        ));
+        let i = &f.host.world().issues[&issue];
+        assert_eq!(i.folder, Some(FolderId::new("ui-1")));
+        assert_eq!(i.other_folders, vec![FolderId::new("svc-1")]);
+        let ready = Command::Ready {
+            issue: issue.clone(),
+            pull: None,
+            pulls: [
+                (ProjectId::new("ui"), "12".to_string()),
+                (ProjectId::new("svc"), "34".to_string()),
+            ]
+            .into(),
+        };
+        done(run(&mut f.host, "author-1", ready));
+        issue
+    }
+
+    #[test]
+    fn both_merge_in_order_after_uis_main_pipeline_and_deploy_runs_once() {
+        let mut f = fixture(Checks::Passed, Checks::Passed);
+        f.mains
+            .lock()
+            .expect("lock")
+            .insert("group/ui".into(), Checks::Pending);
+        let issue = in_review(&mut f);
+        done(run(
+            &mut f.host,
+            "reviewer-1",
+            Command::Review {
+                issue: issue.clone(),
+                verdict: Verdict::Approve,
+            },
+        ));
+        f.host.tick(1).expect("CI read, then ui merges");
+        f.host.tick(2).expect("svc waits for ui's main pipeline");
+        assert_eq!(*f.merges.lock().expect("lock"), ["group/ui"]);
+        assert_eq!(f.host.world().issues[&issue].stage, Stage::Merging);
+        assert!(f.host.problems().is_empty(), "{:?}", f.host.problems());
+        f.mains
+            .lock()
+            .expect("lock")
+            .insert("group/ui".into(), Checks::Passed);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut now = 3;
+        while f.host.world().issues[&issue].stage != Stage::Done
+            && std::time::Instant::now() < deadline
+        {
+            f.host.tick(now).expect("tick");
+            now += 1;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            *f.merges.lock().expect("lock"),
+            ["group/ui", "group/svc"],
+            "the plan's order"
+        );
+        assert_eq!(f.host.world().issues[&issue].stage, Stage::Done);
+        assert_eq!(*f.deploys.lock().expect("lock"), 1, "after the last merge");
+        assert!(f.host.world().folders.values().all(|f| f.holder.is_none()));
+        let logged = f.kept.0.lock().expect("journal").clone();
+        let mut replayed = World::replay(&logged).0;
+        replayed.catalog = f.host.world().catalog.clone();
+        assert_eq!(&replayed, f.host.world());
+    }
+
+    #[test]
+    fn ci_failing_on_the_second_repository_sends_the_author_back_naming_it() {
+        let mut f = fixture(
+            Checks::Passed,
+            Checks::Failed {
+                failing: vec!["rust".into()],
+            },
+        );
+        let issue = in_review(&mut f);
+        f.host.tick(1).expect("CI read");
+        let i = &f.host.world().issues[&issue];
+        assert_eq!(i.checks_ok, Some(false));
+        assert!(i.fix.iter().any(|p| p.contains("svc")), "{:?}", i.fix);
+        assert!(f.merges.lock().expect("lock").is_empty());
+    }
 }

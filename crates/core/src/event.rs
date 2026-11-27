@@ -178,9 +178,13 @@ pub enum Event {
     PullRequestReady {
         /// The issue.
         issue: IssueId,
-        /// The pull request's number on the code host, when the author names it.
+        /// The pull request's number on the code host, from older logs, where one
+        /// issue had one pull request: it is read as the first repository's.
         #[serde(default)]
         pull: Option<String>,
+        /// The pull requests' numbers by repository, when the author names them.
+        #[serde(default)]
+        pulls: std::collections::BTreeMap<ProjectId, String>,
     },
     /// What an issue's agent was to hear reached it: the fixes, or a new round.
     Told {
@@ -218,10 +222,14 @@ pub enum Event {
         /// The option chosen instead.
         to: usize,
     },
-    /// The change merged.
+    /// The change merged: one repository's pull request, or (from older logs, and
+    /// when left out) all of them.
     Merged {
         /// The issue.
         issue: IssueId,
+        /// The repository whose pull request merged.
+        #[serde(default)]
+        repo: Option<ProjectId>,
     },
     /// The change deployed.
     Deployed {

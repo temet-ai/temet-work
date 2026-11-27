@@ -56,7 +56,13 @@ Stage 1, now: areas in the configuration and the loop; area trackers synced like
 trackers; groups that take areas; dependencies across projects; an area issue worked in
 one repository, the first in its plan's `repos`.
 
-Stage 2, next: an issue that changes several repositories. Its author holds a work
-folder in each and opens a pull request in each; `ready` names them all; CI must pass on
-all of them; they merge in the plan's order, each after the previous repository's main
-pipeline has passed.
+Stage 2, now: an issue that changes several repositories. The issue holds one free work
+folder in each repository its plan names, all or none; its author starts in the first and
+makes the branch and one pull request per repository itself. `temet-work ready ISSUE
+REPO=NUMBER...` names them all (a bare number still works for one repository), and
+`temet-work issue` lists each with its repository and merge state. CI must pass on every
+pull request; a failure names its repository. They merge in the plan's order: each after
+the previous repository's main pipeline has passed (with `ci = false` it does not wait).
+Deploy and verify run once, after the last merge. Merged pull requests are recorded per
+repository, so a restart or a refused merge part-way never merges one twice; the author
+fixes forward in the remaining repository. All folders are released together.

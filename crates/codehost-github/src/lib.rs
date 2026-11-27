@@ -130,6 +130,33 @@ fn parse_pull(json: &str) -> Result<Pull, CodeHostError> {
     })
 }
 
+/// What the workflow runs of one commit on the default branch say, read from
+/// `gh run list --json name,status,conclusion`. Their words are lower case; the
+/// rollup's are upper case.
+fn main_checks(json: &str) -> Result<Checks, CodeHostError> {
+    let runs: Vec<Value> = serde_json::from_str(json)
+        .map_err(|e| CodeHostError::Other(format!("gh run list: {e}")))?;
+    let upper = |r: &Value, k: &str| {
+        Value::from(
+            r.get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_uppercase(),
+        )
+    };
+    let rollup: Vec<Value> = runs
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "name": r.get("name").cloned().unwrap_or(Value::Null),
+                "status": upper(r, "status"),
+                "conclusion": upper(r, "conclusion"),
+            })
+        })
+        .collect();
+    Ok(checks_of(&rollup))
+}
+
 impl CodeHost for GitHub {
     fn id(&self) -> &'static str {
         "github"
@@ -162,6 +189,27 @@ impl CodeHost for GitHub {
         self.run(&["pr", "merge", number, "-R", repo, flag])
             .map(|_| ())
     }
+
+    fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
+        let out = self.run(&["pr", "view", number, "-R", repo, "--json", "mergeCommit"])?;
+        let v: Value = serde_json::from_str(&out)
+            .map_err(|e| CodeHostError::Other(format!("gh pr view: {e}")))?;
+        let sha = v
+            .pointer("/mergeCommit/oid")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CodeHostError::Other(format!("pull request {number} has not merged")))?;
+        let out = self.run(&[
+            "run",
+            "list",
+            "-R",
+            repo,
+            "--commit",
+            sha,
+            "--json",
+            "name,status,conclusion",
+        ])?;
+        main_checks(&out)
+    }
 }
 
 #[cfg(test)]
@@ -174,8 +222,29 @@ mod tests {
 
     impl Transport for Recorded {
         fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            if args.starts_with(&[
+                "pr",
+                "view",
+                "46",
+                "-R",
+                "temet-ai/radar",
+                "--json",
+                "mergeCommit",
+            ]) {
+                return Ok(include_str!("../tests/fixtures/radar-pr-46-merge.json").into());
+            }
             if args.starts_with(&["pr", "view", "46", "-R", "temet-ai/radar"]) {
                 return Ok(include_str!("../tests/fixtures/radar-pr-46.json").into());
+            }
+            if args.starts_with(&[
+                "run",
+                "list",
+                "-R",
+                "temet-ai/radar",
+                "--commit",
+                "eb7f7a2ed029b4426d58361d4b10e4d3fff86aca",
+            ]) {
+                return Ok(include_str!("../tests/fixtures/radar-main-runs.json").into());
             }
             Err("GraphQL: Could not resolve to a PullRequest".into())
         }
@@ -211,6 +280,28 @@ mod tests {
             .expect("recorded");
         assert_eq!(pull.state, PullState::Merged);
         assert_eq!(pull.checks, Checks::Passed);
+    }
+
+    #[test]
+    fn reads_the_main_pipeline_of_the_commit_a_pull_request_merged_as() {
+        let mut gh = GitHub::with(Box::new(Recorded));
+        assert_eq!(gh.main_pipeline("temet-ai/radar", "46"), Ok(Checks::Passed));
+        assert!(gh.main_pipeline("temet-ai/radar", "999999999").is_err());
+    }
+
+    #[test]
+    fn a_running_or_failed_main_run_is_pending_or_failed() {
+        let runs = |status: &str, conclusion: &str| {
+            format!(r#"[{{"name":"CI","status":"{status}","conclusion":"{conclusion}"}}]"#)
+        };
+        assert_eq!(main_checks(&runs("in_progress", "")), Ok(Checks::Pending));
+        assert_eq!(
+            main_checks(&runs("completed", "failure")),
+            Ok(Checks::Failed {
+                failing: vec!["CI".into()]
+            })
+        );
+        assert_eq!(main_checks("[]"), Ok(Checks::None));
     }
 
     #[test]

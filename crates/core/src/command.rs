@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, Verdict};
-use crate::ids::{AgentId, DecisionId, IssueId};
+use crate::ids::{AgentId, DecisionId, IssueId, ProjectId};
 use crate::model::{Decision, DecisionKind, Plan, Role, Stage};
 use crate::settings::{self, Scope, Target};
 use crate::text::stage;
@@ -40,9 +40,13 @@ pub enum Command {
     Ready {
         /// The issue.
         issue: IssueId,
-        /// The pull request's number; needed the first time.
+        /// A bare pull request number, for an issue that changes one repository.
         #[serde(default)]
         pull: Option<String>,
+        /// The pull request numbers by repository; needed the first time, and
+        /// for an issue that changes several repositories.
+        #[serde(default)]
+        pulls: std::collections::BTreeMap<crate::ids::ProjectId, String>,
     },
     /// A reviewer's verdict on the round under review.
     Review {
@@ -267,19 +271,58 @@ impl World {
                     plan: plan.clone(),
                 }
             }
-            Command::Ready { issue, pull } => {
+            Command::Ready { issue, pull, pulls } => {
                 self.may_step(by, "ready", Role::Author, issue)?;
                 match at(issue)? {
                     Stage::Working | Stage::Fixing { .. } => {
-                        let known = self.issues.get(issue).and_then(|i| i.pull.as_ref());
-                        if pull.is_none() && known.is_none() {
+                        let (repos, known) = self.issues.get(issue).map_or_else(
+                            || (Vec::new(), Vec::new()),
+                            |i| (self.repos_of(i), i.pulls.keys().cloned().collect()),
+                        );
+                        let list: Vec<String> = repos.iter().map(ToString::to_string).collect();
+                        let mut named = pulls.clone();
+                        if let Some(n) = pull {
+                            let [only] = repos.as_slice() else {
+                                return Err(format!(
+                                    "{issue} changes several repositories ({}); say which: \
+                                     repo=number for each, as in temet-work ready {issue} {}",
+                                    list.join(", "),
+                                    list.iter()
+                                        .map(|r| format!("{r}=<number>"))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                ));
+                            };
+                            named.insert(only.clone(), n.clone());
+                        }
+                        if let Some(r) = named.keys().find(|r| !repos.contains(r)) {
                             return Err(format!(
-                                "say which pull request: temet-work ready {issue} <number>"
+                                "{r} is not a repository {issue} changes; they are {}",
+                                list.join(", ")
                             ));
+                        }
+                        let lacking: Vec<&ProjectId> = repos
+                            .iter()
+                            .filter(|r| !named.contains_key(*r) && !known.contains(*r))
+                            .collect();
+                        if !lacking.is_empty() {
+                            return Err(if repos.len() > 1 {
+                                format!(
+                                    "say which pull request in each repository: temet-work ready {issue} {}",
+                                    lacking
+                                        .iter()
+                                        .map(|r| format!("{r}=<number>"))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                )
+                            } else {
+                                format!("say which pull request: temet-work ready {issue} <number>")
+                            });
                         }
                         Event::PullRequestReady {
                             issue: issue.clone(),
-                            pull: pull.clone(),
+                            pull: None,
+                            pulls: named,
                         }
                     }
                     now => return refuse(issue, now, "being worked on"),
@@ -511,6 +554,7 @@ mod tests {
             Command::Ready {
                 issue: issue(),
                 pull: Some("57".into()),
+                pulls: Default::default(),
             },
         )
         .expect("ready");
@@ -536,7 +580,8 @@ mod tests {
                 Some(&author),
                 &Command::Ready {
                     issue: issue(),
-                    pull: Some("57".into())
+                    pull: Some("57".into()),
+                    pulls: Default::default()
                 }
             ),
             Err("ankh#1 is refining, not being worked on".into())
@@ -546,7 +591,8 @@ mod tests {
                 Some(&author),
                 &Command::Ready {
                     issue: IssueId::new("ankh", "9"),
-                    pull: None
+                    pull: None,
+                    pulls: Default::default(),
                 }
             )
             .is_err()
@@ -573,6 +619,7 @@ mod tests {
         let bare = Command::Ready {
             issue: issue(),
             pull: None,
+            pulls: Default::default(),
         };
         assert!(
             w.check(owner(&bare).as_ref(), &bare)
@@ -583,10 +630,17 @@ mod tests {
             Command::Ready {
                 issue: issue(),
                 pull: Some("57".into()),
+                pulls: Default::default(),
             },
         )
         .expect("ready");
-        assert_eq!(w.issues[&issue()].pull.as_deref(), Some("57"));
+        assert_eq!(
+            w.issues[&issue()]
+                .pulls
+                .get(&ProjectId::new("ankh"))
+                .map(String::as_str),
+            Some("57")
+        );
         let block = Command::Review {
             issue: issue(),
             verdict: Verdict::Block {
@@ -613,6 +667,7 @@ mod tests {
             Command::Ready {
                 issue: issue(),
                 pull: Some("57".into()),
+                pulls: Default::default(),
             },
         )
         .expect("ready");
@@ -661,6 +716,7 @@ mod tests {
                 Command::Ready {
                     issue: issue(),
                     pull: Some("57".into()),
+                    pulls: Default::default(),
                 },
             ),
             (
@@ -717,7 +773,8 @@ mod tests {
                 Some(&AgentId::new("reviewer-1")),
                 &Command::Ready {
                     issue: issue(),
-                    pull: Some("57".into())
+                    pull: Some("57".into()),
+                    pulls: Default::default()
                 }
             ),
             Err(
@@ -747,6 +804,7 @@ mod tests {
             Command::Ready {
                 issue: issue(),
                 pull: Some("57".into()),
+                pulls: Default::default(),
             },
             Command::Review {
                 issue: issue(),
@@ -770,6 +828,7 @@ mod tests {
                 Command::Ready {
                     issue: issue(),
                     pull: Some("57".into()),
+                    pulls: Default::default(),
                 },
             )
             .expect("ready");
@@ -811,6 +870,7 @@ mod tests {
                 Command::Ready {
                     issue: issue(),
                     pull: Some("57".into()),
+                    pulls: Default::default(),
                 },
             )
             .expect("ready");
@@ -1067,5 +1127,160 @@ mod plan_settings {
             w.events(Some(&AgentId::new("author-1")), &retry)
                 .is_err_and(|e| e.contains("a person's"))
         );
+    }
+}
+
+#[cfg(test)]
+mod ready_in_several_repositories {
+    use super::*;
+    use crate::ids::{FolderId, GroupId, MachineId};
+
+    fn pid(s: &str) -> ProjectId {
+        ProjectId::new(s)
+    }
+
+    fn gld() -> IssueId {
+        IssueId::new("guild", "GLD-1")
+    }
+
+    /// GLD-1 of an area, planned for the repositories `repos`, with the author at work.
+    fn working(repos: &[&str]) -> World {
+        let mut events = vec![Event::AreaDefined {
+            area: pid("guild"),
+            name: "Guild".into(),
+            projects: vec![pid("ui"), pid("api")],
+            tracker: "fake".into(),
+            tracker_name: "GLD".into(),
+        }];
+        for p in ["ui", "api"] {
+            events.push(Event::ProjectAdded {
+                project: pid(p),
+                tracker: String::new(),
+                name: format!("group/{p}"),
+                code_host: Some("fake".into()),
+                repo: None,
+            });
+            events.push(Event::FolderAdded {
+                folder: FolderId::new(format!("{p}-1")),
+                project: pid(p),
+                machine: MachineId::new("morpork"),
+                path: format!("/srv/{p}"),
+            });
+        }
+        events.push(Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Watch".into(),
+            projects: vec![],
+            areas: vec![pid("guild")],
+            milestones: vec![],
+            refining_at_once: 1,
+            model: None,
+        });
+        events.push(Event::IssueSynced {
+            issue: gld(),
+            title: "t".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        events.push(Event::PlanWritten {
+            issue: gld(),
+            plan: Plan {
+                repos: repos.iter().map(|r| pid(r)).collect(),
+                ..Plan::default()
+            },
+        });
+        events.push(Event::AgentStarted {
+            agent: AgentId::new("author-1"),
+            group: GroupId::new("watch"),
+            role: Role::Author,
+            issue: Some(gld()),
+            machine: MachineId::new("morpork"),
+            folder: None,
+        });
+        World::replay(&events).0
+    }
+
+    fn ready(pull: Option<&str>, pulls: &[(&str, &str)]) -> Command {
+        Command::Ready {
+            issue: gld(),
+            pull: pull.map(String::from),
+            pulls: pulls.iter().map(|(r, n)| (pid(r), n.to_string())).collect(),
+        }
+    }
+
+    fn check(w: &World, c: &Command) -> Result<Event, String> {
+        w.check(Some(&AgentId::new("author-1")), c)?
+            .ok_or_else(|| "no event".to_string())
+    }
+
+    #[test]
+    fn names_every_repositorys_pull_request() {
+        let w = working(&["ui", "api"]);
+        let event = check(&w, &ready(None, &[("ui", "12"), ("api", "34")])).expect("ready");
+        assert_eq!(
+            event,
+            Event::PullRequestReady {
+                issue: gld(),
+                pull: None,
+                pulls: [
+                    (pid("ui"), "12".to_string()),
+                    (pid("api"), "34".to_string())
+                ]
+                .into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_bare_number_works_for_one_repository() {
+        let w = working(&["ui"]);
+        let event = check(&w, &ready(Some("12"), &[])).expect("ready");
+        assert!(matches!(
+            event,
+            Event::PullRequestReady { pulls, .. } if pulls.get(&pid("ui")).map(String::as_str) == Some("12")
+        ));
+    }
+
+    #[test]
+    fn a_bare_number_is_refused_when_the_plan_names_several() {
+        let w = working(&["ui", "api"]);
+        let e = check(&w, &ready(Some("12"), &[])).expect_err("refused");
+        assert!(e.contains("say which: repo=number"), "{e}");
+    }
+
+    #[test]
+    fn a_repository_left_out_the_first_time_or_not_in_the_plan_is_refused() {
+        let w = working(&["ui", "api"]);
+        let e = check(&w, &ready(None, &[("ui", "12")])).expect_err("api left out");
+        assert!(
+            e.contains("api=<number>") && !e.contains("ui=<number>"),
+            "{e}"
+        );
+        let e = check(&w, &ready(None, &[("ui", "12"), ("db", "3")])).expect_err("db");
+        assert!(e.contains("db is not a repository"), "{e}");
+    }
+
+    #[test]
+    fn pull_requests_on_record_need_not_be_named_again() {
+        let mut w = working(&["ui", "api"]);
+        w.apply(&Event::PullRequestReady {
+            issue: gld(),
+            pull: None,
+            pulls: [
+                (pid("ui"), "12".to_string()),
+                (pid("api"), "34".to_string()),
+            ]
+            .into(),
+        });
+        w.apply(&Event::ReviewFinished {
+            issue: gld(),
+            round: 1,
+            verdict: Verdict::Block {
+                points: vec!["x".into()],
+            },
+        });
+        assert!(check(&w, &ready(None, &[])).is_ok());
     }
 }

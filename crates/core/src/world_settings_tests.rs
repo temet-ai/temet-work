@@ -78,6 +78,7 @@ fn blocked(w: &mut World, issue: &IssueId, round: u8) -> Vec<Effect> {
     w.apply(&Event::PullRequestReady {
         issue: issue.clone(),
         pull: Some("1".into()),
+        pulls: Default::default(),
     });
     w.apply(&Event::ReviewFinished {
         issue: issue.clone(),

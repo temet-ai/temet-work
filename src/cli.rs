@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use temet_work_core::ids::{AgentId, IssueId};
+use temet_work_core::ids::{AgentId, IssueId, ProjectId};
 use temet_work_core::model::{Plan, Role};
 use temet_work_core::settings::Target;
 use temet_work_core::{Command, Request, Verdict};
@@ -15,7 +15,7 @@ temet-work status
 temet-work issue ISSUE                      one issue in full
 temet-work screen AGENT                     what an agent's terminal shows now
 temet-work plan ISSUE FILE                  a refiner's plan, as YAML; FILE - reads it from standard input
-temet-work ready ISSUE PULL                 the pull request is open and the checks hold;
+temet-work ready ISSUE PULL|REPO=PULL...     the pull request is open and the checks hold;
                                             PULL is its number, needed the first time
 temet-work review ISSUE approve
 temet-work review ISSUE block POINT...      what to fix, one argument each
@@ -85,10 +85,28 @@ pub fn request(
             // `-` is standard input, so an agent can send a plan without writing a file.
             plan: plan(&read(Path::new(arg(2, "FILE")?))?)?,
         },
-        "ready" => Command::Ready {
-            issue: issue()?,
-            pull: args.get(2).cloned(),
-        },
+        "ready" => {
+            let (mut pull, mut pulls) = (None, std::collections::BTreeMap::new());
+            for a in args.get(2..).unwrap_or_default() {
+                match a.split_once('=') {
+                    Some((repo, number)) if !repo.is_empty() && !number.is_empty() => {
+                        pulls.insert(ProjectId::new(repo), number.to_string());
+                    }
+                    Some(_) => return Err(format!("{a} is not repo=number")),
+                    None if pull.is_none() => pull = Some(a.clone()),
+                    None => {
+                        return Err(
+                            "name one bare pull request number, or repo=number for each".into()
+                        );
+                    }
+                }
+            }
+            Command::Ready {
+                issue: issue()?,
+                pull,
+                pulls,
+            }
+        }
         "review" => Command::Review {
             issue: issue()?,
             verdict: match arg(2, "approve or block")? {
