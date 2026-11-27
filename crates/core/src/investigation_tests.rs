@@ -152,6 +152,133 @@ fn untaken_new_issues_count_toward_the_queue() {
     assert_eq!(tick(&mut w, 0).len(), 1);
 }
 
+/// A world with no work folder, so ready issues stay ready, whose group watch
+/// (queue_low 8, milestone First) refined issues 1 to `first + later`, after which
+/// the last `later` of them were synced into Later.
+fn refined(first: u64, later: u64) -> World {
+    let mut w = World::replay(&[
+        project("ankh", "city/ankh"),
+        group(&["First"], Some(8), None),
+    ])
+    .0;
+    for key in 1..=first + later {
+        w.apply(&sync(&key.to_string(), Some("First")));
+        w.apply(&Event::PlanWritten {
+            issue: IssueId::new("ankh", key.to_string()),
+            plan: Plan::default(),
+        });
+    }
+    for key in first + 1..=first + later {
+        w.apply(&sync(&key.to_string(), Some("Later")));
+    }
+    assert!(w.issues.values().all(|i| i.stage == Stage::Ready));
+    w
+}
+
+fn queued(w: &World) -> usize {
+    w.queue(&w.groups[&watch()])
+}
+
+#[test]
+fn out_of_scope_issues_leave_the_queue() {
+    let w = refined(2, 10);
+    assert_eq!(queued(&w), 2, "not 12");
+    assert_eq!(
+        w.investigation_events(0, true),
+        [Event::InvestigationStarted {
+            group: watch(),
+            agent: AgentId::new("investigator-1"),
+            at_ms: 0,
+        }]
+    );
+    let enough = refined(8, 10);
+    assert_eq!(queued(&enough), 8);
+    assert_eq!(enough.investigation_events(0, true), []);
+}
+
+#[test]
+fn out_of_scope_by_project_or_area_leaves_the_queue() {
+    let takes = |projects: &[&str], areas: &[&str], milestones: &[&str]| Event::GroupCreated {
+        group: watch(),
+        name: "Night watch".into(),
+        projects: projects.iter().map(|p| ProjectId::new(*p)).collect(),
+        areas: areas.iter().map(|a| ProjectId::new(*a)).collect(),
+        milestones: milestones.iter().map(|m| MilestoneId::new(*m)).collect(),
+        refining_at_once: 1,
+        model: None,
+        queue_low: None,
+        investigate_every: None,
+    };
+    let mut w = World::replay(&[
+        project("ankh", "city/ankh"),
+        Event::AreaDefined {
+            area: ProjectId::new("guild"),
+            name: "Thieves' Guild".into(),
+            projects: vec![],
+            tracker: "fake".into(),
+            tracker_name: "GLD".into(),
+        },
+        takes(&["ankh"], &["guild"], &["First", "Second"]),
+    ])
+    .0;
+    // A ready issue of the project, one of the area, and one still refining.
+    for (source, key) in [("ankh", "1"), ("guild", "2")] {
+        let issue = IssueId::new(source, key);
+        w.apply(&Event::IssueSynced {
+            issue: issue.clone(),
+            title: format!("issue {key}"),
+            milestone: Some(MilestoneId::new("First")),
+            depends_on: vec![],
+            order: key.parse().unwrap_or(0),
+            closed: false,
+        });
+        w.apply(&Event::PlanWritten {
+            issue,
+            plan: Plan::default(),
+        });
+    }
+    w.apply(&sync("3", Some("Second")));
+    w.apply(&Event::AgentStarted {
+        agent: AgentId::new("refiner-3"),
+        group: watch(),
+        role: Role::Refiner,
+        issue: Some(IssueId::new("ankh", "3")),
+        machine: MachineId::new("morpork"),
+        folder: None,
+        secret_digest: None,
+    });
+    assert_eq!(queued(&w), 3);
+
+    w.apply(&takes(&["ankh"], &["guild"], &["First"]));
+    assert_eq!(
+        w.issues[&IssueId::new("ankh", "3")].stage,
+        Stage::Refining,
+        "its refiner still runs"
+    );
+    assert_eq!(queued(&w), 2, "its milestone left the list");
+    w.apply(&takes(&[], &["guild"], &["First"]));
+    assert_eq!(queued(&w), 1, "its project left the list");
+    w.apply(&takes(&[], &[], &["First"]));
+    assert_eq!(queued(&w), 0, "its area left the list");
+}
+
+#[test]
+fn issues_back_in_scope_count_again() {
+    let mut w = refined(2, 10);
+    let mut wider = w.clone();
+    for key in 3..=8 {
+        w.apply(&sync(&key.to_string(), Some("First")));
+    }
+    assert_eq!(queued(&w), 8);
+    let status = crate::text::text(&w, &Default::default());
+    assert!(status.contains("; 8 in its queue, "), "{status}");
+    assert_eq!(w.investigating(&watch()), None);
+    assert_eq!(w.investigation_events(0, true), []);
+
+    wider.apply(&group(&["First", "Later"], Some(8), None));
+    assert_eq!(queued(&wider), 12);
+}
+
 #[test]
 fn queue_low_defaults_to_twice_the_groups_work_folders() {
     let g = |w: &World| w.groups[&watch()].clone();
