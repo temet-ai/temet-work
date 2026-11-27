@@ -6,7 +6,7 @@
 //! times it sets are carried on the events, so nothing here reads one and
 //! replaying the log gives the same state.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 
 use crate::brief;
@@ -25,12 +25,31 @@ pub const QUEUE_LOW_WITHOUT_FOLDERS: usize = 2;
 /// How far back a group's first investigation reads merged pull requests.
 pub const FIRST_SINCE_DAYS: u64 = 7;
 
+/// A ready issue that cannot start because an open issue it needs, directly or
+/// through other open issues, is out of its group's scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DependencyWait {
+    /// The ready issue.
+    pub issue: IssueId,
+    /// The group that took it.
+    pub group: GroupId,
+    /// The dependency out of scope.
+    pub on: IssueId,
+    /// The open issues between the two, nearest to `issue` first; none when
+    /// `issue` names `on` itself.
+    pub through: Vec<IssueId>,
+    /// The milestone of `on` that the group does not take; none when `on` is out
+    /// of scope because no group covers it.
+    pub left_out: Option<MilestoneId>,
+}
+
 impl World {
     /// The group's work queue: its issues refining or ready, and the new issues
     /// it would take that no group has taken yet, each only while in its scope.
     /// The new ones count because the group refines them next; leaving them out
     /// would start investigations that file them again. One out of scope is no
-    /// work for the group until it comes back.
+    /// work for the group until it comes back, and nor is a ready one that waits
+    /// on a dependency out of scope.
     pub fn queue(&self, group: &Group) -> usize {
         self.issues
             .values()
@@ -40,7 +59,60 @@ impl World {
                 _ => false,
             })
             .filter(|i| self.in_scope(group, i))
+            .filter(|i| i.stage != Stage::Ready || self.blocked_on(group, i).is_empty())
             .count()
+    }
+
+    /// Every ready issue in its group's scope that waits on a dependency out of
+    /// it, once for each such dependency. Like [`World::out_of_scope`], it is
+    /// worked out each time from the issues and groups.
+    pub fn dependency_waits(&self) -> Vec<DependencyWait> {
+        self.issues
+            .values()
+            .filter(|i| i.stage == Stage::Ready)
+            .filter_map(|i| Some((self.groups.get(i.group.as_ref()?)?, i)))
+            .filter(|(group, i)| self.in_scope(group, i))
+            .flat_map(|(group, i)| self.blocked_on(group, i))
+            .collect()
+    }
+
+    /// The dependencies out of `group`'s scope that keep `issue` from starting:
+    /// those no group covers, and those in a milestone `group` does not take,
+    /// whoever else takes it. Open dependencies in scope are followed to their
+    /// own, nearest first, each issue once, so a cycle ends the walk. A done one
+    /// holds nothing up, and nothing says what scope an issue never synced is in.
+    fn blocked_on(&self, group: &Group, issue: &Issue) -> Vec<DependencyWait> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::from([&issue.id]);
+        let mut next = VecDeque::from([(issue, Vec::new())]);
+        while let Some((from, through)) = next.pop_front() {
+            for id in &from.depends_on {
+                let Some(on) = self.issues.get(id) else {
+                    continue;
+                };
+                if on.stage == Stage::Done || !seen.insert(id) {
+                    continue;
+                }
+                let left_out = on
+                    .milestone
+                    .as_ref()
+                    .filter(|m| !group.milestones.is_empty() && !group.milestones.contains(m));
+                if left_out.is_some() || !self.groups.values().any(|g| self.in_scope(g, on)) {
+                    out.push(DependencyWait {
+                        issue: issue.id.clone(),
+                        group: group.id.clone(),
+                        on: id.clone(),
+                        through: through.clone(),
+                        left_out: left_out.cloned(),
+                    });
+                } else {
+                    let mut path = through.clone();
+                    path.push(id.clone());
+                    next.push_back((on, path));
+                }
+            }
+        }
+        out
     }
 
     /// The repositories a group covers: its projects, then those of its areas,
