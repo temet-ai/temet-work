@@ -13,14 +13,16 @@ same commands.
 
 | Object | Belongs to | What it is |
 |---|---|---|
-| Project | the app | A repository: the tracker its issues come from (GitHub, GitLab or Jira), the code host its pull requests are on, its work folders, and its deploy and verify commands. Its settings are in the daemon's configuration (`docs/configuration.md`). |
+| Area | the app | Projects that work together, and the tracker of its own issues when one tracker project serves them all (`docs/areas.md`). |
+| Project | the app or an area | A repository: the tracker its issues come from (GitHub, GitLab or Jira), the code host its pull requests are on, and its work folders. |
+| Setting | a level: global, area, project, milestone or task | A value that says how work is done, such as the runtime, model or review rounds, for every role or one role. The most specific level that sets it wins (`docs/settings.md`). |
 | Group | the app | Sessions working together on a goal: its agents and the issues it has taken, from one or more projects, in the order of the milestones it works on. The daemon coordinates a group; no agent does. Groups run side by side and do not wait on each other. |
-| Agent | a group | One session: its role (refiner, author, reviewer, arbiter, investigator), runtime and model, machine, work folder, terminal and state. |
+| Agent | a group | One session: its role (refiner, author, reviewer, arbiter, investigator), runtime and model (from the settings), machine, work folder, terminal and state. |
 | Machine | the app | Where agents run, with its build slots. |
 | Limit | the app | A runtime account's usage windows (Claude 5 hours and 7 days, Codex 5 hours). |
 | Style guide | the app | Tokens, components, the ban list and the checks used when reviewing UI work. A project may set its accent, display face and density. |
 | Rule | the app or a project | A line in an agent's brief or in the config, with where it came from (a ruling, an overturned decision, a measured change), its state (proposed, on trial, kept, reverted) and what it is measured by. |
-| Milestone | a project | From the tracker. The project's focus is a list of milestones. |
+| Milestone | a project or area | From the tracker. A group's focus is a list of milestones. |
 | Issue | a project, in a milestone or none | From the tracker. One group at a time takes it through the loop. |
 | Work folder | a project | A checkout on one machine, used by one agent at a time, with a target directory that stays warm between issues. |
 | Plan | an issue | Written by the refiner as YAML: the checks, the parts and who does each, the folder, the merge rule. |

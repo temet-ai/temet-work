@@ -31,6 +31,9 @@ An issue from an area's tracker has the id `area#KEY`, and its plan says which o
 area's repositories it changes, in the order they merge (`repos`). For an issue from a
 project's own tracker, `repos` is that project when left empty.
 
+An area is one level of the settings chain (`docs/settings.md`): a value it sets holds for
+its projects and its own issues unless a project, milestone or task sets its own.
+
 A group can take whole areas (`areas = ["guild"]`) as well as single projects: it then takes
 the area's own issues and the issues of every project in it.
 

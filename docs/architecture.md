@@ -37,7 +37,7 @@ crate, and on no other crate in the workspace.
 
 | Crate | Depends on | Holds |
 |---|---|---|
-| `temet-work-core` | nothing in the workspace | The objects (project, milestone, issue, plan, check, group, agent, decision, rule), the work loop as a pure state machine (an event goes in, state and effects come out), commands, and view data with a text form. The `Part` contract. No I/O, no tool or service names, no UI types. |
+| `temet-work-core` | nothing in the workspace | The objects (area, project, milestone, issue, plan, check, group, agent, decision, rule), the settings chain (`docs/settings.md`), the work loop as a pure state machine (an event goes in, state and effects come out), commands, and view data with a text form. The `Part` contract. No I/O, no tool or service names, no UI types. |
 | `temet-work-tracker` | core | The tracker contract, a fake, and the contract tests every tracker adapter runs. |
 | `temet-work-tracker-github` | tracker only | GitHub. GitLab and Jira follow as their own crates. |
 | `temet-work-runner` | core | The runner contract: start a labelled terminal, read it, send to it, wait on it, follow its events. A fake and the contract tests. |
@@ -77,6 +77,9 @@ issue that changes several repositories is not yet.
 
 What does not work yet:
 
+- Runtimes and runners: every agent gets the first one in the build. Settings at every
+  level, from global down to one task (`docs/settings.md`), replace this, and the same
+  chain replaces every fixed value and one-off key the code has today.
 - Any agent or person can run any command; a command is not yet limited to the agent
   whose step it is.
 - Overturning a decision: the loop records an overturn, but no command makes one and no
@@ -175,7 +178,16 @@ features.
 
 ## What comes next
 
-The daemon, which reads the event log, feeds new events to the loop and carries out its
-effects through the parts: the GitHub tracker for issues, herdr-core for
-terminals, Claude Code for agents. Pull requests and merges need a code-host family of
-their own, since a tracker such as Jira hosts no code.
+In this order:
+
+1. The settings chain (`docs/settings.md`): global, area, project, milestone and task
+   levels, with roles inside each; runtimes and runners chosen by it; every family tested
+   with two adapters at once.
+2. The Codex runtime, as the second runtime.
+3. The app's theme generated from the design system's tokens, then the navbar with areas
+   through review.
+4. The desktop window on GPUI, drawing the daemon's view data.
+5. Areas, stage 2: one issue across several repositories, merged in order
+   (`docs/areas.md`).
+6. A Jira tracker and a GitLab code host.
+7. Overturning a decision by command, and rules proposed from overturns.

@@ -67,6 +67,10 @@ It refines `refining_at_once` issues at a time. It starts an author on a refined
 when one of the project's folders is free and every issue in the issue's "Depends on"
 lines is done. A project with two folders has at most two authors working at once.
 
+Settings at every level, from global down to one task, are planned (`docs/settings.md`).
+When they are built, a group's `model` and a project's `ci`, `deploy`, `verify` and
+`run_in` are read as settings at their level, so this file keeps working.
+
 Each project, folder and group in the file becomes an event in the log the first time the
 daemon reads it, and again whenever it changes. Removing one from the file does not
 remove it from the daemon yet.
