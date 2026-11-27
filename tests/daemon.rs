@@ -2461,6 +2461,32 @@ refining_at_once = 2
         temet_work_core::Digest::from_bytes(&bytes).0
     }
 
+    /// A new folder in the temp dir that only this user can write, removed when
+    /// dropped, so a failed test leaves nothing in it either.
+    #[cfg(target_os = "linux")]
+    struct Private(PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl Private {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            // A random name, and `create` fails on a folder someone else made.
+            let dir = std::env::temp_dir().join(format!("temet-work-test-{}", &fresh()[..16]));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&dir)
+                .expect("a new folder");
+            Self(dir)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for Private {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// The commands a person may run and an agent may not.
     const PERSONS: [&[&str]; 7] = [
         &["rule", "ankh#1", "approve", "the", "bell", "is", "fine"],
@@ -2589,11 +2615,13 @@ refining_at_once = 2
     #[cfg(target_os = "linux")]
     #[test]
     fn a_stolen_secret_from_a_sender_that_cannot_be_read_is_refused() {
-        let dir = scratch("unreadable");
-        let sock = dir.join("daemon.sock");
+        let sock = scratch("unreadable").join("daemon.sock");
         // A copy with no read bit runs non-dumpable, so its environ is root's.
-        // `install` writes it, so no thread here holds it open when it runs.
-        let hidden = dir.join("temet-work");
+        // It goes to the temp dir: on a busy project disk the copy alone can
+        // take seconds. `install` writes it, so no thread here holds it open
+        // when it runs.
+        let copy = Private::new();
+        let hidden = copy.0.join("temet-work");
         let installed = std::process::Command::new("install")
             .args(["-m", "111", env!("CARGO_BIN_EXE_temet-work")])
             .arg(&hidden)
