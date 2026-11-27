@@ -144,3 +144,39 @@ answers at ...` (the daemon is not running there). A refusal from the daemon is 
 refusal, as for a local agent.
 
 To send one command from your own shell the same way: `TEMET_WORK_DAEMON=ssh://omit temet-work status`.
+
+## temet-work deploying itself
+
+A deploy may restart the daemon that runs it, so the command does three things in this
+order: build and install, record the handoff, start the restart outside the daemon. A
+failed build stops the `&&` chain before anything is stopped, and its last lines are the
+issue's problem. The daemon gives the command `TEMET_WORK_HANDOFF`, a file next to its log
+(`deploy-handoff`); the command writes one line, `ISSUE BUILD`, into it. The old daemon
+then does not record `Deployed`. The new daemon records it, once, when its own build
+(`temet-workd --build`, the commit it was built from) is the one in the line, and the
+verify command runs after that, once. Agents run in herdr-core terminals, so they keep
+running across the restart and the new daemon starts no duplicates.
+
+```toml
+[[project]]
+id = "temet-work"
+tracker = "github"
+name = "temet-ai/temet-work"
+run_in = "/home/me/src/temet-work-deploy"   # a checkout of its own, never a work folder
+deploy = '''
+  git pull --ff-only &&
+  cargo install --path . --locked --root ~/.local &&
+  echo "$TEMET_WORK_ISSUE $(~/.local/bin/temet-workd --build)" >> "$TEMET_WORK_HANDOFF" &&
+  systemd-run --user --on-active=3 systemctl --user restart temet-workd
+'''
+verify = '''
+  test "$(~/.local/bin/temet-workd --build)" = "$(git describe --always --dirty)"
+'''
+```
+
+`systemd-run` starts the restart as its own unit, so the restart is not in the daemon's
+control group and is not killed with it. A deploy that handed off but was not followed by
+a restart within ten minutes counts as failed and runs again; after three failures it
+waits for a person, as any deploy does. If the daemon that starts is not the build the
+line names, the issue is listed as a problem with both builds, and deleting its line from
+`deploy-handoff` lets the deploy run again.

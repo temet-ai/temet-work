@@ -883,3 +883,104 @@ fn relay_with_no_daemon_exits_non_zero_saying_so() {
     assert_eq!(out.status.code(), Some(4));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no temet-work daemon answers at "));
 }
+
+/// A deploy that restarts the daemon: the old daemon hands the restart off and
+/// records nothing; the new one, with the new build, records Deployed and runs
+/// verify once.
+#[test]
+fn a_deploy_that_restarts_the_daemon_is_recorded_by_the_new_one() {
+    use temet_work_core::event::Event;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("handoff");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let handoff = dir.join("deploy-handoff");
+    let mut world = World::default();
+    let events = Config::parse(CONFIG)
+        .expect("config")
+        .events(&World::default());
+    for event in &events {
+        world.apply(event);
+    }
+    world.apply(&Event::IssueSynced {
+        issue: IssueId::new("ankh", "1"),
+        title: "Mend the clock".into(),
+        milestone: None,
+        depends_on: vec![],
+        order: 1,
+        closed: false,
+    });
+    let issue = IssueId::new("ankh", "1");
+    world.issues.get_mut(&issue).expect("issue").stage = Stage::Deploying;
+
+    let verifies = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shell = |file: std::path::PathBuf,
+                 verifies: std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+        std::sync::Arc::new(
+            move |command: &str, _: &std::path::PathBuf, _: &[(String, String)]| {
+                if command == "make deploy" {
+                    std::fs::write(&file, "ankh#1 new\n").map_err(|e| e.to_string())
+                } else {
+                    verifies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }
+            },
+        )
+    };
+    let part = |build: &str| {
+        temet_work_deploy::Deploys::with(shell(handoff.clone(), verifies.clone()))
+            .handoff(handoff.clone(), build)
+    };
+    let mut config = CONFIG.replace(
+        "deploy = \"make deploy\"",
+        "deploy = \"make deploy\"\nverify = \"make smoke\"",
+    );
+    config.push('\n');
+    let settle = |host: &mut Host, rounds: u64, until: Stage| {
+        for now in 0..rounds {
+            host.tick(now).expect("tick");
+            if host.world().issues[&issue].stage == until {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+
+    let mut old = Host::new(
+        world.clone(),
+        vec![Box::new(part("old"))],
+        Box::new(Memory::default()),
+    );
+    for event in Config::parse(&config).expect("config").events(old.world()) {
+        old.handle(0, event).expect("config event");
+    }
+    settle(&mut old, 100, Stage::Verifying);
+    assert_eq!(
+        old.world().issues[&issue].stage,
+        Stage::Deploying,
+        "not deployed by the old one"
+    );
+    assert_eq!(verifies.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(handoff.exists());
+
+    // The restart: the old daemon is gone; the new one has the log's state.
+    let world = old.world().clone();
+    drop(old);
+    let mut new = Host::new(
+        world,
+        vec![Box::new(part("new"))],
+        Box::new(Memory::default()),
+    );
+    settle(&mut new, 200, Stage::Done);
+    assert_eq!(
+        new.world().issues[&issue].stage,
+        Stage::Done,
+        "{:?}",
+        new.problems()
+    );
+    assert_eq!(
+        verifies.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "verify ran once"
+    );
+    assert!(!handoff.exists());
+}
