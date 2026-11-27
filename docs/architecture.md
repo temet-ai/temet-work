@@ -119,11 +119,14 @@ is stopped after thirty so a fresh one takes over. An agent whose turn ends in a
 usage limit, is listed under Problems with the line its turn ended on: the terminal's status
 message, or else the line on its screen that names the error, read once. When that line gives a
 reset time the runner family can read (`resets 5pm`, `resets 5:40pm` or `resets 17:40`, in the
-daemon's time zone), the daemon types `continue` one minute after it, without starting a new agent,
-and text waiting for the agent goes after that. The reset time is kept in the event log, so a
-restart does not lose it. An error with no reset time it can read, or one that comes back with a
-reset time no later than the one already continued after, is treated as idle: reminded, then
-stopped. A reminder starts a turn, and one that ends on the same error, or on another with no
+daemon's time zone; am or pm may follow a space in any case, as in `resets 5:40 PM`), the daemon
+types `continue` one minute after it, without starting a new agent, and text waiting for the agent
+goes after that. A time up to an hour past counts as passed, whether it is yesterday's, today's or
+tomorrow's, so a limit seen just after its reset is continued at once. The reset time is kept in the
+event log, so a restart does not lose it. A time more than six hours ahead is not read, and the
+agent is treated as idle: reminded, then stopped. The same happens when an error has no reset time
+the daemon can read, or comes back with a reset time no later than the one already continued after.
+A reminder starts a turn, and one that ends on the same error, or on another with no
 reset time to wait for, counts toward the stop, however long the turn worked: the next reminder
 or the stop is still timed from the last reminder. The count starts again when such a turn ends
 between turns, when the agent stops at a prompt or on a limit with a reset time, when it ends,

@@ -2215,6 +2215,57 @@ mod tests {
     }
 
     #[test]
+    fn a_limit_read_just_after_midnight_is_continued_at_once() {
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let fake = handle.fake;
+        let author = run(&mut part, &mut w, &["claude"]);
+        fake.lock().expect("lock").end_in_error(
+            &TerminalId("t1".into()),
+            "You've hit your 5-hour limit · resets 11:40pm",
+        );
+        let mut events = step(&mut part, &mut w, nov27(0, 20));
+        events.extend(step(&mut part, &mut w, nov27(0, 21)));
+        assert_eq!(continues(&fake), 1);
+        assert!(
+            events.contains(&Event::Continued {
+                agent: author.clone(),
+                resets_ms: nov27(23, 40) - 24 * 60 * 60 * 1000
+            }),
+            "{events:?}"
+        );
+        assert!(!ended(&events, &author), "{events:?}");
+        assert!(w.missing().start.is_empty(), "{:?}", w.missing());
+    }
+
+    #[test]
+    fn a_limit_more_than_6_hours_ahead_is_treated_as_idle() {
+        use temet_work_core::Host;
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let fake = handle.fake.clone();
+        run(&mut part, &mut w, &["claude"]);
+        let mut host = Host::new(w, vec![Box::new(part)], Box::new(Kept::default()));
+        fake.lock()
+            .expect("lock")
+            .end_in_error(&TerminalId("t1".into()), LIMIT);
+        host.tick(nov27(11, 0)).expect("tick");
+        assert_eq!(
+            host.problems().values().cloned().collect::<Vec<_>>(),
+            [
+                "author-1 in . stopped on an error: You've hit your 5-hour limit · resets 5:40pm; \
+                 the daemon reminds it and stops it as it does an idle agent"
+            ]
+        );
+        host.tick(nov27(11, 9)).expect("tick");
+        assert_eq!(reminders(&handle), 0);
+        host.tick(nov27(11, 10)).expect("tick");
+        assert_eq!(reminders(&handle), 1);
+    }
+
+    #[test]
     fn an_error_with_no_reset_time_is_reminded_twice_then_stopped() {
         let mut w = world();
         at_stage(&mut w, temet_work_core::model::Stage::Working);
