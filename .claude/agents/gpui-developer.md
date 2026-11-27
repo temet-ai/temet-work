@@ -1,6 +1,6 @@
 ---
 name: gpui-developer
-description: Specialist for temet-work's desktop app in Rust on GPUI with gpui-component (longbridge/gpui-component), built and run on this Linux machine under Wayland (Hyprland). Use for any Rust UI work in temet-work - spikes/gpui-shell/, windows, sidebars, virtual lists and tables, picking gpui and gpui-component versions, build times, and screenshots of the running window.
+description: Specialist for temet-work's desktop app in Rust on GPUI with gpui-component (longbridge/gpui-component), built and run on this Linux machine under Wayland (Hyprland). Use for any Rust UI work in temet-work - spikes/gpui-shell/, windows, sidebars, virtual lists and tables, picking gpui and gpui-component versions, build times, and screenshots taken offscreen.
 skills:
   - plain-writing
 ---
@@ -43,11 +43,16 @@ clean build and an issue list does not need them.
 
 ## Running and the screenshot
 
-- Set a unique `app_id` in the window options so you can find the window: 
-  `hyprctl clients -j` gives `class`, `at` and `size` in global coordinates; monitors are
-  side by side (`hyprctl monitors -j`), scale 1.
-- `grim -g "X,Y WxH" docs/findings/gpui-shell.png` captures screen pixels, not the window:
-  it must be on a visible workspace, unobscured, and drawn. Wait for the first frame, then
-  open the PNG with Read and check it shows the sidebar and the rows before you report.
-- The window opens on Dawid's live desktop. Do not move, focus or close his windows, and
-  do not edit `~/.config` or the Herdr app. Close your own window by ending its process.
+- Never open a window on Dawid's desktop: no `cargo run` of a window, no `hyprctl dispatch`,
+  no `exec_cmd`. On 27 November 2026 a test window launched with
+  `hyprctl dispatch hl.dsp.exec_cmd(..., { float, size, move })` made Hyprland abort; it came
+  back in safe mode with no monitors, and his Herdr and Discord windows closed.
+- Screenshots come from gpui's offscreen renderer, with no compositor:
+  `HeadlessAppContext::with_platform(CosmicTextSystem, Assets, || gpui_platform::current_headless_renderer())`
+  and `capture_screenshot(window)`, from a test or an example in `app/`, with the
+  `test-support` feature of gpui-pre and gpui-pre-platform and gpui-pre-wgpu as
+  dev-dependencies. Write the PNG to the session's scratch folder, open it with Read and check
+  it before you report.
+- Read-only `hyprctl` queries and `grim` of what is already on screen are allowed only when a
+  person asks for them. Do not move, focus or close his windows, and do not edit `~/.config`
+  or the Herdr app.
