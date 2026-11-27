@@ -16,6 +16,37 @@ on, the work folders agents use, and the groups of agents.
 The daemon works in rounds, one every two seconds, and prints each new problem to
 stderr. `--once` stops after the first round and prints the state as text.
 
+## Jira
+
+A project whose issues are in Jira Cloud names the tracker `jira` and its project key:
+
+```toml
+[[project]]
+id = "eng"
+tracker = "jira"
+name = "ENG"              # the Jira project key
+repo = "temet-ai/eng"     # Jira holds no code: name the code host's repository
+code_host = "github"
+```
+
+An area can name a Jira project the same way with `tracker = "jira"` and `tracker_project = "ENG"`.
+
+The adapter calls the Jira Cloud REST API v3 with `curl`. The site and the sign-in come from
+the daemon's environment, never from this file:
+
+| Variable | Holds |
+|---|---|
+| `JIRA_URL` | the site, `https://your-site.atlassian.net` (it must be `https`) |
+| `JIRA_USER` | the email of the account that owns the token |
+| `JIRA_TOKEN` | an Atlassian API token |
+
+A missing variable is a problem on the project that names it. Open issues are the project's
+issues whose status category is not Done. An issue's first fix version is its milestone, so a
+group's `milestones = ["Sign-in rework"]` names a version in Jira, and the milestones the
+project offers are its unreleased, unarchived versions. An issue depends on the issues its text
+names on a line starting "Depends on" and on those that block it with an "is blocked by" link.
+Closing an issue takes the transition that leads to a Done status.
+
 ## Example
 
 ```toml

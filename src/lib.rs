@@ -34,6 +34,8 @@ pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<
         let mut family = temet_work_tracker::Trackers::default();
         #[cfg(feature = "tracker-github")]
         family.add(Box::new(temet_work_tracker_github::GitHub::default()));
+        #[cfg(feature = "tracker-jira")]
+        family.add(Box::new(temet_work_tracker_jira::Jira::default()));
         parts.push(Box::new(family));
     }
     #[cfg(feature = "runner")]
