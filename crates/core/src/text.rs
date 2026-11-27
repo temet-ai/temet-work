@@ -600,8 +600,8 @@ Problems
         let text = issue(&w, &IssueId::new("radar", "44")).expect("known");
         assert!(text.contains("Settings for the refiner:\n"), "{text}");
         assert!(
-            text.contains("  model          opus    task, set by refiner-3\n"),
-            "{text}"
+            !text.contains("  model "),
+            "the refiner's model is for the author, not the refiner: {text}"
         );
     }
 
@@ -614,7 +614,7 @@ Problems
             "{all}"
         );
         assert!(
-            all.contains("  radar#44: model = opus, set by refiner-3\n"),
+            all.contains("  radar#44, author: model = opus, set by refiner-3\n"),
             "{all}"
         );
         assert!(

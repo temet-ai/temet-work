@@ -166,6 +166,9 @@ pub enum Kind {
 pub enum Agents {
     /// A refiner may, for the issue it is refining, while it is refining.
     May,
+    /// A refiner may in the same way, for the author only: its value is
+    /// recorded for the author, and the other roles' are a person's to set.
+    ForAuthor,
     /// Only a person does; why, in words that follow "because".
     MayNot(&'static str),
 }
@@ -199,13 +202,13 @@ pub const SPECS: [Spec; 16] = [
         key: "runtime",
         kind: Kind::Text,
         about: "the agent runtime an agent runs",
-        agents: Agents::May,
+        agents: Agents::ForAuthor,
     },
     Spec {
         key: "model",
         kind: Kind::Text,
         about: "the model an agent runs; the runtime's own default when none is set",
-        agents: Agents::May,
+        agents: Agents::ForAuthor,
     },
     Spec {
         key: "runner",
@@ -344,14 +347,45 @@ pub fn check_value(key: &str, value: &Value) -> Result<(), String> {
     }
 }
 
-/// Whether the loop leaves a logged change out: an agent's change, for one
-/// issue, of a setting only a person sets. Logs from before agents were refused
-/// hold such changes.
-pub(crate) fn ignored(scope: &Scope, key: &str, by: &str) -> bool {
-    matches!(scope, Scope::Task(_))
-        && by != FILE
-        && by != PERSON
-        && spec(key).is_ok_and(|s| s.agents != Agents::May)
+/// Whether `by`, as a change records it, is an agent.
+fn is_agent(by: &str) -> bool {
+    by != FILE && by != PERSON
+}
+
+/// Whether an agent may set `key` for the author only.
+fn for_author(key: &str) -> bool {
+    spec(key).is_ok_and(|s| s.agents == Agents::ForAuthor)
+}
+
+/// The role a change of `key` by `by` is recorded for, when it names `role`: an
+/// agent's change of a key it may set for the author only is the author's.
+pub(crate) fn recorded_role(role: Option<Role>, key: &str, by: &str) -> Option<Role> {
+    if is_agent(by) && for_author(key) {
+        Some(Role::Author)
+    } else {
+        role
+    }
+}
+
+/// The role the loop keeps a logged change under, or `None` when it leaves the
+/// change out. Logs from before agents were refused hold changes an agent made
+/// for one issue that it may no longer make: of a setting only a person sets,
+/// left out, and of a setting that is now the author's only, for every role
+/// (read as the author's) or for another role (left out).
+pub(crate) fn kept_role(
+    scope: &Scope,
+    role: Option<Role>,
+    key: &str,
+    by: &str,
+) -> Option<Option<Role>> {
+    if !matches!(scope, Scope::Task(_)) || !is_agent(by) {
+        return Some(role);
+    }
+    match spec(key).map(|s| s.agents) {
+        Ok(Agents::MayNot(_)) => None,
+        Ok(Agents::ForAuthor) if !matches!(role, None | Some(Role::Author)) => None,
+        _ => Some(recorded_role(role, key, by)),
+    }
 }
 
 /// Reads what was typed as the value of `key`.
@@ -591,6 +625,33 @@ impl World {
             .collect()
     }
 
+    /// Whether the author's value of `key` at `scope` is an agent's, for a key an
+    /// agent may set for the author only. A person's change for every role at that
+    /// scope overturns it: within a level the author's value would win otherwise.
+    pub(crate) fn agents_author_value(&self, scope: &Scope, key: &str) -> bool {
+        matches!(scope, Scope::Task(_))
+            && for_author(key)
+            && self
+                .settings
+                .get(&(scope.clone(), Some(Role::Author), key.to_string()))
+                .is_some_and(|e| is_agent(&e.by))
+    }
+
+    /// Drops an agent's value for the author when a change by a person or the
+    /// file, for every role, overturns it.
+    pub(crate) fn overturn_agents_value(
+        &mut self,
+        scope: &Scope,
+        role: Option<Role>,
+        key: &str,
+        by: &str,
+    ) {
+        if role.is_none() && !is_agent(by) && self.agents_author_value(scope, key) {
+            self.settings
+                .remove(&(scope.clone(), Some(Role::Author), key.to_string()));
+        }
+    }
+
     /// Records a value as `by`, as `SettingSet` does.
     pub(crate) fn put(
         &mut self,
@@ -729,11 +790,11 @@ mod level {
         ];
         for (scope, level) in cases {
             let mut events = base();
-            events.push(set(scope, None, "model", "opus", "someone"));
+            events.push(set(scope, None, "model", "opus", "person"));
             let r = at(&world(&events), None).expect("set");
             assert_eq!(r.level, level);
             assert_eq!(r.value, Value::Text("opus".into()));
-            assert_eq!(r.by.as_deref(), Some("someone"));
+            assert_eq!(r.by.as_deref(), Some("person"));
         }
     }
 
@@ -753,7 +814,7 @@ mod level {
             ),
             (Scope::Task(IssueId::new("radar", "44")), "task"),
         ] {
-            events.push(set(scope, None, "model", v, "p"));
+            events.push(set(scope, None, "model", v, "person"));
             assert_eq!(
                 at(&world(&events), None).expect("set").value,
                 Value::Text(v.into()),
@@ -830,7 +891,7 @@ mod level {
     #[test]
     fn only_a_person_sets_deploy_verify_run_in_permission_and_ci() {
         let mut keys: Vec<&str> = specs()
-            .filter(|s| s.agents != Agents::May)
+            .filter(|s| matches!(s.agents, Agents::MayNot(_)))
             .map(|s| s.key)
             .collect();
         keys.sort_unstable();
@@ -1170,6 +1231,67 @@ mod replay {
     }
 
     #[test]
+    fn an_older_log_with_a_refiners_model_for_every_role_reads_it_as_the_authors() {
+        let task = || Scope::Task(IssueId::new("radar", "44"));
+        let project = || Scope::Project(ProjectId::new("radar"));
+        let mut events = base();
+        for key in ["model", "runtime"] {
+            events.push(set(project(), Some(Role::Reviewer), key, "opus", "person"));
+            events.push(set(task(), None, key, "sonnet", "refiner-14"));
+            for role in [
+                Role::Reviewer,
+                Role::Arbiter,
+                Role::Refiner,
+                Role::Investigator,
+            ] {
+                events.push(set(task(), Some(role), key, "haiku", "refiner-14"));
+            }
+        }
+        let read = |w: &World, role, key| {
+            w.setting(&IssueId::new("radar", "44"), Some(role), key)
+                .map(|r| (r.value.to_string(), r.source()))
+        };
+        let is = |value: &str, source: &str| Some((value.to_string(), source.to_string()));
+        let w = world(&events);
+        for key in ["model", "runtime"] {
+            assert_eq!(
+                read(&w, Role::Author, key),
+                is("sonnet", "task, set by refiner-14")
+            );
+            assert_eq!(
+                read(&w, Role::Reviewer, key),
+                is("opus", "project, set by person")
+            );
+            for role in [Role::Arbiter, Role::Refiner, Role::Investigator] {
+                assert_eq!(read(&w, role, key), None, "{role:?}");
+            }
+        }
+        assert_eq!(
+            w.settings.keys().filter(|(at, ..)| *at == task()).count(),
+            2,
+            "one value for the author of each key"
+        );
+        // A person's later value for every role overturns it for every role.
+        events.push(set(task(), None, "model", "fable", "person"));
+        let w = world(&events);
+        for role in [Role::Author, Role::Reviewer, Role::Arbiter] {
+            assert_eq!(
+                read(&w, role, "model"),
+                is("fable", "task, set by person"),
+                "{role:?}"
+            );
+        }
+        // And an agent's unset for every role takes the author's value away.
+        events.push(Event::SettingUnset {
+            scope: task(),
+            role: None,
+            key: "runtime".into(),
+            by: "refiner-14".into(),
+        });
+        assert_eq!(read(&world(&events), Role::Author, "runtime"), None);
+    }
+
+    #[test]
     fn an_unset_removes_the_value_and_replaying_the_log_gives_the_same_settings() {
         let mut events = base();
         events.push(set(Scope::Global, None, "model", "sonnet", "file"));
@@ -1199,7 +1321,7 @@ mod replay {
             .collect();
         assert_eq!(world(&again).settings, once.settings);
         let r = once
-            .setting(&IssueId::new("radar", "44"), None, "model")
+            .setting(&IssueId::new("radar", "44"), Some(Role::Author), "model")
             .expect("task value");
         assert_eq!(r.source(), "task, set by refiner-3");
     }

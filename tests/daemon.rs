@@ -624,6 +624,70 @@ mod settings_commands {
     }
 
     #[test]
+    fn a_refiners_plan_model_leaves_the_persons_reviewer_model() {
+        use temet_work_core::model::{Check, Plan, Role};
+        let (mut host, starts) = host();
+        host.tick(0).expect("sync");
+        for role in [Role::Reviewer, Role::Arbiter] {
+            done(ask(
+                &mut host,
+                None,
+                set("ankh", Some(role), "model", "opus"),
+            ));
+        }
+        let refiner = |host: &mut Host, command: Command| {
+            let request = from(&starts, Some("refiner-1"), command);
+            answer(host, 1, &request, &Peer::Unchecked).expect("answer")
+        };
+        for role in [None, Some(Role::Author)] {
+            assert_eq!(
+                done(refiner(&mut host, set("ankh#1", role, "model", "haiku"))),
+                "model is haiku at ankh#1 for author"
+            );
+        }
+        let why = refused(refiner(
+            &mut host,
+            set("ankh#1", Some(Role::Reviewer), "model", "haiku"),
+        ));
+        assert!(why.contains("are a person's to set"), "{why}");
+        let unset = Command::Unset {
+            target: Target::parse("ankh#1"),
+            role: None,
+            key: "model".into(),
+        };
+        assert_eq!(
+            done(refiner(&mut host, unset)),
+            "model is no longer set at ankh#1 for author"
+        );
+        let plan = Command::Plan {
+            issue: IssueId::new("ankh", "1"),
+            plan: Plan {
+                repos: Vec::new(),
+                settings: [("model".to_string(), Value::Text("sonnet".into()))].into(),
+                checks: vec![Check {
+                    done_when: "the clock strikes thirteen".into(),
+                    proven_by: "listening at midnight".into(),
+                }],
+            },
+        };
+        done(refiner(&mut host, plan));
+        let mut shown = |role| {
+            let command = Command::Settings {
+                target: Target::parse("ankh#1"),
+                role: Some(role),
+            };
+            row(&done(ask(&mut host, None, command)), "model")
+        };
+        assert_eq!(shown(Role::Reviewer), "opus project, set by person");
+        assert_eq!(shown(Role::Author), "sonnet task, set by refiner-1");
+        let status = done(ask(&mut host, None, Command::Status));
+        assert!(
+            status.contains("ankh#1, author: model = sonnet, set by refiner-1\n"),
+            "{status}"
+        );
+    }
+
+    #[test]
     fn a_value_of_the_wrong_kind_an_unknown_key_or_an_adapter_the_build_lacks_is_refused_with_why()
     {
         let (mut host, _) = host();

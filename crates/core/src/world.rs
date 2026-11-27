@@ -176,8 +176,9 @@ impl World {
                 value,
                 by,
             } => {
-                if !settings::ignored(scope, key, by) {
-                    self.put(scope, *role, key, value, by);
+                if let Some(role) = settings::kept_role(scope, *role, key, by) {
+                    self.overturn_agents_value(scope, role, key, by);
+                    self.put(scope, role, key, value, by);
                 }
             }
             Event::SettingUnset {
@@ -186,8 +187,9 @@ impl World {
                 key,
                 by,
             } => {
-                if !settings::ignored(scope, key, by) {
-                    self.settings.remove(&(scope.clone(), *role, key.clone()));
+                if let Some(role) = settings::kept_role(scope, *role, key, by) {
+                    self.overturn_agents_value(scope, role, key, by);
+                    self.settings.remove(&(scope.clone(), role, key.clone()));
                 }
             }
             Event::GroupCreated {

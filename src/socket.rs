@@ -548,29 +548,14 @@ pub fn answer(
             },
         }),
         Ok(events) => {
+            let changed = changed_setting(&request.command, events.first());
             for event in events {
                 host.handle(now_ms, event)?;
             }
+            if let Some(text) = changed {
+                return Ok(Reply::Done { text });
+            }
             match &request.command {
-                temet_work_core::Command::Set {
-                    target,
-                    role,
-                    key,
-                    value,
-                } => {
-                    let for_role = role.map_or_else(String::new, |r| format!(" for {}", r.name()));
-                    return Ok(Reply::Done {
-                        text: format!("{key} is {value} at {target}{for_role}"),
-                    });
-                }
-                temet_work_core::Command::Unset {
-                    target, role, key, ..
-                } => {
-                    let for_role = role.map_or_else(String::new, |r| format!(" for {}", r.name()));
-                    return Ok(Reply::Done {
-                        text: format!("{key} is no longer set at {target}{for_role}"),
-                    });
-                }
                 temet_work_core::Command::Overturn {
                     decision, option, ..
                 } => {
@@ -596,6 +581,31 @@ pub fn answer(
                 );
             Ok(Reply::Done { text })
         }
+    }
+}
+
+/// What a `set` or `unset` is answered with, read from the event it was recorded
+/// as: an agent's value may be recorded for a role the command did not name.
+fn changed_setting(
+    command: &temet_work_core::Command,
+    recorded: Option<&temet_work_core::Event>,
+) -> Option<String> {
+    use temet_work_core::{Command, Event};
+    let for_role = |role: &Option<temet_work_core::model::Role>| {
+        role.map_or_else(String::new, |r| format!(" for {}", r.name()))
+    };
+    match (command, recorded?) {
+        (
+            Command::Set { target, .. },
+            Event::SettingSet {
+                role, key, value, ..
+            },
+        ) => Some(format!("{key} is {value} at {target}{}", for_role(role))),
+        (Command::Unset { target, .. }, Event::SettingUnset { role, key, .. }) => Some(format!(
+            "{key} is no longer set at {target}{}",
+            for_role(role)
+        )),
+        _ => None,
     }
 }
 

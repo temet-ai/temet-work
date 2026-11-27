@@ -193,7 +193,7 @@ impl World {
             for (key, value) in &plan.settings {
                 out.push(Event::SettingSet {
                     scope: Scope::Task(issue.clone()),
-                    role: None,
+                    role: settings::recorded_role(None, key, &who),
                     key: key.clone(),
                     value: value.clone(),
                     by: who.clone(),
@@ -235,18 +235,26 @@ impl World {
         })
     }
 
-    /// Why `by` may not change `key` at `scope`. A person may change any setting
-    /// anywhere. An agent may change what the setting's [`settings::Spec`] leaves
-    /// to agents, and only as the refiner of the issue at `scope`, in its plan or
-    /// by command, while that issue is refining.
-    fn may_set(&self, by: Option<&AgentId>, scope: &Scope, key: &str) -> Result<(), String> {
+    /// Why `by` may not change `key` at `scope` for `role` (none: the command
+    /// names no role). A person may change any setting anywhere. An agent may
+    /// change what the setting's [`settings::Spec`] leaves to agents, for the
+    /// roles it leaves to them, and only as the refiner of the issue at `scope`,
+    /// in its plan or by command, while that issue is refining.
+    fn may_set(
+        &self,
+        by: Option<&AgentId>,
+        scope: &Scope,
+        role: Option<Role>,
+        key: &str,
+    ) -> Result<(), String> {
         let Some(by) = by else {
             return Ok(());
         };
         let Some(agent) = self.agents.get(by) else {
             return Err(format!("{by} is not an agent this daemon started"));
         };
-        if let Agents::MayNot(why) = settings::spec(key)?.agents {
+        let agents = settings::spec(key)?.agents;
+        if let Agents::MayNot(why) = agents {
             return Err(format!("only a person sets {key}, because {why}"));
         }
         match scope {
@@ -254,7 +262,17 @@ impl World {
                 if agent.role == Role::Refiner && agent.issue.as_ref() == Some(issue) =>
             {
                 match self.issues.get(issue).map(|i| i.stage) {
-                    Some(Stage::Refining) => Ok(()),
+                    Some(Stage::Refining) => match role {
+                        Some(other) if agents == Agents::ForAuthor && other != Role::Author => {
+                            Err(format!(
+                                "only a person sets {key} for the {}, because the {key}s of \
+                                 reviewers, arbiters, refiners and investigators are a person's \
+                                 to set; a refiner's {key} is for the author",
+                                other.name()
+                            ))
+                        }
+                        _ => Ok(()),
+                    },
                     Some(now) => Err(format!(
                         "{} may change settings of {issue} only while it is refining; \
                          it is {} now",
@@ -346,7 +364,7 @@ impl World {
                 }
                 let task = Scope::Task(issue.clone());
                 for (key, value) in &plan.settings {
-                    self.may_set(by, &task, key)
+                    self.may_set(by, &task, None, key)
                         .and_then(|()| settings::check_value(key, value))
                         .and_then(|()| self.check_choice(key, value))
                         .map_err(|e| format!("the plan's settings: {e}"))?;
@@ -458,35 +476,41 @@ impl World {
                 value,
             } => {
                 let scope = self.scope_of(target)?;
-                self.may_set(by, &scope, key)?;
+                self.may_set(by, &scope, *role, key)?;
                 let value = settings::parse_value(key, value)?;
                 self.check_choice(key, &value)?;
+                let by = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
                 Event::SettingSet {
                     scope,
-                    role: *role,
+                    role: settings::recorded_role(*role, key, &by),
                     key: key.clone(),
                     value,
-                    by: by.map_or_else(|| PERSON.to_string(), |a| a.0.clone()),
+                    by,
                 }
             }
             Command::Unset { target, role, key } => {
                 let scope = self.scope_of(target)?;
-                self.may_set(by, &scope, key)?;
+                self.may_set(by, &scope, *role, key)?;
                 settings::spec(key)?;
-                if !self
+                let who = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
+                let at = settings::recorded_role(*role, key, &who);
+                // A person's unset for every role also takes an agent's value for
+                // the author away, so it has something to unset when only that is.
+                let there = self
                     .settings
-                    .contains_key(&(scope.clone(), *role, key.clone()))
-                {
-                    let for_role = role.map_or_else(String::new, |r| format!(" for {}", r.name()));
+                    .contains_key(&(scope.clone(), at, key.clone()))
+                    || (by.is_none() && at.is_none() && self.agents_author_value(&scope, key));
+                if !there {
+                    let for_role = at.map_or_else(String::new, |r| format!(" for {}", r.name()));
                     return Err(format!(
                         "{key} is not set at {target}{for_role}; nothing to unset"
                     ));
                 }
                 Event::SettingUnset {
                     scope,
-                    role: *role,
+                    role: at,
                     key: key.clone(),
-                    by: by.map_or_else(|| PERSON.to_string(), |a| a.0.clone()),
+                    by: who,
                 }
             }
             Command::Retry { issue } => {
@@ -1064,7 +1088,7 @@ mod plan_settings {
     use super::*;
     use crate::ids::{GroupId, MachineId, ProjectId};
     use crate::model::Check;
-    use crate::settings::{Level, Value};
+    use crate::settings::Value;
 
     fn issue() -> IssueId {
         IssueId::new("ankh", "1")
@@ -1133,27 +1157,173 @@ mod plan_settings {
         }
     }
 
+    fn set(target: &str, role: Option<Role>, key: &str, value: &str) -> Command {
+        Command::Set {
+            target: Target::parse(target),
+            role,
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    fn unset(role: Option<Role>) -> Command {
+        Command::Unset {
+            target: Target::Issue(issue()),
+            role,
+            key: "model".into(),
+        }
+    }
+
+    /// Runs `command` as `by` and applies what it becomes.
+    fn run(w: &mut World, by: Option<&str>, command: &Command) -> Vec<Event> {
+        let by = by.map(AgentId::new);
+        let events = w.events(by.as_ref(), command).expect("accepted");
+        apply_all(w, &events);
+        events
+    }
+
+    /// The value `role` reads for ankh#1 and where it comes from.
+    fn read(w: &World, role: Role, key: &str) -> Option<(String, String)> {
+        w.setting(&issue(), Some(role), key)
+            .map(|r| (r.value.to_string(), r.source()))
+    }
+
+    fn is(value: &str, source: &str) -> Option<(String, String)> {
+        Some((value.to_string(), source.to_string()))
+    }
+
     #[test]
-    fn a_plan_with_settings_records_them_as_the_refiners_task_level_events_first() {
+    fn a_plan_records_model_and_runtime_for_the_author() {
         let mut w = refining();
-        let refiner = AgentId::new("refiner-1");
+        run(
+            &mut w,
+            None,
+            &set("ankh", Some(Role::Reviewer), "runtime", "alpha"),
+        );
         let command = plan(&[
             ("model", Value::Text("opus".into())),
+            ("runtime", Value::Text("beta".into())),
             ("review_rounds", Value::Number(5)),
         ]);
-        let events = w.events(Some(&refiner), &command).expect("accepted");
+        let events = run(&mut w, Some("refiner-1"), &command);
         assert!(matches!(events.last(), Some(Event::PlanWritten { .. })));
-        assert_eq!(events.len(), 3, "two settings, then the plan");
-        assert!(events[..2].iter().all(|e| matches!(
-            e,
-            Event::SettingSet { scope: Scope::Task(i), by, .. } if i == &issue() && by == "refiner-1"
-        )));
-        apply_all(&mut w, &events);
-        let model = w
-            .setting(&issue(), Some(Role::Author), "model")
-            .expect("set");
-        assert_eq!(model.source(), "task, set by refiner-1");
+        assert_eq!(events.len(), 4, "three settings, then the plan");
+        let recorded: Vec<(&str, Option<Role>)> = events[..3]
+            .iter()
+            .map(|e| match e {
+                Event::SettingSet {
+                    scope: Scope::Task(i),
+                    role,
+                    key,
+                    by,
+                    ..
+                } if i == &issue() && by == "refiner-1" => (key.as_str(), *role),
+                other => panic!("not the refiner's task-level setting: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            [
+                ("model", Some(Role::Author)),
+                ("review_rounds", None),
+                ("runtime", Some(Role::Author)),
+            ]
+        );
+        assert_eq!(
+            read(&w, Role::Author, "model"),
+            is("opus", "task, set by refiner-1")
+        );
+        assert_eq!(
+            read(&w, Role::Author, "runtime"),
+            is("beta", "task, set by refiner-1")
+        );
+        assert_eq!(
+            read(&w, Role::Reviewer, "runtime"),
+            is("alpha", "project, set by person")
+        );
         assert_eq!(w.setting_number(&issue(), None, "review_rounds"), 5);
+    }
+
+    #[test]
+    fn a_refiners_model_is_for_the_author_only() {
+        let mut w = refining();
+        for role in [Role::Reviewer, Role::Arbiter] {
+            run(&mut w, None, &set("ankh", Some(role), "model", "opus"));
+        }
+        let command = plan(&[("model", Value::Text("sonnet".into()))]);
+        run(&mut w, Some("refiner-1"), &command);
+        for (role, model) in [
+            (Role::Author, "sonnet"),
+            (Role::Reviewer, "opus"),
+            (Role::Arbiter, "opus"),
+        ] {
+            let launch = w
+                .launch(&GroupId::new("watch"), role, &issue(), None)
+                .expect("known");
+            assert_eq!(launch.brief.model.as_deref(), Some(model), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn a_refiners_set_of_model_is_for_the_author_and_refused_for_other_roles() {
+        let refiner = AgentId::new("refiner-1");
+        for key in ["model", "runtime"] {
+            for role in [None, Some(Role::Author)] {
+                let mut w = refining();
+                let events = run(&mut w, Some("refiner-1"), &set("ankh#1", role, key, "x"));
+                assert_eq!(
+                    events,
+                    [Event::SettingSet {
+                        scope: Scope::Task(issue()),
+                        role: Some(Role::Author),
+                        key: key.into(),
+                        value: Value::Text("x".into()),
+                        by: "refiner-1".into(),
+                    }]
+                );
+            }
+            for role in [
+                Role::Reviewer,
+                Role::Arbiter,
+                Role::Refiner,
+                Role::Investigator,
+            ] {
+                let w = refining();
+                let unset = Command::Unset {
+                    target: Target::Issue(issue()),
+                    role: Some(role),
+                    key: key.into(),
+                };
+                for command in [set("ankh#1", Some(role), key, "x"), unset] {
+                    let why = w.events(Some(&refiner), &command).expect_err("refused");
+                    assert!(
+                        why.starts_with(&format!(
+                            "only a person sets {key} for the {}, because ",
+                            role.name()
+                        )) && why.contains("are a person's to set"),
+                        "{why}"
+                    );
+                }
+            }
+        }
+        // Its unset, with no role, removes the author's value.
+        let mut w = refining();
+        run(
+            &mut w,
+            Some("refiner-1"),
+            &set("ankh#1", None, "model", "x"),
+        );
+        let events = run(&mut w, Some("refiner-1"), &unset(None));
+        assert_eq!(
+            events,
+            [Event::SettingUnset {
+                scope: Scope::Task(issue()),
+                role: Some(Role::Author),
+                key: "model".into(),
+                by: "refiner-1".into(),
+            }]
+        );
+        assert_eq!(read(&w, Role::Author, "model"), None);
     }
 
     #[test]
@@ -1191,28 +1361,53 @@ mod plan_settings {
     #[test]
     fn a_person_can_overturn_what_a_refiner_set() {
         let mut w = refining();
-        let refiner = AgentId::new("refiner-1");
-        let events = w
-            .events(
-                Some(&refiner),
-                &plan(&[("model", Value::Text("opus".into()))]),
-            )
-            .expect("accepted");
-        apply_all(&mut w, &events);
-        let set = Command::Set {
-            target: Target::Issue(issue()),
-            role: None,
-            key: "model".into(),
-            value: "haiku".into(),
-        };
-        let events = w.events(None, &set).expect("a person may");
-        apply_all(&mut w, &events);
-        let r = w.setting(&issue(), None, "model").expect("set");
-        assert_eq!(
-            (r.value, r.level),
-            (Value::Text("haiku".into()), Level::Task)
+        let command = plan(&[("model", Value::Text("opus".into()))]);
+        run(&mut w, Some("refiner-1"), &command);
+        run(&mut w, None, &set("ankh#1", None, "model", "haiku"));
+        for role in [Role::Author, Role::Reviewer, Role::Arbiter] {
+            assert_eq!(
+                read(&w, role, "model"),
+                is("haiku", "task, set by person"),
+                "{role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_persons_own_value_for_the_author_is_kept() {
+        let mut w = refining();
+        run(
+            &mut w,
+            None,
+            &set("ankh#1", Some(Role::Author), "model", "opus"),
         );
-        assert_eq!(r.by.as_deref(), Some(PERSON));
+        run(&mut w, None, &set("ankh#1", None, "model", "haiku"));
+        assert_eq!(
+            read(&w, Role::Author, "model"),
+            is("opus", "task, set by person")
+        );
+        run(&mut w, None, &unset(None));
+        assert_eq!(
+            read(&w, Role::Author, "model"),
+            is("opus", "task, set by person")
+        );
+        assert!(
+            w.events(None, &unset(None))
+                .is_err_and(|e| e.contains("nothing to unset"))
+        );
+    }
+
+    #[test]
+    fn a_persons_unset_for_every_role_removes_a_refiners_value_for_the_author() {
+        let mut w = refining();
+        run(&mut w, None, &set("ankh", None, "model", "opus"));
+        let command = plan(&[("model", Value::Text("haiku".into()))]);
+        run(&mut w, Some("refiner-1"), &command);
+        run(&mut w, None, &unset(None));
+        assert_eq!(
+            read(&w, Role::Author, "model"),
+            is("opus", "project, set by person")
+        );
     }
 
     #[test]
@@ -1319,6 +1514,26 @@ mod plan_settings {
     }
 
     #[test]
+    fn a_refiners_brief_says_its_model_is_the_authors() {
+        let w = refining();
+        let launch = w
+            .launch(&GroupId::new("watch"), Role::Refiner, &issue(), None)
+            .expect("known");
+        let task = launch.brief.task;
+        assert!(
+            task.contains(
+                "A model or runtime you set is the author's only: the models and runtimes of \
+                 reviewers, arbiters and refiners are a person's to set."
+            ),
+            "{task}"
+        );
+        assert!(
+            task.contains("Only a person sets permission, ci, deploy, verify, run_in:"),
+            "{task}"
+        );
+    }
+
+    #[test]
     fn an_agent_may_not_set_deploy() {
         only_a_person_may_set("deploy", "make deploy", Value::Text("make deploy".into()));
     }
@@ -1374,7 +1589,7 @@ mod plan_settings {
             .expect("accepted");
         apply_all(&mut w, &events);
         for (key, value) in [("merge", "rebase"), ("model", "opus")] {
-            let r = w.setting(&issue(), None, key).expect("set");
+            let r = w.setting(&issue(), Some(Role::Author), key).expect("set");
             assert_eq!(r.value, Value::Text(value.into()));
             assert_eq!(r.source(), "task, set by refiner-1");
         }
