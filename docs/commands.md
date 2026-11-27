@@ -87,14 +87,24 @@ itself is in no log, reply, status or issue text.
 
 Agents run as the same user as the daemon, so this does not stop an agent that:
 
-- starts a process that leaves its process tree (`setsid -f`): with both variables
+- starts any process outside its process tree (`hc exec`, `hc run`, a double fork,
+  `tmux new -d`, `systemd-run --user`, `at`, cron, `setsid -f`): with both variables
   dropped it passes as a person, and with another agent's id and secret it passes as
-  that agent;
+  that agent. `hc exec` and `hc run` start the program as herdr-core's child with
+  herdr-core's environment, not the agent's, so it passes as a person even without
+  `env -u`;
 - edits the daemon's files or its event log;
 - logs in to the daemon's machine over SSH and runs `temet-work` there, outside the relay;
 - runs on another machine and reads another agent's secret from that machine's `/proc`:
   through the relay it passes as that agent, since the daemon cannot see the processes
   there;
+- sends text to another agent's terminal through herdr-core (`hc send`, `hc keys`): it
+  acts as that agent. A line starting with `!` runs as a shell command in that agent's
+  process tree with its secret, so both the secret check and the tree check pass, and
+  plain text is a prompt that agent acts on. `hc send` run from a terminal puts an
+  `<hc from="…">` tag before the text, which unsetting `HC_TERMINAL_ID` leaves out.
+  Terminals carry `group`, `issue` and `role` labels, so one such as the terminal of
+  `reviewer-3` on `watch#12` is easy to find;
 - types into a person's terminal.
 
 On macOS the daemon checks secrets but not process trees, because `SO_PEERCRED` and
