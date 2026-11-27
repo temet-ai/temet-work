@@ -143,6 +143,27 @@ when one of the project's folders is free (on the issue's `machine`, when that s
 names one) and every issue in the issue's "Depends on" lines is done. A project with two
 folders has at most two authors working at once.
 
+An issue leaves a group's scope when the group no longer lists its milestone, project or
+area, because the issue moved or the group changed. An agent already working on it
+finishes its step: a refiner its plan, an author its change or the fixes it has heard, a
+reviewer its round, an arbiter its ruling. After that the group does not start an agent on
+it, send a fix or a new review round, or merge an approved change. The issue keeps its
+work folders and its idle author, which hold its branch and what the author knew.
+`temet-work status` and `temet-work issue` show its stage followed by "out of scope".
+Three cases go differently:
+
+- A refined issue no author has started on holds no agent or folder, so another group
+  whose lists cover it takes it, without refining it again.
+- A refining issue whose refiner stops before its plan is in goes back to the new issues.
+  It holds no refining slot while it is out, and is refined from the start when a group
+  takes it.
+- An issue with one of its pull requests merged, or deploying or verifying, finishes: the
+  rest merge in the plan's order, then it deploys and is verified.
+
+When the issue is back in its group's lists it carries on from the stage it reached: the
+agent that stage needs starts or is told, or the merge goes ahead. An issue with a plan is
+not refined again.
+
 A project's `deploy` and `verify` commands run through `sh -c` in its `run_in` folder (your
 home folder when left out), with `TEMET_WORK_ISSUE` (the issue, such as `radar#44`),
 `TEMET_WORK_PROJECT` (the project's id) and `TEMET_WORK_REPO` (the code host's name for its

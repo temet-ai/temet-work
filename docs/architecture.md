@@ -135,6 +135,22 @@ merges. A group has no coordinator agent: in the research fleet the standing sea
 28 minutes, and in mike's larger runs such seats were where the token and turn costs came from
 (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
 
+A group takes for refining, and starts authors on, only issues its milestones, projects and
+areas cover. Whether an issue it took is still covered is worked out from the issue and the group
+each time and is not stored, so a log replays to the same state. An issue that leaves its group's
+scope before any of its pull requests merged is paused (`World::paused`): `World::apply` drops the
+effects that would start an agent, send a fix, start or announce a review round, or ask for a
+merge, `World::missing` returns nothing for it, and `World::waiting_on` is false for an author
+that has not heard its fixes, so it is not reminded into working. Agents already working finish
+their step, since stopping one mid-turn throws away a plan half written or edits not yet
+committed, and a milestone move is often undone. The issue keeps its folders and its idle author.
+A paused ready issue goes to another group that covers it, since it holds no agent or folder; a
+paused refining issue whose refiner has stopped goes back to new, so it holds no refining slot.
+An issue with a pull request merged still merges the rest, deploys and is verified: stopping
+between repositories would leave main branches that do not match, and a merged change has to
+deploy to match main. When the issue is covered again, `World::missing` starts or tells the
+agent its stage needs, or asks for the merge.
+
 ## How parts meet
 
 A part never names another part. They meet through the core's events and effects, and

@@ -24,6 +24,16 @@ pub fn stage(stage: Stage) -> String {
     }
 }
 
+/// An issue's stage, and "out of scope" when its group no longer covers it.
+fn issue_stage(world: &World, issue: &crate::model::Issue) -> String {
+    let at = stage(issue.stage);
+    if world.out_of_scope(issue) {
+        format!("{at}, out of scope")
+    } else {
+        at
+    }
+}
+
 /// An agent's state in a few words.
 pub fn agent_state(state: &AgentState) -> String {
     match state {
@@ -113,7 +123,7 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             out,
             "  {}  {}  {}{milestone}{pulls}",
             i.id,
-            stage(i.stage),
+            issue_stage(world, i),
             i.title
         );
     }
@@ -263,7 +273,7 @@ pub fn issue(world: &World, id: &crate::ids::IssueId) -> Option<String> {
     let i = world.issues.get(id)?;
     let mut out = String::new();
     let _ = writeln!(out, "{}  {}", i.id, i.title);
-    let _ = writeln!(out, "Stage: {}", stage(i.stage));
+    let _ = writeln!(out, "Stage: {}", issue_stage(world, i));
     if let Some(m) = &i.milestone {
         let _ = writeln!(out, "Milestone: {m}");
     }
