@@ -186,9 +186,10 @@ issues a person closed in the group's projects and areas, and the investigator f
 them again. The list holds issues the daemon saw open while syncing. A close in the tracker
 counts as a person's unless the daemon made it after verifying the issue, or one of the
 issue's pull requests had merged before it, since a pull request can close its issue as it
-merges. So a person's own close after such a merge does not count either, and the issue may
-be filed again; reopening the issue clears the merge. A person who wants a listed issue
-built reopens it.
+merges. For the same reason the daemon ignores a close of an issue that has a merged pull
+request and is not done: a failed verify sends it back to be fixed, and a person's own close
+after the merge does not finish it. Reopening a done issue clears the merge. A person who
+wants a listed issue built reopens it.
 
 The investigation ends when the investigator runs `temet-work investigated GROUP` or its
 session ends. An idle investigator is reminded and then stopped after `remind_after` and
