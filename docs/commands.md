@@ -4,6 +4,7 @@ session_id:
   - 30de12a8-8bb8-4310-a59b-8d5267ce0b97
   - 26cd49d9-7565-4506-b988-a9b64ed0fa45
   - 7d9306de-2941-41bd-8a60-efad6ed38f2a
+  - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
 ---
 
 # Commands
@@ -181,7 +182,9 @@ began on code that has since changed.
 
 The daemon listens at `$TEMET_WORK_SOCKET`, else `$XDG_RUNTIME_DIR/temet-work/daemon.sock`,
 else `~/.local/state/temet-work/daemon.sock`, one JSON request per line and one JSON reply
-per line.
+per line. The line `{"ask":"build"}` asks the daemon its build. It replies at once with
+`{"reply":"done","text":"BUILD"}`, naming the build it is running, and the same connection
+takes requests as before.
 
 `TEMET_WORK_DAEMON` picks how a command reaches the daemon: unset or empty is the local
 socket above; `ssh://[USER@]HOST[:PORT][/SOCKET/PATH]` runs `ssh -o BatchMode=yes
@@ -193,8 +196,11 @@ and the command fails with `ssh HOST: no answer within 60 s`. A host ssh cannot 
 fails with `ssh HOST: could not connect: ...`.
 The hidden command `temet-work relay` copies one request line from standard input to the
 local socket, marked as relayed, and the reply line back; it exits 4 when no daemon
-answers. When `--build` is missing or is not its own build, it does not contact the daemon and replies with a
-refusal: `temet-work on NAME is build X, the daemon is build Y: update it`.
+answers. Before it sends the request, it asks the daemon its build on the same connection.
+When `--build` is missing or names another build, it does not send the request and replies
+with a refusal that names the daemon's build:
+`temet-work on NAME is build X, the daemon is build Y: update it`. A daemon too old to
+answer the question is not sent the request either, and the refusal says to restart it.
 The hidden command `temet-work trust-folder RUNTIME PATH` marks PATH trusted for the
 runtime in its user files on the machine it runs on, as the daemon does before an agent
 starts in a folder on its own machine. For a folder on another machine the daemon runs it

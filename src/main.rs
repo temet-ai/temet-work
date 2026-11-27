@@ -98,7 +98,7 @@ fn secret() -> Option<String> {
 
 /// `temet-work relay` (hidden): the far end of an SSH transport. Copies one
 /// request line from standard input to this machine's daemon and the reply line
-/// back to standard output, when the caller names this build.
+/// back to standard output, when the caller names the running daemon's build.
 fn relay(args: &[String]) -> ExitCode {
     let (mut path, mut caller) = (None, socket::Caller::default());
     let mut args = args.iter();

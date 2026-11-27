@@ -1129,10 +1129,10 @@ printf '{{"reply":"done","text":"all quiet"}}\n'
 }
 
 /// A stub `ssh` whose far end is the real `temet-work relay`, told that the
-/// caller is build `other` on the machine `lancre`.
-fn other_build_stub(name: &str, socket: &std::path::Path) -> std::path::PathBuf {
+/// caller is build `build` on the machine `lancre`.
+fn relay_stub(name: &str, socket: &std::path::Path, build: &str) -> std::path::PathBuf {
     let body = format!(
-        "#!/bin/sh\nTEMET_WORK_SOCKET={} exec {} relay --build other --host lancre\n",
+        "#!/bin/sh\nTEMET_WORK_SOCKET={} exec {} relay --build {build} --host lancre\n",
         socket.display(),
         env!("CARGO_BIN_EXE_temet-work")
     );
@@ -1153,7 +1153,7 @@ fn a_client_at_a_different_build_is_refused_and_nothing_reaches_the_daemon() {
 
     let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("other-build.sock");
     let requests = socket::listen(&path).expect("listen");
-    let stub = other_build_stub("other-build", &path);
+    let stub = relay_stub("other-build", &path, "other");
     let reply = Ssh {
         target: "stub".into(),
         port: None,
@@ -1173,8 +1173,9 @@ fn a_client_at_a_different_build_is_refused_and_nothing_reaches_the_daemon() {
 
 #[test]
 fn a_person_at_a_different_build_reads_one_line_and_exit_code_1() {
-    let nowhere = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("unused.sock");
-    let stub = other_build_stub("other-build-cli", &nowhere);
+    let sock = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("other-build-cli.sock");
+    let _requests = temet_work::socket::listen(&sock).expect("listen");
+    let stub = relay_stub("other-build-cli", &sock, "other");
     let path = format!(
         "{}:{}",
         stub.parent().expect("dir").display(),
@@ -1193,6 +1194,51 @@ fn a_person_at_a_different_build_reads_one_line_and_exit_code_1() {
         format!("refused: {}\n", other_build_refusal())
     );
     assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn the_relay_compares_the_client_with_the_daemons_build_not_its_own() {
+    use temet_work::socket::{self, Reply, Ssh, Transport};
+
+    assert_ne!("octarine", temet_work::BUILD);
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("daemon-build.sock");
+    let requests = socket::listen_as(&path, "octarine").expect("listen");
+    let send_as = |name: &str, build: &str| {
+        let stub = relay_stub(name, &path, build);
+        std::thread::spawn(move || {
+            Ssh {
+                target: "stub".into(),
+                port: None,
+                socket: None,
+                program: stub.display().to_string(),
+                deadline: socket::SSH_DEADLINE,
+            }
+            .send(&Request::new(None, Command::Status))
+        })
+    };
+
+    let client = send_as("at-the-daemons-build", "octarine");
+    let pending = requests
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("a request");
+    let (mut host, _) = host();
+    host.tick(0).expect("tick");
+    let answer = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
+    pending.answer(answer.clone());
+    assert!(matches!(answer, Reply::Done { .. }), "{answer:?}");
+    assert_eq!(client.join().expect("client"), Ok(answer));
+
+    let client = send_as("at-the-relays-build", temet_work::BUILD);
+    assert_eq!(
+        client.join().expect("client"),
+        Ok(Reply::Refused {
+            why: format!(
+                "temet-work on lancre is build {}, the daemon is build octarine: update it",
+                temet_work::BUILD
+            )
+        })
+    );
+    assert!(requests.try_recv().is_err(), "the request was forwarded");
 }
 
 #[test]

@@ -2,6 +2,7 @@
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
   - 26cd49d9-7565-4506-b988-a9b64ed0fa45
+  - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
 ---
 
 # temet-work architecture
@@ -32,8 +33,8 @@ The app, the CLI and the MCP server reach the daemon through one transport inter
 (`Transport` in `src/socket.rs`): a client sends a request and gets a reply, and has no
 idea how it travelled. There are two implementations, the daemon's local socket and
 SSH (`ssh HOST temet-work relay`, which copies one JSON line to the daemon's socket on
-its machine, and refuses a client of another build). `TEMET_WORK_DAEMON` picks one. The
-address carries the daemon's socket as its path
+its machine, and refuses a client whose build is not the running daemon's).
+`TEMET_WORK_DAEMON` picks one. The address carries the daemon's socket as its path
 (`ssh://omit/run/user/1000/temet-work/daemon.sock`), because sshd passes no environment
 and a second daemon on one machine has to be told apart; no path means the default
 socket. A TCP transport with a token, on a private
