@@ -284,6 +284,107 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
     assert!(author.contains("$ fake-agent "), "{author}");
 }
 
+/// A person keeps the project's agents in plan mode. A refiner cannot move the
+/// issue to Codex, which ignores `permission`, so the author runs Claude in it.
+#[cfg(all(feature = "runtime-claude", feature = "runtime-codex"))]
+#[test]
+fn a_refiners_plan_naming_runtime_is_refused_and_the_author_runs_claude_in_plan_mode() {
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::model::{Check, Plan};
+    use temet_work_core::settings::{Scope, Target, Value};
+    use temet_work_core::{Event, text};
+
+    // The Claude adapter marks the folder trusted in this home, never the real one.
+    let home = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("runtime-plan-home");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("home");
+    let mut runtimes = temet_work_runtime::Runtimes::default().with_home(&home);
+    runtimes.add(Box::new(temet_work_runtime_claude::Claude));
+    runtimes.add(Box::new(temet_work_runtime_codex::Codex));
+    let kept = Kept::default();
+    let (mut host, starts) = host_with_runtimes(Box::new(kept.clone()), runtimes);
+    let run = |host: &mut Host, by: Option<&str>, command: Command| {
+        let request = from(&starts, by, command);
+        answer(host, 1, &request, &Peer::Unchecked).expect("answer")
+    };
+    let done = |reply: Reply| match reply {
+        Reply::Done { text } => text,
+        Reply::Refused { why } => panic!("refused: {why}"),
+    };
+    done(run(
+        &mut host,
+        None,
+        Command::Set {
+            target: Target::parse("ankh"),
+            role: None,
+            key: "permission".into(),
+            value: "plan".into(),
+        },
+    ));
+    host.tick(0).expect("sync");
+    let issue = IssueId::new("ankh", "1");
+    let plan = |settings: &[(&str, &str)]| Command::Plan {
+        issue: issue.clone(),
+        plan: Plan {
+            repos: Vec::new(),
+            settings: settings
+                .iter()
+                .map(|(k, v)| (k.to_string(), Value::Text(v.to_string())))
+                .collect(),
+            checks: vec![Check {
+                done_when: "the clock strikes thirteen".into(),
+                proven_by: "listening at midnight".into(),
+            }],
+        },
+    };
+
+    let logged = kept.0.lock().expect("log").len();
+    let refused = run(&mut host, Some("refiner-1"), plan(&[("runtime", "codex")]));
+    assert!(
+        matches!(&refused, Reply::Refused { why } if why.contains(
+            "only a person sets runtime, because a runtime may not follow permission"
+        )),
+        "{refused:?}"
+    );
+    assert_eq!(host.world().issues[&issue].stage, Stage::Refining);
+    assert_eq!(host.world().issues[&issue].plan, None);
+    let task = Scope::Task(issue.clone());
+    assert!(
+        !host
+            .world()
+            .settings
+            .keys()
+            .any(|(at, _, key)| *at == task && key == "runtime"),
+        "no task-level runtime"
+    );
+    let since: Vec<Event> = kept.0.lock().expect("log")[logged..].to_vec();
+    assert!(
+        !since
+            .iter()
+            .any(|e| matches!(e, Event::SettingSet { .. } | Event::PlanWritten { .. })),
+        "{since:?}"
+    );
+
+    done(run(&mut host, Some("refiner-1"), plan(&[])));
+    let author = done(run(
+        &mut host,
+        None,
+        Command::Screen {
+            agent: AgentId::new("author-1"),
+        },
+    ));
+    assert!(
+        author.contains("$ claude --permission-mode plan "),
+        "{author}"
+    );
+    assert!(home.join(".claude.json").exists(), "trusted in the scratch");
+    assert!(
+        host.problems().is_empty(),
+        "{}",
+        text::text(host.world(), host.problems())
+    );
+}
+
 #[test]
 fn a_folder_on_another_machine_needs_daemon_host_before_an_agent_starts_there() {
     let config = CONFIG.replace("path = \".\"", "machine = \"mac\"\npath = \"/work/ankh\"");
@@ -1997,6 +2098,21 @@ refining_at_once = 2
         let requests = socket::listen(&sock).expect("listen");
         let (mut host, starts) = host();
         host.tick(0).expect("sync");
+        // One review round, so that the first block goes to the arbiter.
+        let one_round = Command::Set {
+            target: temet_work_core::settings::Target::parse("ankh"),
+            role: None,
+            key: "review_rounds".into(),
+            value: "1".into(),
+        };
+        let set = answer(
+            &mut host,
+            1,
+            &Request::new(None, one_round),
+            &Peer::Unchecked,
+        )
+        .expect("answer");
+        assert!(matches!(set, Reply::Done { .. }), "{set:?}");
         let client = std::thread::spawn({
             let sock = sock.clone();
             move || {
@@ -2005,7 +2121,7 @@ refining_at_once = 2
                 };
                 let refiner = secret(&starts, "refiner-1");
                 let plan = plan.display().to_string();
-                let set = ["set", "ankh#1", "review_rounds", "1"];
+                let set = ["set", "ankh#1", "starts", "5"];
                 let mut got = vec![
                     run("refiner-1", None, &set),
                     run("refiner-1", None, &["status"]),

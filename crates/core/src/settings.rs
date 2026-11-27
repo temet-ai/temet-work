@@ -202,7 +202,10 @@ pub const SPECS: [Spec; 16] = [
         key: "runtime",
         kind: Kind::Text,
         about: "the agent runtime an agent runs",
-        agents: Agents::ForAuthor,
+        agents: Agents::MayNot(
+            "a runtime may not follow permission, so the runtime decides what an agent \
+             may do without asking",
+        ),
     },
     Spec {
         key: "model",
@@ -214,7 +217,10 @@ pub const SPECS: [Spec; 16] = [
         key: "runner",
         kind: Kind::Text,
         about: "where an agent's terminal runs",
-        agents: Agents::May,
+        agents: Agents::MayNot(
+            "it follows from the person's machines, not from the issue, and a value for \
+             one issue replaces the one a person chose for a role",
+        ),
     },
     Spec {
         key: "machine",
@@ -234,7 +240,10 @@ pub const SPECS: [Spec; 16] = [
         key: "review_rounds",
         kind: Kind::Count(1),
         about: "review rounds before the arbiter rules",
-        agents: Agents::May,
+        agents: Agents::MayNot(
+            "it decides how many rounds of review an issue gets before the arbiter rules, \
+             so fewer rounds weaken its review",
+        ),
     },
     Spec {
         key: "ci",
@@ -889,13 +898,25 @@ mod level {
     }
 
     #[test]
-    fn only_a_person_sets_deploy_verify_run_in_permission_and_ci() {
+    fn only_a_person_sets_ci_deploy_permission_review_rounds_run_in_runner_runtime_and_verify() {
         let mut keys: Vec<&str> = specs()
             .filter(|s| matches!(s.agents, Agents::MayNot(_)))
             .map(|s| s.key)
             .collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["ci", "deploy", "permission", "run_in", "verify"]);
+        assert_eq!(
+            keys,
+            [
+                "ci",
+                "deploy",
+                "permission",
+                "review_rounds",
+                "run_in",
+                "runner",
+                "runtime",
+                "verify",
+            ]
+        );
     }
 
     #[test]
@@ -1185,6 +1206,7 @@ mod replay {
         let mut events = base();
         events.push(set(radar(), None, "deploy", "make deploy", FILE));
         events.push(set(radar(), None, "permission", "plan", "person"));
+        events.push(set(radar(), None, "runtime", "alpha", "person"));
         events.push(set(task(), None, "verify", "make smoke", "person"));
         events.extend([
             by_refiner("deploy", text("make mine")),
@@ -1192,6 +1214,9 @@ mod replay {
             by_refiner("permission", text("bypassPermissions")),
             by_refiner("verify", text("true")),
             by_refiner("ci", Value::Flag(false)),
+            by_refiner("runtime", text("beta")),
+            by_refiner("runner", text("elsewhere")),
+            by_refiner("review_rounds", Value::Number(1)),
             by_refiner("model", text("opus")),
         ]);
         events.push(set(
@@ -1199,6 +1224,14 @@ mod replay {
             Some(Role::Author),
             "permission",
             "bypassPermissions",
+            "refiner-3",
+        ));
+        // A refiner's runtime was once recorded for the author.
+        events.push(set(
+            task(),
+            Some(Role::Author),
+            "runtime",
+            "beta",
             "refiner-3",
         ));
         // Nor does an agent's unset take away what a person set.
@@ -1219,6 +1252,10 @@ mod replay {
         assert_eq!(at("verify"), is("make smoke", "task, set by person"));
         assert_eq!(at("run_in"), None);
         assert_eq!(at("ci"), is("true", "built in"));
+        // The next level's value, or none, so the build's own default is used.
+        assert_eq!(at("runtime"), is("alpha", "project, set by person"));
+        assert_eq!(at("runner"), None);
+        assert_eq!(at("review_rounds"), is("3", "built in"));
         assert_eq!(at("model"), is("opus", "task, set by refiner-3"));
         // `temet-work settings` and `status` read these, so neither lists the rest.
         let agents: Vec<&str> = w
@@ -1235,60 +1272,63 @@ mod replay {
         let task = || Scope::Task(IssueId::new("radar", "44"));
         let project = || Scope::Project(ProjectId::new("radar"));
         let mut events = base();
-        for key in ["model", "runtime"] {
-            events.push(set(project(), Some(Role::Reviewer), key, "opus", "person"));
-            events.push(set(task(), None, key, "sonnet", "refiner-14"));
-            for role in [
-                Role::Reviewer,
-                Role::Arbiter,
-                Role::Refiner,
-                Role::Investigator,
-            ] {
-                events.push(set(task(), Some(role), key, "haiku", "refiner-14"));
-            }
+        events.push(set(
+            project(),
+            Some(Role::Reviewer),
+            "model",
+            "opus",
+            "person",
+        ));
+        events.push(set(task(), None, "model", "sonnet", "refiner-14"));
+        for role in [
+            Role::Reviewer,
+            Role::Arbiter,
+            Role::Refiner,
+            Role::Investigator,
+        ] {
+            events.push(set(task(), Some(role), "model", "haiku", "refiner-14"));
         }
-        let read = |w: &World, role, key| {
-            w.setting(&IssueId::new("radar", "44"), Some(role), key)
+        let read = |w: &World, role| {
+            w.setting(&IssueId::new("radar", "44"), Some(role), "model")
                 .map(|r| (r.value.to_string(), r.source()))
         };
         let is = |value: &str, source: &str| Some((value.to_string(), source.to_string()));
         let w = world(&events);
-        for key in ["model", "runtime"] {
-            assert_eq!(
-                read(&w, Role::Author, key),
-                is("sonnet", "task, set by refiner-14")
-            );
-            assert_eq!(
-                read(&w, Role::Reviewer, key),
-                is("opus", "project, set by person")
-            );
-            for role in [Role::Arbiter, Role::Refiner, Role::Investigator] {
-                assert_eq!(read(&w, role, key), None, "{role:?}");
-            }
+        assert_eq!(
+            read(&w, Role::Author),
+            is("sonnet", "task, set by refiner-14")
+        );
+        assert_eq!(
+            read(&w, Role::Reviewer),
+            is("opus", "project, set by person")
+        );
+        for role in [Role::Arbiter, Role::Refiner, Role::Investigator] {
+            assert_eq!(read(&w, role), None, "{role:?}");
         }
         assert_eq!(
             w.settings.keys().filter(|(at, ..)| *at == task()).count(),
-            2,
-            "one value for the author of each key"
+            1,
+            "one value, for the author"
         );
+        // An agent's unset for every role takes the author's value away.
+        let mut unset = events.clone();
+        unset.push(Event::SettingUnset {
+            scope: task(),
+            role: None,
+            key: "model".into(),
+            by: "refiner-14".into(),
+        });
+        assert_eq!(read(&world(&unset), Role::Author), None);
         // A person's later value for every role overturns it for every role.
         events.push(set(task(), None, "model", "fable", "person"));
         let w = world(&events);
         for role in [Role::Author, Role::Reviewer, Role::Arbiter] {
             assert_eq!(
-                read(&w, role, "model"),
+                read(&w, role),
                 is("fable", "task, set by person"),
                 "{role:?}"
             );
         }
-        // And an agent's unset for every role takes the author's value away.
-        events.push(Event::SettingUnset {
-            scope: task(),
-            role: None,
-            key: "runtime".into(),
-            by: "refiner-14".into(),
-        });
-        assert_eq!(read(&world(&events), Role::Author, "runtime"), None);
     }
 
     #[test]
