@@ -87,7 +87,8 @@ What exists today:
 | `temet-work-codehost-gitlab` | merge requests through `glab` and its sign-in, merged with `--squash`, `--rebase` or neither; a pipeline reads as failed once a job that may not fail has failed; passes the contract on recorded output and, read only, against GitLab (`--features live`) |
 | `temet-work-deploy` | runs the deploy command after a merge and the verify command after a deploy, each on its own thread, one at a time per project and `run_in` folder; a failed deploy is listed as a problem, a failed verify sends the issue back to ready; a handoff line naming a build other than the daemon's runs the deploy again, up to three times, then waits for `temet-work retry ISSUE` |
 | `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |
-| style, mike | skeletons |
+| `temet-work-style` | the design system's tokens as Rust constants, written by `scripts/sync-tokens`; the ban list; tests that hold the tokens to the design system's rules. `docs/ui.md` maps the app's parts to the design system |
+| mike | a skeleton |
 | `temet-work`, the root package | the parts, the configuration (`docs/configuration.md`), `temet-workd`, which syncs GitHub issues, starts agents and answers commands on its socket after reading who sent each, and the `temet-work` command line (`docs/commands.md`) |
 
 Areas (`docs/areas.md`) group projects that work together; stages 1 and 2 are built, so an
@@ -225,7 +226,7 @@ In this order:
    with two adapters at once. Done: Claude Code and Codex are both runtimes, chosen by the
    `runtime` setting.
 2. The app's theme generated from the design system's tokens, then the navbar with areas
-   through review.
+   through review (`docs/ui.md`).
 3. The desktop window on GPUI, drawing the daemon's view data.
 4. Areas, stage 2: one issue across several repositories, merged in order
    (`docs/areas.md`).

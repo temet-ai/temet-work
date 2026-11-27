@@ -1,0 +1,305 @@
+#!/usr/bin/env node
+// scripts/sync-tokens: writes crates/style/src/tokens.rs from the tokens of the design system,
+// @temet-ai/design.
+//
+//   scripts/sync-tokens [storybook-url]      default http://127.0.0.1:6106
+//
+// It opens one story of the design system's running Storybook in headless Chromium, reads each
+// token the design system documents as the page resolves it in the dark theme, and writes it as
+// a Rust constant with the token's name. It also reads the StatusTag and StageTag maps. Nothing in
+// the design system changes. Start its Storybook first (`npm run storybook` in temet-design/ui).
+// Set CHROME to the browser to use; the default is the first of chromium, google-chrome-stable
+// and the Mac's Google Chrome that is installed.
+"use strict";
+
+const { spawn, execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const STORYBOOK = (process.argv[2] || "http://127.0.0.1:6106").replace(/\/$/, "");
+const STORY = "temet-statustag--all-statuses";
+const OUT = path.join(__dirname, "..", "crates", "style", "src", "tokens.rs");
+
+// The tokens the design system documents (Theme/Colours, Theme/Motion, the ramps table). Blueprint's
+// other ramps stay out, and with them its turquoise, cerulean and sepia, which the Rules leave unused.
+const KEEP = [
+  /^--tm-/,
+  /^--bp-palette-(blue|green|orange|red)-[1-6]$/,
+  /^--bp-palette-(black|white)$/,
+  /^--bp-palette-(dark-gray|gray|light-gray)-[1-5]$/,
+  /^--bp-intent-/,
+  /^--bp-typography-/,
+  /^--bp-surface-/,
+  /^--bp-emphasis-/,
+];
+
+function fail(message) {
+  console.error(`sync-tokens: ${message}`);
+  process.exit(1);
+}
+
+function browser() {
+  const mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  const names = process.env.CHROME ? [process.env.CHROME] : ["chromium", "google-chrome-stable", mac];
+  for (const name of names) {
+    if (name.startsWith("/") && fs.existsSync(name)) return name;
+    try {
+      execFileSync("which", [name], { stdio: "ignore" });
+      return name;
+    } catch {}
+  }
+  fail(`no browser found (tried ${names.join(", ")}); set CHROME`);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitFor(what, test, ms = 30000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const value = await test();
+    if (value) return value;
+    await sleep(200);
+  }
+  fail(`timed out waiting for ${what}`);
+}
+
+// Runs in the Storybook page. Returns every custom property its stylesheets set, resolved on the
+// body in the dark theme, each colour as the browser computes it, and the two maps.
+async function probe() {
+  const html = document.documentElement;
+  html.classList.add("bp6-dark");
+  document.body.classList.add("bp6-dark");
+  // The Storybook toolbar can switch the attention colour; read the theme's default.
+  html.removeAttribute("data-attention");
+  const names = new Set();
+  const walk = (rules) => {
+    for (const rule of rules) {
+      if (rule.style) for (const p of rule.style) if (p.startsWith("--")) names.add(p);
+      if (rule.cssRules) walk(rule.cssRules);
+    }
+  };
+  for (const sheet of document.styleSheets) {
+    try {
+      walk(sheet.cssRules);
+    } catch {}
+  }
+  const body = getComputedStyle(document.body);
+  const el = document.createElement("div");
+  document.body.append(el);
+  const values = {};
+  for (const name of names) {
+    const raw = body.getPropertyValue(name).trim();
+    el.style.color = "";
+    el.style.color = raw;
+    const colour = el.style.color && !/^[\d.]+$/.test(raw) ? getComputedStyle(el).color : null;
+    values[name] = { raw, colour };
+  }
+  el.remove();
+  const iconName = (c) => {
+    // Blueprint's icon components are named after the icon, as TickCircleIcon for tick-circle.
+    const n = String(c.displayName || c.name || "").split(".").pop().replace(/Icon$/, "");
+    return n.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+  };
+  const { STATUS } = await import("/src/temet/status.ts");
+  const { STAGES } = await import("/src/temet/stages.ts");
+  return JSON.stringify({
+    values,
+    status: Object.entries(STATUS).map(([name, s]) => ({ name, word: s.word, icon: iconName(s.icon), intent: s.intent })),
+    stages: Object.entries(STAGES).map(([name, icon]) => ({ name, icon: iconName(icon) })),
+  });
+}
+
+async function read() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sync-tokens-"));
+  const chrome = spawn(
+    browser(),
+    ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check", "about:blank"],
+    { stdio: "ignore" },
+  );
+  try {
+    const port = await waitFor("the browser", () => {
+      try {
+        return fs.readFileSync(path.join(dir, "DevToolsActivePort"), "utf8").split("\n")[0];
+      } catch {
+        return null;
+      }
+    });
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    const page = targets.find((t) => t.type === "page");
+    if (!page) fail("the browser has no page");
+    const ws = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      ws.onopen = resolve;
+      ws.onerror = () => reject(new Error("cannot reach the browser"));
+    });
+    let id = 0;
+    const pending = new Map();
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      const p = pending.get(m.id);
+      if (!p) return;
+      pending.delete(m.id);
+      if (m.error) p.reject(new Error(m.error.message));
+      else p.resolve(m.result);
+    };
+    const send = (method, params = {}) =>
+      new Promise((resolve, reject) => {
+        pending.set(++id, { resolve, reject });
+        ws.send(JSON.stringify({ id, method, params }));
+      });
+    const evaluate = async (expression) => {
+      const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+      if (r.exceptionDetails) fail(`the page threw: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
+      return r.result.value;
+    };
+    await send("Page.navigate", { url: `${STORYBOOK}/iframe.html?id=${STORY}&viewMode=story` });
+    await waitFor("the story to render", () =>
+      evaluate(`document.readyState === "complete" && !!document.querySelector("#storybook-root > *")`),
+    );
+    const json = await evaluate(`(${probe.toString()})()`);
+    ws.close();
+    return JSON.parse(json);
+  } finally {
+    chrome.kill();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ---------- Values to Rust ----------
+
+const constName = (token) => token.replace(/^--/, "").replace(/-/g, "_").toUpperCase();
+
+/** "rgb(20, 16, 26)", "rgba(255, 255, 255, 0.08)" or "color(srgb 0.8 0.1 0.4 / 0.2)" as 0xRRGGBBAA. */
+function rgba(computed) {
+  let r, g, b, a = 1;
+  let m = computed.match(/^rgba?\(([^)]*)\)$/);
+  if (m) {
+    const p = m[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+    [r, g, b] = p;
+    if (p.length > 3) a = p[3];
+  } else if ((m = computed.match(/^color\(srgb ([^)]*)\)$/))) {
+    const p = m[1].split(/[\s/]+/).filter(Boolean).map(Number);
+    [r, g, b] = p.slice(0, 3).map((v) => v * 255);
+    if (p.length > 3) a = p[3];
+  } else {
+    return null;
+  }
+  const byte = (v) => Math.max(0, Math.min(255, Math.round(v)));
+  const hex = [r, g, b, a * 255].map((v) => byte(v).toString(16).padStart(2, "0")).join("");
+  return `0x${hex}`;
+}
+
+function classify(name, { raw, colour }) {
+  let m;
+  if (name.includes("family")) {
+    const list = raw.split(",").map((f) => f.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+    return { kind: "font", rust: `&[${list.map((f) => JSON.stringify(f)).join(", ")}]`, doc: raw };
+  }
+  if (colour) {
+    const hex = rgba(colour);
+    if (hex) return { kind: "colour", rust: `Rgba(${hex})`, doc: `#${hex.slice(2, 8)}${hex.endsWith("ff") ? "" : ` at ${Math.round((parseInt(hex.slice(8), 16) / 255) * 100)}%`}` };
+  }
+  if ((m = raw.match(/^(-?\d*\.?\d+)px$/))) return { kind: "px", rust: `Px(${Number(m[1]).toFixed(1)})`, doc: raw };
+  if ((m = raw.match(/^(\d*\.?\d+)(ms|s)$/))) {
+    const ms = Number(m[1]) * (m[2] === "s" ? 1000 : 1);
+    return { kind: "duration", rust: `Duration::from_millis(${Math.round(ms)})`, doc: raw };
+  }
+  if ((m = raw.match(/^cubic-bezier\(([^)]*)\)$/))) {
+    const p = m[1].split(",").map((v) => Number(v.trim()).toFixed(2));
+    return { kind: "curve", rust: `Curve(${p.join(", ")})`, doc: raw };
+  }
+  if (/^-?\d*\.?\d+$/.test(raw)) return { kind: "number", rust: Number(raw).toString().includes(".") ? Number(raw).toString() : `${raw}.0`, doc: raw };
+  return null;
+}
+
+const TYPES = { colour: "Rgba", px: "Px", duration: "Duration", curve: "Curve", number: "f32", font: "&[&str]" };
+const LISTS = { colour: "COLOURS", px: "SIZES", duration: "DURATIONS", curve: "CURVES", number: "NUMBERS", font: "FONTS" };
+const INTENTS = { none: "None", primary: "Primary", success: "Success", warning: "Warning", danger: "Danger" };
+
+function source() {
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".config", "temet-design", "config.json"), "utf8"));
+    const version = JSON.parse(fs.readFileSync(path.join(config.ui, "package.json"), "utf8")).version;
+    const git = (...args) => execFileSync("git", ["-C", config.ui, ...args], { encoding: "utf8" }).trim();
+    const commit = git("rev-parse", "--short", "HEAD");
+    const dirty = git("status", "--porcelain", "--", ".") ? ", with uncommitted changes" : "";
+    return `@temet-ai/design ${version}, commit ${commit}${dirty}`;
+  } catch {
+    return "@temet-ai/design";
+  }
+}
+
+function rust(data) {
+  const kept = Object.keys(data.values)
+    .filter((n) => KEEP.some((re) => re.test(n)))
+    .sort();
+  const tokens = [];
+  const skipped = [];
+  for (const name of kept) {
+    const t = classify(name, data.values[name]);
+    if (t) tokens.push({ name, ...t });
+    else skipped.push(name);
+  }
+  const out = [];
+  out.push(`//! The design system's tokens, from ${source()}.`);
+  out.push("//! Written by `scripts/sync-tokens`; do not edit, run the script again.");
+  out.push("//!");
+  out.push("//! Each constant has its token's name and holds its value in the dark theme. Blueprint's ramp");
+  out.push("//! names hold other hues in the temet theme: blue holds magenta (the accent), green holds blue");
+  out.push("//! (success) and orange holds yellow (warning). `TM_ATTENTION` is the theme's default.");
+  if (skipped.length) {
+    out.push("//!");
+    out.push("//! Not a single value, so left out:");
+    for (const s of skipped) out.push(`//! - \`${s}\``);
+  }
+  out.push("");
+  out.push("use std::time::Duration;");
+  out.push("");
+  out.push("use crate::{Curve, Intent, Px, Rgba, StageView, StatusView};");
+  for (const t of tokens) {
+    out.push("");
+    out.push(`/// \`${t.name}\`: ${t.doc.replace(/`/g, "")}`);
+    out.push(`pub const ${constName(t.name)}: ${TYPES[t.kind]} = ${t.rust};`);
+  }
+  for (const kind of Object.keys(LISTS)) {
+    const of = tokens.filter((t) => t.kind === kind);
+    out.push("");
+    out.push(`/// Every ${kind === "px" ? "size" : kind} token, by name.`);
+    out.push(`pub const ${LISTS[kind]}: &[(&str, ${TYPES[kind]})] = &[`);
+    for (const t of of) out.push(`    ("${t.name}", ${constName(t.name)}),`);
+    out.push("];");
+  }
+  out.push("");
+  out.push("/// StatusTag's statuses, in the design system's order.");
+  out.push(`pub const STATUS: [StatusView; ${data.status.length}] = [`);
+  for (const s of data.status) {
+    if (!(s.intent in INTENTS)) fail(`status ${s.name} has an intent this script does not know: ${s.intent}`);
+    out.push(`    StatusView { name: "${s.name}", word: "${s.word}", icon: "${s.icon}", intent: Intent::${INTENTS[s.intent]} },`);
+  }
+  out.push("];");
+  out.push("");
+  out.push("/// StageTag's stages, in the order an issue goes through them.");
+  out.push(`pub const STAGES: [StageView; ${data.stages.length}] = [`);
+  for (const s of data.stages) out.push(`    StageView { name: "${s.name}", icon: "${s.icon}" },`);
+  out.push("];");
+  return { text: out.join("\n") + "\n", count: tokens.length, skipped };
+}
+
+(async () => {
+  try {
+    await fetch(STORYBOOK);
+  } catch {
+    fail(`no Storybook at ${STORYBOOK}; start it with \`npm run storybook\` in temet-design/ui`);
+  }
+  const data = await read();
+  const { text, count, skipped } = rust(data);
+  fs.writeFileSync(OUT, text);
+  try {
+    execFileSync("rustfmt", ["--edition", "2024", OUT], { stdio: "inherit" });
+  } catch {
+    fail(`wrote ${OUT} but rustfmt failed on it`);
+  }
+  console.log(`sync-tokens: ${count} tokens, ${data.status.length} statuses, ${data.stages.length} stages -> ${path.relative(process.cwd(), OUT)}`);
+  if (skipped.length) console.log(`sync-tokens: left out ${skipped.length}: ${skipped.join(", ")}`);
+})().catch((e) => fail(e.message));
