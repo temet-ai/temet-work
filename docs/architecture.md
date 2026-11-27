@@ -110,7 +110,8 @@ changes (on the issue's `machine`, when that setting names one) and the issues i
 on are done. Review runs for at most three rounds before an arbiter
 rules. Every round the daemon also starts any agent an issue needs and does not have: one
 whose session ended, or one it decided on and did not start before it stopped. After three
-agents of one role have ended on one issue it stops and lists the issue as a problem. It
+agents of one role have ended on one issue while it waited on them, it stops and lists the
+issue as a problem. It
 also asks again for a merge, deploy or verify that was lost; the parts that do them do not
 repeat work already done or running; a deploy that restarts the daemon is recorded by
 the new daemon, which finds the build in the handoff file (`docs/configuration.md`). An agent its
@@ -133,10 +134,13 @@ between turns, when the agent stops at a prompt or on a limit with a reset time,
 and when its issue stops waiting on it. A reviewer whose approval is in is not
 waited on while the checks run: it is not reminded, no other is started in its place, and it stays
 until the merge, so after a failed check a reviewer still running hears the next round. A refiner
-stops once its plan is in and an arbiter once its ruling is in, so a later arbitration on the issue
-starts a fresh arbiter that hears that dispute; an approval by ruling is not replaced while the
-checks run. The author and reviewer stop once the issue's last pull request merges. A group has
-no coordinator agent: in the research fleet the standing seat waited 25 of its 28 minutes, and in
+stops once its plan is in and an arbiter once its ruling is in. The arbiter also stops when its
+issue goes back to the author by a failed check, a conflict, a refused merge or a person's
+overturn, so a later arbitration on the issue starts a fresh arbiter that hears that dispute.
+No second arbiter starts as long as one whose stop failed still runs. The daemon asks again each
+round to stop one that has ruled, since nothing reminds it, and starts a fresh one once it has
+ended. An approval by ruling is not replaced while the checks run. The author and reviewer stop once the issue's last pull request merges. A group has no
+coordinator agent: in the research fleet the standing seat waited 25 of its 28 minutes, and in
 mike's larger runs such seats were where the token and turn costs came from
 (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
 

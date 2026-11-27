@@ -58,7 +58,7 @@ which is the one in effect.
 | `deploy`, `verify`, `run_in` | no | none | the deploy part, per issue |
 | `merge` | no | `squash` (or `merge`, `rebase`) | the code host's merge |
 | `remind_after`, `reminders` | yes | 10 minutes, 2 | the runner family, per agent's issue and role |
-| `starts` | yes | 3 agents of one role on one issue | the loop, per issue and role |
+| `starts` | yes | 3 agents of one role that ended while one issue waited on them | the loop, per issue and role |
 | `sync_every`, `ci_every` | no | 60 s, 30 s | the tracker family for each project or area; the code-host family for each issue |
 | `investigate` | no | none | the investigator's brief, under each project's name: lines a person adds, such as the parts of the code another team owns |
 

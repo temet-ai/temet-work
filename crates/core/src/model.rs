@@ -230,6 +230,11 @@ pub struct Agent {
     /// the same limit coming back is not continued again.
     #[serde(default)]
     pub continued: Option<u64>,
+    /// Whether its session ended while its issue still waited on it
+    /// ([`crate::world::World::waiting_on`]). Only such agents count toward the
+    /// `starts` limit: one stopped because its issue moved on had finished its step.
+    #[serde(default)]
+    pub ended_waited_on: bool,
 }
 
 impl AgentState {
