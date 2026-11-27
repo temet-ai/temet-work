@@ -68,8 +68,13 @@ A new variant of an existing part goes the same way.
 `scripts/sync-tokens` reads the design system's tokens from its running Storybook and writes
 `crates/style/src/tokens.rs`; nobody edits that file by hand. It refuses a design system with
 uncommitted changes or a commit that is not pushed, and the file names the commit it came from. Each constant there has its token's
-name: `--tm-edge-quiet` is `TM_EDGE_QUIET`. The front-end crate's theme module turns them into
-gpui-component's `Theme` and into the values temet's own parts read.
+name: `--tm-edge-quiet` is `TM_EDGE_QUIET`.
+
+Every value belongs to a theme, and each constant in `tokens.rs` is a theme's default. The user
+picks the theme and can change the values the design system makes theme settings, such as the
+attention colour. So the theme module reads the theme in force when the app runs, with the
+user's settings, and turns it into gpui-component's `Theme` and the values temet's own parts
+read. Nothing in the app bakes a token's value in.
 
 | Item | Design system source | Values |
 |---|---|---|
@@ -78,9 +83,9 @@ gpui-component's `Theme` and into the values temet's own parts read.
 | Text | `--bp-typography-color-default-rest`, `-muted`, `-default-disabled` | |
 | Accent | `--bp-intent-primary-rest` (`#D41B6F`, fills), `--bp-typography-color-primary-rest` (text), `--bp-emphasis-focus-color` (`#F77CB3`, focus ring) | magenta |
 | Intents | `--bp-intent-{success,warning,danger}-{rest,hover,active}` and `--bp-typography-color-{success,warning,danger}-rest` | success blue, warning yellow, danger red |
-| Attention | `--tm-attention` | yellow or the accent, not yet chosen |
+| Attention | `--tm-attention` | a theme setting the user can change |
 | Selected row | `--tm-selected-fill`, `--tm-selected-line` | accent wash, accent line |
-| Type | `--bp-typography-family-*`, `--bp-typography-size-*`, `--bp-typography-weight-*`, `--bp-typography-line-height-*` | |
+| Type | `--bp-typography-family-*`, `--bp-typography-size-*`, `--bp-typography-weight-*`, `--bp-typography-line-height-*` | Archivo for text, Big Shoulders Display for figures, IBM Plex Mono for code, embedded in the app; controls and page text at 13 px |
 | Spacing and sizes | `--bp-surface-spacing` | |
 | Shape | `--bp-surface-border-radius` (2 px), `--tm-cut` (8 px) | |
 | Icons | `@blueprintjs/icons`, 16 and 20 px | SVG files embedded in the app |
@@ -170,16 +175,17 @@ tokens.
 Each of these goes to the design system as a definition. When the part lands with its story,
 its row above takes the part's id in place of "gap".
 
-- A token export: every token in the Base items table, resolved for the dark theme, as JSON
-  from the package's build, with the status and stage maps. `scripts/sync-tokens` then reads
+- A token export: every token in the Base items table, resolved for each theme, as JSON from
+  the package's build, with the status and stage maps, each component's look per variant and
+  state, and the movements as data. `scripts/sync-tokens` then reads
   that file in place of the running Storybook.
-- The attention colour: yellow or the accent. Dawid picks.
+- A light theme beside the dark one, with the same tokens.
+- The attention colour as a theme setting the user can change.
 - The type scale (20, 16, 14, 13 and 12 px with their weights and line heights), the spacing
-  steps and the column widths the radar page sets in its own CSS, as tokens. Blueprint's own
-  controls stay at 14 px; whether they drop to the page's 13 px is Dawid's call.
-- The app's font: one sans and one mono family the desktop app can embed. Blueprint's stack
-  names system fonts, which differ by machine. The design system offers Inter and JetBrains
-  Mono, both under the OFL; Dawid picks.
+  steps and the column widths the radar page sets in its own CSS, as tokens, with Blueprint's
+  controls at 13 px like the page text.
+- The app's faces as font tokens, with font files the app embeds: Archivo for text, Big
+  Shoulders Display for figures, IBM Plex Mono for code, all under the OFL.
 - AppShell, Heading, PropertyList, Meter and ListRow as components, and every composite above
   but AgentPane.
 - TerminalView and AgentPane, once temet-work sends their definitions.
