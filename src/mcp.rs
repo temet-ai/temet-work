@@ -335,12 +335,14 @@ fn tool_text(text: String, is_error: bool) -> Value {
     json!({"content": [{"type": "text", "text": text}], "isError": is_error})
 }
 
-/// Answers one message. `by` is the agent the server runs for; `send` passes a
-/// request to the daemon. A notification gets no answer.
+/// Answers one message. `by` is the agent the server runs for and `secret` the
+/// secret it was started with; `send` passes a request to the daemon. A
+/// notification gets no answer.
 pub fn handle(
     msg: &Value,
     level: Level,
     by: Option<&str>,
+    secret: Option<&str>,
     send: &mut dyn FnMut(&Request) -> Result<Reply, String>,
 ) -> Option<Value> {
     let id = msg.get("id")?;
@@ -396,6 +398,8 @@ pub fn handle(
             let reply = command(name, &args).and_then(|command| {
                 send(&Request {
                     by: by.filter(|b| !b.is_empty()).map(AgentId::new),
+                    secret: secret.filter(|s| !s.is_empty()).map(String::from),
+                    relayed: false,
                     command,
                 })
             });
@@ -424,13 +428,20 @@ mod tests {
             sent.push(r.clone());
             Ok(Reply::Done { text: "ok".into() })
         };
-        handle(&msg, level, Some("reviewer-1"), &mut send).expect("an answer")
+        handle(
+            &msg,
+            level,
+            Some("reviewer-1"),
+            Some("reviewer-secret"),
+            &mut send,
+        )
+        .expect("an answer")
     }
 
     fn names(level: Level) -> Vec<String> {
         let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
         let mut send = |_: &Request| Err("not called".to_string());
-        let answer = handle(&msg, level, None, &mut send).expect("an answer");
+        let answer = handle(&msg, level, None, None, &mut send).expect("an answer");
         answer["result"]["tools"]
             .as_array()
             .expect("tools")
@@ -470,6 +481,8 @@ mod tests {
             sent,
             [Request {
                 by: Some(AgentId::new("reviewer-1")),
+                secret: Some("reviewer-secret".into()),
+                relayed: false,
                 command: Command::Review {
                     issue: IssueId::new("ankh", "1"),
                     verdict: Verdict::Block {
@@ -592,6 +605,8 @@ mod tests {
             [
                 Request {
                     by: by.clone(),
+                    secret: Some("reviewer-secret".into()),
+                    relayed: false,
                     command: Command::Settings {
                         target: Target::Issue(IssueId::new("radar", "44")),
                         role: Some(Role::Author)
@@ -599,6 +614,8 @@ mod tests {
                 },
                 Request {
                     by: by.clone(),
+                    secret: Some("reviewer-secret".into()),
+                    relayed: false,
                     command: Command::Set {
                         target: Target::Milestone {
                             of: "radar".into(),
@@ -611,6 +628,8 @@ mod tests {
                 },
                 Request {
                     by,
+                    secret: Some("reviewer-secret".into()),
+                    relayed: false,
                     command: Command::Unset {
                         target: Target::Global,
                         role: None,
@@ -643,10 +662,10 @@ mod tests {
     fn initialize_answers_and_a_notification_gets_nothing() {
         let mut send = |_: &Request| Err("not called".to_string());
         let init = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}});
-        let answer = handle(&init, Level::Read, None, &mut send).expect("an answer");
+        let answer = handle(&init, Level::Read, None, None, &mut send).expect("an answer");
         assert_eq!(answer["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(answer["result"]["serverInfo"]["name"], "temet-work");
         let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        assert!(handle(&note, Level::Read, None, &mut send).is_none());
+        assert!(handle(&note, Level::Read, None, None, &mut send).is_none());
     }
 }

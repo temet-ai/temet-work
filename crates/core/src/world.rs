@@ -302,6 +302,7 @@ impl World {
                 issue,
                 machine,
                 folder,
+                secret_digest,
             } => {
                 self.agents.insert(
                     agent.clone(),
@@ -314,6 +315,7 @@ impl World {
                         folder: folder.clone(),
                         state: AgentState::Idle,
                         started: self.applied,
+                        secret_digest: secret_digest.clone(),
                     },
                 );
                 // A new agent hears what its stage needs in its brief.

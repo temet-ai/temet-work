@@ -86,6 +86,7 @@ impl Part for Terms {
                 issue: Some(launch.brief.issue.clone()),
                 machine: launch.machine.clone(),
                 folder: launch.folder.clone(),
+                secret_digest: None,
             }],
             effects: vec![],
         }

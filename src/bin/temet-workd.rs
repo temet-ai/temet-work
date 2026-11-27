@@ -144,7 +144,7 @@ fn run() -> Result<(), String> {
         }
         match requests.recv_timeout(next_round.saturating_duration_since(Instant::now())) {
             Ok(pending) => {
-                let reply = socket::answer(&mut host, now_ms(), &pending.request)?;
+                let reply = socket::answer(&mut host, now_ms(), &pending.request, &pending.peer)?;
                 // Who sent what, and what came of it: a request log on stderr.
                 let debug = format!("{:?}", pending.request.command);
                 eprintln!(

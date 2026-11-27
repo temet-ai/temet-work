@@ -45,7 +45,7 @@ fn main() -> ExitCode {
         }
         _ => {}
     }
-    let by = std::env::var(temet_work::cli::AGENT_VAR).ok();
+    let by = std::env::var(cli::AGENT_VAR).ok();
     // `-` is standard input, so an agent can send a plan without writing a file.
     let read = |p: &std::path::Path| {
         if p == std::path::Path::new("-") {
@@ -57,7 +57,10 @@ fn main() -> ExitCode {
         std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))
     };
     let request = match cli::request(&args, by, read) {
-        Ok(r) => r,
+        Ok(r) => temet_work_core::Request {
+            secret: secret(),
+            ..r
+        },
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::from(2);
@@ -84,6 +87,13 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// The secret this process was started with, when the daemon started it as an agent.
+fn secret() -> Option<String> {
+    std::env::var(cli::SECRET_VAR)
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// `temet-work relay` (hidden): the far end of an SSH transport. Copies one
@@ -151,6 +161,7 @@ fn mcp(args: &[String]) -> ExitCode {
         }
     };
     let by = std::env::var(cli::AGENT_VAR).ok();
+    let secret = secret();
     let transport = match socket::from_env() {
         Ok(t) => t,
         Err(e) => {
@@ -165,7 +176,8 @@ fn mcp(args: &[String]) -> ExitCode {
         let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        if let Some(answer) = temet_work::mcp::handle(&msg, level, by.as_deref(), &mut send)
+        if let Some(answer) =
+            temet_work::mcp::handle(&msg, level, by.as_deref(), secret.as_deref(), &mut send)
             && writeln!(out, "{answer}")
                 .and_then(|()| out.flush())
                 .is_err()

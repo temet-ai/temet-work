@@ -13,9 +13,10 @@ use temet_work::config::Config;
 use temet_work_codehost::{Checks, FakeCodeHost, Pull, PullState};
 use temet_work_core::host::Memory;
 use temet_work_core::ids::{AgentId, IssueId};
+use temet_work_core::launch::SECRET_VAR;
 use temet_work_core::model::Stage;
-use temet_work_core::{Host, World};
-use temet_work_runner::fake::FakeRunner;
+use temet_work_core::{Command, Host, Peer, Request, World};
+use temet_work_runner::fake::{FakeRunner, Starts};
 use temet_work_runtime::FakeRuntime;
 use temet_work_tracker::{FakeTracker, TrackedIssue};
 
@@ -57,11 +58,12 @@ fn fake_runtimes() -> temet_work_runtime::Runtimes {
     runtimes
 }
 
-fn host() -> Host {
+/// A host with every family's fake, and what its runner was asked to start.
+fn host() -> (Host, Starts) {
     host_with(Box::new(Memory::default()))
 }
 
-fn host_with(journal: Box<dyn temet_work_core::Journal>) -> Host {
+fn host_with(journal: Box<dyn temet_work_core::Journal>) -> (Host, Starts) {
     let mut runtimes = temet_work_runtime::Runtimes::default();
     runtimes.add(Box::new(FakeRuntime));
     host_with_runtimes(journal, runtimes)
@@ -70,8 +72,37 @@ fn host_with(journal: Box<dyn temet_work_core::Journal>) -> Host {
 fn host_with_runtimes(
     journal: Box<dyn temet_work_core::Journal>,
     runtimes: temet_work_runtime::Runtimes,
-) -> Host {
+) -> (Host, Starts) {
     host_on(journal, runtimes, CONFIG, None)
+}
+
+/// The secret the runner started `agent` with, from the environment it got.
+fn secret(starts: &Starts, agent: &str) -> String {
+    starts
+        .lock()
+        .expect("starts")
+        .iter()
+        .rev()
+        .find(|s| s.labels.get("agent").map(String::as_str) == Some(agent))
+        .and_then(|s| {
+            s.program
+                .env
+                .iter()
+                .find(|(k, _)| k == SECRET_VAR)
+                .map(|(_, v)| v.clone())
+        })
+        .unwrap_or_else(|| panic!("{agent} was not started"))
+}
+
+/// A request from the agent `by`, carrying the secret it was started with, or
+/// from a person.
+fn from(starts: &Starts, by: Option<&str>, command: Command) -> Request {
+    Request {
+        by: by.map(AgentId::new),
+        secret: by.map(|a| secret(starts, a)),
+        relayed: false,
+        command,
+    }
 }
 
 fn host_on(
@@ -79,25 +110,51 @@ fn host_on(
     runtimes: temet_work_runtime::Runtimes,
     config: &str,
     daemon_host: Option<&str>,
-) -> Host {
+) -> (Host, Starts) {
+    host_from(
+        World::default(),
+        journal,
+        runtimes,
+        config,
+        daemon_host,
+        vec![tracked("city/ankh", "1", 1)],
+    )
+}
+
+/// An open issue `key` of the tracker's project `name`, `order`th oldest.
+fn tracked(name: &str, key: &str, order: u64) -> (String, TrackedIssue) {
+    (
+        name.into(),
+        TrackedIssue {
+            key: key.into(),
+            title: "Mend the clock".into(),
+            body: String::new(),
+            milestone: None,
+            depends_on: vec![],
+            order,
+            closed: false,
+        },
+    )
+}
+
+/// A host on `world`, with every family's fake and the tracker's `issues`.
+fn host_from(
+    world: World,
+    journal: Box<dyn temet_work_core::Journal>,
+    runtimes: temet_work_runtime::Runtimes,
+    config: &str,
+    daemon_host: Option<&str>,
+    issues: Vec<(String, TrackedIssue)>,
+) -> (Host, Starts) {
     let mut trackers = temet_work_tracker::Trackers::default();
     trackers.add(Box::new(FakeTracker {
-        issues: vec![(
-            "city/ankh".into(),
-            TrackedIssue {
-                key: "1".into(),
-                title: "Mend the clock".into(),
-                body: String::new(),
-                milestone: None,
-                depends_on: vec![],
-                order: 1,
-                closed: false,
-            },
-        )],
+        issues,
         ..FakeTracker::default()
     }));
     let mut runners = temet_work_runner::Runners::default();
-    runners.add(Box::new(FakeRunner::default()));
+    let fake = FakeRunner::default();
+    let starts = fake.starts();
+    runners.add(Box::new(fake));
     let runners = runners.daemon_host(daemon_host.map(String::from));
     let mut code_hosts = temet_work_codehost::CodeHosts::default().every(0);
     code_hosts.add(Box::new(FakeCodeHost {
@@ -116,7 +173,7 @@ fn host_on(
         |_: &str, _: &std::path::PathBuf, _: &[(String, String)]| Ok(()),
     ));
     let mut host = Host::new(
-        World::default(),
+        world,
         vec![
             Box::new(trackers),
             Box::new(runners),
@@ -129,12 +186,12 @@ fn host_on(
     for event in Config::parse(config).expect("config").events(host.world()) {
         host.handle(0, event).expect("config event");
     }
-    host
+    (host, starts)
 }
 
 #[test]
 fn a_synced_issue_gets_a_refiner_in_a_labelled_terminal() {
-    let mut host = host();
+    let (mut host, _) = host();
     assert_eq!(host.tick(0), Ok(1), "one issue synced");
     let issue = IssueId::new("ankh", "1");
     assert_eq!(host.world().issues[&issue].stage, Stage::Refining);
@@ -162,18 +219,14 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
     use temet_work::socket::{Reply, answer};
     use temet_work_core::model::{Check, Plan, Role};
     use temet_work_core::settings::Target;
-    use temet_work_core::{Command, Request};
 
     let mut runtimes = temet_work_runtime::Runtimes::default();
     runtimes.add(Box::new(FakeRuntime));
     runtimes.add(Box::new(temet_work_runtime_codex::Codex));
-    let mut host = host_with_runtimes(Box::new(Memory::default()), runtimes);
+    let (mut host, starts) = host_with_runtimes(Box::new(Memory::default()), runtimes);
     let run = |host: &mut Host, by: Option<&str>, command: Command| {
-        let request = Request {
-            by: by.map(AgentId::new),
-            command,
-        };
-        match answer(host, 1, &request).expect("answer") {
+        let request = from(&starts, by, command);
+        match answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
         }
@@ -234,7 +287,7 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
 #[test]
 fn a_folder_on_another_machine_needs_daemon_host_before_an_agent_starts_there() {
     let config = CONFIG.replace("path = \".\"", "machine = \"mac\"\npath = \"/work/ankh\"");
-    let mut host = host_on(Box::new(Memory::default()), fake_runtimes(), &config, None);
+    let (mut host, _) = host_on(Box::new(Memory::default()), fake_runtimes(), &config, None);
     host.tick(0).expect("tick");
     assert!(host.world().agents.is_empty(), "no agent started");
     let problems = host
@@ -249,7 +302,7 @@ fn a_folder_on_another_machine_needs_daemon_host_before_an_agent_starts_there() 
             && problems.contains("mac"),
         "{problems}"
     );
-    let mut host = host_on(
+    let (mut host, _) = host_on(
         Box::new(Memory::default()),
         fake_runtimes(),
         &config,
@@ -262,23 +315,17 @@ fn a_folder_on_another_machine_needs_daemon_host_before_an_agent_starts_there() 
 #[test]
 fn commands_reach_the_daemon_over_its_socket() {
     use temet_work::socket::{self, Reply};
-    use temet_work_core::{Command, Request};
 
     let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("daemon-test.sock");
     let requests = socket::listen(&path).expect("listen");
     assert!(socket::listen(&path).is_err(), "a second daemon is refused");
+    let (mut host, starts) = host();
+    host.tick(0).expect("tick");
     let client = {
         let path = path.clone();
         std::thread::spawn(move || {
             let ask = |command| {
-                socket::send(
-                    &path,
-                    &Request {
-                        by: Some(AgentId::new("refiner-1")),
-                        command,
-                    },
-                )
-                .expect("reply")
+                socket::send(&path, &from(&starts, Some("refiner-1"), command)).expect("reply")
             };
             (
                 ask(Command::Status),
@@ -290,13 +337,11 @@ fn commands_reach_the_daemon_over_its_socket() {
             )
         })
     };
-    let mut host = host();
-    host.tick(0).expect("tick");
     for _ in 0..2 {
         let pending = requests
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("a request");
-        let reply = socket::answer(&mut host, 1, &pending.request).expect("answer");
+        let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
         pending.answer(reply);
     }
     let (status, ready) = client.join().expect("client");
@@ -317,19 +362,16 @@ fn commands_reach_the_daemon_over_its_socket() {
 #[test]
 fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     use temet_work::socket::{Reply, answer};
+    use temet_work_core::Verdict;
     use temet_work_core::model::{Check, Plan};
-    use temet_work_core::{Command, Request, Verdict};
 
     let kept = Kept::default();
-    let mut host = host_with(Box::new(kept.clone()));
+    let (mut host, starts) = host_with(Box::new(kept.clone()));
     host.tick(0).expect("sync");
     let issue = IssueId::new("ankh", "1");
     let run = |host: &mut Host, by: &str, command: Command| {
-        let request = Request {
-            by: Some(AgentId::new(by)),
-            command,
-        };
-        match answer(host, 1, &request).expect("answer") {
+        let request = from(&starts, Some(by), command);
+        match answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("{by}: refused: {why}"),
         }
@@ -358,12 +400,9 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     };
     // The refiner is told whose step ready is before the loop looks at stages,
     // and the author's own ready is accepted.
-    let wrong = Request {
-        by: Some(AgentId::new("refiner-1")),
-        command: ready.clone(),
-    };
+    let wrong = from(&starts, Some("refiner-1"), ready.clone());
     assert_eq!(
-        answer(&mut host, 1, &wrong).expect("answer"),
+        answer(&mut host, 1, &wrong, &Peer::Unchecked).expect("answer"),
         Reply::Refused {
             why: "ready for ankh#1 is the author's: author-1 is working on it; \
                   you are refiner-1"
@@ -448,17 +487,12 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
 mod settings_commands {
     use super::*;
     use temet_work::socket::{Reply, answer};
-    use temet_work_core::Command;
-    use temet_work_core::Request;
     use temet_work_core::event::Event;
     use temet_work_core::settings::{Scope, Target, Value};
 
     fn ask(host: &mut Host, by: Option<&str>, command: Command) -> Reply {
-        let request = Request {
-            by: by.map(AgentId::new),
-            command,
-        };
-        answer(host, 1, &request).expect("answer")
+        let request = Request::new(by.map(AgentId::new), command);
+        answer(host, 1, &request, &Peer::Unchecked).expect("answer")
     }
 
     fn set(
@@ -505,7 +539,7 @@ mod settings_commands {
     fn set_settings_and_unset_go_through_the_daemon_and_are_events_with_who_made_them() {
         use temet_work_core::model::Role;
         let kept = Kept::default();
-        let mut host = host_with(Box::new(kept.clone()));
+        let (mut host, _) = host_with(Box::new(kept.clone()));
         host.tick(0).expect("sync");
         assert_eq!(
             done(ask(&mut host, None, set("ankh#1", None, "model", "opus"))),
@@ -592,7 +626,7 @@ mod settings_commands {
     #[test]
     fn a_value_of_the_wrong_kind_an_unknown_key_or_an_adapter_the_build_lacks_is_refused_with_why()
     {
-        let mut host = host();
+        let (mut host, _) = host();
         host.tick(0).expect("sync");
         assert!(
             refused(ask(
@@ -653,6 +687,8 @@ mod settings_commands {
                     .args(args)
                     .env("TEMET_WORK_SOCKET", &path)
                     .env_remove("TEMET_WORK_AGENT")
+                    .env_remove(SECRET_VAR)
+                    .env_remove("TEMET_WORK_DAEMON")
                     .output()
                     .expect("runs")
             }
@@ -667,13 +703,13 @@ mod settings_commands {
                 )
             }
         });
-        let mut host = host();
+        let (mut host, _) = host();
         host.tick(0).expect("sync");
         for _ in 0..4 {
             let pending = requests
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .expect("a request");
-            let reply = answer(&mut host, 1, &pending.request).expect("answer");
+            let reply = answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
             pending.answer(reply);
         }
         let (bad, good, shown, unset) = client.join().expect("client");
@@ -708,18 +744,16 @@ fn stub_ssh(name: &str, socket: &std::path::Path, body: Option<&str>) -> std::pa
 #[test]
 fn the_same_request_gets_equal_replies_through_the_socket_and_through_ssh() {
     use temet_work::socket::{self, Local, Ssh, Transport};
-    use temet_work_core::{Command, Request};
 
     let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("transports.sock");
     let requests = socket::listen(&path).expect("listen");
     let stub = stub_ssh("equal", &path, None);
+    let (mut host, starts) = host();
+    host.tick(0).expect("tick");
     let client = {
         let path = path.clone();
         std::thread::spawn(move || {
-            let request = Request {
-                by: Some(AgentId::new("author-9")),
-                command: Command::Status,
-            };
+            let request = from(&starts, Some("refiner-1"), Command::Status);
             let local = Local { path }.send(&request);
             let ssh = Ssh {
                 target: "stub".into(),
@@ -732,24 +766,24 @@ fn the_same_request_gets_equal_replies_through_the_socket_and_through_ssh() {
             (local, ssh)
         })
     };
-    let mut host = host();
-    host.tick(0).expect("tick");
     for _ in 0..2 {
         let pending = requests
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("a request");
-        let reply = socket::answer(&mut host, 1, &pending.request).expect("answer");
+        let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
         pending.answer(reply);
     }
     let (local, ssh) = client.join().expect("client");
-    assert!(local.is_ok(), "{local:?}");
+    assert!(
+        matches!(&local, Ok(socket::Reply::Done { text }) if text.contains("refiner-1 on ankh#1")),
+        "{local:?}"
+    );
     assert_eq!(local, ssh);
 }
 
 #[test]
 fn an_address_with_a_path_reaches_that_daemons_socket() {
     use temet_work::socket::{self, Ssh, Transport};
-    use temet_work_core::{Command, Request};
 
     let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("second.sock");
     let requests = socket::listen(&path).expect("listen");
@@ -765,17 +799,14 @@ fn an_address_with_a_path_reaches_that_daemons_socket() {
             program: stub.display().to_string(),
             deadline: socket::SSH_DEADLINE,
         }
-        .send(&Request {
-            by: None,
-            command: Command::Status,
-        })
+        .send(&Request::new(None, Command::Status))
     });
-    let mut host = host();
+    let (mut host, _) = host();
     host.tick(0).expect("tick");
     let pending = requests
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("a request");
-    let reply = socket::answer(&mut host, 1, &pending.request).expect("answer");
+    let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
     pending.answer(reply);
     assert!(client.join().expect("client").is_ok());
 }
@@ -793,6 +824,8 @@ fn an_agent_commands_arrive_over_ssh_as_its_own() {
         "checks:\n  - done_when: the clock strikes thirteen\n    proven_by: listening at midnight\n",
     )
     .expect("plan");
+    let (mut host, starts) = host();
+    host.tick(0).expect("tick");
     let client = std::thread::spawn(move || {
         let run = |by: &str, args: &[&str]| {
             let path = format!(
@@ -806,6 +839,7 @@ fn an_agent_commands_arrive_over_ssh_as_its_own() {
                 .env("TEMET_WORK_DAEMON", "ssh://stub")
                 .env_remove("TEMET_WORK_SOCKET")
                 .env("TEMET_WORK_AGENT", by)
+                .env(SECRET_VAR, secret(&starts, by))
                 .output()
                 .expect("run");
             (
@@ -821,15 +855,15 @@ fn an_agent_commands_arrive_over_ssh_as_its_own() {
             run("reviewer-1", &["review", "ankh#1", "approve"]),
         ]
     });
-    let mut host = host();
-    host.tick(0).expect("tick");
     let mut by = Vec::new();
     for _ in 0..3 {
         let pending = requests
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("a request");
         by.push(pending.request.by.clone().map(|a| a.0));
-        let reply = socket::answer(&mut host, 1, &pending.request).expect("answer");
+        assert!(pending.request.relayed, "marked by the relay");
+        assert_eq!(pending.peer, Peer::Relayed);
+        let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
         pending.answer(reply);
     }
     assert_eq!(
@@ -849,14 +883,10 @@ fn an_agent_commands_arrive_over_ssh_as_its_own() {
 #[test]
 fn a_failed_ssh_hop_says_which_step_failed() {
     use temet_work::socket::{self, Ssh, Transport};
-    use temet_work_core::{Command, Request};
 
     let nowhere = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("nobody.sock");
     let _ = std::fs::remove_file(&nowhere);
-    let request = Request {
-        by: None,
-        command: Command::Status,
-    };
+    let request = Request::new(None, Command::Status);
     let via = |name: &str, body: Option<&str>| {
         let stub = stub_ssh(name, &nowhere, body);
         Ssh {
@@ -913,10 +943,7 @@ printf '{{"reply":"done","text":"all quiet"}}\n'
         program: stub.display().to_string(),
         deadline: socket::SSH_DEADLINE,
     }
-    .send(&Request {
-        by: None,
-        command: Command::Status,
-    })
+    .send(&Request::new(None, Command::Status))
     .expect("a reply");
     let args = std::fs::read_to_string(args).expect("args");
     let args: Vec<&str> = args.lines().collect();
@@ -969,10 +996,7 @@ fn a_client_at_a_different_build_is_refused_and_nothing_reaches_the_daemon() {
         program: stub.display().to_string(),
         deadline: socket::SSH_DEADLINE,
     }
-    .send(&Request {
-        by: None,
-        command: Command::Status,
-    });
+    .send(&Request::new(None, Command::Status));
     assert_eq!(
         reply,
         Ok(Reply::Refused {
@@ -1125,12 +1149,12 @@ fn a_deploy_that_restarts_the_daemon_is_recorded_by_the_new_one() {
 #[test]
 fn an_overturn_and_a_keep_go_through_the_daemon_and_reach_the_next_brief() {
     use temet_work::socket::{Reply, answer};
+    use temet_work_core::Event;
     use temet_work_core::ids::GroupId;
     use temet_work_core::model::{Decision, DecisionKind, Role};
-    use temet_work_core::{Command, Event, Request};
 
     let kept = Kept::default();
-    let mut host = host_with(Box::new(kept.clone()));
+    let (mut host, starts) = host_with(Box::new(kept.clone()));
     host.tick(0).expect("sync");
     let issue = IssueId::new("ankh", "1");
     host.handle(
@@ -1152,11 +1176,8 @@ fn an_overturn_and_a_keep_go_through_the_daemon_and_reach_the_next_brief() {
     )
     .expect("decision");
     let mut ask = |by: Option<&str>, command| {
-        let request = Request {
-            by: by.map(AgentId::new),
-            command,
-        };
-        answer(&mut host, 1, &request).expect("answer")
+        let request = from(&starts, by, command);
+        answer(&mut host, 1, &request, &Peer::Unchecked).expect("answer")
     };
     let overturn = Command::Overturn {
         decision: temet_work_core::ids::DecisionId(1),
@@ -1206,9 +1227,9 @@ mod two_repositories {
     use super::*;
     use std::sync::{Arc, Mutex};
     use temet_work::socket::{Reply, answer};
+    use temet_work_core::Verdict;
     use temet_work_core::ids::{FolderId, ProjectId};
     use temet_work_core::model::{Check, Plan};
-    use temet_work_core::{Command, Request, Verdict};
 
     const AREA: &str = r#"
 [[area]]
@@ -1248,6 +1269,7 @@ areas = ["guild"]
 
     struct Fixture {
         host: Host,
+        starts: Starts,
         merges: Arc<Mutex<Vec<String>>>,
         mains: Arc<Mutex<std::collections::BTreeMap<String, Checks>>>,
         deploys: Arc<Mutex<usize>>,
@@ -1281,7 +1303,9 @@ areas = ["guild"]
             ..FakeTracker::default()
         }));
         let mut runners = temet_work_runner::Runners::default();
-        runners.add(Box::new(FakeRunner::default()));
+        let runner = FakeRunner::default();
+        let starts = runner.starts();
+        runners.add(Box::new(runner));
         let fake = FakeCodeHost {
             pulls: vec![
                 ("group/ui".into(), pull("12", ui)),
@@ -1318,6 +1342,7 @@ areas = ["guild"]
         }
         Fixture {
             host,
+            starts,
             merges,
             mains,
             deploys,
@@ -1325,12 +1350,9 @@ areas = ["guild"]
         }
     }
 
-    fn run(host: &mut Host, by: &str, command: Command) -> Reply {
-        let request = Request {
-            by: Some(AgentId::new(by)),
-            command,
-        };
-        answer(host, 1, &request).expect("answer")
+    fn run(f: &mut Fixture, by: &str, command: Command) -> Reply {
+        let request = from(&f.starts, Some(by), command);
+        answer(&mut f.host, 1, &request, &Peer::Unchecked).expect("answer")
     }
 
     fn done(reply: Reply) -> String {
@@ -1345,7 +1367,7 @@ areas = ["guild"]
         f.host.tick(0).expect("sync");
         let issue = IssueId::new("guild", "GLD-1");
         done(run(
-            &mut f.host,
+            f,
             "refiner-1",
             Command::Plan {
                 issue: issue.clone(),
@@ -1371,7 +1393,7 @@ areas = ["guild"]
             ]
             .into(),
         };
-        done(run(&mut f.host, "author-1", ready));
+        done(run(f, "author-1", ready));
         issue
     }
 
@@ -1384,7 +1406,7 @@ areas = ["guild"]
             .insert("group/ui".into(), Checks::Pending);
         let issue = in_review(&mut f);
         done(run(
-            &mut f.host,
+            &mut f,
             "reviewer-1",
             Command::Review {
                 issue: issue.clone(),
@@ -1448,7 +1470,7 @@ fn two_merges_in_one_project_deploy_one_after_the_other() {
     use std::sync::{Arc, Mutex};
     use temet_work::socket::{Reply, answer};
     use temet_work_core::model::{Check, Plan, Role};
-    use temet_work_core::{Command, Effect, Outcome, Part, Polled, Request, Verdict};
+    use temet_work_core::{Command, Effect, Outcome, Part, Polled, Verdict};
 
     /// The deploy part, noting the most commands it has had running after an
     /// effect: it starts commands only when it carries one out.
@@ -1519,7 +1541,9 @@ projects = ["ankh"]
         ..FakeTracker::default()
     }));
     let mut runners = temet_work_runner::Runners::default();
-    runners.add(Box::new(FakeRunner::default()));
+    let runner = FakeRunner::default();
+    let starts = runner.starts();
+    runners.add(Box::new(runner));
     let pull = |number: &str| {
         (
             "city/ankh".to_string(),
@@ -1580,13 +1604,10 @@ projects = ["ankh"]
             .agents
             .values()
             .find(|a| a.issue.as_ref() == Some(issue) && a.role == role)
-            .map(|a| a.id.clone())
+            .map(|a| a.id.0.clone())
             .unwrap_or_else(|| panic!("no {role:?} on {issue}"));
-        let request = Request {
-            by: Some(agent),
-            command,
-        };
-        match answer(host, 1, &request).expect("answer") {
+        let request = from(&starts, Some(&agent), command);
+        match answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
         }
@@ -1659,4 +1680,660 @@ projects = ["ankh"]
         1,
         "never two commands of the project at once"
     );
+}
+
+/// Who may send what (issue 28): every agent's own secret, the process tree a
+/// request comes from, and the relay from another machine.
+mod senders {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::process::Output;
+    use std::sync::mpsc::Receiver;
+    use temet_work::socket::{self, Pending, Reply, answer};
+    use temet_work_core::event::Event;
+    use temet_work_core::ids::{DecisionId, GroupId, MachineId, RuleId};
+    use temet_work_core::model::{Decision, DecisionKind, Role, Rule, RuleState};
+
+    const PLAN: &str = "checks:\n  - done_when: the clock strikes thirteen\n    proven_by: listening at midnight\n";
+
+    /// A fresh folder for one test, under cargo's folder for test files.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("senders-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        dir
+    }
+
+    /// Answers what reaches `requests`, with the peer the socket read, until
+    /// `client` ends; returns what it returned.
+    fn serve<T>(
+        host: &mut Host,
+        requests: &Receiver<Pending>,
+        client: std::thread::JoinHandle<T>,
+    ) -> T {
+        while !client.is_finished() {
+            if let Ok(p) = requests.recv_timeout(std::time::Duration::from_millis(2)) {
+                let reply = answer(host, 1, &p.request, &p.peer).expect("answer");
+                p.answer(reply);
+            }
+        }
+        client.join().expect("client")
+    }
+
+    /// The exit code and both outputs, trimmed.
+    fn outcome(out: Output) -> (Option<i32>, String, String) {
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        )
+    }
+
+    /// The built `temet-work` with `args`, reaching the daemon at `socket`, with
+    /// neither agent variable set.
+    fn temet_work(socket: &Path, args: &[&str]) -> std::process::Command {
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"));
+        cmd.args(args)
+            .env("TEMET_WORK_SOCKET", socket)
+            .env_remove("TEMET_WORK_DAEMON")
+            .env_remove("TEMET_WORK_AGENT")
+            .env_remove(SECRET_VAR);
+        cmd
+    }
+
+    /// `temet-work` run as the agent `by` with `secret`, as the daemon starts it.
+    fn as_agent(
+        socket: &Path,
+        by: &str,
+        secret: Option<&str>,
+        args: &[&str],
+    ) -> (Option<i32>, String, String) {
+        let mut cmd = temet_work(socket, args);
+        cmd.env("TEMET_WORK_AGENT", by);
+        if let Some(s) = secret {
+            cmd.env(SECRET_VAR, s);
+        }
+        outcome(cmd.output().expect("runs"))
+    }
+
+    /// `temet-work args` from a child of a shell that holds `parent` as its agent
+    /// variables. The shell waits for the command instead of becoming it, as an
+    /// agent's shell does, and the child runs it with `child` as its own
+    /// variables: none at all when `child` is `None` (`env -u` both).
+    #[cfg(target_os = "linux")]
+    fn under(
+        socket: &Path,
+        parent: (&str, &str),
+        child: Option<(&str, &str)>,
+        args: &[&str],
+    ) -> (Option<i32>, String, String) {
+        let set: Vec<String> = match child {
+            None => ["-u", "TEMET_WORK_AGENT", "-u", SECRET_VAR]
+                .map(String::from)
+                .to_vec(),
+            Some((by, secret)) => vec![
+                format!("TEMET_WORK_AGENT={by}"),
+                format!("{SECRET_VAR}={secret}"),
+            ],
+        };
+        // `; exit $?` keeps the shell alive as the command's parent.
+        let out = std::process::Command::new("sh")
+            .args(["-c", "env \"$@\"; exit $?", "sh"])
+            .args(&set)
+            .arg(env!("CARGO_BIN_EXE_temet-work"))
+            .args(args)
+            .env("TEMET_WORK_SOCKET", socket)
+            .env_remove("TEMET_WORK_DAEMON")
+            .env("TEMET_WORK_AGENT", parent.0)
+            .env(SECRET_VAR, parent.1)
+            .output()
+            .expect("sh runs");
+        outcome(out)
+    }
+
+    /// Two projects, ankh here and klatch on the machine mac, refined at once.
+    const TWO: &str = r#"
+daemon_host = "omit"
+
+[[project]]
+id = "ankh"
+tracker = "fake"
+name = "city/ankh"
+
+[[project]]
+id = "klatch"
+tracker = "fake"
+name = "city/klatch"
+
+[[folder]]
+id = "ankh-1"
+project = "ankh"
+path = "."
+
+[[folder]]
+id = "klatch-1"
+project = "klatch"
+machine = "mac"
+path = "/work/klatch"
+
+[[group]]
+id = "watch"
+name = "Night watch"
+projects = ["ankh", "klatch"]
+refining_at_once = 2
+"#;
+
+    #[cfg(feature = "store")]
+    #[test]
+    fn every_agent_gets_a_secret_of_its_own_and_none_is_logged_or_shown() {
+        let log = scratch("log").join("events.jsonl");
+        let (journal, world) = temet_work::journal(&log).expect("log");
+        let (mut host, starts) = host_from(
+            world,
+            journal,
+            fake_runtimes(),
+            TWO,
+            Some("omit"),
+            vec![tracked("city/ankh", "1", 1), tracked("city/klatch", "1", 2)],
+        );
+        host.tick(0).expect("sync");
+        let ankh = IssueId::new("ankh", "1");
+        let plan = Command::Plan {
+            issue: ankh.clone(),
+            plan: temet_work::cli::plan(PLAN).expect("plan"),
+        };
+        let mut shown = Vec::new();
+        let mut ask = |host: &mut Host, request: Request| {
+            let reply = answer(host, 1, &request, &Peer::Unchecked).expect("answer");
+            shown.push(format!("{reply:?}"));
+            reply
+        };
+        let wrong = Request {
+            secret: Some("0".repeat(64)),
+            ..from(&starts, Some("refiner-1"), plan.clone())
+        };
+        assert!(matches!(ask(&mut host, wrong), Reply::Refused { .. }));
+        assert!(matches!(
+            ask(&mut host, from(&starts, Some("refiner-1"), plan)),
+            Reply::Done { .. }
+        ));
+        for command in [
+            Command::Status,
+            Command::Issue {
+                issue: ankh.clone(),
+            },
+            Command::Issue {
+                issue: IssueId::new("klatch", "1"),
+            },
+            Command::Screen {
+                agent: AgentId::new("author-1"),
+            },
+        ] {
+            ask(&mut host, Request::new(None, command));
+        }
+        // Two agents here and one on mac, each with its own secret.
+        let started = starts.lock().expect("starts").clone();
+        let machines: Vec<Option<&str>> = started.iter().map(|s| s.machine.as_deref()).collect();
+        assert_eq!(machines.len(), 3, "{machines:?}");
+        assert_eq!(machines.iter().filter(|m| m.is_none()).count(), 2);
+        assert!(machines.contains(&Some("mac")), "{machines:?}");
+        let secrets: Vec<String> = ["refiner-1", "refiner-2", "author-1"]
+            .iter()
+            .map(|a| secret(&starts, a))
+            .collect();
+        let mut distinct = secrets.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 3);
+        drop(host);
+        let written = std::fs::read_to_string(&log).expect("log");
+        shown.push(temet_work_core::text::text(
+            &temet_work_store::replay(&temet_work_store::Log::read(&log).expect("read")),
+            &Default::default(),
+        ));
+        for secret in &secrets {
+            assert!(!written.contains(secret.as_str()), "the log holds a secret");
+            for text in &shown {
+                assert!(!text.contains(secret.as_str()), "{text}");
+            }
+            // Only its digest is kept.
+            let digest = temet_work::peer::digest(secret);
+            assert!(written.contains(&digest.0), "{written}");
+        }
+    }
+
+    #[test]
+    fn a_request_naming_an_agent_needs_that_agents_own_secret_through_the_command_line() {
+        let dir = scratch("cli");
+        let sock = dir.join("daemon.sock");
+        let plan = dir.join("plan.yaml");
+        std::fs::write(&plan, PLAN).expect("plan");
+        let requests = socket::listen(&sock).expect("listen");
+        let (mut host, starts) = host();
+        host.tick(0).expect("sync");
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            move || {
+                let run = |by: &str, secret: Option<&str>, args: &[&str]| {
+                    as_agent(&sock, by, secret, args)
+                };
+                let refiner = secret(&starts, "refiner-1");
+                let plan = plan.display().to_string();
+                let set = ["set", "ankh#1", "review_rounds", "1"];
+                let mut got = vec![
+                    run("refiner-1", None, &set),
+                    run("refiner-1", None, &["status"]),
+                    run("refiner-1", Some(&"0".repeat(64)), &set),
+                    run("refiner-9", Some(&refiner), &set),
+                    run("refiner-1", Some(&refiner), &set),
+                    run("refiner-1", Some(&refiner), &["plan", "ankh#1", &plan]),
+                ];
+                let author = secret(&starts, "author-1");
+                got.push(run("author-1", Some(&refiner), &["ready", "ankh#1", "57"]));
+                got.push(run("author-1", Some(&author), &["ready", "ankh#1", "57"]));
+                let reviewer = secret(&starts, "reviewer-1");
+                got.push(run(
+                    "reviewer-1",
+                    Some(&reviewer),
+                    &["review", "ankh#1", "block", "no test for a stopped clock"],
+                ));
+                let arbiter = secret(&starts, "arbiter-1");
+                got.push(run(
+                    "arbiter-1",
+                    Some(&arbiter),
+                    &["rule", "ankh#1", "approve", "the", "test", "can", "follow"],
+                ));
+                got
+            }
+        });
+        let got = serve(&mut host, &requests, client);
+        let refused = |i: usize, what: &str| {
+            assert_eq!(got[i].0, Some(1), "{i}: {:?}", got[i]);
+            assert!(got[i].2.contains(what), "{i}: {:?}", got[i]);
+        };
+        refused(0, "names refiner-1 but carries no secret");
+        refused(1, "names refiner-1 but carries no secret");
+        refused(2, "names refiner-1 but its secret is wrong");
+        refused(3, "refiner-9 is not an agent this daemon started");
+        assert_eq!(got[4].0, Some(0), "{:?}", got[4]);
+        assert_eq!(got[5].0, Some(0), "{:?}", got[5]);
+        refused(
+            6,
+            "names author-1 but carries refiner-1's secret, not author-1's",
+        );
+        assert_eq!(got[7].1, "ankh#1 is in review, round 1", "{:?}", got[7]);
+        assert!(got[8].1.contains("arbiter"), "{:?}", got[8]);
+        assert_eq!(got[9].0, Some(0), "{:?}", got[9]);
+        let decision = host.world().decisions.values().next().expect("a ruling");
+        assert_eq!(decision.by, AgentId::new("arbiter-1"));
+    }
+
+    #[test]
+    fn an_agent_acts_through_mcp_with_its_secret_and_is_refused_without_it() {
+        use std::io::Write;
+        let sock = scratch("mcp").join("daemon.sock");
+        let requests = socket::listen(&sock).expect("listen");
+        let (mut host, starts) = host();
+        host.tick(0).expect("sync");
+        let refiner = secret(&starts, "refiner-1");
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            move || {
+                let mcp = |secret: Option<&str>| {
+                    let mut cmd = temet_work(&sock, &["mcp", "--allow", "act"]);
+                    cmd.env("TEMET_WORK_AGENT", "refiner-1")
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped());
+                    if let Some(s) = secret {
+                        cmd.env(SECRET_VAR, s);
+                    }
+                    let mut child = cmd.spawn().expect("mcp runs");
+                    let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"plan","arguments":{"issue":"ankh#1","checks":[{"done_when":"the clock strikes thirteen","proven_by":"listening at midnight"}]}}}"#;
+                    writeln!(child.stdin.take().expect("stdin"), "{call}").expect("write");
+                    let out = child.wait_with_output().expect("mcp ends");
+                    let answer: serde_json::Value =
+                        serde_json::from_slice(&out.stdout).expect("one answer");
+                    (
+                        answer["result"]["isError"].as_bool(),
+                        answer["result"]["content"][0]["text"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    )
+                };
+                (mcp(None), mcp(Some(&refiner)))
+            }
+        });
+        let (without, with) = serve(&mut host, &requests, client);
+        assert_eq!(without.0, Some(true), "{without:?}");
+        assert!(without.1.contains("carries no secret"), "{without:?}");
+        assert_eq!(with, (Some(false), "ankh#1 is working".to_string()));
+    }
+
+    #[cfg(feature = "store")]
+    #[test]
+    fn after_a_restart_running_agents_keep_their_secrets_and_older_ones_their_ids() {
+        let kept = Kept::default();
+        let config = CONFIG.replace(
+            "projects = [\"ankh\"]",
+            "projects = [\"ankh\"]\nrefining_at_once = 2",
+        );
+        let issues = || vec![tracked("city/ankh", "1", 1), tracked("city/ankh", "2", 2)];
+        let (mut first, starts) = host_from(
+            World::default(),
+            Box::new(kept.clone()),
+            fake_runtimes(),
+            &config,
+            None,
+            issues(),
+        );
+        first.tick(0).expect("sync");
+        let earlier = secret(&starts, "refiner-1");
+        drop(first);
+        // The log's lines as the store writes them, then an agent a daemon started
+        // before agents had secrets, whose line has no digest.
+        let mut lines: Vec<String> = kept
+            .0
+            .lock()
+            .expect("log")
+            .iter()
+            .enumerate()
+            .map(|(i, event)| {
+                serde_json::to_string(&temet_work_store::Entry {
+                    seq: i as u64 + 1,
+                    at_ms: 0,
+                    event: event.clone(),
+                })
+                .expect("line")
+            })
+            .collect();
+        lines.push(format!(
+            r#"{{"seq":{},"at_ms":0,"event":{{"AgentStarted":{{"agent":"refiner-0","group":"watch","role":"Refiner","issue":{{"project":"ankh","key":"2"}},"machine":"local","folder":null}}}}}}"#,
+            lines.len() + 1
+        ));
+        let entries: Vec<temet_work_store::Entry> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).expect("a log line"))
+            .collect();
+
+        // The second daemon has only the log.
+        let (mut second, _) = host_from(
+            temet_work_store::replay(&entries),
+            Box::new(Memory::default()),
+            fake_runtimes(),
+            &config,
+            None,
+            issues(),
+        );
+        assert_eq!(
+            second.world().agents[&AgentId::new("refiner-1")].secret_digest,
+            Some(temet_work::peer::digest(&earlier))
+        );
+        let plan = |key: &str| Command::Plan {
+            issue: IssueId::new("ankh", key),
+            plan: temet_work::cli::plan(PLAN).expect("plan"),
+        };
+        let mut ask = |by: &str, secret: Option<String>, command| {
+            let request = Request {
+                secret,
+                ..Request::new(Some(AgentId::new(by)), command)
+            };
+            answer(&mut second, 1, &request, &Peer::Unchecked).expect("answer")
+        };
+        assert!(matches!(
+            ask("refiner-1", Some("0".repeat(64)), plan("1")),
+            Reply::Refused { why } if why.contains("secret is wrong")
+        ));
+        assert_eq!(
+            ask("refiner-1", Some(earlier), plan("1")),
+            Reply::Done {
+                text: "ankh#1 is working".into()
+            }
+        );
+        // ankh#2 waits for the one folder; the plan counts.
+        assert_eq!(
+            ask("refiner-0", None, plan("2")),
+            Reply::Done {
+                text: "ankh#2 is ready".into()
+            }
+        );
+    }
+
+    /// A world with ankh#1 at `stage`, ankh#2 deploying, decisions 1 and 2 with a
+    /// rule proposed from each, and the agents `(id, role, secret)` on ankh#1. The host has
+    /// no parts: what the commands lead to is not under test.
+    fn tree_host(agents: &[(&str, Role, &str)], stage: Stage) -> Host {
+        let mut w = World::default();
+        for event in Config::parse(CONFIG).expect("config").events(&w) {
+            w.apply(&event);
+        }
+        for key in ["1", "2"] {
+            w.apply(&Event::IssueSynced {
+                issue: IssueId::new("ankh", key),
+                title: "Mend the clock".into(),
+                milestone: None,
+                depends_on: vec![],
+                order: 1,
+                closed: false,
+            });
+        }
+        for (id, role, secret) in agents {
+            w.apply(&Event::AgentStarted {
+                agent: AgentId::new(*id),
+                group: GroupId::new("watch"),
+                role: *role,
+                issue: Some(IssueId::new("ankh", "1")),
+                machine: MachineId::new("local"),
+                folder: None,
+                secret_digest: Some(temet_work::peer::digest(secret)),
+            });
+        }
+        // Decision 1 is the one to overturn; decision 2's rule is proposed too.
+        for id in [1, 2] {
+            let decision = Decision {
+                id: DecisionId(id),
+                issue: IssueId::new("ankh", "1"),
+                by: AgentId::new("author-1"),
+                kind: DecisionKind::Choice,
+                question: "Which bell?".into(),
+                options: vec!["the big one".into(), "the small one".into()],
+                chosen: 1,
+                reason: "quieter".into(),
+                overturned_to: None,
+                overturn_reason: String::new(),
+            };
+            w.apply(&Event::DecisionMade { decision });
+            w.apply(&Event::RuleProposed {
+                rule: Rule {
+                    id: RuleId(id),
+                    text: "Ring the big bell.".into(),
+                    decision: DecisionId(id),
+                    issue: IssueId::new("ankh", "1"),
+                    decided_by: AgentId::new("author-1"),
+                    overturned_by: "person".into(),
+                    state: RuleState::Proposed,
+                },
+            });
+        }
+        let one = w
+            .issues
+            .get_mut(&IssueId::new("ankh", "1"))
+            .expect("ankh#1");
+        one.stage = stage;
+        one.told = true;
+        w.issues
+            .get_mut(&IssueId::new("ankh", "2"))
+            .expect("ankh#2")
+            .stage = Stage::Deploying;
+        Host::new(w, Vec::new(), Box::new(Memory::default()))
+    }
+
+    /// A random secret, as the runner makes one.
+    #[cfg(target_os = "linux")]
+    fn fresh() -> String {
+        use std::io::Read;
+        let mut bytes = [0u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut bytes))
+            .expect("random");
+        temet_work_core::Digest::from_bytes(&bytes).0
+    }
+
+    /// The commands a person may run and an agent may not.
+    const PERSONS: [&[&str]; 7] = [
+        &["rule", "ankh#1", "approve", "the", "bell", "is", "fine"],
+        &["overturn", "1", "1", "the", "big", "one", "is", "heard"],
+        &["retry", "ankh#2"],
+        &["proposal", "1", "keep"],
+        &["proposal", "2", "drop"],
+        &["set", "ankh", "review_rounds", "2"],
+        &["unset", "ankh", "review_rounds"],
+    ];
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_person_command_from_inside_an_agents_process_tree_is_refused_even_with_its_variables_unset()
+     {
+        let sock = scratch("tree").join("daemon.sock");
+        let requests = socket::listen(&sock).expect("listen");
+        let author = fresh();
+        let mut host = tree_host(
+            &[("author-1", Role::Author, &author)],
+            Stage::Arbitration { round: 3 },
+        );
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            let author = author.clone();
+            move || {
+                let inside: Vec<_> = PERSONS
+                    .iter()
+                    .map(|args| under(&sock, ("author-1", &author), None, args))
+                    .collect();
+                let reads: Vec<_> = [&["status"][..], &["issue", "ankh#1"], &["settings", "ankh"]]
+                    .iter()
+                    .map(|args| under(&sock, ("author-1", &author), None, args))
+                    .collect();
+                // A person's own shell, then a shell holding a secret this daemon
+                // never issued, as a second daemon's agent would.
+                let outside: Vec<_> = PERSONS
+                    .iter()
+                    .map(|args| outcome(temet_work(&sock, args).output().expect("runs")))
+                    .collect();
+                let foreign = fresh();
+                let other: Vec<_> = PERSONS[5..]
+                    .iter()
+                    .map(|args| under(&sock, ("author-1", &foreign), None, args))
+                    .collect();
+                (inside, reads, outside, other)
+            }
+        });
+        let (inside, reads, outside, other) = serve(&mut host, &requests, client);
+        for (args, got) in PERSONS.iter().zip(&inside) {
+            assert_eq!(got.0, Some(1), "{args:?}: {got:?}");
+            assert!(
+                got.2
+                    .contains("names no agent but comes from inside author-1's process tree"),
+                "{args:?}: {got:?}"
+            );
+        }
+        for got in &reads {
+            assert_eq!(got.0, Some(0), "{got:?}");
+        }
+        for (args, got) in PERSONS.iter().zip(outside.iter().chain(&other)) {
+            assert_eq!(got.0, Some(0), "{args:?}: {got:?}");
+        }
+        assert_eq!(other.len(), 2);
+        assert!(
+            host.world()
+                .rules
+                .values()
+                .all(|r| r.state != RuleState::Proposed)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stolen_secret_is_refused_by_the_secret_in_the_thiefs_own_process_tree() {
+        let sock = scratch("stolen").join("daemon.sock");
+        let requests = socket::listen(&sock).expect("listen");
+        let (author, reviewer) = (fresh(), fresh());
+        let mut host = tree_host(
+            &[
+                ("author-1", Role::Author, &author),
+                ("reviewer-1", Role::Reviewer, &reviewer),
+            ],
+            Stage::InReview { round: 1 },
+        );
+        let approve = ["review", "ankh#1", "approve"];
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            let (author, reviewer) = (author.clone(), reviewer.clone());
+            move || {
+                under(
+                    &sock,
+                    ("author-1", &author),
+                    Some(("reviewer-1", &reviewer)),
+                    &approve,
+                )
+            }
+        });
+        let stolen = serve(&mut host, &requests, client);
+        assert_eq!(stolen.0, Some(1), "{stolen:?}");
+        assert!(
+            stolen.2.contains(
+                "names reviewer-1 but comes from inside author-1's process tree, which holds author-1's secret"
+            ),
+            "{stolen:?}"
+        );
+        let issue = IssueId::new("ankh", "1");
+        assert!(!host.world().issues[&issue].review_ok, "still in review");
+        // The reviewer's own shell sends the same command, and it counts.
+        let client = std::thread::spawn({
+            let sock = sock.clone();
+            move || {
+                under(
+                    &sock,
+                    ("reviewer-1", &reviewer),
+                    Some(("reviewer-1", &reviewer)),
+                    &approve,
+                )
+            }
+        });
+        let own = serve(&mut host, &requests, client);
+        assert_eq!(own.0, Some(0), "{own:?}");
+        assert!(host.world().issues[&issue].review_ok, "approved");
+    }
+
+    #[test]
+    fn a_person_command_through_the_relay_is_refused_and_reads_pass() {
+        let sock = scratch("relay").join("daemon.sock");
+        let requests = socket::listen(&sock).expect("listen");
+        let stub = stub_ssh("senders-relay", &sock, None);
+        let mut host = tree_host(&[], Stage::Arbitration { round: 3 });
+        let client = std::thread::spawn(move || {
+            let path = format!(
+                "{}:{}",
+                stub.parent().expect("dir").display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let run = |args: &[&str]| {
+                let mut cmd = temet_work(Path::new("/nonexistent.sock"), args);
+                cmd.env_remove("TEMET_WORK_SOCKET")
+                    .env("TEMET_WORK_DAEMON", "ssh://stub")
+                    .env("PATH", &path);
+                outcome(cmd.output().expect("runs"))
+            };
+            (run(PERSONS[0]), run(PERSONS[5]), run(&["status"]))
+        });
+        let (rule, set, status) = serve(&mut host, &requests, client);
+        for got in [&rule, &set] {
+            assert_eq!(got.0, Some(1), "{got:?}");
+            assert!(
+                got.2.contains("came through temet-work relay")
+                    && got.2.contains("run it on the daemon's machine"),
+                "{got:?}"
+            );
+        }
+        assert_eq!(status.0, Some(0), "{status:?}");
+    }
 }

@@ -138,13 +138,43 @@ impl Command {
     }
 }
 
-/// A command and who sent it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A command and who sent it. Its `Debug` form hides the secret.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     /// The agent that sent it; `None` for a person.
     pub by: Option<AgentId>,
+    /// The secret the sending agent was started with
+    /// ([`SECRET_VAR`](crate::launch::SECRET_VAR)), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// Set by `temet-work relay`: the request came from another machine.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relayed: bool,
     /// The command.
     pub command: Command,
+}
+
+impl Request {
+    /// A request from `by`, or from a person, carrying no secret.
+    pub fn new(by: Option<AgentId>, command: Command) -> Self {
+        Self {
+            by,
+            secret: None,
+            relayed: false,
+            command,
+        }
+    }
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("by", &self.by)
+            .field("secret", &self.secret.as_ref().map(|_| "<hidden>"))
+            .field("relayed", &self.relayed)
+            .field("command", &self.command)
+            .finish()
+    }
 }
 
 /// Who a decision is recorded as made by when a person makes it.
@@ -638,6 +668,7 @@ mod tests {
             issue: Some(IssueId::new(project, key)),
             machine: MachineId::new("morpork"),
             folder: None,
+            secret_digest: None,
         }
     }
 
@@ -1073,6 +1104,7 @@ mod plan_settings {
                 issue: Some(issue()),
                 machine: MachineId::new("local"),
                 folder: None,
+                secret_digest: None,
             },
         ]);
         w
@@ -1741,6 +1773,7 @@ mod ready_in_several_repositories {
             issue: Some(gld()),
             machine: MachineId::new("morpork"),
             folder: None,
+            secret_digest: None,
         });
         World::replay(&events).0
     }

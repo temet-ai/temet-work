@@ -620,6 +620,7 @@ fn started(agent: &str, role: Role, key: &str) -> Event {
         issue: Some(issue(key)),
         machine: MachineId::new("morpork"),
         folder: None,
+        secret_digest: None,
     }
 }
 

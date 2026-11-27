@@ -228,3 +228,36 @@ fn pull_requests_by_repository_survive_the_log() {
     let entries = Log::read(&p).expect("read");
     assert_eq!(entries[0].event, event);
 }
+
+#[test]
+fn an_agent_started_before_secrets_reads_with_no_digest_and_a_digest_survives_the_log() {
+    use temet_work_core::ids::AgentId;
+    use temet_work_core::sender::Digest;
+    let p = path("agent-digest");
+    // As a daemon wrote it before agents had secrets.
+    let old = r#"{"seq":1,"at_ms":0,"event":{"AgentStarted":{"agent":"author-1","group":"watch","role":"Author","issue":{"project":"ankh","key":"1"},"machine":"local","folder":"ankh-1"}}}"#;
+    std::fs::write(&p, format!("{old}\n")).expect("write");
+    let (mut log, entries) = Log::open(&p).expect("an old log opens");
+    assert_eq!(
+        replay(&entries).agents[&AgentId::new("author-1")].secret_digest,
+        None
+    );
+    let digest = Digest("ab".repeat(32));
+    let event = Event::AgentStarted {
+        agent: AgentId::new("reviewer-1"),
+        group: GroupId::new("watch"),
+        role: temet_work_core::model::Role::Reviewer,
+        issue: Some(IssueId::new("ankh", "1")),
+        machine: MachineId::new("local"),
+        folder: None,
+        secret_digest: Some(digest.clone()),
+    };
+    log.append(1, &event).expect("append");
+    drop(log);
+    let entries = Log::read(&p).expect("read");
+    assert_eq!(entries[1].event, event);
+    assert_eq!(
+        replay(&entries).agents[&AgentId::new("reviewer-1")].secret_digest,
+        Some(digest)
+    );
+}

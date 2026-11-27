@@ -1,6 +1,7 @@
 ---
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
+  - 26cd49d9-7565-4506-b988-a9b64ed0fa45
 ---
 
 # temet-work architecture
@@ -85,7 +86,7 @@ What exists today:
 | `temet-work-deploy` | runs the deploy command after a merge and the verify command after a deploy, each on its own thread, one at a time per project and `run_in` folder; a failed deploy is listed as a problem, a failed verify sends the issue back to ready; a handoff line naming a build other than the daemon's runs the deploy again, up to three times, then waits for `temet-work retry ISSUE` |
 | `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |
 | style, mike | skeletons |
-| `temet-work`, the root package | the parts, the configuration (`docs/configuration.md`), `temet-workd`, which syncs GitHub issues, starts agents and answers commands on its socket, and the `temet-work` command line (`docs/commands.md`) |
+| `temet-work`, the root package | the parts, the configuration (`docs/configuration.md`), `temet-workd`, which syncs GitHub issues, starts agents and answers commands on its socket after reading who sent each, and the `temet-work` command line (`docs/commands.md`) |
 
 Areas (`docs/areas.md`) group projects that work together; stages 1 and 2 are built, so an
 issue can change several repositories, with a work folder and a pull request in each,
@@ -135,6 +136,18 @@ agent's state. Neither family names the other.
 Each part is also polled every round: it returns what it has seen as events, and any
 problem it has now, such as a tracker that cannot be reached. A problem stays listed
 until a poll comes back without it.
+
+## Who sent a command
+
+The runner family makes each agent a random secret when it starts it, puts it in the
+agent's environment, and records only its SHA-256 digest, in `AgentStarted`. For each
+request the daemon hashes the secret the request carries and, on Linux, the secrets it
+finds in the environments of the sending process and its parents (`src/peer.rs`, through
+`SO_PEERCRED` and `/proc`); `temet-work relay` marks what it forwards from another
+machine. The core's `World::admit` compares those digests with the ones on record and
+refuses a request it cannot take at its word, before the step checks run
+(`docs/commands.md`). Making a secret and reading another process are I/O, so the core
+does neither.
 
 ## Rules the tests enforce
 

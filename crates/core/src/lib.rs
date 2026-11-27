@@ -14,6 +14,7 @@ pub mod ids;
 pub mod launch;
 pub mod model;
 pub mod placement;
+pub mod sender;
 pub mod settings;
 pub mod text;
 pub mod world;
@@ -22,6 +23,7 @@ pub use command::{Command, Request};
 pub use effect::Effect;
 pub use event::{Event, Verdict};
 pub use host::{Host, Journal, Outcome, Polled};
+pub use sender::{Digest, Peer, Sender};
 pub use world::World;
 
 /// A part of temet-work: a family of adapters (trackers, runners, agent
