@@ -3164,18 +3164,60 @@ mod tests {
         }
         assert_eq!(stops(&handle), 2, "stopped");
         assert_eq!(screen_of(&handle.fake), before, "typed into the shell");
+    }
 
-        // A stop the runner answers with the terminal unknown has nothing left to do.
-        let (mut w, mut part, handle, _) = working_author(0);
+    #[test]
+    fn the_shell_is_removed_after_refusals_each_tried_a_minute_after_the_last() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = working_author(0);
+        let before = screen_of(&handle.fake);
         {
             let mut fake = handle.fake.lock().expect("lock");
             fake.lose_to_shell(&t1);
-            fake.fail_next_stop(RunnerError::Unknown(t1.clone()));
+            // A core that refuses three times in a row, then removes it.
+            for _ in 0..3 {
+                fake.fail_next_stop(RunnerError::Other("t1 is still live after kill".into()));
+            }
         }
-        for at in [1_000, 61_000, 121_000] {
-            step(&mut part, &mut w, at);
+        // The first try at 1 s, each later one STOP_AGAIN_MS after the last.
+        let tries = [1_000, 61_000, 121_000, 181_000];
+        assert!(
+            tries
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] == STOP_AGAIN_MS)
+        );
+        // A poll every 10 s for five minutes, and one just before each retry.
+        let mut polls: Vec<u64> = (0..30).map(|k| 1_000 + k * 10_000).collect();
+        polls.extend(tries[1..].iter().map(|t| t - 1));
+        polls.sort_unstable();
+        for at in polls {
+            let polled = step(&mut part, &mut w, at);
+            if at == tries[0] {
+                assert!(ended(&polled, &author), "{polled:?}");
+            } else {
+                assert_eq!(polled, vec![], "at {at} ms");
+            }
+            let tried = tries.iter().filter(|t| at >= **t).count();
+            assert_eq!(stops(&handle), tried, "at {at} ms");
         }
-        assert_eq!(stops(&handle), 1);
+        assert_eq!(screen_of(&handle.fake), before, "typed into the shell");
+    }
+
+    #[test]
+    fn the_shell_is_removed_once_a_stop_is_answered_with_the_terminal_gone_or_unknown() {
+        let t1 = TerminalId("t1".into());
+        for answer in [RunnerError::Gone, RunnerError::Unknown(t1.clone())] {
+            let (mut w, mut part, handle, _) = working_author(0);
+            {
+                let mut fake = handle.fake.lock().expect("lock");
+                fake.lose_to_shell(&t1);
+                fake.fail_next_stop(answer.clone());
+            }
+            for at in [1_000, 30_000, 61_000, 121_000, 600_000] {
+                step(&mut part, &mut w, at);
+            }
+            assert_eq!(stops(&handle), 1, "{answer:?} is not tried again");
+        }
     }
 
     #[test]

@@ -55,8 +55,8 @@ pub struct FakeRunner {
     starts: Starts,
     calls: Calls,
     exec_error: Option<RunnerError>,
-    /// What the next stop fails with, changing nothing.
-    stop_error: Option<RunnerError>,
+    /// What the next stops fail with, in order, changing nothing.
+    stop_errors: std::collections::VecDeque<RunnerError>,
 }
 
 /// Every [`Start`] a fake runner was given, shared so a test can read them after
@@ -100,7 +100,7 @@ impl FakeRunner {
             starts: Starts::default(),
             calls: Calls::default(),
             exec_error: None,
-            stop_error: None,
+            stop_errors: std::collections::VecDeque::new(),
         }
     }
 
@@ -124,9 +124,11 @@ impl FakeRunner {
 
     /// Makes the next `stop` fail with `error` and change nothing, as
     /// herdr-core does when it will not remove a terminal it is still
-    /// putting a shell into. The stop after it works.
+    /// putting a shell into. Each call adds one failure, so calling it three
+    /// times fails the next three stops in that order; the stop after the
+    /// last failure works.
     pub fn fail_next_stop(&mut self, error: RunnerError) {
-        self.stop_error = Some(error);
+        self.stop_errors.push_back(error);
     }
 
     fn update(&mut self, terminal: &TerminalId, doing: Option<String>) {
@@ -356,7 +358,7 @@ impl Runner for FakeRunner {
         let Some(t) = self.terms.get_mut(terminal) else {
             return Err(RunnerError::Unknown(terminal.clone()));
         };
-        if let Some(e) = self.stop_error.take() {
+        if let Some(e) = self.stop_errors.pop_front() {
             return Err(e);
         }
         t.shell = false;
