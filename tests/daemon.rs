@@ -56,6 +56,15 @@ fn host() -> Host {
 }
 
 fn host_with(journal: Box<dyn temet_work_core::Journal>) -> Host {
+    let mut runtimes = temet_work_runtime::Runtimes::default();
+    runtimes.add(Box::new(FakeRuntime));
+    host_with_runtimes(journal, runtimes)
+}
+
+fn host_with_runtimes(
+    journal: Box<dyn temet_work_core::Journal>,
+    runtimes: temet_work_runtime::Runtimes,
+) -> Host {
     let mut trackers = temet_work_tracker::Trackers::default();
     trackers.add(Box::new(FakeTracker {
         issues: vec![(
@@ -72,8 +81,6 @@ fn host_with(journal: Box<dyn temet_work_core::Journal>) -> Host {
         )],
         ..FakeTracker::default()
     }));
-    let mut runtimes = temet_work_runtime::Runtimes::default();
-    runtimes.add(Box::new(FakeRuntime));
     let mut runners = temet_work_runner::Runners::default();
     runners.add(Box::new(FakeRunner::default()));
     let mut code_hosts = temet_work_codehost::CodeHosts::default().every(0);
@@ -129,6 +136,82 @@ fn a_synced_issue_gets_a_refiner_in_a_labelled_terminal() {
         text.contains("refiner-1 on ankh#1: idle (on local)"),
         "{text}"
     );
+}
+
+/// A reviewer set to run Codex starts as the Codex program in a labelled
+/// terminal; the author of the same issue keeps the build's default runtime.
+#[cfg(feature = "runtime-codex")]
+#[test]
+fn a_reviewer_set_to_codex_starts_the_codex_program() {
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::model::{Check, Plan, Role};
+    use temet_work_core::settings::Target;
+    use temet_work_core::{Command, Request};
+
+    let mut runtimes = temet_work_runtime::Runtimes::default();
+    runtimes.add(Box::new(FakeRuntime));
+    runtimes.add(Box::new(temet_work_runtime_codex::Codex));
+    let mut host = host_with_runtimes(Box::new(Memory::default()), runtimes);
+    let run = |host: &mut Host, by: Option<&str>, command: Command| {
+        let request = Request {
+            by: by.map(AgentId::new),
+            command,
+        };
+        match answer(host, 1, &request).expect("answer") {
+            Reply::Done { text } => text,
+            Reply::Refused { why } => panic!("refused: {why}"),
+        }
+    };
+    run(
+        &mut host,
+        None,
+        Command::Set {
+            target: Target::parse("ankh"),
+            role: Some(Role::Reviewer),
+            key: "runtime".into(),
+            value: "codex".into(),
+        },
+    );
+    host.tick(0).expect("sync");
+    let issue = IssueId::new("ankh", "1");
+    let plan = Plan {
+        repos: Vec::new(),
+        settings: Default::default(),
+        checks: vec![Check {
+            done_when: "the clock strikes thirteen".into(),
+            proven_by: "listening at midnight".into(),
+        }],
+    };
+    run(
+        &mut host,
+        Some("refiner-1"),
+        Command::Plan {
+            issue: issue.clone(),
+            plan,
+        },
+    );
+    run(
+        &mut host,
+        Some("author-1"),
+        Command::Ready {
+            issue,
+            pull: Some("57".into()),
+        },
+    );
+    assert!(host.problems().is_empty(), "{:?}", host.problems());
+    let screen = |host: &mut Host, agent: &str| {
+        run(
+            host,
+            None,
+            Command::Screen {
+                agent: AgentId::new(agent),
+            },
+        )
+    };
+    let reviewer = screen(&mut host, "reviewer-1");
+    assert!(reviewer.contains("$ codex --approve-for-me "), "{reviewer}");
+    let author = screen(&mut host, "author-1");
+    assert!(author.contains("$ fake-agent "), "{author}");
 }
 
 #[test]

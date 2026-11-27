@@ -28,6 +28,33 @@ pub trait Runtime: Send {
     fn program(&self, brief: &Brief) -> Program;
 }
 
+/// Variables every runtime passes on to its sessions from the daemon's
+/// environment: a terminal gets its terminal service's environment, not the
+/// daemon's. They are the proxy variables a capturing proxy needs and the code
+/// host's sign-in, without which `gh` cannot read an issue or open a pull
+/// request. Adapters use this one list, so a variable is added for every runtime
+/// at once.
+pub const PASSED_ON: [&str; 5] = [
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "NODE_EXTRA_CA_CERTS",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+];
+
+/// The [`PASSED_ON`] variables the daemon has, as `(name, value)` pairs.
+pub fn passed_on_env() -> Vec<(String, String)> {
+    passed_on_from(|k| std::env::var(k).ok())
+}
+
+/// The [`PASSED_ON`] variables `get` finds and that are not empty.
+pub fn passed_on_from(get: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    PASSED_ON
+        .iter()
+        .filter_map(|k| get(k).filter(|v| !v.is_empty()).map(|v| (k.to_string(), v)))
+        .collect()
+}
+
 /// A runtime for tests: `fake-agent [--model M] TASK`.
 #[derive(Default)]
 pub struct FakeRuntime;
@@ -91,16 +118,6 @@ pub mod contract {
         let with_model = runtime.program(&brief(Some("contract-model")));
         if !with_model.argv.iter().any(|a| a == "contract-model") {
             return Err("the brief's model reaches the program".into());
-        }
-        let mut ask = brief(None);
-        ask.permission = "contract-permission".into();
-        if !runtime
-            .program(&ask)
-            .argv
-            .iter()
-            .any(|a| a.contains("contract-permission"))
-        {
-            return Err("the brief's permission reaches the program".into());
         }
         Ok(())
     }
@@ -264,6 +281,24 @@ mod tests {
         part.add(Box::new(FakeRuntime));
         assert_eq!(part.ids(), ["fake"]);
         assert_eq!(part.id(), "runtime");
+    }
+
+    #[test]
+    fn passes_on_the_variables_that_are_set_and_not_empty() {
+        let env = passed_on_from(|k| match k {
+            "HTTPS_PROXY" => Some("http://p".into()),
+            "GH_TOKEN" => Some(String::new()),
+            "NO_PROXY" => Some("localhost".into()),
+            _ => None,
+        });
+        assert_eq!(
+            env,
+            [
+                ("HTTPS_PROXY".to_string(), "http://p".to_string()),
+                ("NO_PROXY".to_string(), "localhost".to_string())
+            ]
+        );
+        assert!(passed_on_from(|_| None).is_empty());
     }
 
     #[test]

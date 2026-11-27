@@ -41,7 +41,7 @@ too.
 | `runtime` | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
 | `model` | the runtime's own default | the agent's brief, so the runtime adapter |
 | `runner` | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
-| `permission` | `auto` | the agent's brief; the Claude adapter's permission mode, the Codex adapter's approval policy |
+| `permission` | `auto` | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
 | `review_rounds` | 3 | the loop, per issue |
 | `ci` | true | the code-host family, per issue |
 | `deploy`, `verify`, `run_in` | none | the deploy part, per issue |
@@ -139,7 +139,7 @@ level. `temet-work status` lists every value with the level it is set at and who
 - A family reports the adapters in its build and its default one; the host puts them in
   the world, which is how a value naming an adapter the build lacks is refused. The
   runtime family picks its adapter by `runtime`, the runner family by `runner`. The Codex
-  adapter is the second runtime.
+  adapter (`temet-work-runtime-codex`) is the second runtime.
 - Every family is tested with two adapters compiled in at once, so "the first one wins"
   cannot come back unnoticed.
 - The group's `model` and the project's `ci`, `deploy`, `verify` and `run_in` are read as

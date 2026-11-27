@@ -16,15 +16,6 @@
 
 use temet_work_runtime::{Brief, Program, Runtime};
 
-/// Variables passed on to every session from the daemon's environment.
-pub const PASSED_ON: [&str; 5] = [
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "NODE_EXTRA_CA_CERTS",
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-];
-
 /// The Claude Code adapter.
 #[derive(Default)]
 pub struct Claude;
@@ -49,16 +40,10 @@ impl Runtime for Claude {
             argv.push(model.clone());
         }
         argv.push(brief.task.clone());
-        let env = PASSED_ON
-            .iter()
-            .filter_map(|k| {
-                std::env::var(k)
-                    .ok()
-                    .filter(|v| !v.is_empty())
-                    .map(|v| (k.to_string(), v))
-            })
-            .collect();
-        Program { argv, env }
+        Program {
+            argv,
+            env: temet_work_runtime::passed_on_env(),
+        }
     }
 }
 
@@ -69,5 +54,22 @@ mod tests {
     #[test]
     fn passes_the_runtime_contract() {
         assert_eq!(temet_work_runtime::contract::check(&Claude), Ok(()));
+    }
+
+    #[test]
+    fn the_brief_permission_is_the_permission_mode() {
+        use temet_work_runtime::{IssueId, Role};
+        let brief = Brief {
+            role: Role::Author,
+            issue: IssueId::new("a", "1"),
+            task: "do it".into(),
+            model: None,
+            permission: "plan".into(),
+            folder: None,
+        };
+        assert_eq!(
+            Claude.program(&brief).argv,
+            ["claude", "--permission-mode", "plan", "do it"]
+        );
     }
 }
