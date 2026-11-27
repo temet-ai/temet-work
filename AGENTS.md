@@ -27,5 +27,12 @@ Test the crate you changed as you work. Before you commit, run the workspace tes
   the coupling; never re-record the other crate's snapshots.
 - A test takes milliseconds. Over 2 s is flagged, over 20 s is killed, and a crate's suite
   over 10 s fails CI.
+- Nothing waits on a person. When a choice stops you, take the default you would defend,
+  record it as a decision with your reason, and finish your step. Do not stop to ask for
+  approval or wait for an answer.
+- A real run goes on a second `temet-workd` started from your branch, with its own
+  `--config`, `--log` and `TEMET_WORK_SOCKET`. Never touch the live `temet-workd` service
+  or `~/.config/temet-work/config.toml`.
+- After a rebase, push your own branch with `git push --force-with-lease`.
 - Turn the hooks on once per checkout: `git config core.hooksPath scripts/hooks`. Every
   commit here is public.
