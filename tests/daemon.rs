@@ -726,6 +726,7 @@ fn the_same_request_gets_equal_replies_through_the_socket_and_through_ssh() {
                 port: None,
                 socket: None,
                 program: stub.display().to_string(),
+                deadline: socket::SSH_DEADLINE,
             }
             .send(&request);
             (local, ssh)
@@ -762,6 +763,7 @@ fn an_address_with_a_path_reaches_that_daemons_socket() {
             port: None,
             socket: Some(socket),
             program: stub.display().to_string(),
+            deadline: socket::SSH_DEADLINE,
         }
         .send(&Request {
             by: None,
@@ -846,7 +848,7 @@ fn an_agent_commands_arrive_over_ssh_as_its_own() {
 
 #[test]
 fn a_failed_ssh_hop_says_which_step_failed() {
-    use temet_work::socket::{Ssh, Transport};
+    use temet_work::socket::{self, Ssh, Transport};
     use temet_work_core::{Command, Request};
 
     let nowhere = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("nobody.sock");
@@ -862,6 +864,7 @@ fn a_failed_ssh_hop_says_which_step_failed() {
             port: None,
             socket: None,
             program: stub.display().to_string(),
+            deadline: socket::SSH_DEADLINE,
         }
         .send(&request)
     };
