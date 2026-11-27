@@ -208,7 +208,8 @@ impl Tracker for GitHub {
         let v: Value = serde_json::from_str(&out)
             .map_err(|e| TrackerError::Other(format!("gh issue view: {e}")))?;
         match v.get("state").and_then(Value::as_str) {
-            Some("CLOSED") => Ok(true),
+            // `gh issue view` answers for a pull request's number too.
+            Some("CLOSED" | "MERGED") => Ok(true),
             Some(_) => Ok(false),
             None => Err(TrackerError::Other("gh issue view gave no state".into())),
         }
@@ -365,6 +366,30 @@ mod tests {
         assert_eq!(first.milestone.as_deref(), Some("Slack sign-in rework"));
         assert_eq!(first.order, 44);
         assert!(issues.iter().any(|i| i.milestone.is_none()));
+    }
+
+    /// Answers `issue view` with the state named by the key asked about.
+    struct States;
+
+    impl Transport for States {
+        fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            match args {
+                ["issue", "view", state, ..] => Ok(format!(r#"{{"state":"{state}"}}"#)),
+                _ => Err(format!("not expected: {args:?}")),
+            }
+        }
+    }
+
+    #[test]
+    fn a_merged_pull_request_counts_as_closed() {
+        let mut gh = GitHub::with(Box::new(States));
+        for (state, closed) in [("MERGED", true), ("CLOSED", true), ("OPEN", false)] {
+            assert_eq!(
+                gh.closed("ankh-morpork/watch", state),
+                Ok(closed),
+                "{state}"
+            );
+        }
     }
 
     /// The recorded output, with an issue filed through it listed afterwards as
