@@ -170,7 +170,20 @@ not refined again.
 A group's work queue is the refining, ready and new issues in its scope (its milestones,
 projects and areas): those it is refining or has refined and not started, and those no group
 has taken yet. An issue moved out of them does not hold off an investigator, and counts again
-once it is back. When the queue holds fewer than `queue_low` issues, the daemon starts one
+once it is back. A ready issue is not counted either while it waits on an open dependency out
+of its group's scope, directly or through another open issue: one that no group covers, or one
+in a milestone the group does not take, even when another group takes it. `temet-work status`
+lists such an issue under Waiting, with a line for each of those dependencies, such as
+`radar#44 waiting on radar#51, out of scope (Later is not a milestone of core)`. The brackets
+say `no group covers it` for a dependency with no milestone the group leaves out, and
+`through radar#47` follows the dependency when radar#44 reaches it through radar#47. The issue
+counts again once the dependency is done or back in scope, or its "Depends on" line is gone.
+A dependency on a repository that no project or area matches is one no group covers: no sync
+looks it up, and the line shows it as the issue's text writes it, such as `nowhere#5`.
+Refining and new issues count whatever they depend on, and so does a ready issue whose
+dependency in a known project or area the daemon has never synced.
+
+When the queue holds fewer than `queue_low` issues, the daemon starts one
 investigator for the group. Left out, `queue_low` is twice the work folders of the group's
 projects and of the projects in its areas, or 2 when they have none; 0 starts no
 investigator. The investigator holds no work folder and changes no file: it runs in a

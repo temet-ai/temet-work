@@ -223,15 +223,17 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     out
 }
 
-/// The issues waiting for a work folder on the machine a setting names; no
-/// section when there are none.
+/// The issues waiting for a work folder on the machine a setting names, then the
+/// ready ones waiting on a dependency out of scope; no section when there are
+/// neither.
 fn waiting(out: &mut String, world: &World) {
-    let waits = world.machine_waits();
-    if waits.is_empty() {
+    let machines = world.machine_waits();
+    let dependencies = world.dependency_waits();
+    if machines.is_empty() && dependencies.is_empty() {
         return;
     }
     let _ = writeln!(out, "Waiting");
-    for w in waits {
+    for w in machines {
         let agent = if w.role == Role::Author {
             String::new()
         } else {
@@ -244,6 +246,27 @@ fn waiting(out: &mut String, world: &World) {
             out,
             "  {} waiting for a work folder on {}{agent}{none}",
             w.issue, w.machine
+        );
+    }
+    for w in dependencies {
+        let through: Vec<String> = w.through.iter().map(ToString::to_string).collect();
+        let through = match through.split_last() {
+            None => String::new(),
+            Some((only, [])) => format!(" through {only}"),
+            Some((last, rest)) => format!(" through {} and {last}", rest.join(", ")),
+        };
+        let why = w.left_out.map_or_else(
+            || "no group covers it".to_string(),
+            |m| format!("{m} is not a milestone of {}", w.group),
+        );
+        // A name nothing matches is shown as its "Depends on" line writes it.
+        let on =
+            w.on.unmatched()
+                .map_or_else(|| w.on.to_string(), str::to_string);
+        let _ = writeln!(
+            out,
+            "  {} waiting on {on}{through}, out of scope ({why})",
+            w.issue
         );
     }
 }
@@ -942,6 +965,85 @@ Problems
             all.contains(
                 "\n  watch (Night watch): ankh; First; refines 1 at a time; 2 in its queue, \
                  investigates below 8\n"
+            ),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn the_status_names_an_out_of_scope_dependency() {
+        use crate::ids::{GroupId, MachineId, MilestoneId};
+        let ankh = ProjectId::new("ankh");
+        let mut w = World::default();
+        for (id, name) in [("ankh", "city/ankh"), ("klatch", "desert/klatch")] {
+            w.apply(&Event::ProjectAdded {
+                project: ProjectId::new(id),
+                tracker: "t".into(),
+                name: name.into(),
+                code_host: None,
+                repo: None,
+            });
+        }
+        w.apply(&Event::FolderAdded {
+            folder: crate::ids::FolderId::new("f1"),
+            project: ankh.clone(),
+            machine: MachineId::new("morpork"),
+            path: "/srv/ankh/f1".into(),
+        });
+        w.apply(&Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ankh],
+            areas: Vec::new(),
+            milestones: vec![MilestoneId::new("First")],
+            refining_at_once: 1,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        });
+        // ankh#2 waits for a folder on a machine that has none.
+        w.apply(&Event::SettingSet {
+            scope: crate::settings::Scope::Task(IssueId::new("ankh", "2")),
+            role: Some(Role::Author),
+            key: "machine".into(),
+            value: crate::settings::Value::Text("mac".into()),
+            by: "person".into(),
+        });
+        let later = IssueId::new("ankh", "100");
+        let uncovered = IssueId::new("klatch", "3");
+        let sync = |issue: &IssueId, milestone: Option<&str>, depends_on: Vec<IssueId>| {
+            Event::IssueSynced {
+                issue: issue.clone(),
+                title: format!("Issue {}", issue.key),
+                milestone: milestone.map(MilestoneId::new),
+                depends_on,
+                order: 1,
+                closed: false,
+            }
+        };
+        w.apply(&sync(&later, Some("Later"), Vec::new()));
+        w.apply(&sync(&uncovered, None, Vec::new()));
+        for (key, depends_on) in [
+            ("1", vec![later.clone(), uncovered.clone()]),
+            ("2", Vec::new()),
+            // An open dependency in scope.
+            ("4", vec![IssueId::new("ankh", "2")]),
+        ] {
+            let issue = IssueId::new("ankh", key);
+            w.apply(&sync(&issue, Some("First"), depends_on));
+            w.apply(&Event::PlanWritten {
+                issue,
+                plan: Default::default(),
+            });
+        }
+        let all = text(&w, &BTreeMap::new());
+        assert!(
+            all.contains(
+                "Waiting\n  \
+                 ankh#2 waiting for a work folder on mac (ankh has no work folder there)\n  \
+                 ankh#1 waiting on ankh#100, out of scope (Later is not a milestone of watch)\n  \
+                 ankh#1 waiting on klatch#3, out of scope (no group covers it)\n\
+                 Agents\n"
             ),
             "{all}"
         );

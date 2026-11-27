@@ -283,6 +283,292 @@ fn issues_back_in_scope_count_again() {
     assert_eq!(queued(&wider), 12);
 }
 
+fn ankh_issue(key: &str) -> IssueId {
+    IssueId::new("ankh", key)
+}
+
+fn sync_on(issue: &IssueId, milestone: Option<&str>, depends_on: &[&IssueId]) -> Event {
+    Event::IssueSynced {
+        issue: issue.clone(),
+        title: format!("issue {}", issue.key),
+        milestone: milestone.map(MilestoneId::new),
+        depends_on: depends_on.iter().map(|d| (*d).clone()).collect(),
+        order: issue.key.parse().unwrap_or(0),
+        closed: false,
+    }
+}
+
+/// Syncs an issue of ankh into First and has its refiner write the plan. No issue
+/// may be refining already, since watch refines one at a time.
+fn make_ready(w: &mut World, key: &str, depends_on: &[&IssueId]) {
+    let issue = ankh_issue(key);
+    w.apply(&sync_on(&issue, Some("First"), depends_on));
+    w.apply(&Event::PlanWritten {
+        issue: issue.clone(),
+        plan: Plan::default(),
+    });
+    assert_eq!(w.issues[&issue].stage, Stage::Ready, "{issue}");
+}
+
+/// Project ankh with no work folder and its group watch (queue_low 8, milestone
+/// First).
+fn unstaffed() -> World {
+    World::replay(&[
+        project("ankh", "city/ankh"),
+        group(&["First"], Some(8), None),
+    ])
+    .0
+}
+
+/// Each dependency wait as the waiting issue and the dependency it names.
+fn waits(w: &World) -> Vec<(String, String)> {
+    w.dependency_waits()
+        .iter()
+        .map(|d| (d.issue.to_string(), d.on.to_string()))
+        .collect()
+}
+
+fn wait(issue: &str, on: &str) -> (String, String) {
+    (issue.into(), on.into())
+}
+
+fn status(w: &World) -> String {
+    crate::text::text(w, &Default::default())
+}
+
+#[test]
+fn ready_issues_on_an_out_of_scope_dependency_leave_the_queue() {
+    let mut w = unstaffed();
+    let later = ankh_issue("100");
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    for key in 1..=8 {
+        make_ready(&mut w, &key.to_string(), &[&later]);
+    }
+    assert_eq!(queued(&w), 0);
+    assert_eq!(
+        w.investigation_events(0, true),
+        [Event::InvestigationStarted {
+            group: watch(),
+            agent: AgentId::new("investigator-1"),
+            at_ms: 0,
+        }]
+    );
+    let status = status(&w);
+    assert!(
+        status.contains("; 0 in its queue, investigates below 8"),
+        "{status}"
+    );
+    let lines: String = (1..=8)
+        .map(|key| {
+            format!(
+                "  ankh#{key} waiting on ankh#100, out of scope \
+                 (Later is not a milestone of watch)\n"
+            )
+        })
+        .collect();
+    assert!(
+        status.contains(&format!("Waiting\n{lines}Agents\n")),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_dependency_no_group_covers_keeps_a_ready_issue_out_of_the_queue() {
+    // In a project no group covers, with and without a milestone watch takes,
+    // and in watch's own project with no milestone.
+    let klatch = IssueId::new("klatch", "3");
+    for (on, milestone) in [
+        (&klatch, None),
+        (&klatch, Some("First")),
+        (&ankh_issue("100"), None),
+    ] {
+        let mut w = unstaffed();
+        w.apply(&project("klatch", "desert/klatch"));
+        w.apply(&sync_on(on, milestone, &[]));
+        make_ready(&mut w, "1", &[on]);
+        assert_eq!(queued(&w), 0, "{on} {milestone:?}");
+        let status = status(&w);
+        assert!(
+            status.contains(&format!(
+                "  ankh#1 waiting on {on}, out of scope (no group covers it)\n"
+            )),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn a_dependency_on_a_repository_nothing_matches_keeps_a_ready_issue_out_of_the_queue() {
+    // The tracker keeps a name no project or area matches as the key of an issue
+    // in the project that names it, and never syncs it.
+    let (short, long) = (ankh_issue("nowhere#5"), ankh_issue("desert/elsewhere#12"));
+    let mut w = unstaffed();
+    for key in 1..=8 {
+        make_ready(&mut w, &key.to_string(), &[&short]);
+    }
+    make_ready(&mut w, "9", &[&long]);
+    make_ready(&mut w, "10", &[&ankh_issue("9")]);
+    assert_eq!(queued(&w), 0);
+    assert_eq!(w.investigation_events(0, true).len(), 1);
+    let status = status(&w);
+    for line in [
+        "  ankh#1 waiting on nowhere#5, out of scope (no group covers it)\n",
+        "  ankh#8 waiting on nowhere#5, out of scope (no group covers it)\n",
+        "  ankh#9 waiting on desert/elsewhere#12, out of scope (no group covers it)\n",
+        "  ankh#10 waiting on desert/elsewhere#12 through ankh#9, out of scope \
+         (no group covers it)\n",
+    ] {
+        assert!(status.contains(line), "{line}{status}");
+    }
+
+    // Dropping the line counts the issue again.
+    w.apply(&sync_on(&ankh_issue("1"), Some("First"), &[]));
+    assert_eq!(queued(&w), 1);
+}
+
+#[test]
+fn a_dependency_in_a_milestone_another_group_takes_keeps_it_out_too() {
+    let mut w = unstaffed();
+    let guard = GroupId::new("guard");
+    w.apply(&Event::GroupCreated {
+        group: guard.clone(),
+        name: "Day watch".into(),
+        projects: vec![ankh()],
+        areas: Vec::new(),
+        milestones: vec![MilestoneId::new("Later")],
+        refining_at_once: 1,
+        model: None,
+        queue_low: None,
+        investigate_every: None,
+    });
+    let later = ankh_issue("100");
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    assert_eq!(w.issues[&later].group.as_ref(), Some(&guard));
+    make_ready(&mut w, "1", &[&later]);
+    assert_eq!(queued(&w), 0);
+    assert_eq!(w.queue(&w.groups[&guard]), 1, "guard is refining ankh#100");
+    assert_eq!(waits(&w), [wait("ankh#1", "ankh#100")]);
+}
+
+#[test]
+fn in_scope_or_done_dependencies_keep_a_ready_issue_in_the_queue() {
+    let mut w = unstaffed();
+    let (working, done, later) = (ankh_issue("7"), ankh_issue("50"), ankh_issue("100"));
+    let unseen = ankh_issue("999");
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    w.apply(&Event::IssueSynced {
+        issue: done.clone(),
+        title: "issue 50".into(),
+        milestone: Some(MilestoneId::new("Later")),
+        depends_on: vec![],
+        order: 50,
+        closed: true,
+    });
+    // The one work folder goes to ankh#7, so the others stay ready.
+    make_ready(&mut w, "7", &[]);
+    w.apply(&folder("f1", "ankh"));
+    make_ready(&mut w, "1", &[&working]);
+    make_ready(&mut w, "2", &[&done]);
+    make_ready(&mut w, "3", &[&unseen]);
+    assert_eq!(w.issues[&working].stage, Stage::Working);
+    assert_eq!(queued(&w), 3, "1, 2 and 3; 7 is being worked on");
+
+    // One refining and one new, both on the dependency in Later.
+    w.apply(&sync_on(&ankh_issue("4"), Some("First"), &[&later]));
+    w.apply(&sync_on(&ankh_issue("5"), Some("First"), &[&later]));
+    assert_eq!(w.issues[&ankh_issue("4")].stage, Stage::Refining);
+    assert_eq!(w.issues[&ankh_issue("5")].stage, Stage::New);
+    assert_eq!(queued(&w), 5);
+    assert_eq!(waits(&w), []);
+    assert!(!status(&w).contains("Waiting"), "{}", status(&w));
+
+    w.apply(&Event::PlanWritten {
+        issue: ankh_issue("4"),
+        plan: Plan::default(),
+    });
+    assert_eq!(queued(&w), 4, "4 is ready and cannot start");
+    assert_eq!(waits(&w), [wait("ankh#4", "ankh#100")]);
+}
+
+#[test]
+fn moving_the_dependency_or_dropping_the_line_counts_the_issue_again() {
+    let mut w = unstaffed();
+    let later = ankh_issue("100");
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    make_ready(&mut w, "1", &[&later]);
+    assert_eq!(queued(&w), 0);
+    assert_eq!(waits(&w), [wait("ankh#1", "ankh#100")]);
+
+    let mut moved = w.clone();
+    moved.apply(&sync_on(&later, Some("First"), &[]));
+    assert_eq!(queued(&moved), 2, "ankh#1, and ankh#100 now refining");
+
+    let mut closed = w.clone();
+    closed.apply(&Event::IssueSynced {
+        issue: later.clone(),
+        title: "issue 100".into(),
+        milestone: Some(MilestoneId::new("Later")),
+        depends_on: vec![],
+        order: 100,
+        closed: true,
+    });
+    assert_eq!(queued(&closed), 1);
+
+    let mut dropped = w;
+    dropped.apply(&sync_on(&ankh_issue("1"), Some("First"), &[]));
+    assert_eq!(queued(&dropped), 1);
+
+    for w in [moved, closed, dropped] {
+        assert_eq!(waits(&w), []);
+        assert!(!status(&w).contains("Waiting"), "{}", status(&w));
+    }
+}
+
+#[test]
+fn an_out_of_scope_dependency_through_another_issue_leaves_the_queue() {
+    let mut w = unstaffed();
+    let (near, far, later) = (ankh_issue("5"), ankh_issue("6"), ankh_issue("100"));
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    make_ready(&mut w, "5", &[&later]);
+    make_ready(&mut w, "1", &[&near]);
+    assert_eq!(queued(&w), 0);
+    let chained = status(&w);
+    assert!(
+        chained.contains(
+            "Waiting\n  \
+             ankh#1 waiting on ankh#100 through ankh#5, out of scope \
+             (Later is not a milestone of watch)\n  \
+             ankh#5 waiting on ankh#100, out of scope (Later is not a milestone of watch)\n\
+             Agents\n"
+        ),
+        "{chained}"
+    );
+
+    // Longer chains name each issue on the way, and one that closes on itself
+    // still ends.
+    make_ready(&mut w, "6", &[&near]);
+    make_ready(&mut w, "2", &[&far]);
+    make_ready(&mut w, "3", &[&ankh_issue("2")]);
+    w.apply(&sync_on(&near, Some("First"), &[&ankh_issue("1"), &later]));
+    assert_eq!(queued(&w), 0);
+    let longer = status(&w);
+    assert!(
+        longer.contains("  ankh#2 waiting on ankh#100 through ankh#6 and ankh#5, out of scope"),
+        "{longer}"
+    );
+    assert!(
+        longer.contains(
+            "  ankh#3 waiting on ankh#100 through ankh#2, ankh#6 and ankh#5, out of scope"
+        ),
+        "{longer}"
+    );
+
+    // A cycle with nothing out of scope waits on itself, and stays counted.
+    w.apply(&sync_on(&near, Some("First"), &[&ankh_issue("1")]));
+    assert_eq!(queued(&w), 5);
+    assert_eq!(waits(&w), []);
+}
+
 #[test]
 fn queue_low_defaults_to_twice_the_groups_work_folders() {
     let g = |w: &World| w.groups[&watch()].clone();
