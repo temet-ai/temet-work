@@ -1439,3 +1439,224 @@ areas = ["guild"]
         assert!(f.merges.lock().expect("lock").is_empty());
     }
 }
+
+/// Two issues of one project merge in the same round: their deploys run one
+/// after the other, and both end verified and closed.
+#[test]
+fn two_merges_in_one_project_deploy_one_after_the_other() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::model::{Check, Plan, Role};
+    use temet_work_core::{Command, Effect, Outcome, Part, Polled, Request, Verdict};
+
+    /// The deploy part, noting the most commands it has had running after an
+    /// effect: it starts commands only when it carries one out.
+    struct Counted {
+        inner: temet_work_deploy::Deploys,
+        most: Arc<AtomicUsize>,
+    }
+
+    impl Part for Counted {
+        fn id(&self) -> &'static str {
+            self.inner.id()
+        }
+        fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
+            self.inner.poll(world, now_ms)
+        }
+        fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
+            let outcome = self.inner.carry_out(effect, world);
+            self.most.fetch_max(self.inner.running(), Ordering::SeqCst);
+            outcome
+        }
+    }
+
+    const ONE_PROJECT: &str = r#"
+[[project]]
+id = "ankh"
+tracker = "fake"
+name = "city/ankh"
+deploy = "make deploy"
+verify = "make smoke"
+run_in = "/srv/ankh"
+
+[[folder]]
+id = "ankh-1"
+project = "ankh"
+path = "."
+
+[[folder]]
+id = "ankh-2"
+project = "ankh"
+path = "."
+
+[[group]]
+id = "watch"
+name = "Night watch"
+projects = ["ankh"]
+"#;
+
+    let tracked = |key: &str, title: &str| {
+        (
+            "city/ankh".to_string(),
+            TrackedIssue {
+                key: key.into(),
+                title: title.into(),
+                body: String::new(),
+                milestone: None,
+                depends_on: vec![],
+                order: key.parse().expect("number"),
+                closed: false,
+            },
+        )
+    };
+    let mut trackers = temet_work_tracker::Trackers::default();
+    trackers.add(Box::new(FakeTracker {
+        issues: vec![
+            tracked("1", "Mend the clock"),
+            tracked("2", "Wind the clock"),
+        ],
+        ..FakeTracker::default()
+    }));
+    let mut runners = temet_work_runner::Runners::default();
+    runners.add(Box::new(FakeRunner::default()));
+    let pull = |number: &str| {
+        (
+            "city/ankh".to_string(),
+            Pull {
+                number: number.into(),
+                state: PullState::Open,
+                checks: Checks::Passed,
+                conflicting: false,
+            },
+        )
+    };
+    let fake = FakeCodeHost {
+        pulls: vec![pull("57"), pull("58")],
+        ..FakeCodeHost::default()
+    };
+    let merged = fake.merged_repos.clone();
+    let mut code_hosts = temet_work_codehost::CodeHosts::default().every(0);
+    code_hosts.add(Box::new(fake));
+    let deployed = Arc::new(Mutex::new(Vec::new()));
+    let ran = deployed.clone();
+    let most = Arc::new(AtomicUsize::new(0));
+    let deploys = Counted {
+        inner: temet_work_deploy::Deploys::with(Arc::new(
+            move |command: &str, _: &std::path::PathBuf, env: &[(String, String)]| {
+                if command == "make deploy" {
+                    let issue = env
+                        .iter()
+                        .find_map(|(k, v)| (k == "TEMET_WORK_ISSUE").then(|| v.clone()))
+                        .unwrap_or_default();
+                    ran.lock().map_err(|e| e.to_string())?.push(issue);
+                }
+                Ok(())
+            },
+        )),
+        most: most.clone(),
+    };
+    let mut host = Host::new(
+        World::default(),
+        vec![
+            Box::new(trackers),
+            Box::new(runners.daemon_host(None)),
+            Box::new(fake_runtimes()),
+            Box::new(code_hosts),
+            Box::new(deploys),
+        ],
+        Box::new(Memory::default()),
+    );
+    for event in Config::parse(ONE_PROJECT)
+        .expect("config")
+        .events(host.world())
+    {
+        host.handle(0, event).expect("config event");
+    }
+
+    let run = |host: &mut Host, issue: &IssueId, role: Role, command: Command| {
+        let agent = host
+            .world()
+            .agents
+            .values()
+            .find(|a| a.issue.as_ref() == Some(issue) && a.role == role)
+            .map(|a| a.id.clone())
+            .unwrap_or_else(|| panic!("no {role:?} on {issue}"));
+        let request = Request {
+            by: Some(agent),
+            command,
+        };
+        match answer(host, 1, &request).expect("answer") {
+            Reply::Done { text } => text,
+            Reply::Refused { why } => panic!("refused: {why}"),
+        }
+    };
+    host.tick(0).expect("sync");
+    let issues = [IssueId::new("ankh", "1"), IssueId::new("ankh", "2")];
+    for issue in &issues {
+        let plan = Plan {
+            repos: Vec::new(),
+            settings: Default::default(),
+            checks: vec![Check {
+                done_when: "the clock strikes thirteen".into(),
+                proven_by: "listening at midnight".into(),
+            }],
+        };
+        let plan = Command::Plan {
+            issue: issue.clone(),
+            plan,
+        };
+        run(&mut host, issue, Role::Refiner, plan);
+    }
+    for (issue, pull) in issues.iter().zip(["57", "58"]) {
+        let ready = Command::Ready {
+            issue: issue.clone(),
+            pull: Some(pull.into()),
+            pulls: Default::default(),
+        };
+        run(&mut host, issue, Role::Author, ready);
+    }
+    for issue in &issues {
+        let approve = Command::Review {
+            issue: issue.clone(),
+            verdict: Verdict::Approve,
+        };
+        run(&mut host, issue, Role::Reviewer, approve);
+    }
+    host.tick(1).expect("CI read, both merge");
+    assert_eq!(
+        *merged.lock().expect("lock"),
+        ["city/ankh", "city/ankh"],
+        "both merged in one round"
+    );
+    for issue in &issues {
+        assert_eq!(host.world().issues[issue].stage, Stage::Deploying);
+    }
+    // The commands run on threads, each done within a millisecond or so; the
+    // loop asks again every round, for at most two seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while issues
+        .iter()
+        .any(|i| host.world().issues[i].stage != Stage::Done)
+        && std::time::Instant::now() < deadline
+    {
+        host.tick(2).expect("tick");
+        std::thread::yield_now();
+    }
+    for issue in &issues {
+        let i = &host.world().issues[issue];
+        assert_eq!(i.stage, Stage::Done, "{issue}: {:?}", host.problems());
+        assert!(i.closed_by_loop, "{issue} closed");
+    }
+    assert!(host.problems().is_empty(), "{:?}", host.problems());
+    assert_eq!(
+        *deployed.lock().expect("lock"),
+        ["ankh#1", "ankh#2"],
+        "the deploy command ran once for each"
+    );
+    assert_eq!(
+        most.load(Ordering::SeqCst),
+        1,
+        "never two commands of the project at once"
+    );
+}
