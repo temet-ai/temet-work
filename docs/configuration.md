@@ -206,9 +206,23 @@ On a new machine, start `claude --permission-mode auto` once in the work folder 
 agent stops at that prompt on its first read outside the folder.
 
 A failed hop says which step failed in one line: `could not connect` (ssh, either
-direction), `temet-work is not on the other machine's PATH`, or `no temet-work daemon
-answers at ...` (the daemon is not running there). A refusal from the daemon is a
-refusal, as for a local agent.
+direction), `no answer within 60 s`, `temet-work is not on the other machine's PATH`,
+or `no temet-work daemon answers at ...` (the daemon is not running there). A refusal
+from the daemon is a refusal, as for a local agent.
+
+A hop has three time limits:
+
+| What stalls | Limit | The message |
+|---|---|---|
+| Connecting to the host (`ConnectTimeout=10`) | 10 s | `ssh HOST: could not connect: ...` |
+| An open link that goes silent (`ServerAliveInterval=15`, `ServerAliveCountMax=2`) | about 45 s of silence | `ssh HOST: could not connect: Timeout, server ... not responding.` |
+| Anything else, from the start of the hop to its end | 60 s | `ssh HOST: no answer within 60 s` |
+
+The 60 s limit counts the whole hop, so a link that drops more than about 15 s into a
+request ends with that message. temet-work passes the three `-o` options on the command
+line, so they win over `~/.ssh/config`. After `no answer within 60 s`, or a link that
+dropped in the middle of a request, the daemon may already have applied the command:
+run `temet-work issue ISSUE` before you send it again.
 
 To send one command from your own shell the same way: `TEMET_WORK_DAEMON=ssh://omit temet-work status`.
 

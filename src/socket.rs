@@ -1,10 +1,13 @@
 //! The daemon's socket: one JSON line per request and one per reply, over a
 //! Unix socket. The command line uses it; the app and the MCP server will.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use temet_work_core::{Host, Request};
@@ -145,10 +148,39 @@ impl Transport for Local {
     }
 }
 
+/// `ConnectTimeout`, in seconds: long enough for a slow VPN or mobile link to
+/// connect, and short enough that an agent's own command timeout does not fire
+/// first. Without it an unreachable host takes the kernel's 75 to 127 s.
+pub const SSH_CONNECT_TIMEOUT_S: u32 = 10;
+
+/// `ServerAliveInterval`, in seconds: how long an open link may be silent before
+/// ssh asks the other end whether it is still there. Without it a dropped link
+/// takes TCP keepalive, about two hours.
+pub const SSH_ALIVE_INTERVAL_S: u32 = 15;
+
+/// `ServerAliveCountMax`: how many of those questions may go unanswered. ssh
+/// gives up when the next one falls due, so a silent link ends after about
+/// `SSH_ALIVE_INTERVAL_S * (SSH_ALIVE_COUNT_MAX + 1)`, 45 s: inside
+/// [`SSH_DEADLINE`], so a dropped link is still reported as ssh's own failure.
+pub const SSH_ALIVE_COUNT_MAX: u32 = 2;
+
+/// The longest a whole hop may take: the connect limit and time for the daemon to
+/// answer. Above any normal reply, below the 120 s an agent's tool call is
+/// typically given, so the agent reads why instead of being killed.
+pub const SSH_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long the output of an ssh that has exited may stay open. A process it left
+/// behind (a `ControlPersist` master) can hold the pipe long after the reply.
+const SSH_OUTPUT_GRACE: Duration = Duration::from_millis(500);
+
 /// The daemon's socket on another machine, reached by running
-/// `ssh -o BatchMode=yes HOST temet-work relay` there. No listener and no secret
-/// beyond the SSH access that already exists; BatchMode makes a missing key fail
-/// with ssh's own error instead of waiting for a password nobody can type.
+/// `ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
+/// -o ServerAliveCountMax=2 HOST temet-work relay` there. No listener and no
+/// secret beyond the SSH access that already exists; BatchMode makes a missing key
+/// fail with ssh's own error instead of waiting for a password nobody can type.
+/// The other three options limit the connect and the silence on an open link
+/// ([`SSH_CONNECT_TIMEOUT_S`], [`SSH_ALIVE_INTERVAL_S`], [`SSH_ALIVE_COUNT_MAX`]),
+/// and `deadline` limits the whole hop.
 pub struct Ssh {
     /// `HOST` or `USER@HOST`, as ssh takes it.
     pub target: String,
@@ -158,12 +190,97 @@ pub struct Ssh {
     pub socket: Option<String>,
     /// The ssh program; `ssh`.
     pub program: String,
+    /// How long the program may run before it is killed; [`SSH_DEADLINE`].
+    pub deadline: Duration,
+}
+
+/// What an ssh that ran to its end left behind.
+struct Ran {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 impl Ssh {
     fn hop(&self, what: &str) -> String {
         format!("ssh {}: {what}", self.target)
     }
+
+    /// Gives `child` the request line and waits for it to exit, at most
+    /// `deadline`; after that it is killed and reaped. Its pipes are written and
+    /// drained on threads, so a full one cannot block the wait.
+    fn wait(&self, mut child: Child, line: String) -> Result<Ran, String> {
+        let started = Instant::now();
+        if let Some(mut stdin) = child.stdin.take() {
+            std::thread::spawn(move || {
+                // A hop that fails early closes its end before it reads: the exit
+                // status says why, so a broken pipe here is not the answer.
+                let _ = writeln!(stdin, "{line}");
+            });
+        }
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|e| self.hop(&e.to_string()))? {
+                break status;
+            }
+            let left = self.deadline.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                // It may have exited since the check: the kill then does nothing.
+                let _ = child.kill();
+                let _ = child.wait();
+                let limit = self.deadline.as_secs_f64();
+                return Err(self.hop(&format!("no answer within {limit} s")));
+            }
+            std::thread::sleep(left.min(Duration::from_millis(5)));
+        };
+        let until = Instant::now() + SSH_OUTPUT_GRACE;
+        Ok(Ran {
+            status,
+            stdout: stdout.take(until),
+            stderr: stderr.take(until),
+        })
+    }
+}
+
+/// One of a child's pipes, being read on a thread of its own.
+struct Drain {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    /// Closes when the pipe does.
+    open: Receiver<()>,
+}
+
+impl Drain {
+    /// What was read, once the pipe has closed or at `until`.
+    fn take(self, until: Instant) -> Vec<u8> {
+        let _ = self
+            .open
+            .recv_timeout(until.saturating_duration_since(Instant::now()));
+        std::mem::take(&mut *self.bytes.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+fn drain(pipe: Option<impl Read + Send + 'static>) -> Drain {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let (closes, open) = mpsc::channel();
+    let read = Arc::clone(&bytes);
+    std::thread::spawn(move || {
+        let _closes: Sender<()> = closes;
+        let Some(mut pipe) = pipe else { return };
+        let mut chunk = [0; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => read
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
+    });
+    Drain { bytes, open }
 }
 
 impl Transport for Ssh {
@@ -175,10 +292,16 @@ impl Transport for Ssh {
     }
 
     fn send(&self, request: &Request) -> Result<Reply, String> {
-        use std::process::{Command, Stdio};
         let line = serde_json::to_string(request).map_err(|e| e.to_string())?;
         let mut cmd = Command::new(&self.program);
         cmd.args(["-o", "BatchMode=yes"]);
+        for option in [
+            format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_S}"),
+            format!("ServerAliveInterval={SSH_ALIVE_INTERVAL_S}"),
+            format!("ServerAliveCountMax={SSH_ALIVE_COUNT_MAX}"),
+        ] {
+            cmd.args(["-o", &option]);
+        }
         if let Some(port) = &self.port {
             cmd.args(["-p", port]);
         }
@@ -190,15 +313,10 @@ impl Transport for Ssh {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = cmd
+        let child = cmd
             .spawn()
             .map_err(|e| self.hop(&format!("cannot run {}: {e}", self.program)))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            // A hop that fails early closes its end before it reads: the exit
-            // status below says why, so a broken pipe here is not the answer.
-            let _ = writeln!(stdin, "{line}");
-        }
-        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        let out = self.wait(child, line)?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stderr = stderr.trim().lines().last().unwrap_or("").to_string();
         match out.status.code() {
@@ -258,6 +376,7 @@ pub fn transport_for(value: Option<&str>, socket: PathBuf) -> Result<Box<dyn Tra
         port,
         socket,
         program: "ssh".into(),
+        deadline: SSH_DEADLINE,
     }))
 }
 
@@ -405,6 +524,139 @@ mod tests {
         assert_eq!(
             target(Some("ssh://dawid@omit:2222")),
             Ok(("dawid@omit".into(), Some("2222".into())))
+        );
+    }
+
+    /// An `Ssh` to a host that does not exist, whose program is a shell script
+    /// with this body. The second value is the script's path, removed with its
+    /// folder by the caller.
+    fn fake_ssh(name: &str, body: &str) -> (Ssh, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        // Under this checkout's build folder, never the shared temp folder.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("target/tmp/ssh-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let script = dir.join("ssh");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let ssh = Ssh {
+            target: "unseen-university.invalid".into(),
+            port: None,
+            socket: None,
+            program: script.display().to_string(),
+            deadline: SSH_DEADLINE,
+        };
+        (ssh, script)
+    }
+
+    fn remove(script: &Path) {
+        let _ = std::fs::remove_dir_all(script.parent().expect("dir"));
+    }
+
+    fn status(by: Option<String>) -> Request {
+        Request {
+            by: by.map(temet_work_core::ids::AgentId::new),
+            command: temet_work_core::Command::Status,
+        }
+    }
+
+    const REPLY: &str = r#"printf '{"reply":"done","text":"all quiet"}\n'"#;
+
+    fn all_quiet() -> Result<Reply, String> {
+        Ok(Reply::Done {
+            text: "all quiet".into(),
+        })
+    }
+
+    #[test]
+    fn every_hop_limits_the_connect_and_the_silence_before_the_target() {
+        let (ssh, script) = fake_ssh(
+            "options",
+            &format!("printf '%s\\n' \"$@\" >\"$0.args\"\n{REPLY}"),
+        );
+        let reply = ssh.send(&status(None));
+        let args = std::fs::read_to_string(script.with_extension("args")).expect("args");
+        remove(&script);
+        assert_eq!(reply, all_quiet());
+        assert_eq!(
+            args.lines().collect::<Vec<_>>(),
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=2",
+                "--",
+                "unseen-university.invalid",
+                "temet-work",
+                "relay",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hop_that_never_answers_is_killed_at_the_deadline() {
+        let (mut ssh, script) = fake_ssh("silent", "echo $$ >\"$0.pid\"\nexec sleep 30");
+        ssh.deadline = Duration::from_millis(200);
+        let started = Instant::now();
+        // More than a pipe holds, and never read: writing it must not block either.
+        let reply = ssh.send(&status(Some("x".repeat(1 << 20))));
+        let took = started.elapsed();
+        let pid = std::fs::read_to_string(script.with_extension("pid")).expect("pid");
+        remove(&script);
+        assert_eq!(
+            reply,
+            Err("ssh unseen-university.invalid: no answer within 0.2 s".to_string())
+        );
+        assert!(took < Duration::from_millis(900), "{took:?}");
+        // `kill -0` still succeeds for a child that was killed and never reaped.
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .expect("kill");
+        assert!(!alive.success(), "process {pid} is still there");
+    }
+
+    #[test]
+    fn a_chatty_hop_that_answers_in_time_returns_the_reply() {
+        let (ssh, script) = fake_ssh(
+            "chatty",
+            &format!("head -c 1000000 /dev/zero >&2\ncat >/dev/null\n{REPLY}"),
+        );
+        let reply = ssh.send(&status(None));
+        remove(&script);
+        assert_eq!(reply, all_quiet());
+    }
+
+    #[test]
+    fn a_reply_counts_when_a_process_left_behind_holds_the_pipe_open() {
+        let (mut ssh, script) = fake_ssh(
+            "lingering",
+            &format!("sleep 5 >/dev/null &\necho $! >\"$0.pid\"\n{REPLY}"),
+        );
+        ssh.deadline = Duration::from_secs(3);
+        let reply = ssh.send(&status(None));
+        let pid = std::fs::read_to_string(script.with_extension("pid")).expect("pid");
+        let _ = Command::new("kill").arg(pid.trim()).status();
+        remove(&script);
+        assert_eq!(reply, all_quiet());
+    }
+
+    #[test]
+    fn an_unreachable_host_says_it_could_not_connect() {
+        let (ssh, script) = fake_ssh(
+            "unreachable",
+            "echo 'ssh: Could not resolve hostname unseen-university.invalid' >&2\nexit 255",
+        );
+        let reply = ssh.send(&status(None));
+        remove(&script);
+        assert_eq!(
+            reply,
+            Err("ssh unseen-university.invalid: could not connect: ssh: Could not resolve hostname unseen-university.invalid".to_string())
         );
     }
 
