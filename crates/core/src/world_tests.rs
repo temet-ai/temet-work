@@ -1056,6 +1056,190 @@ fn a_block_after_an_approval_in_the_last_round_leaves_the_arbiter_to_rule() {
     assert_eq!(stage(&w, "1"), Stage::Arbitration { round: 3 });
 }
 
+fn pull_ready() -> Event {
+    Event::PullRequestReady {
+        issue: issue("1"),
+        pull: None,
+        pulls: Default::default(),
+    }
+}
+
+fn block(round: u8) -> Event {
+    verdict(round, Verdict::Block { points: vec![] })
+}
+
+fn arbiter() -> Effect {
+    Effect::StartAgent {
+        group: GroupId::new("watch"),
+        role: Role::Arbiter,
+        issue: issue("1"),
+        folder: None,
+    }
+}
+
+fn starts_an_arbiter(effects: &[Effect]) -> bool {
+    effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::StartAgent {
+                role: Role::Arbiter,
+                ..
+            }
+        )
+    })
+}
+
+fn stop(agent: &str) -> Effect {
+    Effect::StopAgent {
+        agent: AgentId::new(agent),
+    }
+}
+
+/// The arbiters on issue 1 whose sessions have not ended.
+fn arbiters_running(w: &World) -> Vec<&str> {
+    w.agents
+        .values()
+        .filter(|a| {
+            a.issue == Some(issue("1"))
+                && a.role == Role::Arbiter
+                && a.state != crate::model::AgentState::Ended
+        })
+        .map(|a| a.id.0.as_str())
+        .collect()
+}
+
+/// Arbiter `n`'s "fix first" ruling on issue 1, as decision `n`.
+fn fix_first(n: u64) -> Event {
+    let Event::DecisionMade { mut decision } = ruling(false) else {
+        unreachable!("a ruling is a decision")
+    };
+    decision.id = DecisionId(n);
+    decision.by = AgentId::new(format!("arbiter-{n}"));
+    Event::DecisionMade { decision }
+}
+
+#[test]
+fn a_conflict_in_arbitration_stops_the_arbiter_so_the_next_block_has_one() {
+    let mut w = arbitrating();
+    w.apply(&started("arbiter-1", Role::Arbiter, "1"));
+    assert_eq!(stage(&w, "1"), Stage::Arbitration { round: 3 });
+    let effects = w.apply(&Event::PullConflicts {
+        issue: issue("1"),
+        repo: None,
+    });
+    assert!(effects.contains(&stop("arbiter-1")), "{effects:?}");
+    w.apply(&ended("arbiter-1"));
+    w.apply(&pull_ready());
+    assert_eq!(stage(&w, "1"), Stage::InReview { round: 3 }, "same round");
+    let effects = w.apply(&block(3));
+    assert!(effects.contains(&arbiter()), "{effects:?}");
+    w.apply(&started("arbiter-2", Role::Arbiter, "1"));
+    assert_eq!(arbiters_running(&w), ["arbiter-2"]);
+    let running = w.running(&issue("1"), Role::Arbiter).map(|a| &a.id);
+    assert_eq!(running, Some(&AgentId::new("arbiter-2")));
+}
+
+#[test]
+fn every_send_back_from_the_arbiter_stops_it_and_the_next_block_starts_one() {
+    let refused = Event::MergeRefused {
+        issue: issue("1"),
+        reason: "it conflicts with main".into(),
+    };
+    let conflict = Event::PullConflicts {
+        issue: issue("1"),
+        repo: None,
+    };
+    // What comes before the send-back, the send-back, and the round of the next
+    // arbitration: a fix that names a new problem takes a new round.
+    let rows: [(&str, Vec<Event>, Event, u8); 6] = [
+        ("a conflict", vec![], conflict, 3),
+        ("a failed check", vec![], checks(false), 3),
+        ("a fix-first ruling", vec![], ruling(false), 4),
+        (
+            "an approval overturned in arbitration",
+            vec![ruling(true)],
+            overturned(1),
+            4,
+        ),
+        (
+            "an approval overturned while merging",
+            vec![checks(true), ruling(true)],
+            overturned(1),
+            4,
+        ),
+        (
+            "a refused merge after an approval",
+            vec![checks(true), ruling(true)],
+            refused,
+            3,
+        ),
+    ];
+    for (path, before, send_back, next) in rows {
+        let mut w = arbitrating();
+        w.apply(&started("arbiter-1", Role::Arbiter, "1"));
+        for e in &before {
+            w.apply(e);
+        }
+        let effects = w.apply(&send_back);
+        assert!(effects.contains(&stop("arbiter-1")), "{path}: {effects:?}");
+        assert!(
+            matches!(stage(&w, "1"), Stage::Fixing { .. }),
+            "{path}: {:?}",
+            stage(&w, "1")
+        );
+        w.apply(&ended("arbiter-1"));
+        w.apply(&pull_ready());
+        assert_eq!(stage(&w, "1"), Stage::InReview { round: next }, "{path}");
+        let effects = w.apply(&block(next));
+        assert!(effects.contains(&arbiter()), "{path}: {effects:?}");
+        w.apply(&started("arbiter-2", Role::Arbiter, "1"));
+        assert_eq!(arbiters_running(&w), ["arbiter-2"], "{path}");
+    }
+}
+
+#[test]
+fn a_last_round_block_while_an_arbiter_still_runs_starts_no_second_one() {
+    let mut w = arbitrating();
+    w.apply(&started("arbiter-1", Role::Arbiter, "1"));
+    // The stop this asks for fails, as an older log that never stopped it would
+    // leave it: arbiter-1 runs on.
+    w.apply(&Event::PullConflicts {
+        issue: issue("1"),
+        repo: None,
+    });
+    w.apply(&pull_ready());
+    let effects = w.apply(&block(3));
+    assert!(!starts_an_arbiter(&effects), "{effects:?}");
+    assert_eq!(stage(&w, "1"), Stage::Arbitration { round: 3 });
+    let missing = w.missing();
+    assert!(!starts_an_arbiter(&missing.start), "{missing:?}");
+    assert!(waited_on(&w, "arbiter-1"), "reminded like any idle agent");
+    // Stopped after sitting idle: a fresh one takes over.
+    w.apply(&ended("arbiter-1"));
+    assert_eq!(w.missing().start, vec![arbiter()]);
+}
+
+#[test]
+fn arbiters_stopped_by_a_send_back_do_not_count_toward_the_starts_limit() {
+    let mut w = arbitrating();
+    for (n, round) in [(1, 3), (2, 4)] {
+        let id = format!("arbiter-{n}");
+        w.apply(&started(&id, Role::Arbiter, "1"));
+        let effects = w.apply(&fix_first(n));
+        assert!(effects.contains(&stop(&id)), "{effects:?}");
+        w.apply(&ended(&id));
+        w.apply(&pull_ready());
+        w.apply(&block(round + 1));
+    }
+    assert_eq!(stage(&w, "1"), Stage::Arbitration { round: 5 });
+    w.apply(&started("arbiter-3", Role::Arbiter, "1"));
+    // The third ends on its own before it rules.
+    w.apply(&ended("arbiter-3"));
+    let missing = w.missing();
+    assert_eq!(missing.start, vec![arbiter()]);
+    assert_eq!(missing.given_up, Vec::<String>::new());
+}
+
 #[test]
 fn a_lost_merge_deploy_or_verify_is_asked_for_again() {
     let mut w = in_review();

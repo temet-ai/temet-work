@@ -327,6 +327,7 @@ impl World {
                         started: self.applied,
                         secret_digest: secret_digest.clone(),
                         continued: None,
+                        ended_waited_on: false,
                     },
                 );
                 // A new agent hears what its stage needs in its brief.
@@ -347,12 +348,14 @@ impl World {
                 }
             }
             Event::AgentChanged { agent, state } => {
+                let waited_on = self.agents.get(agent).is_some_and(|a| self.waiting_on(a));
                 // An ended session stays ended: an update already on its way when it
                 // was stopped must not bring it back.
                 if let Some(a) = self.agents.get_mut(agent)
                     && a.state != AgentState::Ended
                 {
                     a.state = state.clone();
+                    a.ended_waited_on = *state == AgentState::Ended && waited_on;
                 }
             }
             Event::Continued { agent, resets_ms } => {
@@ -424,6 +427,8 @@ impl World {
                 verdict,
             } => {
                 let rounds = self.setting_number(issue, None, "review_rounds");
+                let arbiter_running = self.running(issue, Role::Arbiter).is_some();
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == (Stage::InReview { round: *round })
                 {
@@ -432,18 +437,23 @@ impl World {
                     match verdict {
                         Verdict::Approve => Self::try_merge(i, &mut out),
                         Verdict::Block { points } if u64::from(*round) < rounds => {
-                            Self::send_back(i, *round, points.clone(), false, &mut out);
+                            Self::send_back(i, *round, points.clone(), false, arbiters, &mut out);
                         }
                         Verdict::Block { .. } => {
                             // An issue in review was taken by a group, so it has one.
                             if let Some(group) = i.group.clone() {
                                 i.stage = Stage::Arbitration { round: *round };
-                                out.push(Effect::StartAgent {
-                                    group,
-                                    role: Role::Arbiter,
-                                    issue: issue.clone(),
-                                    folder: None,
-                                });
+                                // One arbiter at a time. One still running, because
+                                // a stop failed or an older log left it, is reminded
+                                // like any idle agent and replaced once it is stopped.
+                                if !arbiter_running {
+                                    out.push(Effect::StartAgent {
+                                        group,
+                                        role: Role::Arbiter,
+                                        issue: issue.clone(),
+                                        folder: None,
+                                    });
+                                }
                             }
                         }
                     }
@@ -454,6 +464,7 @@ impl World {
                 passed,
                 failing,
             } => {
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue) {
                     match i.stage {
                         Stage::InReview { round } | Stage::Arbitration { round } => {
@@ -470,7 +481,7 @@ impl World {
                                         .map(|c| format!("CI check {c} failed"))
                                         .collect()
                                 };
-                                Self::send_back(i, round, points, true, &mut out);
+                                Self::send_back(i, round, points, true, arbiters, &mut out);
                             }
                         }
                         _ => {}
@@ -486,12 +497,13 @@ impl World {
                     && let Some(i) = self.issues.get_mut(&decision.issue)
                     && let Stage::Arbitration { round } = i.stage
                 {
-                    out.extend(done);
                     if approve {
+                        out.extend(done);
                         i.review_ok = true;
                         Self::try_merge(i, &mut out);
                     } else {
-                        Self::send_back(i, round, vec![decision.reason.clone()], false, &mut out);
+                        let points = vec![decision.reason.clone()];
+                        Self::send_back(i, round, points, false, done, &mut out);
                     }
                 }
             }
@@ -511,8 +523,11 @@ impl World {
                     if let DecisionKind::Ruling { approve } = d.kind {
                         let issue = d.issue.clone();
                         let reviewers = self.stop(&issue, &[Role::Reviewer]);
+                        let arbiters = self.stop(&issue, &[Role::Arbiter]);
                         if let Some(i) = self.issues.get_mut(&issue) {
-                            Self::overturn_ruling(i, approve, reason, reviewers, &mut out);
+                            Self::overturn_ruling(
+                                i, approve, reason, reviewers, arbiters, &mut out,
+                            );
                         }
                     }
                 }
@@ -574,6 +589,7 @@ impl World {
                 }
             }
             Event::PullConflicts { issue, repo } => {
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && let Stage::InReview { round } | Stage::Arbitration { round } = i.stage
                 {
@@ -586,7 +602,7 @@ impl World {
                         "the pull request{which} conflicts with the branch it merges into: rebase \
                          onto that branch, then push your own branch with `git push --force-with-lease`"
                     )];
-                    Self::send_back(i, round, points, true, &mut out);
+                    Self::send_back(i, round, points, true, arbiters, &mut out);
                 }
             }
             Event::MergeRefused { issue, reason } => {
@@ -595,6 +611,7 @@ impl World {
                     .get(issue)
                     .map(|i| self.repos_of(i))
                     .unwrap_or_default();
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Merging
                 {
@@ -616,7 +633,7 @@ impl World {
                         ),
                         _ => format!("the pull request cannot merge: {reason}"),
                     };
-                    Self::send_back(i, round, vec![point], true, &mut out);
+                    Self::send_back(i, round, vec![point], true, arbiters, &mut out);
                 }
             }
             Event::InvestigationStarted {
@@ -835,10 +852,11 @@ impl World {
     /// needs neither while its checks run. This brings back an agent whose session
     /// ended, or one the daemon decided on and did not start before it stopped. A
     /// running author or reviewer that has not heard its fixes or its new round is
-    /// told again. After the `starts` setting's number of agents of one role on one
-    /// issue it gives up, and says so. A paused issue gets nothing until it is back
-    /// in its group's scope, and then what its stage needs. A running investigation
-    /// whose investigator never started gets one.
+    /// told again. After the `starts` setting's number of agents of one role have
+    /// ended while one issue waited on them it gives up, and says so. A paused
+    /// issue gets nothing until it is back in its group's scope, and then what its
+    /// stage needs. A running investigation whose investigator never started gets
+    /// one.
     pub fn missing(&self) -> Missing {
         let mut out = Missing {
             start: self.missing_investigators(),
@@ -921,10 +939,13 @@ impl World {
                 }
                 continue;
             }
+            // Only agents that ended while the issue waited on them count: not one
+            // the loop stopped because the issue went back to its author.
             let tried = self
                 .agents
                 .values()
                 .filter(|a| a.issue.as_ref() == Some(&i.id) && a.role == role)
+                .filter(|a| a.ended_waited_on)
                 .count();
             if tried as u64 >= self.setting_number(&i.id, Some(role), "starts") {
                 out.given_up.push(format!(
@@ -1070,14 +1091,19 @@ impl World {
             .collect()
     }
 
-    /// Sends an issue back to its author with what to fix.
+    /// Sends an issue back to its author with what to fix, and stops its running
+    /// arbiters (`arbiters`, from [`Self::stop`]). An arbiter's work ends with its
+    /// ruling, and its brief names the round and pull requests it was started for,
+    /// so the next final-round block starts a fresh one.
     fn send_back(
         i: &mut Issue,
         round: u8,
         points: Vec<String>,
         keeps_round: bool,
+        arbiters: Vec<Effect>,
         out: &mut Vec<Effect>,
     ) {
+        out.extend(arbiters);
         i.stage = Stage::Fixing { round };
         i.fix.clone_from(&points);
         i.told = false;
@@ -1095,6 +1121,7 @@ impl World {
         was_approve: bool,
         reason: &str,
         reviewers: Vec<Effect>,
+        arbiters: Vec<Effect>,
         out: &mut Vec<Effect>,
     ) {
         if was_approve {
@@ -1105,12 +1132,12 @@ impl World {
                         out.extend(reviewers);
                     }
                     i.review_ok = false;
-                    Self::send_back(i, round, vec![reason.to_string()], false, out);
+                    Self::send_back(i, round, vec![reason.to_string()], false, arbiters, out);
                 }
                 Stage::Merging => {
                     i.review_ok = false;
                     let round = i.round.max(1);
-                    Self::send_back(i, round, vec![reason.to_string()], false, out);
+                    Self::send_back(i, round, vec![reason.to_string()], false, arbiters, out);
                 }
                 Stage::Fixing { .. } => {
                     i.fix.push(reason.to_string());
