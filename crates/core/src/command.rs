@@ -172,6 +172,48 @@ impl World {
         }
     }
 
+    /// Why `by` may not run a step command of `role` on `issue`. An agent must
+    /// have that role and work on that issue; a person may only rule.
+    fn may_step(
+        &self,
+        by: Option<&AgentId>,
+        step: &str,
+        role: Role,
+        issue: &IssueId,
+    ) -> Result<(), String> {
+        let owner = role.name();
+        let Some(by) = by else {
+            return if role == Role::Arbiter {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{step} for {issue} is the {owner}'s: a person may not run it; \
+                     a person may rule, or set and unset settings"
+                ))
+            };
+        };
+        let Some(agent) = self.agents.get(by) else {
+            return Err(format!(
+                "{step} for {issue} is the {owner}'s: {by} is not an agent this daemon started"
+            ));
+        };
+        if agent.role == role && agent.issue.as_ref() == Some(issue) {
+            return Ok(());
+        }
+        let working = self
+            .agents
+            .values()
+            .find(|a| a.role == role && a.issue.as_ref() == Some(issue))
+            .map_or_else(
+                || format!("no {owner} is working on it"),
+                |a| format!("{} is working on it", a.id),
+            );
+        Err(format!(
+            "{step} for {issue} is the {owner}'s: {working}; you are {}",
+            agent.id
+        ))
+    }
+
     /// The event a command becomes, or why the loop refuses it. `Status`
     /// becomes no event.
     pub fn check(&self, by: Option<&AgentId>, command: &Command) -> Result<Option<Event>, String> {
@@ -191,6 +233,7 @@ impl World {
                 return Ok(None);
             }
             Command::Plan { issue, plan } => {
+                self.may_step(by, "plan", Role::Refiner, issue)?;
                 let now = at(issue)?;
                 if now != Stage::Refining {
                     return refuse(issue, now, "refining");
@@ -218,22 +261,26 @@ impl World {
                     plan: plan.clone(),
                 }
             }
-            Command::Ready { issue, pull } => match at(issue)? {
-                Stage::Working | Stage::Fixing { .. } => {
-                    let known = self.issues.get(issue).and_then(|i| i.pull.as_ref());
-                    if pull.is_none() && known.is_none() {
-                        return Err(format!(
-                            "say which pull request: temet-work ready {issue} <number>"
-                        ));
+            Command::Ready { issue, pull } => {
+                self.may_step(by, "ready", Role::Author, issue)?;
+                match at(issue)? {
+                    Stage::Working | Stage::Fixing { .. } => {
+                        let known = self.issues.get(issue).and_then(|i| i.pull.as_ref());
+                        if pull.is_none() && known.is_none() {
+                            return Err(format!(
+                                "say which pull request: temet-work ready {issue} <number>"
+                            ));
+                        }
+                        Event::PullRequestReady {
+                            issue: issue.clone(),
+                            pull: pull.clone(),
+                        }
                     }
-                    Event::PullRequestReady {
-                        issue: issue.clone(),
-                        pull: pull.clone(),
-                    }
+                    now => return refuse(issue, now, "being worked on"),
                 }
-                now => return refuse(issue, now, "being worked on"),
-            },
+            }
             Command::Review { issue, verdict } => {
+                self.may_step(by, "review", Role::Reviewer, issue)?;
                 let Stage::InReview { round } = at(issue)? else {
                     return refuse(issue, at(issue)?, "in review");
                 };
@@ -303,6 +350,7 @@ impl World {
                 approve,
                 reason,
             } => {
+                self.may_step(by, "rule", Role::Arbiter, issue)?;
                 let Stage::Arbitration { round } = at(issue)? else {
                     return refuse(issue, at(issue)?, "with the arbiter");
                 };
@@ -376,12 +424,51 @@ mod tests {
                 order: 1,
                 closed: false,
             },
+            agent(Role::Refiner, "ankh", "1"),
+            agent(Role::Author, "ankh", "1"),
+            agent(Role::Reviewer, "ankh", "1"),
+            agent(Role::Arbiter, "ankh", "1"),
+            agent(Role::Author, "ankh", "2"),
         ]);
         w
     }
 
+    fn agent(role: Role, project: &str, key: &str) -> Event {
+        let id = if key == "1" {
+            format!("{}-1", role.name())
+        } else {
+            format!("{}-{key}", role.name())
+        };
+        Event::AgentStarted {
+            agent: AgentId::new(&id),
+            group: GroupId::new("watch"),
+            role,
+            issue: Some(IssueId::new(project, key)),
+            machine: MachineId::new("morpork"),
+            folder: None,
+        }
+    }
+
+    /// The agent whose step the command is, on ankh#1.
+    fn owner(command: &Command) -> Option<AgentId> {
+        let role = match command {
+            Command::Plan { .. } => Role::Refiner,
+            Command::Ready { .. } => Role::Author,
+            Command::Review { .. } => Role::Reviewer,
+            Command::Rule { .. } => Role::Arbiter,
+            _ => return None,
+        };
+        Some(AgentId::new(format!("{}-1", role.name())))
+    }
+
     fn run(w: &mut World, command: Command) -> Result<(), String> {
-        let event = w.check(None, &command)?.expect("an event");
+        if matches!(command, Command::Review { .. }) {
+            // The reviewer has heard of the round.
+            w.apply(&Event::Told { issue: issue() });
+        }
+        let event = w
+            .check(owner(&command).as_ref(), &command)?
+            .expect("an event");
         w.apply(&event);
         Ok(())
     }
@@ -426,9 +513,10 @@ mod tests {
     #[test]
     fn a_command_for_another_step_is_refused_with_the_stage() {
         let w = refining();
+        let author = AgentId::new("author-1");
         assert_eq!(
             w.check(
-                None,
+                Some(&author),
                 &Command::Ready {
                     issue: issue(),
                     pull: Some("57".into())
@@ -438,19 +526,20 @@ mod tests {
         );
         assert!(
             w.check(
-                None,
+                Some(&author),
                 &Command::Ready {
                     issue: IssueId::new("ankh", "9"),
                     pull: None
                 }
             )
-            .is_err_and(|e| e.contains("no issue ankh#9"))
+            .is_err()
         );
         let empty = Command::Plan {
             issue: issue(),
             plan: Plan::default(),
         };
-        assert!(w.check(None, &empty).is_err());
+        let refiner = AgentId::new("refiner-1");
+        assert!(w.check(Some(&refiner), &empty).is_err());
     }
 
     #[test]
@@ -469,7 +558,7 @@ mod tests {
             pull: None,
         };
         assert!(
-            w.check(None, &bare)
+            w.check(owner(&bare).as_ref(), &bare)
                 .is_err_and(|e| e.contains("temet-work ready ankh#1 <number>"))
         );
         run(
@@ -520,9 +609,172 @@ mod tests {
             w.check(Some(&reviewer), &approve)
                 .is_err_and(|e| e.contains("round 1 of ankh#1 started after your review began"))
         );
-        assert!(w.check(None, &approve).is_ok(), "a person may still review");
+        assert!(
+            w.check(None, &approve)
+                .is_err_and(|e| e.contains("the reviewer's")),
+            "a person may not review"
+        );
         w.apply(&Event::Told { issue: issue() });
         assert!(w.check(Some(&reviewer), &approve).is_ok());
+    }
+
+    #[test]
+    fn a_step_command_is_refused_unless_it_is_the_senders_step_on_that_issue() {
+        let mut w = refining();
+        run(
+            &mut w,
+            Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        )
+        .expect("plan");
+        let commands = [
+            (
+                "plan",
+                Role::Refiner,
+                Command::Plan {
+                    issue: issue(),
+                    plan: plan(),
+                },
+            ),
+            (
+                "ready",
+                Role::Author,
+                Command::Ready {
+                    issue: issue(),
+                    pull: Some("57".into()),
+                },
+            ),
+            (
+                "review",
+                Role::Reviewer,
+                Command::Review {
+                    issue: issue(),
+                    verdict: Verdict::Approve,
+                },
+            ),
+            (
+                "rule",
+                Role::Arbiter,
+                Command::Rule {
+                    issue: issue(),
+                    approve: true,
+                    reason: "fine".into(),
+                },
+            ),
+        ];
+        for (step, role, command) in &commands {
+            let owner = format!("{}-1", role.name());
+            let other = if *role == Role::Author {
+                "reviewer-1"
+            } else {
+                "author-1"
+            };
+            // Another role: refused, naming the step, the owner and the sender.
+            let why = w
+                .check(Some(&AgentId::new(other)), command)
+                .expect_err("wrong role");
+            assert!(
+                why.contains(&format!("{step} for ankh#1 is the {}'s", role.name())),
+                "{why}"
+            );
+            assert!(why.contains(&format!("{owner} is working on it")), "{why}");
+            assert!(why.contains(&format!("you are {other}")), "{why}");
+            // The right role on another issue.
+            if *role == Role::Author {
+                let why = w
+                    .check(Some(&AgentId::new("author-2")), command)
+                    .expect_err("other issue");
+                assert!(why.contains("author-1 is working on it"), "{why}");
+                assert!(why.contains("you are author-2"), "{why}");
+            }
+            // An id the daemon did not start.
+            let why = w
+                .check(Some(&AgentId::new("ghost-9")), command)
+                .expect_err("unknown");
+            assert!(why.contains("not an agent this daemon started"), "{why}");
+        }
+        assert_eq!(
+            w.check(
+                Some(&AgentId::new("reviewer-1")),
+                &Command::Ready {
+                    issue: issue(),
+                    pull: Some("57".into())
+                }
+            ),
+            Err(
+                "ready for ankh#1 is the author's: author-1 is working on it; you are reviewer-1"
+                    .into()
+            ),
+            "the agent is checked before the stage"
+        );
+        for (_, role, command) in &commands {
+            let by = AgentId::new(format!("{}-1", role.name()));
+            let verdict = w.check(Some(&by), command);
+            assert!(
+                verdict.as_ref().is_ok() || verdict.as_ref().is_err_and(|e| !e.contains("is the")),
+                "the owner passes the agent check: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_person_may_rule_but_not_plan_ready_or_review() {
+        let mut w = refining();
+        for command in [
+            Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+            Command::Ready {
+                issue: issue(),
+                pull: Some("57".into()),
+            },
+            Command::Review {
+                issue: issue(),
+                verdict: Verdict::Approve,
+            },
+        ] {
+            let why = w.check(None, &command).expect_err("a person is refused");
+            assert!(why.contains("'s: a person may not run it"), "{why}");
+        }
+        run(
+            &mut w,
+            Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        )
+        .expect("plan");
+        for _ in 0..3 {
+            run(
+                &mut w,
+                Command::Ready {
+                    issue: issue(),
+                    pull: Some("57".into()),
+                },
+            )
+            .expect("ready");
+            let block = Command::Review {
+                issue: issue(),
+                verdict: Verdict::Block {
+                    points: vec!["x".into()],
+                },
+            };
+            run(&mut w, block).expect("block");
+        }
+        let rule = Command::Rule {
+            issue: issue(),
+            approve: true,
+            reason: "good enough".into(),
+        };
+        let event = w
+            .check(None, &rule)
+            .expect("a person may rule")
+            .expect("event");
+        w.apply(&event);
+        assert_eq!(w.decisions[&DecisionId(1)].by.0, PERSON);
     }
 
     #[test]
