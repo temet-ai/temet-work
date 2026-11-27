@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use crate::Part;
 use crate::effect::Effect;
 use crate::event::Event;
+use crate::model::AgentState;
 use crate::world::World;
 
 /// Where the host writes every event before it applies it.
@@ -73,6 +74,9 @@ pub struct Polled {
 
 /// How problems from giving up on an issue's agents are keyed.
 const GAVE_UP: &str = "gave up: ";
+
+/// How problems from an agent stopped at a prompt are keyed.
+const BLOCKED: &str = "blocked: ";
 
 /// The most events and effects one call handles before it stops, so a loop
 /// between parts cannot hang the daemon.
@@ -199,7 +203,32 @@ impl Host {
             self.handle(now_ms, event)?;
         }
         self.recover(now_ms)?;
+        self.report_blocked();
         Ok(n)
+    }
+
+    /// Lists every agent stopped at a prompt as a problem: the daemon never
+    /// answers a prompt, so a person has to. Rebuilt on each tick, so it goes
+    /// when the agent leaves the state or ends.
+    fn report_blocked(&mut self) {
+        self.problems.retain(|k, _| !k.starts_with(BLOCKED));
+        for agent in self.world.agents.values() {
+            let AgentState::Blocked { reason } = &agent.state else {
+                continue;
+            };
+            let place = agent
+                .folder
+                .as_ref()
+                .and_then(|f| self.world.folders.get(f))
+                .map_or_else(String::new, |f| format!(" in {}", f.path));
+            self.problems.insert(
+                format!("{BLOCKED}{}", agent.id),
+                format!(
+                    "{}{place} is blocked: {reason}; the daemon cannot answer it",
+                    agent.id
+                ),
+            );
+        }
     }
 
     fn offer(&mut self, effect: &Effect) -> Outcome {

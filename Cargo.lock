@@ -346,6 +346,7 @@ dependencies = [
 name = "temet-work-runtime-claude"
 version = "0.0.1"
 dependencies = [
+ "serde_json",
  "temet-work-runtime",
 ]
 

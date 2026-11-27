@@ -4,7 +4,10 @@
 //! This crate holds the [`Runtime`] contract, a [`FakeRuntime`] and the
 //! [`contract`] every runtime adapter runs. Adapter crates depend on this crate only.
 
+use std::path::{Path, PathBuf};
+
 use temet_work_core::settings::Choice;
+use temet_work_core::world::LOCAL;
 use temet_work_core::{Effect, Outcome, Part, World};
 
 /// The core types this contract uses, re-exported so adapters need no other crate.
@@ -26,6 +29,24 @@ pub trait Runtime: Send {
     /// The program that starts an agent with this brief: its task as the first
     /// prompt, and the model when the brief names one.
     fn program(&self, brief: &Brief) -> Program;
+
+    /// Marks `folder` as one the person lets agents work in, before an agent
+    /// starts there, in the runtime's own user files under `home` (the person's
+    /// home folder, or the folder their settings are kept in when they name
+    /// one). It changes nothing the runtime has already been told, and
+    /// changes nothing else. The default does nothing.
+    fn trust(&self, _folder: &Path, _home: &Path) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Where a runtime's user files are: the folder `CLAUDE_CONFIG_DIR` names when it
+/// is set, else the person's home folder.
+pub fn user_home() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
 }
 
 /// Variables every runtime passes on to its sessions from the daemon's
@@ -124,12 +145,29 @@ pub mod contract {
 }
 
 /// The runtime part: the runtimes compiled into this build, in the order they were added.
-#[derive(Default)]
 pub struct Runtimes {
     adapters: Vec<Box<dyn Runtime>>,
+    /// Where the runtimes' user files are, for [`Runtime::trust`].
+    home: Option<PathBuf>,
+}
+
+impl Default for Runtimes {
+    fn default() -> Self {
+        Self {
+            adapters: Vec::new(),
+            home: user_home(),
+        }
+    }
 }
 
 impl Runtimes {
+    /// Uses `home` as where the runtimes' user files are, instead of the
+    /// environment's.
+    pub fn with_home(mut self, home: impl Into<PathBuf>) -> Self {
+        self.home = Some(home.into());
+        self
+    }
+
     /// Adds a runtime. The root package calls this once per compiled-in adapter.
     pub fn add(&mut self, adapter: Box<dyn Runtime>) {
         self.adapters.push(adapter);
@@ -224,6 +262,15 @@ impl Part for Runtimes {
         let Some(launch) = world.launch(&group, role, issue, folder) else {
             return Outcome::Failed(format!("{issue} is not known"));
         };
+        // A folder on this machine is trusted before the agent starts in it. One on
+        // another machine cannot be from here: the terminal's blocked prompt
+        // reports it.
+        let local = launch.machine.0 == LOCAL;
+        if let (Some(dir), Some(home), true) = (&launch.brief.folder, &self.home, local)
+            && let Err(e) = runtime.trust(dir, home)
+        {
+            return Outcome::Failed(format!("cannot trust {}: {e}", dir.display()));
+        }
         let program = runtime.program(&launch.brief);
         Outcome::Done {
             events: Vec::new(),
@@ -462,5 +509,90 @@ mod tests {
             contract::check(&DropsTheModel),
             Err("the brief's model reaches the program".into())
         );
+    }
+
+    /// A runtime that records the folders it was asked to trust, and what the
+    /// terminal had started by then.
+    struct Records(
+        std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, PathBuf)>>>,
+        bool,
+    );
+
+    impl Runtime for Records {
+        fn id(&self) -> &'static str {
+            "records"
+        }
+        fn is_default(&self) -> bool {
+            true
+        }
+        fn program(&self, brief: &Brief) -> Program {
+            Program {
+                argv: vec!["rec".into(), brief.task.clone()],
+                env: Vec::new(),
+            }
+        }
+        fn trust(&self, folder: &Path, home: &Path) -> Result<(), String> {
+            if self.1 {
+                return Err("no way".into());
+            }
+            self.0
+                .lock()
+                .expect("lock")
+                .push((folder.to_path_buf(), home.to_path_buf()));
+            Ok(())
+        }
+    }
+
+    fn with_folder(machine: &str) -> World {
+        use temet_work_core::Event;
+        use temet_work_core::ids::{FolderId, MachineId, ProjectId};
+        let mut world = world_with_issue();
+        world.apply(&Event::FolderAdded {
+            folder: FolderId::new("f1"),
+            project: ProjectId::new("ankh"),
+            machine: MachineId::new(machine),
+            path: "/work/a".into(),
+        });
+        world
+    }
+
+    fn start_in(folder: Option<&str>) -> Effect {
+        Effect::StartAgent {
+            group: temet_work_core::ids::GroupId::new("watch"),
+            role: Role::Author,
+            issue: IssueId::new("ankh", "1"),
+            folder: folder.map(temet_work_core::ids::FolderId::new),
+        }
+    }
+
+    #[test]
+    fn trusts_a_local_folder_before_the_agent_starts_and_only_then() {
+        let seen = Default::default();
+        let mut part = Runtimes::default().with_home("/h");
+        part.add(Box::new(Records(std::sync::Arc::clone(&seen), false)));
+        let world = with_folder(LOCAL);
+        let Outcome::Done { effects, .. } = part.carry_out(&start_in(Some("f1")), &world) else {
+            panic!("not done");
+        };
+        assert!(matches!(effects.as_slice(), [Effect::Run { .. }]));
+        assert_eq!(
+            *seen.lock().expect("lock"),
+            [(PathBuf::from("/work/a"), PathBuf::from("/h"))]
+        );
+        // No folder, or a folder on another machine: nothing is trusted from here.
+        let _ = part.carry_out(&start_in(None), &world_with_issue());
+        let _ = part.carry_out(&start_in(Some("f1")), &with_folder("far"));
+        assert_eq!(seen.lock().expect("lock").len(), 1);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_trusted_fails_the_start_naming_it() {
+        let mut part = Runtimes::default().with_home("/h");
+        part.add(Box::new(Records(Default::default(), true)));
+        let Outcome::Failed(why) = part.carry_out(&start_in(Some("f1")), &with_folder(LOCAL))
+        else {
+            panic!("started");
+        };
+        assert!(why.contains("/work/a") && why.contains("no way"), "{why}");
     }
 }

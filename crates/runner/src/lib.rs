@@ -1376,4 +1376,46 @@ mod tests {
             Err("a send to a terminal at a prompt is refused, and nothing is typed".into())
         );
     }
+
+    #[test]
+    fn an_agent_at_a_prompt_is_a_problem_naming_agent_folder_and_prompt_until_it_goes() {
+        use temet_work_core::Host;
+        use temet_work_core::host::Memory;
+        let mut w = world();
+        let (mut part, handle) = shared();
+        let fake = handle.fake;
+        let agent = run(&mut part, &mut w, &["cat"]);
+        let mut host = Host::new(w, vec![Box::new(part)], Box::new(Memory::default()));
+        host.tick(1).expect("tick");
+        assert!(host.problems().is_empty(), "{:?}", host.problems());
+
+        fake.lock()
+            .expect("lock")
+            .block(&TerminalId("t1".into()), "trust this folder");
+        host.tick(2).expect("tick");
+        let said = host.problems().values().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            said,
+            ["author-1 in . is blocked: trust this folder; the daemon cannot answer it"]
+        );
+        let text = temet_work_core::text::text(host.world(), host.problems());
+        assert!(text.contains(&said[0]), "{text}");
+        assert_eq!(agent.0, "author-1");
+
+        fake.lock().expect("lock").unblock(&TerminalId("t1".into()));
+        host.tick(3).expect("tick");
+        assert!(host.problems().is_empty(), "{:?}", host.problems());
+
+        fake.lock()
+            .expect("lock")
+            .block(&TerminalId("t1".into()), "trust this folder");
+        host.tick(4).expect("tick");
+        assert_eq!(host.problems().len(), 1);
+        fake.lock()
+            .expect("lock")
+            .stop(&TerminalId("t1".into()))
+            .expect("stop");
+        host.tick(5).expect("tick");
+        assert!(host.problems().is_empty(), "ended: {:?}", host.problems());
+    }
 }
