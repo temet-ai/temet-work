@@ -159,6 +159,8 @@ pub fn write(
              they are recorded as yours and a person can overturn them. \
              A model you set is the author's only: the models of reviewers, arbiters and refiners are \
              a person's to set. \
+             A plain model is read by the agents of the global runtime; \
+             model.<runtime> names the runtime a model is for. \
              Only a person sets {persons}: a plan that names one is refused.",
             title = issue.title,
             persons = only_a_persons().join(", "),
