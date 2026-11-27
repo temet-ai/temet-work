@@ -52,6 +52,10 @@ pub enum Command {
         /// for an issue that changes several repositories.
         #[serde(default)]
         pulls: std::collections::BTreeMap<crate::ids::ProjectId, String>,
+        /// The author's replies to the points of the review round its fix
+        /// answers, one for each point it answers.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replies: Vec<String>,
     },
     /// A reviewer's verdict on the round under review.
     Review {
@@ -337,6 +341,31 @@ impl World {
         }
     }
 
+    /// The author's replies `ready` sends for `issue`, trimmed, or why they are
+    /// refused: a reply that is empty, or an issue whose fix answers no finished
+    /// review round ([`World::answered_round`]), since there is no round to put
+    /// them on.
+    fn replies(&self, issue: &IssueId, replies: &[String]) -> Result<Vec<String>, String> {
+        if replies.is_empty() {
+            return Ok(Vec::new());
+        }
+        let replies: Vec<String> = replies.iter().map(|r| r.trim().to_string()).collect();
+        if replies.iter().any(String::is_empty) {
+            return Err("a reply is empty; give each --reply its text".into());
+        }
+        let reviewed = self.issues.get(issue).is_some_and(|i| {
+            World::answered_round(i).is_some_and(|round| i.reviews.iter().any(|r| r.round == round))
+        });
+        if !reviewed {
+            return Err(format!(
+                "{issue} has no review round to reply to: it has not been reviewed yet, or its \
+                 fixes come from the checks, a conflict or a refused merge. Run temet-work ready \
+                 {issue} without --reply"
+            ));
+        }
+        Ok(replies)
+    }
+
     /// Why `by` may not run a step command of `role` on `issue`. An agent must
     /// have that role and work on that issue; a person may only rule.
     fn may_step(
@@ -578,10 +607,16 @@ impl World {
                     plan: plan.clone(),
                 }
             }
-            Command::Ready { issue, pull, pulls } => {
+            Command::Ready {
+                issue,
+                pull,
+                pulls,
+                replies,
+            } => {
                 self.may_step(by, "ready", Role::Author, issue)?;
                 match at(issue)? {
                     Stage::Working | Stage::Fixing { .. } => {
+                        let replies = self.replies(issue, replies)?;
                         let (repos, known) = self.issues.get(issue).map_or_else(
                             || (Vec::new(), Vec::new()),
                             |i| (self.repos_of(i), i.pulls.keys().cloned().collect()),
@@ -630,6 +665,7 @@ impl World {
                             issue: issue.clone(),
                             pull: None,
                             pulls: named,
+                            replies,
                         }
                     }
                     now => return refuse(issue, now, "being worked on"),
@@ -828,6 +864,7 @@ impl World {
                     return Err("a ruling needs a reason".into());
                 }
                 let id = self.decisions.keys().next_back().map_or(1, |d| d.0 + 1);
+                let (cost, point) = Decision::ruling_cost(*approve);
                 Event::DecisionMade {
                     decision: Decision {
                         id: DecisionId(id),
@@ -840,6 +877,8 @@ impl World {
                         reason: reason.clone(),
                         overturned_to: None,
                         overturn_reason: String::new(),
+                        cost: Some(cost),
+                        point: Some(point),
                     },
                 }
             }
@@ -920,6 +959,8 @@ mod tests {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: None,
+            runtime: None,
+            model: None,
         }
     }
 
@@ -969,6 +1010,7 @@ mod tests {
                 issue: issue(),
                 pull: Some("57".into()),
                 pulls: Default::default(),
+                replies: Vec::new(),
             },
         )
         .expect("ready");
@@ -995,7 +1037,8 @@ mod tests {
                 &Command::Ready {
                     issue: issue(),
                     pull: Some("57".into()),
-                    pulls: Default::default()
+                    pulls: Default::default(),
+                    replies: Vec::new(),
                 }
             ),
             Err("ankh#1 is refining, not being worked on".into())
@@ -1007,6 +1050,7 @@ mod tests {
                     issue: IssueId::new("ankh", "9"),
                     pull: None,
                     pulls: Default::default(),
+                    replies: Vec::new(),
                 }
             )
             .is_err()
@@ -1051,6 +1095,7 @@ mod tests {
             issue: issue(),
             pull: None,
             pulls: Default::default(),
+            replies: Vec::new(),
         };
         assert!(
             w.check(owner(&bare).as_ref(), &bare)
@@ -1062,6 +1107,7 @@ mod tests {
                 issue: issue(),
                 pull: Some("57".into()),
                 pulls: Default::default(),
+                replies: Vec::new(),
             },
         )
         .expect("ready");
@@ -1083,6 +1129,58 @@ mod tests {
     }
 
     #[test]
+    fn ready_puts_the_authors_replies_on_the_review_round_its_fix_answers() {
+        let mut w = refining();
+        run(
+            &mut w,
+            Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        )
+        .expect("plan");
+        let ready = |replies: &[&str]| Command::Ready {
+            issue: issue(),
+            pull: Some("57".into()),
+            pulls: Default::default(),
+            replies: replies.iter().map(ToString::to_string).collect(),
+        };
+        let refused = |w: &World, replies: &[&str]| {
+            let command = ready(replies);
+            w.check(owner(&command).as_ref(), &command)
+                .expect_err("refused")
+        };
+        // The first pull request answers no round.
+        assert!(refused(&w, &["early"]).contains("no review round to reply to"));
+        run(&mut w, ready(&[])).expect("ready");
+        run(
+            &mut w,
+            Command::Review {
+                issue: issue(),
+                verdict: Verdict::Block {
+                    points: vec!["no test for a stopped clock".into()],
+                },
+            },
+        )
+        .expect("block");
+        assert!(refused(&w, &[" "]).contains("a reply is empty"));
+        run(&mut w, ready(&[" added one that stops the clock "])).expect("ready");
+        assert_eq!(
+            w.issues[&issue()].reviews[0].replies,
+            ["added one that stops the clock"]
+        );
+        // A failed check sends it back for the same round: that fix answers no
+        // review round.
+        w.apply(&Event::ChecksFinished {
+            issue: issue(),
+            passed: false,
+            failing: vec!["lint".into()],
+        });
+        assert!(refused(&w, &["fixed the lint"]).contains("no review round to reply to"));
+        run(&mut w, ready(&[])).expect("ready without replies");
+    }
+
+    #[test]
     fn a_reviewer_that_has_not_heard_the_new_round_is_refused() {
         let mut w = refining();
         run(
@@ -1099,6 +1197,7 @@ mod tests {
                 issue: issue(),
                 pull: Some("57".into()),
                 pulls: Default::default(),
+                replies: Vec::new(),
             },
         )
         .expect("ready");
@@ -1148,6 +1247,7 @@ mod tests {
                     issue: issue(),
                     pull: Some("57".into()),
                     pulls: Default::default(),
+                    replies: Vec::new(),
                 },
             ),
             (
@@ -1205,7 +1305,8 @@ mod tests {
                 &Command::Ready {
                     issue: issue(),
                     pull: Some("57".into()),
-                    pulls: Default::default()
+                    pulls: Default::default(),
+                    replies: Vec::new(),
                 }
             ),
             Err(
@@ -1236,6 +1337,7 @@ mod tests {
                 issue: issue(),
                 pull: Some("57".into()),
                 pulls: Default::default(),
+                replies: Vec::new(),
             },
             Command::Review {
                 issue: issue(),
@@ -1260,6 +1362,7 @@ mod tests {
                     issue: issue(),
                     pull: Some("57".into()),
                     pulls: Default::default(),
+                    replies: Vec::new(),
                 },
             )
             .expect("ready");
@@ -1302,6 +1405,7 @@ mod tests {
                     issue: issue(),
                     pull: Some("57".into()),
                     pulls: Default::default(),
+                    replies: Vec::new(),
                 },
             )
             .expect("ready");
@@ -1375,6 +1479,8 @@ mod plan_settings {
                 machine: MachineId::new("local"),
                 folder: None,
                 secret_digest: None,
+                runtime: None,
+                model: None,
             },
         ]);
         w
@@ -2181,6 +2287,8 @@ mod plan_settings {
                 reason: "easiest to undo".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             },
         });
         w
@@ -2473,6 +2581,8 @@ mod ready_in_several_repositories {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: None,
+            runtime: None,
+            model: None,
         });
         World::replay(&events).0
     }
@@ -2482,6 +2592,7 @@ mod ready_in_several_repositories {
             issue: gld(),
             pull: pull.map(String::from),
             pulls: pulls.iter().map(|(r, n)| (pid(r), n.to_string())).collect(),
+            replies: Vec::new(),
         }
     }
 
@@ -2504,6 +2615,7 @@ mod ready_in_several_repositories {
                     (pid("api"), "34".to_string())
                 ]
                 .into(),
+                replies: Vec::new(),
             }
         );
     }
@@ -2548,6 +2660,7 @@ mod ready_in_several_repositories {
                 (pid("api"), "34".to_string()),
             ]
             .into(),
+            replies: Vec::new(),
         });
         w.apply(&Event::ReviewFinished {
             issue: gld(),

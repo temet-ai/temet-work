@@ -123,11 +123,15 @@ pub fn start(path: &Path, parts: Vec<Box<dyn Part>>) -> Result<Host, String> {
 #[cfg(feature = "store")]
 pub fn journal(path: &Path, catalog: Catalog) -> Result<(Box<dyn Journal>, World), String> {
     let (log, entries) = temet_work_store::Log::open(path).map_err(|e| e.to_string())?;
-    let (world, _) = World {
-        catalog,
-        ..World::default()
-    }
-    .replay_onto(entries.iter().map(|e| &e.event));
+    // Each entry at the time it was logged with, so a restart gives each issue
+    // the same time it last changed.
+    let world = temet_work_store::replay_onto(
+        World {
+            catalog,
+            ..World::default()
+        },
+        &entries,
+    );
     Ok((Box::new(log), world))
 }
 

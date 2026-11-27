@@ -154,6 +154,20 @@ pub enum Event {
         /// Whether it is closed in the tracker.
         closed: bool,
     },
+    /// A tracker listed a milestone of a project or area as open, or its due
+    /// date there changed, or it stopped listing it as open. Logged only when
+    /// one of these changed.
+    MilestoneSynced {
+        /// The project or area whose tracker lists it.
+        project: ProjectId,
+        /// The milestone.
+        milestone: MilestoneId,
+        /// Its due date as `YYYY-MM-DD`; none when the tracker gives none.
+        due: Option<String>,
+        /// Whether the tracker lists it as open; false once it is closed there or
+        /// gone.
+        open: bool,
+    },
     /// An agent session started.
     AgentStarted {
         /// The agent.
@@ -172,6 +186,13 @@ pub enum Event {
         /// agent started before agents had secrets.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret_digest: Option<Digest>,
+        /// The runtime that made its program; none in older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+        /// The model its brief named; none when its settings named none, and in
+        /// older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// An agent's state changed.
     AgentChanged {
@@ -206,6 +227,10 @@ pub enum Event {
         /// The pull requests' numbers by repository, when the author names them.
         #[serde(default)]
         pulls: std::collections::BTreeMap<ProjectId, String>,
+        /// The author's replies to the points of the review round its fix
+        /// answers; empty when it sent none, and in older logs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replies: Vec<String>,
     },
     /// What an issue's agent was to hear reached it: the fixes, or a new round.
     Told {

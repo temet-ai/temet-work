@@ -148,7 +148,17 @@ pub fn write(
         String::new()
     } else {
         let list: String = issue.fix.iter().map(|p| format!("- {p}\n")).collect();
-        format!("Earlier work on it came back with these to fix first:\n{list}")
+        let reply = if crate::World::answered_round(issue).is_some() {
+            format!(
+                "They came from a review or a ruling: when you run temet-work ready, reply to each, \
+                 in their order, with what you did about it or why you did not, as in \
+                 temet-work ready {} --reply \"<reply to the first>\" [--reply \"<reply to the next>\" ...]\n",
+                issue.id
+            )
+        } else {
+            String::new()
+        };
+        format!("Earlier work on it came back with these to fix first:\n{list}{reply}")
     };
     let folder_note = if shared {
         "Another issue's author is changing files in this folder: do not switch its branch or change \
@@ -453,7 +463,10 @@ fn only_a_persons() -> Vec<&'static str> {
 pub fn fixes(issue: &IssueId, points: &[String]) -> String {
     let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
     format!(
-        "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready {issue}"
+        "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready {issue}\n\
+         When the points came from a review or a ruling, reply to each, in their order, with what you \
+         did about it or why you did not: temet-work ready {issue} --reply \"<reply to the first>\" \
+         [--reply \"<reply to the next>\" ...]"
     )
 }
 
@@ -733,6 +746,23 @@ mod tests {
             &[],
         )
         .task
+    }
+
+    #[test]
+    fn an_author_fixing_a_review_round_is_told_to_reply_to_each_point() {
+        let reply = "--reply \"<reply to the first>\" [--reply \"<reply to the next>\" ...]";
+        let told = fixes(&IssueId::new("watch", "31"), &["light it at dusk".into()]);
+        assert!(told.contains(reply), "{told}");
+        // A new author on an issue sent back by a review hears it in its brief.
+        let mut issue = lamp_issue();
+        issue.stage = crate::model::Stage::Fixing { round: 1 };
+        issue.fix = vec!["light it at dusk".into()];
+        let brief = lamp_task(Role::Author, &issue);
+        assert!(brief.contains(reply), "{brief}");
+        // A fix for a failed check answers no review round.
+        issue.fix_keeps_round = true;
+        let brief = lamp_task(Role::Author, &issue);
+        assert!(!brief.contains("--reply"), "{brief}");
     }
 
     #[test]

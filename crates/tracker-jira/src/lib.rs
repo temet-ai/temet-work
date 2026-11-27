@@ -8,7 +8,9 @@
 //! test run, the real transport runs nothing.
 
 use serde_json::{Value, json};
-use temet_work_tracker::{TrackedIssue, TrackedMilestone, Tracker, TrackerError, depends_on};
+use temet_work_tracker::{
+    TrackedIssue, TrackedMilestone, Tracker, TrackerError, depends_on, is_date,
+};
 
 /// One call to the Jira REST API.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,11 +171,15 @@ const FIELDS: [&str; 5] = [
 /// The Jira adapter.
 pub struct Jira {
     transport: Box<dyn Transport>,
+    /// The site, from `JIRA_URL`, that the web addresses name; none when it is
+    /// not set or not `https://`.
+    site: Option<String>,
 }
 
 impl Default for Jira {
+    /// Calls Jira with `curl` on the site `JIRA_URL` names.
     fn default() -> Self {
-        Self::with(Box::new(Curl::default()))
+        Self::with(Box::new(Curl::default())).site(&std::env::var("JIRA_URL").unwrap_or_default())
     }
 }
 
@@ -228,9 +234,21 @@ fn problem(reply: &Reply) -> String {
 }
 
 impl Jira {
-    /// A Jira tracker that calls the REST API through `transport`.
+    /// A Jira tracker that calls the REST API through `transport`, with no site
+    /// for its web addresses.
     pub fn with(transport: Box<dyn Transport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            site: None,
+        }
+    }
+
+    /// The same tracker, its web addresses on `site` (`https://your-site.atlassian.net`).
+    /// A site that is not `https://` gives none, as `curl` is not sent to one.
+    pub fn site(mut self, site: &str) -> Self {
+        let site = site.trim().trim_end_matches('/');
+        self.site = site.starts_with("https://").then(|| site.to_string());
+        self
     }
 
     /// Sends a request and returns the JSON Jira answered with (`null` for no body).
@@ -451,15 +469,25 @@ impl Tracker for Jira {
                 v.get("released").and_then(Value::as_bool) != Some(true)
                     && v.get("archived").and_then(Value::as_bool) != Some(true)
             })
-            .filter_map(|v| v.get("name").and_then(Value::as_str))
-            .map(|name| TrackedMilestone {
+            .filter_map(|v| Some((v.get("name").and_then(Value::as_str)?, v)))
+            .map(|(name, v)| TrackedMilestone {
                 title: name.to_string(),
                 open: issues
                     .iter()
                     .filter(|i| first_version(i).as_deref() == Some(name))
                     .count() as u64,
+                due: v
+                    .get("releaseDate")
+                    .and_then(Value::as_str)
+                    .filter(|d| is_date(d))
+                    .map(String::from),
             })
             .collect())
+    }
+
+    fn address(&self, project: &str) -> Option<String> {
+        valid_project(project).ok()?;
+        Some(format!("{}/browse/{project}", self.site.as_ref()?))
     }
 
     fn closed(&mut self, project: &str, key: &str) -> Result<bool, TrackerError> {
@@ -661,7 +689,7 @@ mod tests {
     fn jira() -> (Jira, Arc<Mutex<Vec<Request>>>) {
         let t = Recorded::default();
         let sent = t.sent.clone();
-        (Jira::with(Box::new(t)), sent)
+        (Jira::with(Box::new(t)).site("https://demo.invalid"), sent)
     }
 
     #[test]
@@ -793,11 +821,39 @@ mod tests {
     }
 
     #[test]
-    fn milestones_are_unreleased_versions_with_their_open_counts() {
+    fn milestones_are_unreleased_versions_with_their_open_counts_and_release_dates() {
         let (mut jira, _) = jira();
         let m = jira.milestones("DEMO").expect("recorded versions");
-        let m: Vec<(&str, u64)> = m.iter().map(|m| (m.title.as_str(), m.open)).collect();
-        assert_eq!(m, [("Sign-in rework", 2), ("Later", 0)]);
+        let m: Vec<(&str, u64, Option<&str>)> = m
+            .iter()
+            .map(|m| (m.title.as_str(), m.open, m.due.as_deref()))
+            .collect();
+        assert_eq!(
+            m,
+            [
+                ("Sign-in rework", 2, Some("2026-12-12")),
+                ("Later", 0, None)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_issues_address_is_on_the_jira_site_and_none_without_one() {
+        let (jira, _) = jira();
+        assert_eq!(
+            jira.address("DEMO").as_deref(),
+            Some("https://demo.invalid/browse/DEMO")
+        );
+        assert_eq!(jira.address("not a key"), None);
+        let none = Jira::with(Box::new(Recorded::default()));
+        assert_eq!(none.address("DEMO"), None, "no JIRA_URL");
+        let plain = Jira::with(Box::new(Recorded::default())).site("http://demo.invalid");
+        assert_eq!(plain.address("DEMO"), None, "not https");
+        let trailing = Jira::with(Box::new(Recorded::default())).site("https://demo.invalid/");
+        assert_eq!(
+            trailing.address("DEMO").as_deref(),
+            Some("https://demo.invalid/browse/DEMO")
+        );
     }
 
     #[test]

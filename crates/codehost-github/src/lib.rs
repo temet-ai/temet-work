@@ -37,18 +37,39 @@ impl Transport for Cli {
 /// The GitHub adapter.
 pub struct GitHub {
     transport: Box<dyn Transport>,
+    /// The host `gh` reaches, which the web addresses name.
+    host: String,
 }
 
 impl Default for GitHub {
+    /// Runs the real `gh`, on the host `GH_HOST` names when the daemon has it,
+    /// as `gh` does.
     fn default() -> Self {
-        Self::with(Box::new(Cli))
+        Self::with(Box::new(Cli)).host(&std::env::var("GH_HOST").unwrap_or_default())
     }
 }
 
 impl GitHub {
-    /// A GitHub code host that runs `gh` through `transport`.
+    /// A GitHub code host that runs `gh` through `transport`, on github.com.
     pub fn with(transport: Box<dyn Transport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            host: "github.com".into(),
+        }
+    }
+
+    /// The same code host on `host`: a name, or an address whose scheme is
+    /// dropped. An empty one leaves it as it was.
+    pub fn host(mut self, host: &str) -> Self {
+        let host = host
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        if !host.is_empty() {
+            self.host = host.to_string();
+        }
+        self
     }
 
     fn run(&mut self, args: &[&str]) -> Result<String, CodeHostError> {
@@ -190,6 +211,10 @@ impl CodeHost for GitHub {
             .map(|_| ())
     }
 
+    fn address(&self, repo: &str) -> Option<String> {
+        Some(format!("https://{}/{repo}", self.host))
+    }
+
     fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
         let out = self.run(&["pr", "view", number, "-R", repo, "--json", "mergeCommit"])?;
         let v: Value = serde_json::from_str(&out)
@@ -262,6 +287,25 @@ mod tests {
         fn mergeable(&self) -> Option<String> {
             None
         }
+    }
+
+    #[test]
+    fn the_code_is_on_github_or_the_host_gh_host_names() {
+        let at = |gh: GitHub| gh.address("ankh-morpork/watch");
+        assert_eq!(
+            at(GitHub::with(Box::new(Recorded))).as_deref(),
+            Some("https://github.com/ankh-morpork/watch")
+        );
+        for host in ["git.example.com", "https://git.example.com/"] {
+            assert_eq!(
+                at(GitHub::with(Box::new(Recorded)).host(host)).as_deref(),
+                Some("https://git.example.com/ankh-morpork/watch")
+            );
+        }
+        assert_eq!(
+            at(GitHub::with(Box::new(Recorded)).host("")).as_deref(),
+            Some("https://github.com/ankh-morpork/watch")
+        );
     }
 
     #[test]

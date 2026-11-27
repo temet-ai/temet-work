@@ -54,6 +54,7 @@ fn pull_ready() -> Event {
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     }
 }
 

@@ -2003,6 +2003,8 @@ mod unknown_adapter {
             folder: None,
             machine: MachineId::new("local"),
             secret_digest: None,
+            runtime: None,
+            model: None,
         });
         let plan = |key: &str| Command::Plan {
             issue: IssueId::new("radar", "44"),

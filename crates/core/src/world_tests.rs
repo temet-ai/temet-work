@@ -170,6 +170,7 @@ fn review_blocks_go_back_to_the_author_then_to_an_arbiter_after_three_rounds() {
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     };
     let block = |round| Event::ReviewFinished {
         issue: issue("1"),
@@ -214,6 +215,7 @@ fn a_verdict_for_an_old_round_changes_nothing() {
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     let stale = Event::ReviewFinished {
         issue: issue("1"),
@@ -232,6 +234,7 @@ fn merges_once_review_and_checks_pass_in_either_order() {
             issue: issue("1"),
             pull: None,
             pulls: Default::default(),
+            replies: Vec::new(),
         });
         let approve = Event::ReviewFinished {
             issue: issue("1"),
@@ -260,6 +263,7 @@ fn failed_checks_go_back_to_the_author() {
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     let effects = w.apply(&Event::ChecksFinished {
         issue: issue("1"),
@@ -284,6 +288,7 @@ fn merged_deployed_and_checked_closes_the_issue_and_frees_the_folder_for_the_nex
             issue: issue("1"),
             pull: None,
             pulls: Default::default(),
+            replies: Vec::new(),
         },
         Event::ReviewFinished {
             issue: issue("1"),
@@ -334,6 +339,7 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
             issue: issue("1"),
             pull: None,
             pulls: Default::default(),
+            replies: Vec::new(),
         });
         for round in 1..=3 {
             w.apply(&Event::ReviewFinished {
@@ -346,6 +352,7 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
                     issue: issue("1"),
                     pull: None,
                     pulls: Default::default(),
+                    replies: Vec::new(),
                 });
             }
         }
@@ -366,6 +373,8 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
                 reason: "Scope names every elicitation field".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             },
         };
         let effects = w.apply(&ruling);
@@ -391,6 +400,7 @@ fn arbitrating() -> World {
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     for round in 1..=3 {
         w.apply(&Event::ReviewFinished {
@@ -403,6 +413,7 @@ fn arbitrating() -> World {
                 issue: issue("1"),
                 pull: None,
                 pulls: Default::default(),
+                replies: Vec::new(),
             });
         }
     }
@@ -423,6 +434,8 @@ fn ruling(approve: bool) -> Event {
             reason: "scope names every field".into(),
             overturned_to: None,
             overturn_reason: String::new(),
+            cost: None,
+            point: None,
         },
     }
 }
@@ -480,6 +493,7 @@ fn overturning_a_send_back_while_it_is_fixed_merges_after_the_checks_pass() {
             issue: issue("1"),
             pull: None,
             pulls: Default::default(),
+            replies: Vec::new(),
         }),
         vec![]
     );
@@ -503,6 +517,7 @@ fn overturning_a_send_back_still_in_review_merges_when_the_checks_have_passed() 
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     w.apply(&Event::ChecksFinished {
         issue: issue("1"),
@@ -525,6 +540,7 @@ fn overturning_after_the_merge_changes_no_stage() {
                 issue: issue("1"),
                 pull: None,
                 pulls: Default::default(),
+                replies: Vec::new(),
             });
             w.apply(&Event::ReviewFinished {
                 issue: issue("1"),
@@ -575,6 +591,8 @@ fn overturning_a_choice_changes_no_stage_and_an_unknown_option_nothing_at_all() 
             reason: "easiest to undo".into(),
             overturned_to: None,
             overturn_reason: String::new(),
+            cost: None,
+            point: None,
         },
     });
     let before = w.issues.clone();
@@ -621,6 +639,7 @@ fn the_same_events_give_the_same_state_and_effects() {
             issue: issue("3"),
             pull: None,
             pulls: Default::default(),
+            replies: Vec::new(),
         },
     ];
     assert_eq!(World::replay(&events), World::replay(&events));
@@ -635,6 +654,8 @@ fn started(agent: &str, role: Role, key: &str) -> Event {
         machine: MachineId::new("morpork"),
         folder: None,
         secret_digest: None,
+        runtime: None,
+        model: None,
     }
 }
 
@@ -741,6 +762,7 @@ fn an_author_that_has_not_heard_its_fixes_is_told_again_until_it_has() {
         issue: issue("1"),
         pull: Some("57".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     w.apply(&started("reviewer-1", Role::Reviewer, "1"));
     let points = vec!["no test for a stopped clock".to_string()];
@@ -771,6 +793,7 @@ fn a_new_author_on_an_issue_being_fixed_hears_the_fixes_in_its_brief() {
         issue: issue("1"),
         pull: Some("57".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     w.apply(&Event::ReviewFinished {
         issue: issue("1"),
@@ -836,6 +859,7 @@ fn in_review() -> World {
         issue: issue("1"),
         pull: Some("57".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     w.apply(&started("reviewer-1", Role::Reviewer, "1"));
     w
@@ -854,6 +878,7 @@ fn a_ci_failure_or_a_refused_merge_does_not_use_up_a_review_round() {
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     assert_eq!(
         stage(&w, "1"),
@@ -988,6 +1013,7 @@ fn a_round_approved_before_its_running_reviewer_heard_of_it_is_not_told_again() 
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     // A person's verdict does not wait for the reviewer to have heard the round.
     w.apply(&verdict(2, Verdict::Approve));
@@ -1004,6 +1030,7 @@ fn after_a_ci_failure_the_next_round_waits_on_its_reviewer_again() {
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     };
     let next = Effect::StartReview {
         issue: issue("1"),
@@ -1042,6 +1069,7 @@ fn a_block_after_an_approval_in_the_last_round_leaves_the_arbiter_to_rule() {
             issue: issue("1"),
             pull: None,
             pulls: Default::default(),
+            replies: Vec::new(),
         });
     }
     w.apply(&verdict(3, Verdict::Approve));
@@ -1061,6 +1089,7 @@ fn pull_ready() -> Event {
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     }
 }
 
@@ -1480,6 +1509,7 @@ fn a_retry_asks_again_for_the_deploy_or_verify_and_survives_a_restart() {
             issue: issue("1"),
             pull: Some("57".into()),
             pulls: Default::default(),
+            replies: Vec::new(),
         },
         Event::ReviewFinished {
             issue: issue("1"),
@@ -1554,6 +1584,7 @@ fn ready_both(w: &mut World) -> Vec<Effect> {
             (pid("api"), "34".to_string()),
         ]
         .into(),
+        replies: Vec::new(),
     })
 }
 
@@ -1785,6 +1816,7 @@ fn a_refused_merge_after_the_first_keeps_it_on_record_and_tells_the_author() {
         issue: gld(),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     w.apply(&Event::ReviewFinished {
         issue: gld(),
@@ -1820,6 +1852,7 @@ fn replaying_mid_sequence_resumes_at_the_second_repository() {
                 (pid("api"), "34".to_string()),
             ]
             .into(),
+            replies: Vec::new(),
         },
         Event::ReviewFinished {
             issue: gld(),
@@ -1869,6 +1902,7 @@ fn an_old_single_pull_event_is_the_first_repositorys_and_an_old_merged_is_all_of
         issue: gld(),
         pull: Some("12".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     assert_eq!(
         w.issues[&gld()].pulls.get(&pid("ui")).map(String::as_str),
@@ -1915,6 +1949,7 @@ fn a_new_pull_request_in_a_merged_repository_merges_again_and_the_same_one_does_
             issue: gld(),
             pull: None,
             pulls: [(pid("ui"), number.to_string())].into(),
+            replies: Vec::new(),
         })
     };
     let mut same = w.clone();

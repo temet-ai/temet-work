@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use temet_work_core::ids::{IssueId, MilestoneId, ProjectId};
+use temet_work_core::model::Addresses;
 use temet_work_core::{Effect, Event, IssueText, Outcome, Part, Polled, World};
 
 /// An issue as a tracker reports it.
@@ -37,6 +38,22 @@ pub struct TrackedMilestone {
     pub title: String,
     /// How many issues in it are open.
     pub open: u64,
+    /// Its due date as `YYYY-MM-DD` ([`is_date`]); none when the tracker gives
+    /// none.
+    pub due: Option<String>,
+}
+
+/// Whether `s` is a date as `YYYY-MM-DD`, the form due dates are kept in.
+pub fn is_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 {
+                *c == b'-'
+            } else {
+                c.is_ascii_digit()
+            }
+        })
 }
 
 /// Why a tracker call failed.
@@ -71,8 +88,13 @@ pub trait Tracker: Send {
     /// The project's open issues.
     fn issues(&mut self, project: &str) -> Result<Vec<TrackedIssue>, TrackerError>;
 
-    /// The project's open milestones.
+    /// The project's open milestones, each with its due date when it has one.
     fn milestones(&mut self, project: &str) -> Result<Vec<TrackedMilestone>, TrackerError>;
+
+    /// The web address of the project's issues, made from its name and the
+    /// adapter's own settings, such as the host it reaches; none when the
+    /// adapter cannot say. It asks the tracker nothing.
+    fn address(&self, project: &str) -> Option<String>;
 
     /// Whether the issue is closed. An error, `NotFound` among them, when the
     /// tracker cannot say.
@@ -189,6 +211,10 @@ impl Tracker for FakeTracker {
             .filter(|(p, _)| p == project)
             .map(|(_, m)| m.clone())
             .collect())
+    }
+
+    fn address(&self, project: &str) -> Option<String> {
+        Some(format!("https://{}.example.com/{project}/issues", self.id))
     }
 
     fn closed(&mut self, project: &str, key: &str) -> Result<bool, TrackerError> {
@@ -311,6 +337,18 @@ pub mod contract {
             .milestones(&project)
             .map_err(|e| format!("milestones: {e}"))?;
         ensure(
+            milestones
+                .iter()
+                .all(|m| m.due.as_deref().is_none_or(super::is_date)),
+            "a milestone's due date is YYYY-MM-DD",
+        )?;
+        ensure(
+            tracker
+                .address(&project)
+                .is_some_and(|a| a.starts_with("https://") && a.contains(&project)),
+            "the project's issues have an https address that holds its name",
+        )?;
+        ensure(
             !milestones.is_empty(),
             "a project with open milestones lists them",
         )?;
@@ -387,8 +425,10 @@ pub mod contract {
 ///
 /// It syncs each project from the tracker its configuration names, as often as
 /// its `sync_every` setting says (a minute by default), and reports only what
-/// changed. It keeps each open issue's text from the last sync in memory. It closes
-/// an issue in its tracker when the loop has verified it.
+/// changed: issues, and the open milestones with their due dates. It keeps each
+/// open issue's text from the last sync in memory. It closes an issue in its
+/// tracker when the loop has verified it, and gives the address of each project's
+/// and area's issues.
 #[derive(Default)]
 pub struct Trackers {
     adapters: Vec<Box<dyn Tracker>>,
@@ -453,6 +493,46 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
                 depends_on: i.depends_on.clone(),
                 order: i.order,
                 closed: true,
+            });
+        }
+    }
+    out
+}
+
+/// The events that bring the loop's milestones of `project` up to `listed`, the
+/// open ones its tracker lists now: one for each milestone newly listed or whose
+/// due date changed, and one for each the loop has as open that the tracker no
+/// longer lists. An unchanged milestone gives none, so a due date is logged only
+/// when it changes.
+pub fn milestone_changes(
+    world: &World,
+    project: &ProjectId,
+    listed: &[TrackedMilestone],
+) -> Vec<Event> {
+    let known = world.milestones.get(project);
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for m in listed {
+        let id = MilestoneId::new(m.title.as_str());
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if known.and_then(|k| k.get(&id)) != Some(&m.due) {
+            out.push(Event::MilestoneSynced {
+                project: project.clone(),
+                milestone: id,
+                due: m.due.clone(),
+                open: true,
+            });
+        }
+    }
+    for id in known.into_iter().flat_map(|k| k.keys()) {
+        if !seen.contains(id) {
+            out.push(Event::MilestoneSynced {
+                project: project.clone(),
+                milestone: id.clone(),
+                due: None,
+                open: false,
             });
         }
     }
@@ -656,11 +736,19 @@ impl Part for Trackers {
                             unsure.push(format!("closing {id} failed: {e}"));
                         }
                     }
+                    let milestones = match tracker.milestones(&name) {
+                        Ok(listed) => milestone_changes(world, &source, &listed),
+                        Err(e) => {
+                            unsure.push(format!("its milestones cannot be read: {e}"));
+                            Vec::new()
+                        }
+                    };
                     if !unsure.is_empty() {
                         self.errors
                             .insert(source.clone(), format!("{}: {}", name, unsure.join("; ")));
                     }
                     events.extend(changes(world, &source, &open));
+                    events.extend(milestones);
                     let texts = open.into_iter().map(|t| (t.key, t.body)).collect();
                     self.texts.insert(source, texts);
                 }
@@ -676,6 +764,23 @@ impl Part for Trackers {
 
     fn issue_text(&self, world: &World, issue: &IssueId) -> Option<Result<IssueText, String>> {
         Some(self.read(world, issue))
+    }
+
+    fn addresses(&self, world: &World) -> BTreeMap<ProjectId, Addresses> {
+        sources(world)
+            .into_iter()
+            .filter_map(|(id, tracker, name)| {
+                let tracker = self.adapters.iter().find(|a| a.id() == tracker)?;
+                let issues = tracker.address(&name)?;
+                Some((
+                    id,
+                    Addresses {
+                        issues: Some(issues),
+                        code: None,
+                    },
+                ))
+            })
+            .collect()
     }
 
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
@@ -754,15 +859,98 @@ mod tests {
                 ("ankh/morpork".into(), issue("1", Some("Watch"))),
                 ("ankh/morpork".into(), issue("2", None)),
             ],
-            milestones: vec![(
-                "ankh/morpork".into(),
-                TrackedMilestone {
-                    title: "Watch".into(),
-                    open: 1,
-                },
-            )],
+            milestones: vec![
+                (
+                    "ankh/morpork".into(),
+                    TrackedMilestone {
+                        title: "Watch".into(),
+                        open: 1,
+                        due: Some("2026-12-12".into()),
+                    },
+                ),
+                (
+                    "ankh/morpork".into(),
+                    TrackedMilestone {
+                        title: "Snuff".into(),
+                        open: 0,
+                        due: None,
+                    },
+                ),
+            ],
             ..FakeTracker::default()
         }
+    }
+
+    /// The milestone events among `events`, as (milestone, due date, open).
+    fn milestones_in(events: &[Event]) -> Vec<(&str, Option<&str>, bool)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::MilestoneSynced {
+                    milestone,
+                    due,
+                    open,
+                    ..
+                } => Some((milestone.0.as_str(), due.as_deref(), *open)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_milestones_due_date_is_logged_once_and_again_only_when_it_changes() {
+        let mut w = configured();
+        let mut part = Trackers::default().every(0);
+        part.add(Box::new(fake()));
+        let first = part.poll(&w, 0).events;
+        assert_eq!(
+            milestones_in(&first),
+            [("Watch", Some("2026-12-12"), true), ("Snuff", None, true)]
+        );
+        apply(&mut w, &first);
+        assert_eq!(
+            w.milestones[&ProjectId::new("ankh")][&MilestoneId::new("Watch")].as_deref(),
+            Some("2026-12-12")
+        );
+        assert_eq!(
+            part.poll(&w, 1).events,
+            [],
+            "an unchanged sync logs nothing"
+        );
+        // Moved a week, and Snuff closed.
+        let mut moved = fake();
+        moved.milestones[0].1.due = Some("2026-12-19".into());
+        moved.milestones.pop();
+        let mut part = Trackers::default().every(0);
+        part.add(Box::new(moved));
+        let next = part.poll(&w, 2).events;
+        assert_eq!(
+            milestones_in(&next),
+            [("Watch", Some("2026-12-19"), true), ("Snuff", None, false)]
+        );
+        apply(&mut w, &next);
+        assert_eq!(part.poll(&w, 3).events, []);
+    }
+
+    #[test]
+    fn each_projects_issues_have_the_address_its_tracker_gives() {
+        let mut w = configured();
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new("klatch"),
+            tracker: "jira".into(),
+            name: "KLA".into(),
+            code_host: None,
+            repo: None,
+        });
+        let mut part = Trackers::default();
+        part.add(Box::new(fake()));
+        let addresses = part.addresses(&w);
+        assert_eq!(
+            addresses[&ProjectId::new("ankh")].issues.as_deref(),
+            Some("https://fake.example.com/ankh/morpork/issues")
+        );
+        // No tracker in this build gives klatch's.
+        assert!(!addresses.contains_key(&ProjectId::new("klatch")));
     }
 
     struct Writable;
@@ -801,7 +989,8 @@ mod tests {
         part.add(Box::new(fake()));
         let first = part.poll(&w, 0);
         assert_eq!(first.problem, None);
-        assert_eq!(first.events.len(), 2);
+        // Two issues and two milestones.
+        assert_eq!(first.events.len(), 4);
         apply(&mut w, &first.events);
         assert_eq!(part.poll(&w, 60_000 - 1).events, vec![], "not due yet");
         assert_eq!(part.poll(&w, 60_000).events, vec![], "nothing changed");
@@ -885,7 +1074,7 @@ mod tests {
         let mut part = Trackers::default();
         part.add(Box::new(fake()));
         let first = part.poll(&w, 0);
-        assert_eq!(first.events.len(), 2, "the project that works still syncs");
+        assert_eq!(first.events.len(), 4, "the project that works still syncs");
         assert!(
             first
                 .problem

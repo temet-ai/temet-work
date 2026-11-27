@@ -10,6 +10,7 @@ session_id:
   - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
   - 0645e4e2-33bd-43f8-980f-503649da2f15
   - edd1e649-f07a-4d7c-b5c6-ff74b0021fbb
+  - c14f6d16-7688-4e50-99d4-32021f0e29db
 ---
 
 # Commands
@@ -24,7 +25,7 @@ reports its step done.
 | `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes and agents. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise) | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
-| `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...` | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL` | working, or fixing |
+| `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...`, with `--reply TEXT` for each point it answers | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL`. With a fix for a review round or a ruling, each `--reply` answers one of the round's points, in their order: what the author did about it, or why not. The replies are kept with that round and shown with it in `status --json`. A reply is refused when the fix answers no review round: the first pull request, or a fix for CI, a conflict or a refused merge | working, or fixing |
 | `temet-work review ISSUE approve` | only the reviewer working on ISSUE | in review |
 | `temet-work review ISSUE block POINT...` | only the reviewer working on ISSUE, one argument per thing to fix | in review |
 | `temet-work retry ISSUE` | a person only | deploying or verifying: runs the deploy (or verify) again, at once unless a deploy or verify of the same project or `run_in` folder is running, and clears its failure count, its ten-minute wait and its reruns in `deploy-handoff.stale`, so a deploy that failed three times gets three fresh tries |
@@ -171,12 +172,16 @@ command line exits 0 when the daemon did it, 1 when the daemon refused it, and 2
 command was not understood or no daemon answered.
 
 `temet-work status --json` sends the `view` command (`{"command":"view"}` on the socket)
-and prints the reply as indented JSON: projects, groups, the issues that are not done and
-the count of done ones, agents, decisions and problems (`crates/core/src/view.rs`; what it
-carries is listed in `docs/privacy.md`). Issue ids are `project#key`, each stage and agent
-state is a fixed word with the text form's words beside it, and decision options are
-numbered from 1. `--json` on any other command is refused with the usage; inside a value,
-a title, a body, a review point or a reason it is a word like any other.
+and prints the reply as indented JSON: projects with the web addresses of their issues and
+code, milestones, groups, the issues that are not done and the count of done ones, agents,
+decisions and problems (`crates/core/src/view.rs`; what it carries is listed in
+`docs/privacy.md`). Issue ids are `project#key`, each stage and agent state is a
+fixed word with the text form's words beside it, and decision options are numbered from 1.
+Times, such as when an issue last changed, are milliseconds since 1970, and due dates are
+`YYYY-MM-DD`; a value temet-work does not know, such as a due date the tracker does not
+give, is `null`. `--json` on any other command is refused
+with the usage; inside a value, a title, a body, a review point or a reason it is a word
+like any other.
 
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
@@ -192,7 +197,14 @@ asking the daemon. The build id is the commit the binary was built from, as
 
 A command an agent runs is recorded as that agent's (see "How the daemon knows who sent a
 command"). A ruling is recorded as a decision, listed by `temet-work status` with its
-numbered options.
+numbered options, its cost to undo and its point: the issue's merge, after which
+overturning it costs more. An approval costs high, since the loop does not take back a
+merged change, and a send-back costs low, since the author's fix finishes either way and
+the issue merges once the checks pass. `status --json` gives the cost as
+`low`, `medium` or `high`, and the point as `merge` with whether the issue is past it,
+which it is once the issue is deploying, verifying or done. It gives the point no time,
+since nothing in temet-work knows when a merge will happen. A choice that is not a ruling
+has neither, nor has a ruling recorded before rulings kept them.
 
 ## Overturning a decision
 

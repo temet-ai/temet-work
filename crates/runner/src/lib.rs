@@ -779,6 +779,7 @@ impl Part for Runners {
         match effect {
             Effect::Run {
                 launch,
+                runtime,
                 program,
                 before,
             } => {
@@ -881,6 +882,8 @@ impl Part for Runners {
                                 machine: launch.machine.clone(),
                                 folder: launch.folder.clone(),
                                 secret_digest: Some(secret_digest),
+                                runtime: Some(runtime.clone()),
+                                model: brief.model.clone(),
                             }],
                             effects: Vec::new(),
                         }
@@ -1008,6 +1011,7 @@ mod tests {
                 argv: argv.iter().map(|a| a.to_string()).collect(),
                 env: vec![],
             },
+            runtime: "fake".into(),
         };
         let Outcome::Done { events, .. } = part.carry_out(&run, w) else {
             panic!("not started");
@@ -1022,6 +1026,48 @@ mod tests {
         let mut part = Runners::default();
         part.add(Box::new(FakeRunner::default()));
         part
+    }
+
+    #[test]
+    fn an_agent_starts_recorded_with_the_runtime_that_made_its_program_and_its_briefs_model() {
+        let mut w = world();
+        let mut part = runners();
+        let mut launch = w
+            .launch(
+                &GroupId::new("watch"),
+                Role::Author,
+                &IssueId::new("ankh", "1"),
+                Some(&FolderId::new("f1")),
+            )
+            .expect("launch");
+        launch.brief.model = Some("octavo".into());
+        let run = Effect::Run {
+            launch: Box::new(launch),
+            runtime: "hex".into(),
+            program: Program {
+                argv: vec!["cat".into()],
+                env: vec![],
+            },
+            before: None,
+        };
+        let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
+            panic!("not started");
+        };
+        let [Event::AgentStarted { runtime, model, .. }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(
+            (runtime.as_deref(), model.as_deref()),
+            (Some("hex"), Some("octavo"))
+        );
+        for e in &events {
+            w.apply(e);
+        }
+        let agent = w.agents.values().next().expect("started");
+        assert_eq!(
+            (agent.runtime.as_deref(), agent.model.as_deref()),
+            (Some("hex"), Some("octavo"))
+        );
     }
 
     #[test]
@@ -1113,6 +1159,7 @@ mod tests {
                 argv: vec!["cat".into()],
                 env: vec![],
             },
+            runtime: "fake".into(),
         };
         let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
             panic!("not started");
@@ -1150,6 +1197,8 @@ mod tests {
             machine: MachineId::new(LOCAL),
             folder: None,
             secret_digest: None,
+            runtime: None,
+            model: None,
         });
         assert_eq!(part.poll(&other, 0).events, vec![]);
         let stop = Effect::StopAgent {
@@ -1396,6 +1445,7 @@ mod tests {
                 argv: vec!["cat".into()],
                 env: vec![],
             },
+            runtime: "fake".into(),
         };
         let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
             panic!("not started");
@@ -1463,6 +1513,7 @@ mod tests {
                 argv: vec!["cat".into()],
                 env: vec![],
             },
+            runtime: "fake".into(),
         };
         let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
             panic!("not started");
@@ -1571,6 +1622,7 @@ mod tests {
                 argv: vec!["cat".into()],
                 env: vec![],
             },
+            runtime: "fake".into(),
         };
         assert!(matches!(
             part.carry_out(&run, &w),
@@ -1691,6 +1743,7 @@ mod tests {
                 argv: vec!["cat".into()],
                 env: vec![],
             },
+            runtime: "fake".into(),
         };
         let problem = match part.carry_out(&run, &w) {
             Outcome::Failed(why) => Some(why),
@@ -1735,6 +1788,7 @@ mod tests {
                 argv: vec!["cat".into()],
                 env: vec![],
             },
+            runtime: "fake".into(),
         };
         part.carry_out(&run, &w)
     }
@@ -1903,6 +1957,7 @@ mod tests {
                     argv: vec!["cat".into()],
                     env: vec![],
                 },
+                runtime: "fake".into(),
             };
             match part.carry_out(&run, &w) {
                 Outcome::Done { events: e, .. } => events.extend(e),

@@ -51,6 +51,7 @@ impl Part for Brains {
             events: vec![],
             effects: vec![Effect::Run {
                 launch: Box::new(launch),
+                runtime: "brains".into(),
                 program,
                 before: None,
             }],
@@ -88,6 +89,8 @@ impl Part for Terms {
                 machine: launch.machine.clone(),
                 folder: launch.folder.clone(),
                 secret_digest: None,
+                runtime: None,
+                model: None,
             }],
             effects: vec![],
         }
@@ -143,6 +146,84 @@ fn host(parts: Vec<Box<dyn Part>>, journal: Shared) -> Host {
 }
 
 #[test]
+fn each_event_is_applied_at_the_time_it_is_logged_with() {
+    let mut h = host(Vec::new(), Shared::default());
+    let issue = IssueId::new("ankh", "1");
+    h.handle(5_000, synced("1")).expect("handle");
+    assert_eq!(h.world().updated.at(&issue), Some(5_000));
+    // The same again changes nothing, so the time stays.
+    h.handle(7_000, synced("1")).expect("handle");
+    assert_eq!(h.world().updated.at(&issue), Some(5_000));
+    let renamed = Event::IssueSynced {
+        issue: issue.clone(),
+        title: "Mend the clock tower".into(),
+        milestone: Some(MilestoneId::new("m1")),
+        depends_on: vec![],
+        order: 1,
+        closed: false,
+    };
+    h.handle(9_000, renamed).expect("handle");
+    assert_eq!(h.world().updated.at(&issue), Some(9_000));
+}
+
+/// Gives the web addresses of every project, as a tracker or code-host family
+/// does: `issues` from one part, `code` from another.
+struct Places {
+    issues: Option<&'static str>,
+    code: Option<&'static str>,
+}
+
+impl Part for Places {
+    fn id(&self) -> &'static str {
+        "places"
+    }
+
+    fn addresses(&self, world: &World) -> BTreeMap<ProjectId, crate::model::Addresses> {
+        world
+            .projects
+            .keys()
+            .map(|id| {
+                let at = |a: Option<&str>| a.map(|a| format!("{a}/{id}"));
+                (
+                    id.clone(),
+                    crate::model::Addresses {
+                        issues: at(self.issues),
+                        code: at(self.code),
+                    },
+                )
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn each_round_the_parts_addresses_are_put_in_the_world_and_the_first_part_wins() {
+    let parts: Vec<Box<dyn Part>> = vec![
+        Box::new(Places {
+            issues: Some("https://tracker.example.com"),
+            code: None,
+        }),
+        Box::new(Places {
+            issues: Some("https://other.example.com"),
+            code: Some("https://git.example.com"),
+        }),
+    ];
+    let mut h = host(parts, Shared::default());
+    let ankh = ProjectId::new("ankh");
+    // The project came from the configuration after the host started: the next
+    // round has it.
+    assert!(!h.world().addresses.contains_key(&ankh));
+    h.tick(0).expect("tick");
+    assert_eq!(
+        h.world().addresses[&ankh],
+        crate::model::Addresses {
+            issues: Some("https://tracker.example.com/ankh".into()),
+            code: Some("https://git.example.com/ankh".into()),
+        }
+    );
+}
+
+#[test]
 fn a_synced_issue_starts_a_refiner_through_the_parts_and_logs_it() {
     let journal = Shared::default();
     let mut h = host(
@@ -191,6 +272,8 @@ fn a_tick_starts_one_investigator_for_a_group_short_of_work_and_logs_its_start_a
                 machine: MachineId::new("morpork"),
                 folder: None,
                 secret_digest: None,
+                runtime: None,
+                model: None,
             },
         ],
         "one start, the second tick none"

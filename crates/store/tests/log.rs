@@ -17,6 +17,14 @@ fn path(name: &str) -> PathBuf {
     p
 }
 
+/// The world `events` make when each is applied at `at_ms`, as the daemon
+/// applies them as they come.
+fn applied(at_ms: u64, events: &[Event]) -> World {
+    World::default()
+        .replay_at(events.iter().map(|e| (at_ms, e)))
+        .0
+}
+
 fn events() -> Vec<Event> {
     vec![
         Event::GroupCreated {
@@ -73,15 +81,24 @@ fn appends_and_reads_back_in_order_with_numbers_from_one() {
 }
 
 #[test]
-fn replaying_the_log_gives_the_same_state_as_applying_the_events() {
+fn replaying_the_log_gives_the_same_state_and_change_times_as_applying_the_events() {
     let p = path("replay");
     let (mut log, _) = Log::open(&p).expect("open");
-    for e in events() {
-        log.append(0, &e).expect("append");
+    let mut live = World::default();
+    // A minute apart, as the daemon stamps them when it applies them.
+    for (n, e) in (0..).zip(events()) {
+        let at_ms = 1_795_000_000_000 + n * 60_000;
+        log.append(at_ms, &e).expect("append");
+        live.apply_at(at_ms, &e);
     }
     drop(log);
     let (_, entries) = Log::open(&p).expect("reopen");
-    assert_eq!(replay(&entries), World::replay(&events()).0);
+    let replayed = replay(&entries);
+    assert_eq!(replayed, live);
+    // The plan, the fourth event, was the last change to ankh#1.
+    let issue = IssueId::new("ankh", "1");
+    assert_eq!(replayed.updated.at(&issue), Some(1_795_000_180_000));
+    assert_eq!(replayed.updated.at(&issue), live.updated.at(&issue));
 }
 
 #[test]
@@ -111,6 +128,8 @@ fn replaying_the_log_gives_the_same_rules_section_after_a_restart() {
                 reason: "easiest to undo".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             },
         },
         Event::DecisionOverturned {
@@ -224,6 +243,7 @@ fn pull_requests_by_repository_survive_the_log() {
         issue: IssueId::new("guild", "GLD-1"),
         pull: None,
         pulls: [(ProjectId::new("ui"), "12".to_string())].into(),
+        replies: Vec::new(),
     };
     log.append(0, &event).expect("append");
     drop(log);
@@ -232,17 +252,19 @@ fn pull_requests_by_repository_survive_the_log() {
 }
 
 #[test]
-fn an_agent_started_before_secrets_reads_with_no_digest_and_a_digest_survives_the_log() {
+fn an_agent_started_before_secrets_reads_with_no_digest_runtime_or_model_and_each_survives_the_log()
+{
     use temet_work_core::ids::AgentId;
     use temet_work_core::sender::Digest;
     let p = path("agent-digest");
-    // As a daemon wrote it before agents had secrets.
+    // As a daemon wrote it before agents had secrets, runtimes or models on record.
     let old = r#"{"seq":1,"at_ms":0,"event":{"AgentStarted":{"agent":"author-1","group":"watch","role":"Author","issue":{"project":"ankh","key":"1"},"machine":"local","folder":"ankh-1"}}}"#;
     std::fs::write(&p, format!("{old}\n")).expect("write");
     let (mut log, entries) = Log::open(&p).expect("an old log opens");
+    let author = &replay(&entries).agents[&AgentId::new("author-1")];
     assert_eq!(
-        replay(&entries).agents[&AgentId::new("author-1")].secret_digest,
-        None
+        (&author.secret_digest, &author.runtime, &author.model),
+        (&None, &None, &None)
     );
     let digest = Digest("ab".repeat(32));
     let event = Event::AgentStarted {
@@ -253,14 +275,18 @@ fn an_agent_started_before_secrets_reads_with_no_digest_and_a_digest_survives_th
         machine: MachineId::new("local"),
         folder: None,
         secret_digest: Some(digest.clone()),
+        runtime: Some("hex".into()),
+        model: Some("anthill".into()),
     };
     log.append(1, &event).expect("append");
     drop(log);
     let entries = Log::read(&p).expect("read");
     assert_eq!(entries[1].event, event);
+    let reviewer = &replay(&entries).agents[&AgentId::new("reviewer-1")];
+    assert_eq!(reviewer.secret_digest, Some(digest));
     assert_eq!(
-        replay(&entries).agents[&AgentId::new("reviewer-1")].secret_digest,
-        Some(digest)
+        (reviewer.runtime.as_deref(), reviewer.model.as_deref()),
+        (Some("hex"), Some("anthill"))
     );
 }
 
@@ -287,6 +313,8 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
             machine: MachineId::new("morpork"),
             folder: Some(FolderId::new("f1")),
             secret_digest: None,
+            runtime: None,
+            model: None,
         },
         limited.clone(),
     ]);
@@ -298,7 +326,7 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
     // A daemon restarted while the agent waits on its limit still knows when it resets.
     let (mut log, entries) = Log::open(&p).expect("reopen");
     let world = replay(&entries);
-    assert_eq!(world, World::replay(&events).0);
+    assert_eq!(world, applied(0, &events));
     assert_eq!(world.agents[&author].limit_reset(), Some(1_796_060_400_000));
 
     // Continued, then the same limit again: it is not waited on a second time.
@@ -310,12 +338,12 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
         limited,
     ];
     for e in &more {
-        log.append(1, e).expect("append");
+        log.append(0, e).expect("append");
     }
     events.extend(more);
     drop(log);
     let world = replay(&Log::read(&p).expect("read"));
-    assert_eq!(world, World::replay(&events).0);
+    assert_eq!(world, applied(0, &events));
     assert_eq!(world.agents[&author].continued, Some(1_796_060_400_000));
     assert_eq!(world.agents[&author].limit_reset(), None);
 }
@@ -361,7 +389,7 @@ fn replaying_an_investigation_gives_the_same_state_as_applying_its_events() {
     drop(log);
     let (_, entries) = Log::open(&p).expect("reopen");
     let replayed = replay(&entries);
-    assert_eq!(replayed, World::replay(&all).0);
+    assert_eq!(replayed, applied(0, &all));
     let investigation = &replayed.investigations[&watch];
     assert_eq!(
         (

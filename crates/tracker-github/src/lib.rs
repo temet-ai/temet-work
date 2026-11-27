@@ -6,7 +6,9 @@
 //! test run, the real transport runs nothing.
 
 use serde_json::Value;
-use temet_work_tracker::{TrackedIssue, TrackedMilestone, Tracker, TrackerError, depends_on};
+use temet_work_tracker::{
+    TrackedIssue, TrackedMilestone, Tracker, TrackerError, depends_on, is_date,
+};
 
 /// Runs `gh` with arguments and returns what it printed.
 pub trait Transport: Send {
@@ -38,21 +40,45 @@ impl Transport for Cli {
 const LIMIT: usize = 1000;
 const LIMIT_ARG: &str = "1000";
 
+/// The host GitHub is on when `GH_HOST` names none.
+const GITHUB: &str = "github.com";
+
 /// The GitHub adapter.
 pub struct GitHub {
     transport: Box<dyn Transport>,
+    /// The host `gh` reaches, which the web addresses name.
+    host: String,
 }
 
 impl Default for GitHub {
+    /// Runs the real `gh`, on the host `GH_HOST` names when the daemon has it,
+    /// as `gh` does.
     fn default() -> Self {
-        Self::with(Box::new(Cli))
+        Self::with(Box::new(Cli)).host(&std::env::var("GH_HOST").unwrap_or_default())
     }
 }
 
 impl GitHub {
-    /// A GitHub tracker that runs `gh` through `transport`.
+    /// A GitHub tracker that runs `gh` through `transport`, on github.com.
     pub fn with(transport: Box<dyn Transport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            host: GITHUB.into(),
+        }
+    }
+
+    /// The same tracker on `host`, such as a GitHub Enterprise server: a name,
+    /// or an address whose scheme is dropped. An empty one leaves it as it was.
+    pub fn host(mut self, host: &str) -> Self {
+        let host = host
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        if !host.is_empty() {
+            self.host = host.to_string();
+        }
+        self
     }
 
     fn run(&mut self, args: &[&str]) -> Result<String, TrackerError> {
@@ -121,6 +147,13 @@ fn parse_milestones(jsonl: &str) -> Result<Vec<TrackedMilestone>, TrackerError> 
                     .unwrap_or_default()
                     .to_string(),
                 open: v.get("open").and_then(Value::as_u64).unwrap_or(0),
+                // GitHub gives a time (`2026-12-12T08:00:00Z`); the date is its day.
+                due: v
+                    .get("due")
+                    .and_then(Value::as_str)
+                    .and_then(|d| d.get(..10))
+                    .filter(|d| is_date(d))
+                    .map(String::from),
             })
         })
         .collect()
@@ -161,9 +194,13 @@ impl Tracker for GitHub {
             &path,
             "--paginate",
             "--jq",
-            ".[] | {title: .title, open: .open_issues}",
+            ".[] | {title: .title, open: .open_issues, due: .due_on}",
         ])?;
         parse_milestones(&out)
+    }
+
+    fn address(&self, project: &str) -> Option<String> {
+        Some(format!("https://{}/{project}/issues", self.host))
     }
 
     fn closed(&mut self, project: &str, key: &str) -> Result<bool, TrackerError> {
@@ -228,7 +265,8 @@ impl Tracker for GitHub {
 mod tests {
     use super::*;
 
-    /// Replays `gh` output recorded from temet-ai/radar on 26 November 2026.
+    /// Replays `gh` output recorded from temet-ai/radar on 26 November 2026;
+    /// its milestones with their due dates on 27 November 2026.
     struct Recorded;
 
     impl Transport for Recorded {
@@ -273,6 +311,49 @@ mod tests {
         assert_eq!(
             temet_work_tracker::contract::check(&mut gh, &ReadOnly),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn a_milestones_due_date_is_the_day_of_github_due_on_and_none_without_one() {
+        let due = |jsonl: &str| -> Vec<(String, Option<String>)> {
+            parse_milestones(jsonl)
+                .expect("milestones")
+                .into_iter()
+                .map(|m| (m.title, m.due))
+                .collect()
+        };
+        assert_eq!(
+            due(include_str!("../tests/fixtures/radar-milestones.jsonl")),
+            [("Slack sign-in rework".to_string(), None)]
+        );
+        assert_eq!(
+            due(include_str!("../tests/fixtures/milestones-due.jsonl")),
+            [
+                ("The Clacks".to_string(), Some("2026-12-12".to_string())),
+                ("Snuff".to_string(), None)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_issues_address_is_on_github_or_the_host_gh_host_names() {
+        let gh = GitHub::with(Box::new(Recorded));
+        assert_eq!(
+            gh.address("ankh-morpork/watch").as_deref(),
+            Some("https://github.com/ankh-morpork/watch/issues")
+        );
+        for host in ["git.example.com", "https://git.example.com/"] {
+            let gh = GitHub::with(Box::new(Recorded)).host(host);
+            assert_eq!(
+                gh.address("ankh-morpork/watch").as_deref(),
+                Some("https://git.example.com/ankh-morpork/watch/issues")
+            );
+        }
+        let gh = GitHub::with(Box::new(Recorded)).host("");
+        assert_eq!(
+            gh.address("ankh-morpork/watch").as_deref(),
+            Some("https://github.com/ankh-morpork/watch/issues")
         );
     }
 

@@ -14,12 +14,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::brief;
 use crate::effect::Effect;
 use crate::event::{Event, Verdict};
-use crate::ids::{AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, ProjectId, RuleId};
+use crate::ids::{
+    AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId, RuleId,
+};
 use crate::launch::Launch;
 use crate::model::Decision;
 use crate::model::{
-    Agent, AgentState, Area, DecisionKind, Folder, Group, INVESTIGATE_EVERY, Investigation, Issue,
-    Project, Role, Rule, RuleState, Stage,
+    Addresses, Agent, AgentState, Area, DecisionKind, Folder, Group, INVESTIGATE_EVERY,
+    Investigation, Issue, Project, Review, Role, Rule, RuleState, Stage,
 };
 use crate::settings::{self, FILE, Scope, Value};
 
@@ -67,8 +69,78 @@ pub struct World {
     /// What the build's adapters offer for the settings that name one, put in by
     /// the host. It is not built from events.
     pub catalog: BTreeMap<String, crate::settings::Choice>,
+    /// The open milestones each project's or area's tracker last listed, with
+    /// each one's due date as `YYYY-MM-DD` when the tracker gives one.
+    pub milestones: BTreeMap<ProjectId, BTreeMap<MilestoneId, Option<String>>>,
+    /// Each project's and area's web addresses, put in by the host each round
+    /// from what the parts give. It is not built from events.
+    pub addresses: BTreeMap<ProjectId, Addresses>,
+    /// When each issue last changed, from the times events were applied at.
+    pub updated: Updated,
     /// How many events have been applied.
     pub applied: u64,
+}
+
+/// When each issue last changed: the time of the last event after which its
+/// record differed. Only events applied with a time ([`World::apply_at`]) set
+/// one; a world replayed without times has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Updated {
+    /// The time, in milliseconds since 1970, by issue.
+    at: BTreeMap<IssueId, u64>,
+    /// A mark of each issue's record after the last event, to tell whether the
+    /// next one changed it ([`mark`]).
+    marks: BTreeMap<IssueId, u64>,
+}
+
+impl Updated {
+    /// When `issue` last changed, in milliseconds since 1970; none when no event
+    /// with a time changed it.
+    pub fn at(&self, issue: &IssueId) -> Option<u64> {
+        self.at.get(issue).copied()
+    }
+
+    /// Marks every issue as it is now, and stamps `at_ms` on each whose mark
+    /// changed, when there is a time.
+    fn note(&mut self, issues: &BTreeMap<IssueId, Issue>, at_ms: Option<u64>) {
+        for (id, issue) in issues {
+            let m = mark(issue);
+            let changed = match self.marks.get_mut(id) {
+                Some(old) if *old == m => false,
+                Some(old) => {
+                    *old = m;
+                    true
+                }
+                None => {
+                    self.marks.insert(id.clone(), m);
+                    true
+                }
+            };
+            if let (true, Some(at)) = (changed, at_ms) {
+                self.at.insert(id.clone(), at);
+            }
+        }
+    }
+}
+
+/// A mark of an issue's record: two records with different marks differ. Text
+/// that changes only together with the issue's stage or with a count, its plan,
+/// what it is to fix, its review points and the author's replies, is marked by
+/// its count, so marking every issue after every event stays cheap.
+fn mark(i: &Issue) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    (&i.id, &i.title, &i.milestone, &i.depends_on, i.order).hash(&mut h);
+    (i.stage, &i.group, &i.folder, &i.other_folders).hash(&mut h);
+    i.plan
+        .as_ref()
+        .map(|p| (p.checks.len(), p.repos.len(), p.settings.len()))
+        .hash(&mut h);
+    (i.review_ok, i.checks_ok, &i.pulls, &i.merged, i.fix.len()).hash(&mut h);
+    (i.told, i.fix_keeps_round, i.round, i.closed_by_loop).hash(&mut h);
+    let replies: usize = i.reviews.iter().map(|r| r.replies.len()).sum();
+    (i.has_merged, i.review_waived, i.reviews.len(), replies).hash(&mut h);
+    h.finish()
 }
 
 impl World {
@@ -92,8 +164,41 @@ impl World {
         (self, effects)
     }
 
-    /// Applies one event and returns what the daemon must do.
+    /// Builds the state from events in order onto this world, each applied at
+    /// the time it was logged with ([`World::apply_at`]), with every effect they
+    /// asked for. A log replayed this way gives each issue the time it last
+    /// changed, the same as when its events were first applied.
+    pub fn replay_at<'a>(
+        mut self,
+        events: impl IntoIterator<Item = (u64, &'a Event)>,
+    ) -> (Self, Vec<Effect>) {
+        let mut effects = Vec::new();
+        for (at_ms, event) in events {
+            effects.extend(self.apply_at(at_ms, event));
+        }
+        (self, effects)
+    }
+
+    /// Applies one event and returns what the daemon must do. It gives no issue
+    /// a time it changed: [`World::apply_at`] does.
     pub fn apply(&mut self, event: &Event) -> Vec<Effect> {
+        let out = self.change(event);
+        self.updated.note(&self.issues, None);
+        out
+    }
+
+    /// Applies one event that happened at `at_ms`, in milliseconds since 1970,
+    /// and returns what the daemon must do. Each issue whose record it changed
+    /// last changed at `at_ms`; an event that changes no issue leaves the times
+    /// alone.
+    pub fn apply_at(&mut self, at_ms: u64, event: &Event) -> Vec<Effect> {
+        let out = self.change(event);
+        self.updated.note(&self.issues, Some(at_ms));
+        out
+    }
+
+    /// Changes the state for one event and returns what the daemon must do.
+    fn change(&mut self, event: &Event) -> Vec<Effect> {
         self.applied += 1;
         let mut out = Vec::new();
         match event {
@@ -298,6 +403,7 @@ impl World {
                     closed_by_loop: false,
                     has_merged: false,
                     review_waived: false,
+                    reviews: Vec::new(),
                 });
                 entry.title = title.clone();
                 entry.milestone = milestone.clone();
@@ -315,6 +421,7 @@ impl World {
                     entry.has_merged = false;
                     entry.fix.clear();
                     entry.review_waived = false;
+                    entry.reviews.clear();
                 }
                 // A pull request that closes its issue on merge must not skip deploy
                 // and verify: the loop closes it itself when they pass.
@@ -341,6 +448,22 @@ impl World {
                     self.release(folders, &mut out);
                 }
             }
+            Event::MilestoneSynced {
+                project,
+                milestone,
+                due,
+                open,
+            } => {
+                let listed = self.milestones.entry(project.clone()).or_default();
+                if *open {
+                    listed.insert(milestone.clone(), due.clone());
+                } else {
+                    listed.remove(milestone);
+                }
+                if listed.is_empty() {
+                    self.milestones.remove(project);
+                }
+            }
             Event::AgentStarted {
                 agent,
                 group,
@@ -349,6 +472,8 @@ impl World {
                 machine,
                 folder,
                 secret_digest,
+                runtime,
+                model,
             } => {
                 self.agents.insert(
                     agent.clone(),
@@ -364,6 +489,8 @@ impl World {
                         secret_digest: secret_digest.clone(),
                         continued: None,
                         ended_waited_on: false,
+                        runtime: runtime.clone(),
+                        model: model.clone(),
                     },
                 );
                 // A new agent hears what its stage needs in its brief.
@@ -415,12 +542,23 @@ impl World {
                     out.extend(done);
                 }
             }
-            Event::PullRequestReady { issue, pull, pulls } => {
+            Event::PullRequestReady {
+                issue,
+                pull,
+                pulls,
+                replies,
+            } => {
                 let first = self
                     .issues
                     .get(issue)
                     .and_then(|i| self.repos_of(i).into_iter().next());
                 if let Some(i) = self.issues.get_mut(issue) {
+                    // The author's replies go on the review round its fix answers.
+                    if let Some(round) = Self::answered_round(i)
+                        && let Some(r) = i.reviews.iter_mut().rev().find(|r| r.round == round)
+                    {
+                        r.replies.extend(replies.iter().cloned());
+                    }
                     // Older logs name one pull request: the first repository's.
                     let old = pull.clone().zip(first).map(|(n, repo)| (repo, n));
                     for (repo, number) in old
@@ -464,10 +602,21 @@ impl World {
             } => {
                 let rounds = self.setting_number(issue, None, "review_rounds");
                 let arbiter_running = self.running(issue, Role::Arbiter).is_some();
+                let reviewer = self.running(issue, Role::Reviewer).map(|a| a.id.clone());
                 let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == (Stage::InReview { round: *round })
                 {
+                    i.reviews.push(Review {
+                        round: *round,
+                        reviewer,
+                        approve: matches!(verdict, Verdict::Approve),
+                        points: match verdict {
+                            Verdict::Approve => Vec::new(),
+                            Verdict::Block { points } => points.clone(),
+                        },
+                        replies: Vec::new(),
+                    });
                     // The latest verdict counts: a block takes an approval back.
                     i.review_ok = matches!(verdict, Verdict::Approve);
                     match verdict {
@@ -1231,6 +1380,16 @@ impl World {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// The review round an issue's next pull request answers: the round it is
+    /// being fixed for, when a review or a ruling sent it back. A fix for CI, a
+    /// conflict or a refused merge answers no review round.
+    pub fn answered_round(issue: &Issue) -> Option<u8> {
+        match issue.stage {
+            Stage::Fixing { round } if !issue.fix_keeps_round => Some(round),
+            _ => None,
         }
     }
 

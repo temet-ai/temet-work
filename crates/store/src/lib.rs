@@ -163,9 +163,18 @@ impl Journal for Log {
     }
 }
 
-/// Rebuilds the loop's state from logged entries, in order.
+/// Rebuilds the loop's state from logged entries, in order, each applied at the
+/// time it was logged with, so each issue keeps the time it last changed.
 pub fn replay(entries: &[Entry]) -> World {
-    World::replay(entries.iter().map(|e| &e.event)).0
+    replay_onto(World::default(), entries)
+}
+
+/// Rebuilds the loop's state from logged entries onto `world`, in order, each
+/// applied at the time it was logged with.
+pub fn replay_onto(world: World, entries: &[Entry]) -> World {
+    world
+        .replay_at(entries.iter().map(|e| (e.at_ms, &e.event)))
+        .0
 }
 
 /// The store part.

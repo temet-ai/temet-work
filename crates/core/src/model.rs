@@ -5,7 +5,7 @@ use crate::ids::{
 };
 
 /// Where an issue is in the loop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Stage {
     /// Synced from the tracker, not taken by a group yet.
     New,
@@ -119,6 +119,28 @@ pub struct Issue {
     /// asked again, and it merges once the checks pass.
     #[serde(default)]
     pub review_waived: bool,
+    /// Its review rounds, in the order they finished.
+    #[serde(default)]
+    pub reviews: Vec<Review>,
+}
+
+/// One finished review round of an issue.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Review {
+    /// The round, from 1.
+    pub round: u8,
+    /// The reviewer working on the issue when the round finished; none when no
+    /// reviewer was running, as when a person reviewed it.
+    pub reviewer: Option<AgentId>,
+    /// Whether it approved the change.
+    pub approve: bool,
+    /// What a block asked to change; empty for an approval.
+    pub points: Vec<String>,
+    /// The author's replies to it, sent with the fix that answers this round
+    /// (`temet-work ready --reply`); empty until then, or when the author sent
+    /// none.
+    #[serde(default)]
+    pub replies: Vec<String>,
 }
 
 impl Issue {
@@ -251,6 +273,14 @@ pub struct Agent {
     /// `starts` limit: one stopped because its issue moved on had finished its step.
     #[serde(default)]
     pub ended_waited_on: bool,
+    /// The runtime it was started with; none for an agent from an older log.
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// The model its brief named when it started; none when its settings named
+    /// none, or for an agent from an older log. A person may change the model
+    /// setting while it runs; this stays what it runs.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl AgentState {
@@ -422,6 +452,70 @@ pub struct Decision {
     /// Why the person overturned it.
     #[serde(default)]
     pub overturn_reason: String,
+    /// What overturning it costs; none for a choice, and for a ruling from an
+    /// older log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    /// The point after which overturning it costs more; none for a choice, and
+    /// for a ruling from an older log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<Point>,
+}
+
+/// What overturning a decision costs: how much work it throws away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Cost {
+    /// Nothing done is thrown away.
+    Low,
+    /// Some work is done again.
+    Medium,
+    /// What it led to cannot be taken back by the loop.
+    High,
+}
+
+/// The point after which overturning a decision costs more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Point {
+    /// Its issue's merge. Once the issue is deploying, verifying or done, the
+    /// loop no longer acts on an overturn.
+    Merge,
+}
+
+impl Point {
+    /// Whether `issue` is past this point.
+    pub fn passed(self, issue: &Issue) -> bool {
+        match self {
+            Self::Merge => matches!(
+                issue.stage,
+                Stage::Deploying | Stage::Verifying | Stage::Done
+            ),
+        }
+    }
+}
+
+impl Decision {
+    /// What a ruling records when it is made: an approval costs high to undo,
+    /// since once the change merges the loop does not take it back; sending the
+    /// change back costs low, since overturning it throws no work away (the
+    /// author's fix finishes and the issue merges once the checks pass). Both
+    /// stop being cheap at the issue's merge.
+    pub fn ruling_cost(approve: bool) -> (Cost, Point) {
+        let cost = if approve { Cost::High } else { Cost::Low };
+        (cost, Point::Merge)
+    }
+}
+
+/// A project's or area's web addresses, as the part that holds each gives them.
+/// They follow from the configuration and the daemon's environment, so the log
+/// holds none of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Addresses {
+    /// Where its issues are, from its tracker.
+    pub issues: Option<String>,
+    /// Where its code is, from its code host.
+    pub code: Option<String>,
 }
 
 /// Where a rule is.
