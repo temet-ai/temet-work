@@ -279,6 +279,7 @@ impl World {
                     fix_keeps_round: false,
                     round: 0,
                     closed_by_loop: false,
+                    has_merged: false,
                     review_waived: false,
                 });
                 entry.title = title.clone();
@@ -294,6 +295,7 @@ impl World {
                     entry.checks_ok = None;
                     entry.pulls.clear();
                     entry.merged.clear();
+                    entry.has_merged = false;
                     entry.fix.clear();
                     entry.review_waived = false;
                 }
@@ -577,6 +579,7 @@ impl World {
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == Stage::Merging
                 {
+                    i.has_merged = true;
                     match repo {
                         Some(r) => {
                             i.merged.insert(r.clone());

@@ -111,6 +111,10 @@ pub struct Issue {
     /// Whether the loop closed it, after verifying it. One the tracker closed and
     /// later reopened is worked again; one the loop closed stays closed.
     pub closed_by_loop: bool,
+    /// Whether one of its pull requests has merged. A failed verify clears
+    /// `merged` and keeps this; reopening the issue in the tracker clears it.
+    #[serde(default)]
+    pub has_merged: bool,
     /// Whether a person's overturn of a ruling approved it: the review is not
     /// asked again, and it merges once the checks pass.
     #[serde(default)]
@@ -118,6 +122,18 @@ pub struct Issue {
 }
 
 impl Issue {
+    /// Whether a person closed it, as far as the loop can tell: done, not closed
+    /// by the loop after verifying it, and with no pull request of its merged,
+    /// since one that merged may have closed it. A closed dependency the loop
+    /// never saw open has no title and does not count. An investigator files
+    /// none of these again; reopening one in the tracker takes it off this list.
+    pub fn closed_by_a_person(&self) -> bool {
+        self.stage == Stage::Done
+            && !self.closed_by_loop
+            && !self.has_merged
+            && !self.title.is_empty()
+    }
+
     /// Takes every work folder the issue holds, the first one first.
     pub fn take_folders(&mut self) -> Vec<FolderId> {
         self.folder
