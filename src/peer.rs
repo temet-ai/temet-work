@@ -22,7 +22,10 @@ pub fn digest(secret: &str) -> Digest {
 pub fn of(stream: &UnixStream) -> Peer {
     match rustix::net::sockopt::socket_peercred(stream) {
         Ok(cred) => tree(cred.pid.as_raw_nonzero().get(), Path::new("/proc")),
-        Err(e) => Peer::Unreadable(format!("SO_PEERCRED: {e}")),
+        Err(e) => Peer::Unreadable {
+            why: format!("SO_PEERCRED: {e}"),
+            above: Vec::new(),
+        },
     }
 }
 
@@ -37,29 +40,40 @@ pub fn of(stream: &UnixStream) -> Peer {
 const DEEPEST: usize = 256;
 
 /// Reads process `pid` and its parents under `proc` (`/proc`): the digests of
-/// every agent secret in their environments. The process itself must be
-/// readable; a parent that is not, such as `sshd` or init running as another
-/// user, is passed over, since agents run as the daemon's own user.
+/// every agent secret in their environments. When the process's own environment
+/// cannot be read (it is not dumpable, or it has ended) the answer is
+/// [`Peer::Unreadable`] with what its parents hold, since `status`, which names
+/// the parent, stays readable. A parent that cannot be read, such as `sshd` or
+/// init running as another user, is passed over, since agents run as the
+/// daemon's own user.
 pub fn tree(pid: i32, proc: &Path) -> Peer {
     let mut found = Vec::new();
+    // Why the sending process itself could not be read, when it could not.
+    let mut unreadable = None;
     let mut pid = pid;
     for depth in 0..DEEPEST {
         let dir = proc.join(pid.to_string());
         let parent = parent(&dir);
         match std::fs::read(dir.join("environ")) {
             Ok(env) => found.extend(secrets(&env).map(|s| digest(&s))),
-            Err(e) if depth == 0 => return Peer::Unreadable(format!("process {pid}: {e}")),
+            Err(e) if depth == 0 => unreadable = Some(format!("process {pid}: {e}")),
             Err(_) => {}
         }
         match parent {
             Some(p) if p > 0 => pid = p,
             None if depth == 0 => {
-                return Peer::Unreadable(format!("process {pid} has ended"));
+                return Peer::Unreadable {
+                    why: format!("process {pid} has ended"),
+                    above: Vec::new(),
+                };
             }
             _ => break,
         }
     }
-    Peer::Read(found)
+    match unreadable {
+        Some(why) => Peer::Unreadable { why, above: found },
+        None => Peer::Read(found),
+    }
 }
 
 /// The values of [`SECRET_VAR`] in an environment as `/proc/PID/environ` holds it:
@@ -128,16 +142,36 @@ mod tests {
     }
 
     #[test]
-    fn a_sender_that_cannot_be_read_is_unreadable() {
-        let root = proc("gone", &[(30, 20, "")]);
-        let unreadable = tree(30, &root);
-        let gone = tree(99, &root);
+    fn the_parents_of_a_sender_that_cannot_be_read_are_still_read() {
+        let root = proc(
+            "hidden",
+            &[
+                // The sender has a status and no environ file.
+                (40, 30, ""),
+                (30, 0, "TEMET_WORK_AGENT_TOKEN=s1 TEMET_WORK_AGENT=author-1"),
+            ],
+        );
+        let got = tree(40, &root);
         let _ = std::fs::remove_dir_all(&root);
         assert!(
-            matches!(&unreadable, Peer::Unreadable(why) if why.starts_with("process 30:")),
-            "{unreadable:?}"
+            matches!(&got, Peer::Unreadable { why, above }
+                if why.starts_with("process 40: ") && *above == [digest("s1")]),
+            "{got:?}"
         );
-        assert!(matches!(gone, Peer::Unreadable(_)), "{gone:?}");
+    }
+
+    #[test]
+    fn a_sender_that_has_ended_is_unreadable_with_nothing_found() {
+        let root = proc("gone", &[(30, 0, "TEMET_WORK_AGENT_TOKEN=s1")]);
+        let got = tree(99, &root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            got,
+            Peer::Unreadable {
+                why: "process 99 has ended".into(),
+                above: Vec::new()
+            }
+        );
     }
 
     #[test]

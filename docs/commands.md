@@ -73,6 +73,13 @@ itself is in no log, reply, status or issue text.
   daemon's machine under `sshd`, which says nothing of the machine the command came from.
   The relay's mark only adds refusals, so a process on the daemon's machine that sets it
   is still judged by its own tree.
+- On Linux the sending process itself may be impossible to read: its program has no read
+  bit, it called `prctl(PR_SET_DUMPABLE, 0)`, or it has ended. The daemon still reads its
+  parents, so a secret found there refuses the command as above. A command that changes
+  something and names an agent is refused from such a process even when nothing is found,
+  and the refusal says why it could not be read. `status`, `issue`, `screen` and
+  `settings` still answer it. An agent's own `temet-work` stays alive and readable while
+  it waits for the reply.
 - A command that names no agent is a person's. It may read from anywhere. A command that
   changes something (`rule`, `overturn`, `retry`, `proposal`, `set` and `unset`) is
   refused when it carries an agent's secret; when, on Linux, the sending process or one of
