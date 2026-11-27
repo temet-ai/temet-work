@@ -262,7 +262,11 @@ impl Part for Runtimes {
             Err(e) => return Outcome::Failed(e),
         };
         let Some(launch) = world.launch(&group, role, issue, folder) else {
-            return Outcome::Failed(format!("{issue} is not known"));
+            return Outcome::Failed(format!(
+                "cannot start a {} on {issue}: it is not known, or no work folder is on the \
+                 machine its `machine` setting names",
+                role.name()
+            ));
         };
         // A folder on this machine is trusted before the agent starts in it. One on
         // another machine cannot be from here: the terminal's blocked prompt

@@ -172,7 +172,7 @@ pub struct Spec {
 }
 
 /// Every setting, in the order they are listed.
-pub const SPECS: [Spec; 15] = [
+pub const SPECS: [Spec; 16] = [
     Spec {
         key: "runtime",
         kind: Kind::Text,
@@ -187,6 +187,11 @@ pub const SPECS: [Spec; 15] = [
         key: "runner",
         kind: Kind::Text,
         about: "where an agent's terminal runs",
+    },
+    Spec {
+        key: "machine",
+        kind: Kind::Text,
+        about: "the machine of the work folder an agent is given; any machine when none is set",
     },
     Spec {
         key: "permission",
@@ -631,6 +636,27 @@ mod level {
             (Value::Number(3), Level::BuiltIn)
         );
         assert_eq!(r.source(), "built in");
+    }
+
+    #[test]
+    fn machine_takes_a_name_and_refuses_an_empty_one() {
+        for empty in ["", "  "] {
+            let refused = parse_value("machine", empty);
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|e| e.starts_with("machine takes")),
+                "{refused:?}"
+            );
+            assert!(check_value("machine", &Value::Text(empty.into())).is_err());
+        }
+        assert!(check_value("machine", &Value::Number(2)).is_err());
+        // Any name: a folder on it may be listed later.
+        assert_eq!(
+            parse_value("machine", "mac2"),
+            Ok(Value::Text("mac2".into()))
+        );
+        assert_eq!(builtin("machine"), None);
     }
 
     #[test]

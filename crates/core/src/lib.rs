@@ -13,6 +13,7 @@ pub mod host;
 pub mod ids;
 pub mod launch;
 pub mod model;
+pub mod placement;
 pub mod settings;
 pub mod text;
 pub mod world;

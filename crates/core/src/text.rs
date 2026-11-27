@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use crate::model::{AgentState, Stage};
+use crate::model::{AgentState, Role, Stage};
 use crate::world::World;
 
 /// A stage in a word or two.
@@ -118,6 +118,7 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     if done > 0 {
         let _ = writeln!(out, "  and {done} done");
     }
+    waiting(&mut out, world);
     let _ = writeln!(out, "Agents");
     for a in world.agents.values() {
         let issue = a
@@ -190,6 +191,31 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
         let _ = writeln!(out, "  {from}: {what}");
     }
     out
+}
+
+/// The issues waiting for a work folder on the machine a setting names; no
+/// section when there are none.
+fn waiting(out: &mut String, world: &World) {
+    let waits = world.machine_waits();
+    if waits.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "Waiting");
+    for w in waits {
+        let agent = if w.role == Role::Author {
+            String::new()
+        } else {
+            format!(" for its {}", w.role.name())
+        };
+        let none = w.none_in.map_or_else(String::new, |repo| {
+            format!(" ({repo} has no work folder there)")
+        });
+        let _ = writeln!(
+            out,
+            "  {} waiting for a work folder on {}{agent}{none}",
+            w.issue, w.machine
+        );
+    }
 }
 
 /// The settings in effect over `target` for `role`, one per line with the level
@@ -327,7 +353,6 @@ mod settings {
     use super::*;
     use crate::event::Event;
     use crate::ids::{IssueId, ProjectId};
-    use crate::model::Role;
     use crate::settings::{Choice, Scope, Target, Value};
 
     fn world() -> World {
@@ -421,6 +446,152 @@ radar#44, author
             "{for_author}"
         );
         assert!(settings(&w, &Target::parse("nowhere"), None).is_err());
+    }
+
+    #[test]
+    fn machine_is_listed_with_its_level_only_when_a_level_sets_it() {
+        use crate::command::Command;
+        let mut w = world();
+        let target = Target::parse("radar#44");
+        let listed = |w: &World| settings(w, &target, Some(Role::Author)).expect("known");
+        assert!(!listed(&w).contains("machine"), "{}", listed(&w));
+        for (at, role, value) in [
+            ("radar", None, "local"),
+            ("radar#44", None, "klatch"),
+            ("radar#44", Some(Role::Author), "mac"),
+        ] {
+            let set = Command::Set {
+                target: Target::parse(at),
+                role,
+                key: "machine".into(),
+                value: value.into(),
+            };
+            for e in w.events(None, &set).expect("accepted") {
+                w.apply(&e);
+            }
+        }
+        assert!(
+            listed(&w).contains("  machine        mac     task, set by person\n"),
+            "{}",
+            listed(&w)
+        );
+        let reviewer = settings(&w, &target, Some(Role::Reviewer)).expect("known");
+        assert!(
+            reviewer.contains("  machine        klatch  task, set by person\n"),
+            "{reviewer}"
+        );
+        let project = settings(&w, &Target::parse("radar"), None).expect("known");
+        assert!(
+            project.contains("  machine        local   project, set by person\n"),
+            "{project}"
+        );
+    }
+
+    #[test]
+    fn the_status_names_the_machine_an_issue_waits_for() {
+        use crate::ids::{FolderId, GroupId, MachineId};
+        use crate::model::Plan;
+        let issue = |key: &str| IssueId::new("radar", key);
+        let synced = |key: &str, depends_on: Vec<IssueId>| Event::IssueSynced {
+            issue: issue(key),
+            title: format!("Issue {key}"),
+            milestone: None,
+            depends_on,
+            order: key.parse().unwrap_or_default(),
+            closed: false,
+        };
+        let mac = |key: &str| Event::SettingSet {
+            scope: Scope::Task(issue(key)),
+            role: None,
+            key: "machine".into(),
+            value: Value::Text("mac".into()),
+            by: "person".into(),
+        };
+        let planned = |key: &str| Event::PlanWritten {
+            issue: issue(key),
+            plan: Plan::default(),
+        };
+        let (mut w, _) = World::replay(&[
+            Event::ProjectAdded {
+                project: ProjectId::new("radar"),
+                tracker: "t".into(),
+                name: "city/radar".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::FolderAdded {
+                folder: FolderId::new("radar-mac"),
+                project: ProjectId::new("radar"),
+                machine: MachineId::new("mac"),
+                path: "/srv/radar".into(),
+            },
+            Event::GroupCreated {
+                group: GroupId::new("watch"),
+                name: "Night watch".into(),
+                projects: vec![ProjectId::new("radar")],
+                areas: Vec::new(),
+                milestones: Vec::new(),
+                refining_at_once: 3,
+                model: None,
+            },
+            // radar#1 takes the Mac folder, radar#2 waits for it, radar#3 for radar#2.
+            synced("1", vec![]),
+            synced("2", vec![]),
+            synced("3", vec![issue("2")]),
+            mac("1"),
+            mac("2"),
+            mac("3"),
+            planned("1"),
+            planned("2"),
+            planned("3"),
+        ]);
+        let want = "\
+Projects
+  radar: city/radar in t
+Groups
+  watch (Night watch): radar; every milestone; refines 3 at a time
+Issues
+  radar#1  working  Issue 1
+  radar#2  ready  Issue 2
+  radar#3  ready  Issue 3
+Waiting
+  radar#2 waiting for a work folder on mac
+Agents
+Decisions
+Rules
+Settings
+  radar#1: machine = mac, set by person
+  radar#2: machine = mac, set by person
+  radar#3: machine = mac, set by person
+Problems
+";
+        assert_eq!(text(&w, &BTreeMap::new()), want);
+        // `set` accepts a name no folder uses, and the status says there is none.
+        for (key, role) in [("2", None), ("1", Some(Role::Reviewer))] {
+            let set = crate::command::Command::Set {
+                target: Target::Issue(issue(key)),
+                role,
+                key: "machine".into(),
+                value: "mac2".into(),
+            };
+            for e in w.events(None, &set).expect("accepted") {
+                w.apply(&e);
+            }
+        }
+        w.apply(&Event::PullRequestReady {
+            issue: issue("1"),
+            pull: Some("7".into()),
+            pulls: Default::default(),
+        });
+        let status = text(&w, &BTreeMap::new());
+        assert!(
+            status.contains(
+                "Waiting\n  \
+                 radar#1 waiting for a work folder on mac2 for its reviewer (radar has no work folder there)\n  \
+                 radar#2 waiting for a work folder on mac2 (radar has no work folder there)\nAgents\n"
+            ),
+            "{status}"
+        );
     }
 
     #[test]

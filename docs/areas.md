@@ -59,7 +59,8 @@ one repository, the first in its plan's `repos`.
 Stage 2: an issue that changes several repositories.
 
 - The issue holds one free work folder in each repository its plan names, all on one
-  machine so that its author reaches every one, and all or none, so two issues cannot each
+  machine (the issue's `machine`, when that setting names one) so that its author reaches
+  every one, and all or none, so two issues cannot each
   hold half of what the other needs. Its author starts in the first, and makes the branch
   and one pull request per repository itself, on one branch name; the daemon only holds the
   folders.

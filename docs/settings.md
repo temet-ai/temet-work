@@ -41,6 +41,7 @@ too.
 | `runtime` | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
 | `model` | the runtime's own default | the agent's brief, so the runtime adapter |
 | `runner` | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
+| `machine` | none: any machine | the loop, per issue and role, when it picks a work folder (below) |
 | `permission` | `auto` | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
 | `review_rounds` | 3 | the loop, per issue |
 | `ci` | true | the code-host family, per issue |
@@ -56,6 +57,41 @@ every one of them through it. A setting with no value and no built-in value, suc
 
 How many issues a group refines at once stays on the group: it is how much the group
 takes on, not how a piece of work is done.
+
+## Which machine an agent runs on
+
+`machine` takes the name a `[[folder]]` entry has in its own `machine` field, and limits an
+agent to those entries. The daemon's own machine is `local`. Unset, it limits nothing. It
+picks the checkout, and the entry's own field still says where that checkout is
+(`docs/configuration.md`).
+
+- An author takes a free folder on its machine. With none free, the issue stays ready and
+  holds no folder, and its author starts when one is released. A free folder on another
+  machine does not start it. An issue across several repositories takes one there in each
+  of them, or none.
+- A refiner, reviewer or arbiter holds no checkout of its own and may share a held one on
+  its machine. If the project has none there, the agent waits. It is not moved to another
+  machine. An issue whose refiner cannot start stays new and takes no refining slot.
+- An author that already holds a folder keeps it when the setting changes. The new value
+  applies the next time a folder is picked.
+- A name no folder uses is accepted, because a folder may be listed later. An empty value
+  is refused.
+
+To run authors on a Mac while reviewers stay on the daemon's machine, name both roles:
+
+```
+temet-work set radar --role author machine mac
+temet-work set radar --role reviewer machine local
+```
+
+A value for every role at a nearer level, such as `temet-work set radar#44 machine mac`,
+moves that issue's reviewer too, because the task is asked before the project (Roles,
+above).
+
+`temet-work status` lists each issue that waits for this under Waiting, as
+`radar#44 waiting for a work folder on mac`. The line names the agent when it is not the
+author, and says when the project has no work folder on that machine at all, which is how a
+misspelt name shows.
 
 ## Setting them
 

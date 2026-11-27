@@ -3,8 +3,9 @@
 //! [`World::apply`] takes one event, changes the state and returns what the daemon
 //! must do. After every event the loop places work: it takes the next issue for
 //! refining and starts an author on a ready issue when a work folder of its
-//! project is free and the issues it depends on are done. Nothing here reads a
-//! clock, a file or the network, so the same events always give the same state.
+//! project is free, on the machine its `machine` setting names, and the issues it
+//! depends on are done. Nothing here reads a clock, a file or the network, so the
+//! same events always give the same state.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -633,6 +634,7 @@ impl World {
             }
         }
         out.extend(self.place());
+        out.retain(|e| !self.waits_for_machine(e));
         out
     }
 
@@ -815,30 +817,35 @@ impl World {
                 out.start.push(effect);
             }
         }
+        out.start.retain(|e| !self.waits_for_machine(e));
         out
     }
 
-    /// The folder an agent on `issue` runs in: its own, else (for a reader) a
-    /// free one of the issue's project when there is one, so it does not work in a
-    /// folder an author is changing.
-    pub fn folder_for(&self, issue: &Issue, folder: Option<&FolderId>) -> Option<&Folder> {
+    /// The folder an agent of `role` on `issue` runs in: its own, else (for a
+    /// reader) a free one of the issue's project when there is one, so it does not
+    /// work in a folder an author is changing. Only folders on the role's
+    /// `machine` count, when one is set.
+    pub fn folder_for(
+        &self,
+        issue: &Issue,
+        role: Role,
+        folder: Option<&FolderId>,
+    ) -> Option<&Folder> {
         match folder {
             Some(f) => self.folders.get(f),
-            None => {
-                let repo = self.repo_of(issue).map_or(&issue.id.project, |p| &p.id);
-                self.folders
-                    .values()
-                    .find(|f| &f.project == repo && f.holder.is_none())
-                    .or_else(|| self.folders.values().find(|f| &f.project == repo))
-            }
+            None => self
+                .usable_folders(issue, role)
+                .find(|f| f.holder.is_none())
+                .or_else(|| self.usable_folders(issue, role).next()),
         }
     }
 
     /// What starting an agent takes: its id, the machine and folder it runs in,
     /// and its brief. The id is its role and a number, counting every agent of
     /// that role this world has started (`author-3`). An agent with no work
-    /// folder of its own runs in any folder of its project without holding it.
-    /// `None` when the issue is unknown.
+    /// folder of its own runs in a folder of its project without holding it.
+    /// `None` when the issue is unknown, or when such an agent has no folder on
+    /// the machine its `machine` setting names.
     pub fn launch(
         &self,
         group: &GroupId,
@@ -847,8 +854,11 @@ impl World {
         folder: Option<&FolderId>,
     ) -> Option<Launch> {
         let i = self.issues.get(issue)?;
+        if folder.is_none() && !self.has_place(i, role) {
+            return None;
+        }
         let n = self.agents.values().filter(|a| a.role == role).count() + 1;
-        let place = self.folder_for(i, folder);
+        let place = self.folder_for(i, role, folder);
         let path = place.map(|f| std::path::PathBuf::from(&f.path));
         let shared = folder.is_none() && place.is_some_and(|f| f.holder.is_some());
         // An author holding folders in several repositories is told each one.
@@ -1026,7 +1036,7 @@ impl World {
 
     /// Whether every issue `issue` depends on is done. An issue the loop has not
     /// seen counts as not done.
-    fn ready_to_start(&self, issue: &Issue) -> bool {
+    pub(crate) fn ready_to_start(&self, issue: &Issue) -> bool {
         issue
             .depends_on
             .iter()
@@ -1046,7 +1056,7 @@ impl World {
 
     /// Whether a group works on an issue: one of its projects, and one of its
     /// milestones when it names any.
-    fn in_scope(&self, group: &Group, issue: &Issue) -> bool {
+    pub(crate) fn in_scope(&self, group: &Group, issue: &Issue) -> bool {
         let from = &issue.id.project;
         let taken = group.projects.contains(from)
             || group.areas.contains(from)
@@ -1065,9 +1075,14 @@ impl World {
 
     /// A free work folder in each of `repos`, in their order and all on one
     /// machine, since one author has to reach every one: the machine of the first
-    /// repository's folder. `None` when no machine has them all, so two issues
-    /// cannot each hold half of what the other needs.
-    fn free_folders(&self, repos: &[ProjectId]) -> Option<Vec<FolderId>> {
+    /// repository's folder, which is `on` when that names one. `None` when no such
+    /// machine has them all, so two issues cannot each hold half of what the other
+    /// needs.
+    pub(crate) fn free_folders(
+        &self,
+        repos: &[ProjectId],
+        on: Option<&MachineId>,
+    ) -> Option<Vec<FolderId>> {
         let (first, others) = repos.split_first()?;
         let free = |repo: &ProjectId, machine: &MachineId| {
             self.folders
@@ -1077,6 +1092,7 @@ impl World {
         self.folders
             .values()
             .filter(|f| &f.project == first && f.holder.is_none())
+            .filter(|f| on.is_none_or(|m| &f.machine == m))
             .find_map(|start| {
                 std::iter::once(Some(start.id.clone()))
                     .chain(
@@ -1102,6 +1118,8 @@ impl World {
                 .issues
                 .values()
                 .filter(|i| i.stage == Stage::New && i.group.is_none() && self.in_scope(group, i))
+                // One whose refiner has no folder on its machine takes no slot.
+                .filter(|i| self.has_place(i, Role::Refiner))
                 .collect();
             new.sort_by_key(|i| Self::rank(group, i));
             let take: Vec<IssueId> = new
@@ -1139,7 +1157,8 @@ impl World {
                     .get(&id)
                     .map(|i| self.repos_of(i))
                     .unwrap_or_default();
-                let Some(mut picked) = self.free_folders(&repos) else {
+                let on = self.machine_for(&id, Role::Author);
+                let Some(mut picked) = self.free_folders(&repos, on.as_ref()) else {
                     continue;
                 };
                 for f in &picked {

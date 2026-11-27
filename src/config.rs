@@ -803,6 +803,79 @@ starts = 1
     }
 
     #[test]
+    fn a_machine_is_read_from_every_settings_table() {
+        let text =
+            NEW.replace(
+                "review_rounds = 4\n",
+                "review_rounds = 4\nmachine = \"local\"\n",
+            )
+            .replace(
+                "[settings.reviewer]\n",
+                "[settings.author]\nmachine = \"mac\"\n\n[settings.reviewer]\n",
+            )
+            .replace("ci = false\n", "ci = false\nmachine = \"infra\"\n")
+            .replace(
+                "model = \"opus\"\n",
+                "model = \"opus\"\nmachine = \"mac\"\n",
+            ) + "\n[milestone.settings.reviewer]\nmachine = \"deus\"\n";
+        let w = world_of(&text);
+        let get = |scope: Scope, role: Option<Role>| {
+            w.settings
+                .get(&(scope, role, "machine".to_string()))
+                .map(|e| e.value.to_string())
+        };
+        let milestone = |of: &str, name: &str| Scope::Milestone {
+            of: ProjectId::new(of),
+            name: name.into(),
+        };
+        let radar = Scope::Project(ProjectId::new("radar"));
+        assert_eq!(get(Scope::Global, None).as_deref(), Some("local"));
+        assert_eq!(
+            get(Scope::Global, Some(Role::Author)).as_deref(),
+            Some("mac")
+        );
+        assert_eq!(get(radar, None).as_deref(), Some("infra"));
+        assert_eq!(
+            get(milestone("radar", "Sign-in rework"), None).as_deref(),
+            Some("mac")
+        );
+        assert_eq!(
+            get(milestone("guild", "Heist"), Some(Role::Reviewer)).as_deref(),
+            Some("deus")
+        );
+        let empty = format!("[settings]\nmachine = \"\"\n{TODAY}");
+        assert!(Config::parse(&empty).is_err_and(|e| e.contains("machine")));
+    }
+
+    /// The first TOML block under `heading` in `docs/configuration.md`.
+    fn documented(heading: &str) -> &'static str {
+        include_str!("../docs/configuration.md")
+            .split_once(&format!("\n## {heading}\n"))
+            .and_then(|(_, after)| after.split_once("```toml\n"))
+            .and_then(|(_, block)| block.split_once("```"))
+            .map(|(block, _)| block)
+            .expect("the section has a toml block")
+    }
+
+    #[test]
+    fn the_documented_examples_load() {
+        Config::parse(documented("Example")).expect("the example");
+        let mut w = world_of(documented("Sending work to one machine"));
+        let issue = temet_work_core::ids::IssueId::new("radar", "44");
+        w.apply(&Event::IssueSynced {
+            issue: issue.clone(),
+            title: "Sign in".into(),
+            milestone: Some(MilestoneId::new("Slack sign-in rework")),
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let machine = |role| w.machine_for(&issue, role).map(|m| m.0);
+        assert_eq!(machine(Role::Author).as_deref(), Some("mac"));
+        assert_eq!(machine(Role::Reviewer).as_deref(), Some("local"));
+    }
+
+    #[test]
     fn a_table_written_out_wins_over_an_old_key_and_a_changed_file_changes_the_setting() {
         let text = TODAY.replace(
             "ci = false\n",
