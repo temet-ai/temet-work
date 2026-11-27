@@ -914,7 +914,9 @@ for a person, and leaves each gate until a trigger is met. The decision, in full
 `docs/architecture.md` ("What the autonomy findings change"); this is the same list with
 the findings beside it.
 
-Taken now, none of it built yet:
+Taken now, none of it built yet. Each takes its way of saying things from the comms work
+already done in mike, ask-kit and herdr-core; the routes are in `docs/architecture.md`
+("How things are said").
 
 1. **The floor.** A check can carry a command with an expected exit code. The daemon runs
    it in the author's work folder, at the pull request's head commit, before a reviewer
@@ -923,9 +925,11 @@ Taken now, none of it built yet:
 2. **A way to stop.** `blocked` and `unneeded` as steps a refiner or an author can report,
    each a decision a person can overturn. (Finding 7)
 3. **The reviewer.** A new session each time the pull request comes up for review. Its
-   brief carries the plan's checks, the daemon's results and the earlier blocking points,
-   and tells it to treat the author's description as claims to check. A later round reads
-   the new commits and raises nothing new about code that has not changed. (Finding 4)
+   brief is the whole hand-over: the plan's checks, the daemon's results, the earlier
+   blocking points and the author's answer to each, with the author's description to be
+   read as claims. A later round reads the new commits and raises nothing new about code
+   that has not changed. A disputed point that is held goes to the arbiter, whose ruling
+   names the command it ran. (Finding 4)
 4. **The record.** A plain approval is a decision. Every merge leaves a record the daemon
    writes from what it ran and saw, and the daemon counts failed verifies, issues merged
    more than once, follow-up issues, and `blocked` and `unneeded` per project.

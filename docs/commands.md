@@ -127,16 +127,25 @@ The hidden command `temet-work relay` copies one request line from standard inpu
 local socket and the reply line back; it exits 4 when no daemon answers.
 `docs/configuration.md` says how to set up a work folder on another machine.
 
-## Steps that are not built yet
+## Commands that are not built yet
 
-Decided on 27 November 2026 (`docs/architecture.md`, "What the autonomy findings change").
-An agent that cannot finish has two more things it can say, so that it does not invent
-work to get to `ready`.
+Decided on 27 November 2026 (`docs/architecture.md`, "How things are said" and "What the
+autonomy findings change").
+
+An agent that cannot finish has two more steps, so that it does not invent work to get to
+`ready`.
 
 | Command | Who runs it | Accepted when the issue is | What it does |
 |---|---|---|---|
 | `temet-work blocked ISSUE REASON` | the refiner or the author working on ISSUE | refining, working or fixing | Says the step cannot be done as the issue stands. `status` lists the issue as set aside with the reason, its agents are stopped, its work folder is freed and the group takes the next issue. Its pull request, if it has one, stays open. Issues that depend on it wait, and are listed as waiting on it. |
 | `temet-work unneeded ISSUE REASON` | the same | refining, working or fixing | Says the issue needs no change. `status` lists the issue with the reason, its agents are stopped, its work folder is freed and the group takes the next issue. The daemon also comments on the tracker issue with the reason and does not close it. Issues that depend on it start as if it were done. |
+| `temet-work tell AGENT TEXT` | a person only | any | Types TEXT into the agent's terminal through the runner, as the person's own words, and records who said it. It is refused while the terminal is at a prompt. |
+
+The reason of `blocked` and `unneeded` carries evidence: a `path:line`, a command with its
+exit code, or a session and event. The daemon checks with no model that each citation
+exists and refuses a reason with none. Before either, an agent is expected to settle its
+claim with ask-kit's `ask`, and one held up by another agent's answer asks a mike question
+marked blocked first.
 
 Each is recorded as a decision with two options. A person who thinks the agent was wrong
 overturns it: the issue goes back to work with the reason, and a rule is proposed as for
@@ -144,3 +153,15 @@ any overturn. When what blocked an issue has changed, a person runs `temet-work 
 ISSUE` instead, which sends it back to work and proposes nothing. The refiner's and the
 author's briefs name these two beside the command that reports the step done, and so does
 the reminder an idle refiner or author gets.
+
+The steps that exist will carry more, in the shape of the typed report mike asks of a
+worker, and a step that leaves a part out is refused with the part named.
+
+| Step | Will also carry |
+|---|---|
+| `ready` | The commit; for each check, the command the author ran and its exit code; the tests it changed; what it did not establish; and for each blocking point of the last round, fixed or disputed, a dispute with its evidence. |
+| `review` | The commit reviewed and what was read or run. Each blocking point names a `path:line` and what would satisfy it. |
+| `rule` | The check the ruling rests on and, when it turns on a claim about the code, the command the arbiter ran. |
+
+Every step is answered with one line that says what the daemon recorded and what happens
+next.

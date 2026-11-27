@@ -183,6 +183,34 @@ features.
 | While working, run only the changed crate: `cargo nextest run -p <crate>`. CI runs the workspace, the budget and the mixes. | `.github/workflows/ci.yml` |
 | Every test runs sandboxed (`TEMET_WORK_SANDBOX=1`) and in UTC. | `.cargo/config.toml` |
 
+## How things are said
+
+Decided on 27 November 2026. It rests on work already done and measured: mike's mail,
+questions, notes and delivery routes (`docs/findings/mike-fleets.md`, and
+`docs/INJECTION_TRUST.md` in mike), the dispute run over mike mail and `hc send`
+(`docs/findings/agent-talk.md`), herdr-core (`docs/findings/herdr-core.md`) and ask-kit.
+The route decides how a session treats a piece of text, so each kind of thing has one
+route. What the last column lists is not built; it is item 7 of "What comes next".
+
+| Who says it | Route | Why this route | Not built yet |
+|---|---|---|---|
+| The daemon to an agent: the brief, points to fix, a check's result, a reminder | The brief as the first prompt, and after that a prompt typed through the runner between turns. | Typed text is the one route measured as kept in the transcript and acted on: under 1 s to an idle session, held until a busy one's turn ends, refused at a permission prompt. Text the proxy injects is seen for one request, and a message on mike's channel was acknowledged and then declined. | Each message opens with a fixed line that names temet-work and the step, so mike's capture can tell the daemon's text from a person's; mike needs a marker for that line. A message is stored with a version and `temet-work issue` prints it; text longer than a short prompt is stored and pointed at. A message counts as heard when the terminal turns `working` after it or the step arrives; until then it is sent again, and each thing is said once. |
+| An agent to the daemon: its step | The `temet-work` command its brief names. | mike draws the same line: a worker's report and a judge's verdict are typed calls, never mail, and a short one is refused with the missing field named. | `ready` carries the commit, what the author ran for each check (the command and its exit code), the tests it changed and what it did not establish. `review` and `rule` carry the commit and what was read or run. Each step is answered with one line that says what was recorded and what happens next. |
+| One agent to another | Through the daemon for what binds: review points, the author's answer to each, a ruling. They are steps, held in the log and carried into the next brief as that agent's claims. A question from one live agent to another goes as a mike question (`ask`, `answer`, `decline`) when the mike part is on. | Text one agent types to another with `hc send` reads as the user's. A mike question names the sender, keeps a record with times, and arrives as information the reader may check, not as an order. | Sessions started so that mike knows them: a session id the daemon chooses and records, a name, a role and a goal on mike's roster, and Remote Control and the mike channel on, as mike's own launcher sets them. When the daemon stops a session it ends that registration and declines the session's open questions, so nothing is sent to a session that is gone. A question marked blocked that gets no answer in a set time becomes the asker's `blocked` step. |
+| An agent to a person | `temet-work status`, and the app drawing the same view data. An agent never asks in its terminal and waits. | In the open-issues fleet 14 questions went to a person and none was answered in the record (`docs/research.md`). mike's fleets leave a note and carry on. | Each line a person may act on is said once, in the person's words, with the time it was raised and the command that settles it. Such lines are kept apart from what the loop is still settling by itself and from a line saying nothing is moving. Each decision is also written as a note on the deciding agent's session in mike, where mike's tools and ask-kit's mike kit find it. |
+| A person to an agent or the daemon | The commands (`overturn`, `rule`, `proposal`, `retry`, `set`). To steer a running agent, the person types in its terminal. | Text typed in the terminal is the answer a session treats as its user's, and mike records it as the person's turn, which is what its judge of corrected turns reads. | `temet-work tell AGENT TEXT`, a person's only, for a front end: it types the words through the runner with no leading line, and records who said them. |
+| An agent finding something out | ask-kit's `ask`, before it asks anyone: the code domain for the folder it is in, the sessions domain for past sessions on that machine, the mike kit where mike runs. | About 12 s and $0.003 for a question about code, with a few hundred tokens back to the caller and a `path:line` for each fact. A standing seat kept to answer questions waited 25 of its 28 minutes (`docs/findings/fleet-run.md`). | The brief says to ask before digging and names `temet-work issue` for the plan, the checks and their results. Installed is not used: on the machine measured, asks covered 19% of lookups, so asks are counted per issue. |
+| The loop learning | mike's capture of each session, its judge of corrected turns and its lessons, read by the mike part. | The daemon already passes the proxy variables on, so a daemon started under mike has its sessions captured. | The mike part is a skeleton. It has to read the corrected turns of the sessions the daemon started, by the session ids above, and count each day the sessions started against the sessions captured. |
+
+Three things the measurements say not to assume. A message delivered is not a message
+read, and one read is not one acted on: mike marked each mail of the dispute run consumed
+within 1.6 s, before any acknowledgement. A terminal that is `done` has ended a turn, not
+finished a step. One arbiter's ruling is not settled fact: the same dispute run four
+times gave two different rulings.
+
+mike and ask-kit stay optional. Without the mike part there are no questions between
+agents, no capture and no notes, and the rest works as described.
+
 ## What the autonomy findings change
 
 Decided on 27 November 2026. The research and the reasons are in
@@ -197,22 +225,151 @@ is met. Nothing in the loop waits on a person, and that stays whole.
 ### Taken into the design now
 
 Each of these makes the loop's work better or cheaper and holds nothing for a person.
-None is built; they are items 7 to 11 of "What comes next".
+None is built; they are items 8 to 12 of "What comes next". Each says what it does and
+how it says it, on the routes of "How things are said".
 
-| Found | In the design |
-|---|---|
-| A passing check proves little when the author controls it, and an agent's report of its own work is often wrong (finding 3). mike's floor runs a task's checks itself before any model sees the work. | A check may carry a command with an expected exit code. Before a reviewer starts, the daemon runs it in a terminal of its own in the author's work folder, on that folder's machine, so the build there is warm. It starts the run when the author's turn has ended, and first checks that the folder is clean and at the pull request's head commit. A failure, a timeout or a dirty folder goes back to the author as a fix and uses no review round; a check that fails again after that fix goes to the reviewer with its result, so the cap on rounds still ends it. A run with no result, such as a machine that cannot be reached, is a listed problem and is tried again. An author that cannot make a check pass because the check is wrong reports `blocked`. A check with no command is left to the reviewer, as now. Two contracts grow for this: a runner reports the exit code of a terminal that has ended, and a code host reports a pull request's head commit. |
-| A blocked agent often finds another way to finish, and agents change code in a third to two thirds of cases where no change is needed (finding 7). | Two more steps, `blocked` and `unneeded`, each with a reason (`docs/commands.md`). `status` lists the issue with the reason, its agents are stopped, its work folder is freed and the group takes the next issue. Issues that depend on a `blocked` issue wait and are listed as waiting on it; issues that depend on an `unneeded` one start as if it were done. Each is a decision a person can overturn. |
-| A reviewer that has been through a repair round grows more lenient, a judge shown its own verdicts repeats them, and a checker that reads the author's account can be steered by it (finding 4). mike's judge is not given the worker's summary. | A new reviewer session each time the pull request comes up for review; the session before it is stopped when its verdict is in. Its brief names the pull request and tells the reviewer to read the diff from the code host and the issue from the tracker, and to treat the pull request's description and the author's comments as claims to check. The brief itself carries what the daemon holds: the plan's checks, the results of the daemon's runs of them and the points that were blocking. The first round reads the whole change. A later round checks that the blocking points are met and reads the commits since for new defects; it raises nothing new about code that has not changed. A block names a `path:line` and what would satisfy it. The `starts` limit counts sessions that ended without reporting their step, so a reviewer that finished its round does not use one up. |
-| A person's check adds little when it rests on the agent's account, and "nobody overturned it" is not evidence that a decision was right (finding 8). | A plain approval is recorded as a decision by the reviewer; overturning one before the merge sends the issue back to its author with the reason. `status` lists the decisions of issues that are not done and the ones overturned, and counts the rest. Every merge leaves a record the daemon writes from what it ran and saw: the commit that merged; the checks and their results; the files changed as the code host lists them, and whether they include CI, deploy or verify commands, agent instructions or settings; the review rounds it took and whether an arbiter ruled; each reviewer session with the runtime and model it was started with; and whether the daemon merged it or found it merged. The daemon counts per project: failed verifies, issues that merged more than once, follow-up issues that name the issue they fix, `blocked` and `unneeded` with how long each has waited, and settings set by a plan. |
-| A learned rule is a release, and standing text grows one fix at a time unless something cuts it (finding 9). mike gives its standing text a budget that only goes down, and retires a lesson by count. | A rule has a scope (a role, a project, or all). A proposed rule starts scoped to the role that made the overturned decision; the person keeping it can change the scope and edit the text. A brief has a budget of rules, the setting `rules`; when keeping a rule would put a brief past it, the keep names a kept rule to drop, and `proposal RULE drop` works on a kept rule too. Each rule counts the issues it was given to. Trial and revert follow when there are enough issues to count. |
+#### The floor
+
+Found: a passing check proves little when the author controls it, and an agent's report
+of its own work is often wrong (finding 3). mike's floor runs a task's checks itself
+before any model sees the work.
+
+- A check may carry a command with an expected exit code. Before a reviewer starts, the
+  daemon runs it in a terminal of its own in the author's work folder, on that folder's
+  machine, so the build there is warm. It starts the run when the author's turn has
+  ended, and first checks that the folder is clean and at the pull request's head commit.
+- A pass says nothing to the author. A failure is one typed message in the shape of
+  mike's floor answer: the check's line, the command, the exit code got and expected, the
+  commit, one line of reason and where the full output is. Its code keeps four cases
+  apart: a failed check, a timeout, a folder that is not clean, and a run the daemon could
+  not make, which says the work has not failed. The message is keyed by issue, check and
+  commit, so a repeated run does not repeat it.
+- The full output is stored where `temet-work issue` prints it, and the next reviewer's
+  brief points at it.
+- A failure, a timeout or a dirty folder goes back to the author as a fix and uses no
+  review round; a check that fails again after that fix goes to the reviewer with its
+  result, so the cap on rounds still ends it. A run with no result is a listed problem and
+  is tried again. An author that cannot make a check pass because the check is wrong
+  reports `blocked`. A check with no command is left to the reviewer, as now.
+- Two contracts grow for this: a runner reports the exit code of a terminal that has
+  ended, and a code host reports a pull request's head commit.
+
+#### `blocked` and `unneeded`
+
+Found: a blocked agent often finds another way to finish, and agents change code in a
+third to two thirds of cases where no change is needed (finding 7). mike's fleets leave a
+note for the person and carry on, and a mike question can be marked blocked.
+
+- Two more steps, each with a reason (`docs/commands.md`). Before it reports either, the
+  agent settles its claim with `ask`, and the reason carries the evidence: a `path:line`,
+  a command with its exit code, or a session and event. The daemon checks with no model
+  that each citation exists, as ask-kit does for its answers, and refuses a reason with
+  none.
+- `ready` says what the author did not establish, so there is a place for doubt short of
+  `blocked`.
+- An agent held up by another agent's answer asks a mike question marked blocked first,
+  and reports `blocked` when the question is declined or goes unanswered.
+- `status` lists the issue in the shape of mike's note to its operator: once, in the
+  person's words, with how long it has waited and the commands that answer it. The
+  issue's agents are stopped only after the step's reply is recorded; their open questions
+  are declined and their registration with mike is ended. The work folder is freed and
+  the group takes the next issue.
+- Issues that depend on a `blocked` issue wait and are listed as waiting on it; issues
+  that depend on an `unneeded` one start as if it were done. Each is a decision a person
+  can overturn.
+
+#### A new reviewer session each round
+
+Found: a reviewer that has been through a repair round grows more lenient, a judge shown
+its own verdicts repeats them, and a checker that reads the author's account can be
+steered by it (finding 4). mike's judge is not given the worker's summary, and the
+dispute run settled four disputes of four in 25 to 60 s.
+
+- A new reviewer session each time the pull request comes up for review; the session
+  before it is stopped when its verdict is in. No message goes to a running reviewer about
+  a next round.
+- The brief is the whole hand-over. The daemon builds it from its log in the shape of the
+  input mike gives its judge: the plan's checks, the daemon's results for them with exit
+  code and commit, where to read the diff, and each earlier round as its blocking points
+  with the author's answer to each. It does not carry the author's summary, and it tells
+  the reviewer to read the pull request's description and comments as claims to check. It
+  is stored with a version, so a session that replaces another reads the same brief.
+- Nothing passes from one reviewer session to the next, or from the author to the
+  reviewer, except through that brief.
+- The author answers each blocking point in its `ready` step as fixed or disputed, a
+  dispute with its evidence. A point the author disputes and the next reviewer holds goes
+  to the arbiter then, without using up the rounds that remain.
+- The arbiter's brief is written from the same record, and the arbiter has the
+  repository. Its ruling has a fixed shape: the ruling, the check it rests on, and the
+  command it ran when the ruling turns on a claim about the code. A ruling with no
+  evidence is sent back.
+- The first round reads the whole change. A later round checks that the blocking points
+  are met and reads the commits since for new defects; it raises nothing new about code
+  that has not changed. A block names a `path:line` and what would satisfy it, and the
+  daemon checks with no model that the line exists.
+- The reviewer works in a folder at the pull request's head commit. Today it gets any
+  free folder of the project, or one another author is changing.
+- The `starts` limit counts sessions that ended without reporting their step, so a
+  reviewer that finished its round does not use one up.
+
+#### The merge record and the counts
+
+Found: a person's check adds little when it rests on the agent's account, and "nobody
+overturned it" is not evidence that a decision was right (finding 8). In mike's run
+record every number is measured and none is rewritten by a model.
+
+- A plain approval is recorded as a decision by the reviewer, in the shape of mike's
+  verdict: the verdict, the commit, and what was read or run, which may not be empty.
+  Overturning one before the merge sends the issue back to its author with the reason.
+  `status` lists the decisions of issues that are not done and the ones overturned, and
+  counts the rest.
+- Every merge leaves a record the daemon writes from what it ran and saw: the commit that
+  merged; the checks and their results; the files changed as the code host lists them,
+  and whether they include CI, deploy or verify commands, agent instructions or settings;
+  the review rounds it took and whether an arbiter ruled; each agent session with its
+  session id, its runtime and model, and the version of the brief it worked from; and
+  whether the daemon merged it or found it merged.
+- The record also holds what was said on the issue: each message the daemon sent and
+  whether it became a turn and, with the mike part, the questions asked, answered and
+  declined between its agents. No agent's message or summary is the source of any field.
+- The daemon counts per project: failed verifies, issues that merged more than once,
+  follow-up issues that name the issue they fix, `blocked` and `unneeded` with how long
+  each has waited, settings set by a plan, a person's turns typed into agents' terminals,
+  daemon messages that never became a turn, reminders sent, sessions started against
+  sessions that reported their step, and asks against lookups done by hand, from ask-kit's
+  journal.
+
+#### Rules with a scope, a budget and counts
+
+Found: a learned rule is a release, and standing text grows one fix at a time unless
+something cuts it (finding 9). mike gives its standing text a budget that only goes down,
+tags each lesson with an id and a revision, and retires a lesson by count.
+
+- A rule has a scope (a role, a project, or all), the keys mike's roster addresses a
+  session by. A proposed rule starts scoped to the role that made the overturned
+  decision; the person keeping it can change the scope and edit the text.
+- A rule reaches an agent in its brief and nowhere else, from the next start. Text the
+  proxy injects is seen for one request, and mail is read once.
+- Rules sit before the task in the brief. mike recorded a rule ignored on first read
+  about 9,000 characters into a 33,859-character block.
+- Each rule line carries the rule's id and revision, and the daemon stores which rules at
+  which revision each session's brief carried. That is the count of issues a rule was
+  given to.
+- A brief has a budget of rules, the setting `rules`, in rules and in words. When keeping
+  a rule would put a brief past it, the keep names a kept rule to drop, and
+  `proposal RULE drop` works on a kept rule too.
+- With the mike part, a rule's effect is read from whether the turns after it were
+  corrected, and only above a stated sample; mike reads a lesson at 20 judged turns on
+  each side. Candidates may come from mike's corrected turns as well as from overturns;
+  none reaches a brief until a person keeps it.
+- Trial and revert follow when there are enough issues to count.
 
 ### Left until a trigger is met
 
 | Left out now | Why it can wait | Trigger |
 |---|---|---|
 | Agents running as another user or in a sandbox, with the daemon's files and sign-in out of reach; a code-host identity of their own for agents; protected default branches (finding 5). | The agents, the machines and the repositories are the authors', and a mistake costs a revert. | Someone who is not one of the authors tells them they run temet-work, or is asked to; or it manages a repository its authors do not own; or a merge record shows a pull request the daemon found merged and did not merge itself. |
-| Stronger proof of who sent a command (finding 6). | Every sender today is one of the authors or an agent they started. | The same. |
+| Stronger proof of who sent a command (finding 6). | Every sender today is one of the authors or an agent they started. When it is wanted, mike's way is there to copy: its bridge confirms a caller by finding the captured call that carries the exact message. | The same. |
 | A list of the settings a plan may set (finding 6). | A setting a refiner should not have set is listed as set by that refiner (`temet-work settings`), and a person sets it back. | A project takes tickets its authors did not write; or the count of settings set by plans shows one its issue did not ask for. |
 | Ticket text marked as content in briefs, a list of whose tickets are taken, and tokens that cannot write for the roles that only read (finding 10). | The tickets are the authors'. Until a trigger is met, every group on a repository other people can open issues in is given its milestones (`docs/configuration.md`): an issue a stranger opens has no milestone and is not taken. Its title is still listed by `status`, and a stranger's comment on an issue in work can still be read by the agent working on it; both are accepted for now. | A group works such a repository with no `milestones`; or an issue the authors did not write is put into a milestone a group works. |
 | A class of change held for a person: the daemon's own repository, CI and deploy commands, agent instructions, sign-in, migrations (findings 1 and 11). | Nothing waits on a person. In the open-issues fleet 14 questions went to a person and none was answered in the record (`docs/research.md`). | A managed project has users of its own or data that cannot be rebuilt; or the merge records show a merge that changed files of that class and had to be merged again. |
@@ -235,18 +392,21 @@ In this order:
 5. A GitLab code host.
 6. Overturning a decision by command, and rules proposed from overturns. Done: the loop applies an
    overturn itself, and a kept rule ends every brief written afterwards (`docs/commands.md`).
-7. The floor: a check can carry a command with an expected exit code, which the daemon
+7. How things are said: session ids the daemon chooses and records, sessions on mike's
+   roster, daemon messages marked as the daemon's and stored with a version, typed step
+   reports, and the mike part reading corrected turns.
+8. The floor: a check can carry a command with an expected exit code, which the daemon
    runs at the pull request's head commit before review (`docs/objects.md`).
-8. `blocked` and `unneeded` as steps a refiner or an author can report
+9. `blocked` and `unneeded` as steps a refiner or an author can report
    (`docs/commands.md`).
-9. A new reviewer session each round, briefed with the diff, the issue and the daemon's
-   check results.
-10. A record of each merge written by the daemon, a plain approval recorded as a decision,
-    and counts of reverts, follow-up fixes and failed verifies.
-11. Rules with a scope, a budget and counts.
+10. A new reviewer session each round, with the brief as the whole hand-over, the
+    author's answer to each point, and a ruling in a fixed shape.
+11. A record of each merge written by the daemon, a plain approval recorded as a decision,
+    and the counts.
+12. Rules with a scope, a budget and counts, tagged with an id and a revision.
 
-Items 8 and 9 are small and can be taken whenever the loop is next worked on, ahead of
-their place here: 8 changes the loop and the commands, 9 the loop, the briefs and when the
-runtime family starts a reviewer. Item 7 is larger: it needs the pull request's head
-commit from the code host and a command's exit code from the runner, in both contracts
-and their adapters.
+Item 7 comes first among these: the others lean on its session ids, marked messages and
+stored briefs. Items 9 and 10 change the loop, the commands and the briefs, and can be
+taken whenever the loop is next worked on. Item 8 is larger: it needs the pull request's
+head commit from the code host and a command's exit code from the runner, in both
+contracts and their adapters.
