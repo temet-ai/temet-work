@@ -191,7 +191,8 @@ In this order:
 
 1. The settings chain (`docs/settings.md`): global, area, project, milestone and task
    levels, with roles inside each; runtimes and runners chosen by it; every family tested
-   with two adapters at once.
+   with two adapters at once. Done: Claude Code and Codex are both runtimes, chosen by the
+   `runtime` setting.
 2. The app's theme generated from the design system's tokens, then the navbar with areas
    through review.
 3. The desktop window on GPUI, drawing the daemon's view data.
