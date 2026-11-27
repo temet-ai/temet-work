@@ -2357,7 +2357,15 @@ refining_at_once = 2
                     &sock,
                     ("author-1", &author),
                     None,
-                    &["relay", "--socket", &sock.display().to_string()],
+                    &[
+                        "relay",
+                        "--socket",
+                        &sock.display().to_string(),
+                        "--build",
+                        temet_work::BUILD,
+                        "--host",
+                        "lancre",
+                    ],
                     &format!("{line}\n"),
                 )
             }
