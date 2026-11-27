@@ -210,10 +210,7 @@ impl Deploys {
             return Some(Outcome::Failed(format!(
                 "a deploy installed build {build} and handed the restart off, but this daemon is \
                  build {own}; the restart did not happen, or it ran an older build \
-                 (delete the line for {issue} in {} to deploy again)",
-                self.handoff
-                    .as_ref()
-                    .map_or_else(String::new, |h| h.0.display().to_string())
+                 (run `temet-work retry {issue}` to deploy again)"
             )));
         }
         // The restart brought the new build: that is the deploy done.
@@ -249,23 +246,26 @@ impl Part for Deploys {
             };
             let Job { issue, step, .. } = job;
             match (step, result) {
-                (Step::Deploy, Ok(())) => {
-                    self.failed.remove(&issue);
-                    match self.handed_to(&issue) {
-                        // The restart is handed off: this daemon may be gone
-                        // before it records anything, so the next one does.
-                        Some(build) if Some(&build) != self.handoff.as_ref().map(|h| &h.1) => {
-                            self.pending.insert(issue, Instant::now());
-                        }
-                        Some(_) | None => {
-                            if let Some((file, _)) = &self.handoff {
-                                clear_handoff(file, &issue);
-                            }
-                            events.push(Event::Deployed { issue });
-                        }
+                (Step::Deploy, Ok(())) => match self.handed_to(&issue) {
+                    // The restart is handed off: this daemon may be gone before
+                    // it records anything, so the next one does. Earlier tries
+                    // still count, in case the restart never comes.
+                    Some(build) if Some(&build) != self.handoff.as_ref().map(|h| &h.1) => {
+                        self.pending.insert(issue, Instant::now());
                     }
-                }
+                    Some(_) | None => {
+                        if let Some((file, _)) = &self.handoff {
+                            clear_handoff(file, &issue);
+                        }
+                        self.failed.remove(&issue);
+                        events.push(Event::Deployed { issue });
+                    }
+                },
                 (Step::Deploy, Err(why)) => {
+                    // A failed deploy hands nothing off, whatever it wrote.
+                    if let Some((file, _)) = &self.handoff {
+                        clear_handoff(file, &issue);
+                    }
                     let tries = self.failed.get(&issue).map_or(0, |f| f.tries) + 1;
                     self.failed.insert(
                         issue,
@@ -723,18 +723,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// How many lines the deploy command has appended to `runs`.
+    fn runs(dir: &Path) -> usize {
+        std::fs::read_to_string(dir.join("runs")).map_or(0, |t| t.lines().count())
+    }
+
+    #[test]
+    fn a_handoff_that_never_restarts_waits_for_a_person() {
+        let dir = scratch("never");
+        let handoff = dir.join("deploy-handoff");
+        let mut w = world(
+            Some(
+                "echo run >> runs && echo \"$TEMET_WORK_ISSUE new-build\" >> \"$TEMET_WORK_HANDOFF\"",
+            ),
+            None,
+        );
+        if let Some(i) = w.issues.get_mut(&issue()) {
+            i.stage = Stage::Deploying;
+        }
+        let mut part = Deploys::with(real(&dir)).handoff(handoff, "old-build");
+        let deploy = Effect::Deploy { issue: issue() };
+        for _ in 0..TRIES {
+            assert_eq!(part.carry_out(&deploy, &w), Outcome::done());
+            assert_eq!(settle(&mut part, &w).events, []);
+            // Ten minutes pass with no restart, and the try is counted.
+            *part.pending.get_mut(&issue()).expect("pending") -= RETRY_AFTER;
+            part.carry_out(&deploy, &w);
+            // Then the wait before the next run passes.
+            part.failed.get_mut(&issue()).expect("failure").at -= RETRY_AFTER;
+        }
+        assert_eq!(
+            part.carry_out(&deploy, &w),
+            Outcome::Failed(
+                "failed 3 times, last: the restart was handed off but this daemon was not \
+                 restarted; a person has to look at it"
+                    .into()
+            )
+        );
+        assert_eq!(part.running(), 0);
+        assert_eq!(runs(&dir), TRIES as usize);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deploy_that_fails_after_its_handoff_line_runs_again() {
+        let dir = scratch("after");
+        let handoff = dir.join("deploy-handoff");
+        let mut w = world(
+            Some(
+                "echo run >> runs && echo \"$TEMET_WORK_ISSUE new-build\" >> \"$TEMET_WORK_HANDOFF\" \
+                 && false",
+            ),
+            None,
+        );
+        if let Some(i) = w.issues.get_mut(&issue()) {
+            i.stage = Stage::Deploying;
+        }
+        let mut part = Deploys::with(real(&dir)).handoff(handoff.clone(), "old-build");
+        let deploy = Effect::Deploy { issue: issue() };
+        assert_eq!(part.carry_out(&deploy, &w), Outcome::done());
+        assert_eq!(settle(&mut part, &w).events, []);
+        assert!(!handoff.exists(), "a failed deploy hands nothing off");
+        assert_eq!(part.failed.get(&issue()).map(|f| f.tries), Some(1));
+        assert!(matches!(
+            part.carry_out(&deploy, &w),
+            Outcome::Failed(why) if why.contains("runs again 10 minutes after it failed")
+        ));
+        part.failed.get_mut(&issue()).expect("failure").at -= RETRY_AFTER;
+        assert_eq!(part.carry_out(&deploy, &w), Outcome::done());
+        settle(&mut part, &w);
+        assert_eq!(runs(&dir), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_handoff_to_another_build_is_a_problem_not_a_deploy() {
         let dir = scratch("other");
         let handoff = dir.join("deploy-handoff");
         std::fs::write(&handoff, "ankh#1 new-build\n").expect("handoff");
-        let w = world(Some("make deploy"), None);
+        let mut w = world(Some("make deploy"), None);
+        if let Some(i) = w.issues.get_mut(&issue()) {
+            i.stage = Stage::Deploying;
+        }
         let mut part = Deploys::with(shell()).handoff(handoff.clone(), "old-build");
-        assert!(matches!(
-            part.carry_out(&Effect::Deploy { issue: issue() }, &w),
-            Outcome::Failed(why) if why.contains("new-build") && why.contains("old-build")
-        ));
+        let Outcome::Failed(why) = part.carry_out(&Effect::Deploy { issue: issue() }, &w) else {
+            panic!("another build is listed as a problem");
+        };
+        assert!(
+            why.contains("new-build") && why.contains("old-build"),
+            "{why}"
+        );
+        assert!(why.contains("temet-work retry ankh#1"), "{why}");
+        assert!(!why.contains("delete the line"), "{why}");
         assert!(handoff.exists());
+        // The retry the message names clears the line and runs the deploy.
+        assert_eq!(
+            part.carry_out(&Effect::Retry { issue: issue() }, &w),
+            Outcome::done()
+        );
+        assert!(!handoff.exists());
+        assert_eq!(
+            settle(&mut part, &w).events,
+            [Event::Deployed { issue: issue() }]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
