@@ -78,6 +78,9 @@ const GAVE_UP: &str = "gave up: ";
 /// How problems from an agent stopped at a prompt are keyed.
 const BLOCKED: &str = "blocked: ";
 
+/// How problems from an agent whose turn ended in an error are keyed.
+const ERRORED: &str = "errored: ";
+
 /// The most events and effects one call handles before it stops, so a loop
 /// between parts cannot hang the daemon.
 pub const MAX_STEPS: usize = 10_000;
@@ -208,29 +211,52 @@ impl Host {
     }
 
     /// Lists every agent stopped at a prompt as a problem: the daemon never
-    /// answers a prompt, so a person has to. Rebuilt on each tick, so it goes
-    /// when the agent leaves the state or ends.
+    /// answers a prompt, so a person has to. Lists every agent whose turn ended in
+    /// an error too, with what the daemon will do about it. Rebuilt on each tick,
+    /// so each goes when the agent leaves the state or ends.
     fn report_blocked(&mut self) {
-        self.problems.retain(|k, _| !k.starts_with(BLOCKED));
+        self.problems
+            .retain(|k, _| !k.starts_with(BLOCKED) && !k.starts_with(ERRORED));
         for agent in self.world.agents.values() {
-            let AgentState::Blocked { reason } = &agent.state else {
-                continue;
+            let place = || {
+                agent
+                    .issue
+                    .as_ref()
+                    .and_then(|i| self.world.issues.get(i))
+                    .and_then(|i| self.world.folder_for(i, agent.role, agent.folder.as_ref()))
+                    // A reader's folder is not recorded: name none on another machine.
+                    .filter(|f| f.machine == agent.machine)
+                    .map_or_else(String::new, |f| format!(" in {}", f.path))
             };
-            let place = agent
-                .issue
-                .as_ref()
-                .and_then(|i| self.world.issues.get(i))
-                .and_then(|i| self.world.folder_for(i, agent.role, agent.folder.as_ref()))
-                // A reader's folder is not recorded: name none on another machine.
-                .filter(|f| f.machine == agent.machine)
-                .map_or_else(String::new, |f| format!(" in {}", f.path));
-            self.problems.insert(
-                format!("{BLOCKED}{}", agent.id),
-                format!(
-                    "{}{place} is blocked: {reason}; the daemon cannot answer it",
-                    agent.id
-                ),
-            );
+            match &agent.state {
+                AgentState::Blocked { reason } => {
+                    self.problems.insert(
+                        format!("{BLOCKED}{}", agent.id),
+                        format!(
+                            "{}{} is blocked: {reason}; the daemon cannot answer it",
+                            agent.id,
+                            place()
+                        ),
+                    );
+                }
+                AgentState::Errored { line, .. } => {
+                    let line = if line.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {line}")
+                    };
+                    let next = if agent.limit_reset().is_some() {
+                        "the daemon sends continue after it resets"
+                    } else {
+                        "the daemon reminds it and stops it as it does an idle agent"
+                    };
+                    self.problems.insert(
+                        format!("{ERRORED}{}", agent.id),
+                        format!("{}{} stopped on an error{line}; {next}", agent.id, place()),
+                    );
+                }
+                _ => {}
+            }
         }
     }
 

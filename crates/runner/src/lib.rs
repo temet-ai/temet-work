@@ -24,6 +24,15 @@ pub use temet_work_core::launch::Program;
 
 pub mod contract;
 pub mod fake;
+pub mod reset;
+
+/// What the daemon types into an agent whose limit has reset.
+pub const CONTINUE: &str = "continue";
+
+/// How long after the reset time an error line gives the daemon sends
+/// [`CONTINUE`]. The line gives minutes only and clocks drift, and a continue
+/// sent too early comes straight back with the same error.
+pub const CONTINUE_AFTER_MS: u64 = 60_000;
 
 /// A terminal, by the id its runner gave it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -61,6 +70,12 @@ pub enum Status {
     Blocked {
         /// What kind of prompt, as the runner names it (`question`, `permission`).
         kind: String,
+    },
+    /// The turn ended in an error, such as a usage limit. This is not a prompt:
+    /// typing starts a new turn.
+    Error {
+        /// What the runner says about the error, when it says anything.
+        message: Option<String>,
     },
     /// The program has ended.
     Gone,
@@ -291,8 +306,9 @@ impl Runners {
     /// Sends what is waiting; keeps what the agent cannot take yet.
     /// Reminds an idle agent its issue waits on, `reminders` times (two by default),
     /// `remind_after` minutes (ten) apart; that long after the last reminder it stops
-    /// the agent's session, so the loop starts a fresh one. Returns the agents it
-    /// stopped, as ended.
+    /// the agent's session, so the loop starts a fresh one. An agent whose turn
+    /// ended in an error is idle here, unless it waits for its limit to reset.
+    /// Returns the agents it stopped, as ended.
     fn remind(
         &mut self,
         world: &World,
@@ -305,7 +321,12 @@ impl Runners {
             .values()
             .filter(|a| {
                 let state = seen.get(&a.id).unwrap_or(&a.state);
-                *state == AgentState::Idle && world.waiting_on(a)
+                let idle = match state {
+                    AgentState::Idle => true,
+                    AgentState::Errored { .. } => state.limit_reset(a.continued).is_none(),
+                    _ => false,
+                };
+                idle && world.waiting_on(a)
             })
             .filter_map(|a| a.issue.clone().map(|i| (a.id.0.clone(), a.role, i)))
             .collect();
@@ -320,12 +341,16 @@ impl Runners {
             }
             if u64::from(nudges) < reminders {
                 self.idle.insert(agent.clone(), (now_ms, nudges + 1));
-                events.extend(self.queue(Message {
-                    agent,
-                    issue: issue.clone(),
-                    text: brief::nudge(role, &issue),
-                    tells: false,
-                }));
+                events.extend(self.queue(
+                    world,
+                    seen,
+                    Message {
+                        agent,
+                        issue: issue.clone(),
+                        text: brief::nudge(role, &issue),
+                        tells: false,
+                    },
+                ));
                 continue;
             }
             self.idle.remove(&agent);
@@ -342,7 +367,12 @@ impl Runners {
 
     /// Queues a message unless the same one is already waiting, then sends what
     /// can be sent. Returns a `Told` event for each issue whose message arrived.
-    fn queue(&mut self, message: Message) -> Vec<Event> {
+    fn queue(
+        &mut self,
+        world: &World,
+        seen: &BTreeMap<AgentId, AgentState>,
+        message: Message,
+    ) -> Vec<Event> {
         let waiting = self
             .outbox
             .iter()
@@ -350,12 +380,13 @@ impl Runners {
         if !waiting {
             self.outbox.push(message);
         }
-        self.deliver()
+        self.deliver(world, seen)
     }
 
     /// Sends what is waiting and keeps what the agent cannot take yet. Returns a
-    /// `Told` event for each issue whose message arrived.
-    fn deliver(&mut self) -> Vec<Event> {
+    /// `Told` event for each issue whose message arrived. `seen` holds the states
+    /// this poll has seen that `world` does not have yet.
+    fn deliver(&mut self, world: &World, seen: &BTreeMap<AgentId, AgentState>) -> Vec<Event> {
         let mut keep = Vec::new();
         let mut told = Vec::new();
         for m in std::mem::take(&mut self.outbox) {
@@ -363,6 +394,16 @@ impl Runners {
                 keep.push(m);
                 continue;
             };
+            // A send to a session that waits on its limit is lost to the error;
+            // it goes after continue.
+            if world
+                .agents
+                .get(&AgentId::new(m.agent.clone()))
+                .is_some_and(|a| limit_reset(a, seen).is_some())
+            {
+                keep.push(m);
+                continue;
+            }
             match self.adapters[i].send(&terminal, &m.text, true) {
                 Ok(()) if m.tells => told.push(Event::Told { issue: m.issue }),
                 Ok(()) => {}
@@ -382,6 +423,93 @@ impl Runners {
         self.outbox = keep;
         told
     }
+
+    /// Types [`CONTINUE`] into each agent whose limit has reset, once
+    /// [`CONTINUE_AFTER_MS`] has passed since the time its error line gave, once
+    /// per limit. Returns a `Continued` event for each, and ends an agent whose
+    /// terminal is gone. An agent whose terminal is busy or cannot be reached
+    /// is tried again at the next poll.
+    fn continue_after_reset(
+        &mut self,
+        world: &World,
+        seen: &mut BTreeMap<AgentId, AgentState>,
+        now_ms: u64,
+    ) -> Vec<Event> {
+        let due: Vec<(AgentId, u64)> = world
+            .agents
+            .values()
+            .filter_map(|a| {
+                let at = limit_reset(a, seen)?;
+                (now_ms >= at.saturating_add(CONTINUE_AFTER_MS)).then(|| (a.id.clone(), at))
+            })
+            .collect();
+        let mut events = Vec::new();
+        for (agent, at) in due {
+            let Some((i, terminal)) = self.terminals.get(&agent.0).cloned() else {
+                continue;
+            };
+            match self.adapters[i].send(&terminal, CONTINUE, true) {
+                Ok(()) => {
+                    seen.insert(
+                        agent.clone(),
+                        AgentState::Working {
+                            doing: String::new(),
+                        },
+                    );
+                    events.push(Event::Continued {
+                        agent,
+                        resets_ms: at,
+                    });
+                }
+                Err(RunnerError::Gone | RunnerError::Unknown(_)) => {
+                    self.terminals.remove(&agent.0);
+                    seen.insert(agent.clone(), AgentState::Ended);
+                    events.push(Event::AgentChanged {
+                        agent,
+                        state: AgentState::Ended,
+                    });
+                }
+                Err(_) => {}
+            }
+        }
+        events
+    }
+}
+
+/// When the limit `agent` waits on resets, by the state this poll has seen for
+/// it, else the state on record.
+fn limit_reset(
+    agent: &temet_work_core::model::Agent,
+    seen: &BTreeMap<AgentId, AgentState>,
+) -> Option<u64> {
+    seen.get(&agent.id)
+        .unwrap_or(&agent.state)
+        .limit_reset(agent.continued)
+}
+
+/// The state of an agent whose terminal reports that its turn ended in an
+/// error, seen at `now_ms`: the runner's message when it gives one, else the
+/// line on the visible screen that names the error, with the reset time that
+/// line gives in the daemon's time zone.
+fn errored(
+    runner: &mut dyn Runner,
+    terminal: &TerminalId,
+    message: Option<&str>,
+    now_ms: u64,
+) -> AgentState {
+    let line = message
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            runner
+                .screen(terminal)
+                .ok()
+                .and_then(|screen| reset::error_line(&screen))
+        })
+        .unwrap_or_default();
+    let resets_ms = reset::reset_time(&line, now_ms, &jiff::tz::TimeZone::system());
+    AgentState::Errored { line, resets_ms }
 }
 
 /// What an agent needs to reach the daemon that started it. A local agent gets
@@ -458,7 +586,8 @@ fn state_of(status: &Status, doing: Option<&str>) -> Option<AgentState> {
             reason: doing.map_or_else(|| kind.clone(), String::from),
         }),
         Status::Gone => Some(AgentState::Ended),
-        Status::Unknown => None,
+        // An error's state needs its screen and the time: `errored` makes it.
+        Status::Error { .. } | Status::Unknown => None,
     }
 }
 
@@ -511,12 +640,24 @@ impl Part for Runners {
                     continue;
                 }
                 self.terminals.insert(agent, (i, u.terminal.clone()));
-                let Some(state) = state_of(&u.status, u.doing.as_deref()) else {
-                    continue;
-                };
                 let before = seen
                     .get(&id)
                     .or_else(|| world.agents.get(&id).map(|a| &a.state));
+                let state = match &u.status {
+                    // The line is read once, when the error appears: the same
+                    // error listed again, as after a restart, keeps the line and
+                    // reset time on record.
+                    Status::Error { .. } if matches!(before, Some(AgentState::Errored { .. })) => {
+                        continue;
+                    }
+                    Status::Error { message } => {
+                        errored(adapter.as_mut(), &u.terminal, message.as_deref(), now_ms)
+                    }
+                    status => match state_of(status, u.doing.as_deref()) {
+                        Some(state) => state,
+                        None => continue,
+                    },
+                };
                 if before == Some(&state) {
                     continue;
                 }
@@ -564,7 +705,8 @@ impl Part for Runners {
         if listed_any {
             self.started_here.clear();
         }
-        events.extend(self.deliver());
+        events.extend(self.continue_after_reset(world, &mut seen, now_ms));
+        events.extend(self.deliver(world, &seen));
         events.extend(self.remind(world, &seen, now_ms));
         let problems: Vec<String> = self.adapters.iter().filter_map(|a| a.problem()).collect();
         Polled {
@@ -689,12 +831,16 @@ impl Part for Runners {
                 let Some(author) = world.running(issue, Role::Author) else {
                     return Outcome::done();
                 };
-                let told = self.queue(Message {
-                    agent: author.id.0.clone(),
-                    issue: issue.clone(),
-                    text: brief::fixes(issue, points),
-                    tells: true,
-                });
+                let told = self.queue(
+                    world,
+                    &BTreeMap::new(),
+                    Message {
+                        agent: author.id.0.clone(),
+                        issue: issue.clone(),
+                        text: brief::fixes(issue, points),
+                        tells: true,
+                    },
+                );
                 Outcome::Done {
                     events: told,
                     effects: Vec::new(),
@@ -706,12 +852,16 @@ impl Part for Runners {
                 let Some(reviewer) = world.running(issue, Role::Reviewer) else {
                     return Outcome::NotMine;
                 };
-                let told = self.queue(Message {
-                    agent: reviewer.id.0.clone(),
-                    issue: issue.clone(),
-                    text: brief::next_round(issue, *round),
-                    tells: true,
-                });
+                let told = self.queue(
+                    world,
+                    &BTreeMap::new(),
+                    Message {
+                        agent: reviewer.id.0.clone(),
+                        issue: issue.clone(),
+                        text: brief::next_round(issue, *round),
+                        tells: true,
+                    },
+                );
                 Outcome::Done {
                     events: told,
                     effects: Vec::new(),
@@ -771,6 +921,15 @@ mod tests {
 
     /// Runs `argv` as an author on ankh#1 and applies what the part reports.
     fn run(part: &mut Runners, w: &mut World, argv: &[&str]) -> AgentId {
+        match run_events(part, w, argv).as_slice() {
+            [Event::AgentStarted { agent, .. }] => agent.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Runs `argv` as an author on ankh#1, applies what the part reports and
+    /// returns it.
+    fn run_events(part: &mut Runners, w: &mut World, argv: &[&str]) -> Vec<Event> {
         let launch = w
             .launch(
                 &GroupId::new("watch"),
@@ -779,7 +938,6 @@ mod tests {
                 Some(&FolderId::new("f1")),
             )
             .expect("launch");
-        let agent = launch.agent.clone();
         let run = Effect::Run {
             launch: Box::new(launch),
             before: None,
@@ -794,8 +952,7 @@ mod tests {
         for e in &events {
             w.apply(e);
         }
-        assert!(matches!(events.as_slice(), [Event::AgentStarted { .. }]));
-        agent
+        events
     }
 
     fn runners() -> Runners {
@@ -1732,5 +1889,399 @@ mod tests {
             .expect("stop");
         host.tick(5).expect("tick");
         assert!(host.problems().is_empty(), "ended: {:?}", host.problems());
+    }
+
+    /// The line a Claude session's turn ended on at its usage limit, as the
+    /// issue saw it.
+    const LIMIT: &str = "You've hit your 5-hour limit · resets 5:40pm";
+
+    /// 27 November 2026 at `hh:mm` in UTC, the zone tests run in, in
+    /// milliseconds since 1970.
+    fn nov27(hh: i8, mm: i8) -> u64 {
+        let ms = jiff::tz::TimeZone::UTC
+            .to_zoned_datetime(jiff::civil::date(2026, 11, 27).at(hh, mm, 0, 0))
+            .expect("a time")
+            .timestamp()
+            .as_millisecond();
+        u64::try_from(ms).expect("after 1970")
+    }
+
+    /// Puts ankh#1 in `stage` for the group `watch`, so its author is waited on.
+    fn at_stage(w: &mut World, stage: temet_work_core::model::Stage) {
+        let i = w.issues.get_mut(&IssueId::new("ankh", "1")).expect("there");
+        i.stage = stage;
+        i.group = Some(GroupId::new("watch"));
+    }
+
+    /// Polls at `now_ms` and applies what the part reports, which it returns.
+    fn step(part: &mut Runners, w: &mut World, now_ms: u64) -> Vec<Event> {
+        let events = part.poll(w, now_ms).events;
+        apply(w, &events);
+        events
+    }
+
+    fn screen_of(fake: &std::sync::Arc<std::sync::Mutex<FakeRunner>>) -> String {
+        fake.lock()
+            .expect("fake")
+            .screen(&TerminalId("t1".into()))
+            .expect("screen")
+    }
+
+    /// The lines of the first terminal that are exactly `continue`.
+    fn continues(fake: &std::sync::Arc<std::sync::Mutex<FakeRunner>>) -> usize {
+        screen_of(fake).lines().filter(|l| *l == CONTINUE).count()
+    }
+
+    /// A journal a test can read after the host has it.
+    #[derive(Clone, Default)]
+    struct Kept(std::sync::Arc<std::sync::Mutex<Vec<Event>>>);
+
+    impl temet_work_core::host::Journal for Kept {
+        fn append(&mut self, _at_ms: u64, event: &Event) -> Result<(), String> {
+            self.0.lock().expect("kept").push(event.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_agent_whose_turn_ends_in_an_error_is_a_problem_naming_agent_folder_and_line() {
+        use temet_work_core::Host;
+        use temet_work_core::host::Memory;
+        let mut w = world();
+        let (mut part, handle) = shared();
+        let fake = handle.fake;
+        let t1 = TerminalId("t1".into());
+        run(&mut part, &mut w, &["claude"]);
+        let mut host = Host::new(w, vec![Box::new(part)], Box::new(Memory::default()));
+        host.tick(nov27(16, 49)).expect("tick");
+        assert!(host.problems().is_empty(), "{:?}", host.problems());
+
+        fake.lock().expect("lock").end_in_error(&t1, LIMIT);
+        host.tick(nov27(16, 50)).expect("tick");
+        let said = host.problems().values().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            said,
+            [
+                "author-1 in . stopped on an error: You've hit your 5-hour limit · resets 5:40pm; \
+                 the daemon sends continue after it resets"
+            ]
+        );
+        let text = temet_work_core::text::text(host.world(), host.problems());
+        assert!(
+            text.contains(
+                "author-1 on ankh#1: error: You've hit your 5-hour limit · resets 5:40pm (on local)"
+            ),
+            "{text}"
+        );
+        assert!(text.contains(&said[0]), "{text}");
+
+        // A person typed into it and its turn ended: it has left the state.
+        fake.lock().expect("lock").unblock(&t1);
+        host.tick(nov27(16, 51)).expect("tick");
+        assert!(host.problems().is_empty(), "{:?}", host.problems());
+
+        // An error with no reset time is listed the same way, until the agent ends.
+        fake.lock()
+            .expect("lock")
+            .end_in_error(&t1, "API Error: 529 overloaded");
+        host.tick(nov27(16, 52)).expect("tick");
+        assert_eq!(
+            host.problems().values().cloned().collect::<Vec<_>>(),
+            [
+                "author-1 in . stopped on an error: API Error: 529 overloaded; the daemon reminds \
+                 it and stops it as it does an idle agent"
+            ]
+        );
+        fake.lock().expect("lock").stop(&t1).expect("stop");
+        host.tick(nov27(16, 53)).expect("tick");
+        assert!(host.problems().is_empty(), "ended: {:?}", host.problems());
+    }
+
+    #[test]
+    fn a_usage_limit_error_is_continued_after_its_reset_without_a_new_start() {
+        use temet_work_core::Host;
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let fake = handle.fake;
+        let author = run(&mut part, &mut w, &["claude"]);
+        let kept = Kept::default();
+        let mut host = Host::new(w, vec![Box::new(part)], Box::new(kept.clone()));
+        fake.lock()
+            .expect("lock")
+            .end_in_error(&TerminalId("t1".into()), LIMIT);
+        host.tick(nov27(16, 50)).expect("tick");
+        assert_eq!(
+            host.world().agents[&author].state,
+            AgentState::Errored {
+                line: LIMIT.into(),
+                resets_ms: Some(nov27(17, 40))
+            }
+        );
+        let limited = screen_of(&fake);
+        // Every minute up to 17:40 nothing is typed, not even a reminder,
+        // although its issue waits on it.
+        for minute in 51..=100 {
+            host.tick(nov27(16, 0) + minute * 60_000).expect("tick");
+            assert_eq!(screen_of(&fake), limited, "typed at 16:00 + {minute} min");
+        }
+        host.tick(nov27(17, 41)).expect("tick");
+        assert_eq!(screen_of(&fake), format!("{limited}\ncontinue"));
+        assert_eq!(
+            host.world().agents[&author].state,
+            AgentState::Working {
+                doing: String::new()
+            }
+        );
+        assert!(host.problems().is_empty(), "{:?}", host.problems());
+        for minute in [42, 43, 45, 50] {
+            host.tick(nov27(17, minute)).expect("tick");
+        }
+        assert_eq!(continues(&fake), 1, "once");
+        // The same one author, never ended, and no start since: `starts` is untouched.
+        let events = kept.0.lock().expect("kept").clone();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                Event::AgentStarted { .. }
+                    | Event::AgentChanged {
+                        state: AgentState::Ended,
+                        ..
+                    }
+            )),
+            "{events:?}"
+        );
+        assert!(events.contains(&Event::Continued {
+            agent: author.clone(),
+            resets_ms: nov27(17, 40)
+        }));
+        let authors: Vec<&temet_work_core::model::Agent> = host
+            .world()
+            .agents
+            .values()
+            .filter(|a| a.role == Role::Author)
+            .collect();
+        assert_eq!(authors.len(), 1);
+        assert_eq!(authors[0].id, author);
+        assert_ne!(authors[0].state, AgentState::Ended);
+    }
+
+    #[test]
+    fn an_error_with_no_reset_time_is_reminded_twice_then_stopped() {
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let fake = handle.fake;
+        let author = run(&mut part, &mut w, &["claude"]);
+        fake.lock()
+            .expect("lock")
+            .end_in_error(&TerminalId("t1".into()), "API Error: 529 overloaded");
+        assert_eq!(
+            step(&mut part, &mut w, 0),
+            vec![Event::AgentChanged {
+                agent: author.clone(),
+                state: AgentState::Errored {
+                    line: "API Error: 529 overloaded".into(),
+                    resets_ms: None
+                }
+            }]
+        );
+        let minute = |n: u64| n * 60_000;
+        let reminders = || screen_of(&fake).matches("still waiting on you").count();
+        step(&mut part, &mut w, minute(9));
+        assert_eq!(reminders(), 0, "not before remind_after");
+        step(&mut part, &mut w, minute(10));
+        assert_eq!(reminders(), 1);
+        step(&mut part, &mut w, minute(20));
+        assert_eq!(reminders(), 2);
+        let ended = step(&mut part, &mut w, minute(30));
+        assert!(
+            ended.contains(&Event::AgentChanged {
+                agent: author,
+                state: AgentState::Ended
+            }),
+            "{ended:?}"
+        );
+        // The loop starts a fresh author, as after an idle one is stopped.
+        assert!(
+            w.missing().start.iter().any(|e| matches!(
+                e,
+                Effect::StartAgent {
+                    role: Role::Author,
+                    ..
+                }
+            )),
+            "{:?}",
+            w.missing()
+        );
+    }
+
+    #[test]
+    fn a_limit_error_that_returns_after_continue_is_reminded_not_continued_again() {
+        let t1 = TerminalId("t1".into());
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let fake = handle.fake;
+        let author = run(&mut part, &mut w, &["claude"]);
+        fake.lock().expect("lock").end_in_error(&t1, LIMIT);
+        step(&mut part, &mut w, nov27(16, 50));
+        assert!(
+            step(&mut part, &mut w, nov27(17, 41)).contains(&Event::Continued {
+                agent: author.clone(),
+                resets_ms: nov27(17, 40)
+            })
+        );
+        // The same limit comes straight back.
+        fake.lock().expect("lock").end_in_error(&t1, LIMIT);
+        step(&mut part, &mut w, nov27(17, 42));
+        assert_eq!(
+            w.agents[&author].state,
+            AgentState::Errored {
+                line: LIMIT.into(),
+                resets_ms: Some(nov27(17, 40))
+            }
+        );
+        assert_eq!(w.agents[&author].limit_reset(), None, "already acted on");
+        let reminders = || screen_of(&fake).matches("still waiting on you").count();
+        for minute in 43..=71 {
+            let polled = step(&mut part, &mut w, nov27(17, 0) + minute * 60_000);
+            assert!(
+                !polled.iter().any(|e| matches!(e, Event::Continued { .. })),
+                "continued again at 17:00 + {minute} min"
+            );
+        }
+        assert_eq!(continues(&fake), 1, "not continued on every poll");
+        assert_eq!(reminders(), 2, "at 17:52 and 18:02");
+        assert!(
+            step(&mut part, &mut w, nov27(18, 12)).contains(&Event::AgentChanged {
+                agent: author,
+                state: AgentState::Ended
+            })
+        );
+
+        // A later reset, such as a weekly limit after a 5-hour one, is waited for again.
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let fake = handle.fake;
+        let reminders = || screen_of(&fake).matches("still waiting on you").count();
+        let author = run(&mut part, &mut w, &["claude"]);
+        fake.lock().expect("lock").end_in_error(&t1, LIMIT);
+        step(&mut part, &mut w, nov27(16, 50));
+        step(&mut part, &mut w, nov27(17, 41));
+        fake.lock()
+            .expect("lock")
+            .end_in_error(&t1, "You've hit your weekly limit · resets 11pm");
+        step(&mut part, &mut w, nov27(17, 42));
+        assert_eq!(w.agents[&author].limit_reset(), Some(nov27(23, 0)));
+        for (hh, mm) in [(17, 52), (18, 2), (18, 12), (23, 0)] {
+            assert_eq!(
+                step(&mut part, &mut w, nov27(hh, mm)),
+                vec![],
+                "{hh}:{mm:02}"
+            );
+        }
+        assert_eq!((continues(&fake), reminders()), (1, 0));
+        assert_eq!(
+            step(&mut part, &mut w, nov27(23, 1)),
+            vec![Event::Continued {
+                agent: author,
+                resets_ms: nov27(23, 0)
+            }]
+        );
+        assert_eq!(continues(&fake), 2);
+    }
+
+    #[test]
+    fn fixes_wait_while_the_author_waits_for_its_limit_to_reset() {
+        let issue = IssueId::new("ankh", "1");
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Fixing { round: 1 });
+        let (mut part, handle) = shared();
+        let fake = handle.fake;
+        run(&mut part, &mut w, &["claude"]);
+        // The fixes came after it started, so its brief did not have them.
+        w.issues.get_mut(&issue).expect("there").told = false;
+        fake.lock()
+            .expect("lock")
+            .end_in_error(&TerminalId("t1".into()), LIMIT);
+        step(&mut part, &mut w, nov27(16, 50));
+        let fix = Effect::RequestFix {
+            issue: issue.clone(),
+            points: vec!["no test for a stopped clock".into()],
+        };
+        assert_eq!(part.carry_out(&fix, &w), Outcome::done(), "nobody told");
+        assert_eq!(part.waiting(), 1);
+        for (hh, mm) in [(17, 0), (17, 40)] {
+            let polled = step(&mut part, &mut w, nov27(hh, mm));
+            assert!(
+                !polled.iter().any(|e| matches!(e, Event::Told { .. })),
+                "{polled:?}"
+            );
+        }
+        assert!(!screen_of(&fake).contains("stopped clock"));
+        assert!(!w.issues[&issue].told);
+
+        let polled = step(&mut part, &mut w, nov27(17, 41));
+        let continued = polled
+            .iter()
+            .position(|e| matches!(e, Event::Continued { .. }));
+        let told = polled.iter().position(|e| matches!(e, Event::Told { .. }));
+        assert!(
+            continued.is_some() && told.is_some() && continued < told,
+            "{polled:?}"
+        );
+        let screen = screen_of(&fake);
+        let at = |text: &str| screen.find(text).unwrap_or(usize::MAX);
+        assert!(
+            at("\ncontinue\n") < at("- no test for a stopped clock"),
+            "{screen}"
+        );
+        assert!(w.issues[&issue].told);
+        assert_eq!(part.waiting(), 0);
+    }
+
+    #[test]
+    fn after_a_restart_an_agent_waiting_on_its_limit_is_still_continued() {
+        let mut w = world();
+        let base = w.clone();
+        let (mut part, handle) = shared();
+        let mut log = run_events(&mut part, &mut w, &["claude"]);
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .end_in_error(&TerminalId("t1".into()), LIMIT);
+        log.extend(step(&mut part, &mut w, nov27(16, 50)));
+        drop(part);
+
+        // The daemon restarts: its state is the log replayed, and its runner
+        // lists the terminals it holds again.
+        let mut again = base;
+        apply(&mut again, &log);
+        assert_eq!(again, w, "replaying the log gives the same state");
+        let author = AgentId::new("author-1");
+        assert_eq!(again.agents[&author].limit_reset(), Some(nov27(17, 40)));
+        let mut part = Runners::default();
+        part.add(Box::new(handle.clone()));
+        handle.fake.lock().expect("lock").reconnect();
+        let limited = screen_of(&handle.fake);
+        for (hh, mm) in [(17, 0), (17, 40)] {
+            assert_eq!(part.poll(&again, nov27(hh, mm)).events, vec![]);
+        }
+        assert_eq!(
+            screen_of(&handle.fake),
+            limited,
+            "nothing typed before 17:41"
+        );
+        assert_eq!(
+            part.poll(&again, nov27(17, 41)).events,
+            vec![Event::Continued {
+                agent: author,
+                resets_ms: nov27(17, 40)
+            }]
+        );
+        assert_eq!(screen_of(&handle.fake), format!("{limited}\ncontinue"));
     }
 }

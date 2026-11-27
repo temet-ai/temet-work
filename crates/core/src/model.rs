@@ -189,6 +189,16 @@ pub enum AgentState {
         /// What it is asking for.
         reason: String,
     },
+    /// Its turn ended in an error, such as a usage limit. Typing starts a new
+    /// turn, so this is not a prompt.
+    Errored {
+        /// The line its turn ended on; empty when no line named the error.
+        line: String,
+        /// When the limit the line names resets, in milliseconds since 1970,
+        /// when the line gives a time that can be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_ms: Option<u64>,
+    },
     /// The session has ended.
     Ended,
 }
@@ -216,6 +226,34 @@ pub struct Agent {
     /// The SHA-256 digest of the secret it was started with; none for an agent
     /// started before agents had secrets, which is taken by its id.
     pub secret_digest: Option<crate::sender::Digest>,
+    /// The reset time of the last limit the daemon sent it `continue` after, so
+    /// the same limit coming back is not continued again.
+    #[serde(default)]
+    pub continued: Option<u64>,
+}
+
+impl AgentState {
+    /// When the limit an agent in this state waits on resets, for an agent last
+    /// continued after the limit that reset at `continued`: its turn ended in an
+    /// error whose line gives a reset time later than that. `None` for any other
+    /// state, including an error with no reset time or one already acted on:
+    /// such an agent is treated as idle.
+    pub fn limit_reset(&self, continued: Option<u64>) -> Option<u64> {
+        match self {
+            Self::Errored {
+                resets_ms: Some(at),
+                ..
+            } if continued.is_none_or(|done| *at > done) => Some(*at),
+            _ => None,
+        }
+    }
+}
+
+impl Agent {
+    /// When the limit this agent waits on resets ([`AgentState::limit_reset`]).
+    pub fn limit_reset(&self) -> Option<u64> {
+        self.state.limit_reset(self.continued)
+    }
 }
 
 /// A group of sessions working on a goal.

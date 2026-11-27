@@ -167,7 +167,9 @@ agent starts in a folder, the `claude` runtime marks the folder trusted
 and leaves a folder already trusted alone. For a folder on another machine this happens
 on that machine, in its user file ("A work folder on another machine", below). An agent
 stopped at a prompt the daemon cannot answer is listed under Problems with its name, its
-folder and the prompt, and the line goes when the agent goes on or ends.
+folder and the prompt, and the line goes when the agent goes on or ends. An agent whose
+turn ended in an error, such as a usage limit, is listed the same way with the line its
+turn ended on (`docs/architecture.md`, "Who coordinates").
 
 Each project, folder and group in the file becomes an event in the log the first time the
 daemon reads it, and again whenever it changes. Removing one from the file does not

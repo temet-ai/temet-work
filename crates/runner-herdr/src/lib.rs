@@ -288,12 +288,18 @@ fn unbase64(text: &str) -> Vec<u8> {
     out
 }
 
-fn status_of(state: Option<&str>, kind: Option<&str>) -> Status {
+/// A terminal's status from herdr-core's `state`, `kind` and `msg`. `error` is a
+/// turn that ended in an error, such as a usage limit; its `msg`, when the core
+/// sends one, says which.
+fn status_of(state: Option<&str>, kind: Option<&str>, msg: Option<&str>) -> Status {
     match state {
         Some("idle" | "done") => Status::Between,
         Some("working") => Status::Working,
         Some("blocked") => Status::Blocked {
             kind: kind.unwrap_or("prompt").to_string(),
+        },
+        Some("error") => Status::Error {
+            message: msg.filter(|m| !m.trim().is_empty()).map(String::from),
         },
         _ => Status::Unknown,
     }
@@ -359,6 +365,7 @@ fn take_snapshot(terminals: &Value, s: &mut Shared) {
             status_of(
                 t.pointer("/status/state").and_then(Value::as_str),
                 t.pointer("/status/kind").and_then(Value::as_str),
+                t.pointer("/status/msg").and_then(Value::as_str),
             )
         };
         s.updates.push(Update {
@@ -405,6 +412,7 @@ fn follow(mut conn: Conn, shared: Arc<Mutex<Shared>>) {
                     "status" => Some(status_of(
                         data.pointer("/status/state").and_then(Value::as_str),
                         data.pointer("/status/kind").and_then(Value::as_str),
+                        data.pointer("/status/msg").and_then(Value::as_str),
                     )),
                     "finished" | "lost" | "removed" => Some(Status::Gone),
                     _ => None,
@@ -820,16 +828,36 @@ mod tests {
 
     #[test]
     fn maps_idle_and_done_to_between_turns() {
-        assert_eq!(status_of(Some("idle"), None), Status::Between);
-        assert_eq!(status_of(Some("done"), None), Status::Between);
-        assert_eq!(status_of(Some("working"), None), Status::Working);
+        assert_eq!(status_of(Some("idle"), None, None), Status::Between);
+        assert_eq!(status_of(Some("done"), None, None), Status::Between);
+        assert_eq!(status_of(Some("working"), None, None), Status::Working);
         assert_eq!(
-            status_of(Some("blocked"), Some("question")),
+            status_of(Some("blocked"), Some("question"), None),
             Status::Blocked {
                 kind: "question".into()
             }
         );
-        assert_eq!(status_of(None, None), Status::Unknown);
+        // A turn that ended in an error, with the core's message when it sends one.
+        assert_eq!(
+            status_of(
+                Some("error"),
+                None,
+                Some("You've hit your 5-hour limit · resets 5:40pm")
+            ),
+            Status::Error {
+                message: Some("You've hit your 5-hour limit · resets 5:40pm".into())
+            }
+        );
+        assert_eq!(
+            status_of(Some("error"), None, None),
+            Status::Error { message: None }
+        );
+        assert_eq!(
+            status_of(Some("error"), None, Some("  ")),
+            Status::Error { message: None },
+            "a blank message is none"
+        );
+        assert_eq!(status_of(None, None, None), Status::Unknown);
     }
 
     #[test]
@@ -854,10 +882,17 @@ mod tests {
             {"address": "t4", "labels": {"agent": "refiner-1"}, "status": {"state": "done"}},
             {"address": "t5", "labels": {"agent": "author-2"}, "state": "finished",
              "status": {"state": "done"}},
+            {"address": "t6", "labels": {"agent": "author-3"}, "status": {"state": "error"}},
             {"labels": {"agent": "no-address"}}
         ]);
         take_snapshot(&snapshot, &mut s);
-        assert_eq!(s.updates.len(), 3);
+        assert_eq!(s.updates.len(), 4);
+        assert_eq!(s.updates[3].labels["agent"], "author-3");
+        assert_eq!(
+            s.updates[3].status,
+            Status::Error { message: None },
+            "an agent whose turn ended in an error before the daemon started"
+        );
         assert_eq!(s.updates[0].labels["agent"], "author-1");
         assert_eq!(s.updates[0].status, Status::Working);
         assert_eq!(s.updates[0].doing.as_deref(), Some("running the tests"));
@@ -875,7 +910,7 @@ mod tests {
             .filter(|u| u.status == Status::Gone)
             .map(|u| u.terminal.0.as_str())
             .collect();
-        assert_eq!(gone, ["t3", "t5"]);
+        assert_eq!(gone, ["t3", "t5", "t6"]);
     }
 
     #[test]

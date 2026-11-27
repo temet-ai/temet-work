@@ -31,6 +31,8 @@ pub fn agent_state(state: &AgentState) -> String {
         AgentState::Working { doing } => format!("working: {doing}"),
         AgentState::Idle => "idle".into(),
         AgentState::Blocked { reason } => format!("blocked: {reason}"),
+        AgentState::Errored { line, .. } if line.is_empty() => "error".into(),
+        AgentState::Errored { line, .. } => format!("error: {line}"),
         AgentState::Ended => "ended".into(),
     }
 }
