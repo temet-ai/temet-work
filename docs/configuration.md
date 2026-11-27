@@ -350,7 +350,9 @@ verify = '''
 
 `systemd-run` starts the restart as its own unit, so the restart is not in the daemon's
 control group and is not killed with it. A deploy that handed off but was not followed by
-a restart within ten minutes counts as failed and runs again; after three failures it
-waits for a person, as any deploy does. If the daemon that starts is not the build the
-line names, the issue is listed as a problem with both builds, and deleting its line from
-`deploy-handoff` lets the deploy run again.
+a restart within ten minutes counts as a failed try, and runs again ten minutes after
+that. The tries of a handed-off deploy add up across rounds until the third; then it waits
+for a person, as any deploy does. A deploy that fails after writing its handoff line has
+the line removed and runs again in ten minutes, unless that was its third try. If the
+daemon that starts is not the build the line names, the issue is listed as a problem with
+both builds, and `temet-work retry ISSUE` deploys it again.
