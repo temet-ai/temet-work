@@ -38,16 +38,35 @@ name = "Night watch"
 projects = ["ankh"]
 "#;
 
-/// A journal the test reads after the host has taken it.
+/// A journal the test reads after the host has taken it: the events, and the
+/// time each was logged with.
 #[derive(Clone, Default)]
-struct Kept(std::sync::Arc<std::sync::Mutex<Vec<temet_work_core::Event>>>);
+struct Kept(
+    std::sync::Arc<std::sync::Mutex<Vec<temet_work_core::Event>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+);
+
+impl Kept {
+    /// The world the log rebuilds, as the daemon rebuilds it at start: each
+    /// event at its time, with what the build's parts put in and the log does
+    /// not hold (`host`'s catalog and addresses).
+    fn replayed(&self, host: &World) -> World {
+        let events = self.0.lock().expect("journal").clone();
+        let times = self.1.lock().expect("journal").clone();
+        let mut world = World::default().replay_at(times.into_iter().zip(&events)).0;
+        world.catalog = host.catalog.clone();
+        world.addresses = host.addresses.clone();
+        world
+    }
+}
 
 impl temet_work_core::Journal for Kept {
-    fn append(&mut self, _at_ms: u64, event: &temet_work_core::Event) -> Result<(), String> {
+    fn append(&mut self, at_ms: u64, event: &temet_work_core::Event) -> Result<(), String> {
         self.0
             .lock()
             .map_err(|e| e.to_string())?
             .push(event.clone());
+        self.1.lock().map_err(|e| e.to_string())?.push(at_ms);
         Ok(())
     }
 }
@@ -786,12 +805,9 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         host.problems()
     );
     assert!(host.problems().is_empty(), "{:?}", host.problems());
-    // The log of a live run, with parts carrying out effects, replays to the same state.
-    let logged = kept.0.lock().expect("journal").clone();
-    let mut replayed = World::replay(&logged).0;
-    // What the build's parts offer is not in the log.
-    replayed.catalog = host.world().catalog.clone();
-    assert_eq!(&replayed, host.world());
+    // The log of a live run, with parts carrying out effects, replays to the same
+    // state, with the same time each issue last changed.
+    assert_eq!(&kept.replayed(host.world()), host.world());
 }
 
 mod settings_commands {
@@ -1671,6 +1687,8 @@ fn an_overturn_and_a_keep_go_through_the_daemon_and_reach_the_next_brief() {
                 reason: "easiest to undo".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             },
         },
     )
@@ -1940,10 +1958,7 @@ areas = ["guild"]
         assert_eq!(f.host.world().issues[&issue].stage, Stage::Done);
         assert_eq!(*f.deploys.lock().expect("lock"), 1, "after the last merge");
         assert!(f.host.world().folders.values().all(|f| f.holder.is_none()));
-        let logged = f.kept.0.lock().expect("journal").clone();
-        let mut replayed = World::replay(&logged).0;
-        replayed.catalog = f.host.world().catalog.clone();
-        assert_eq!(&replayed, f.host.world());
+        assert_eq!(&f.kept.replayed(f.host.world()), f.host.world());
     }
 
     #[test]
@@ -2703,6 +2718,8 @@ refining_at_once = 2
                 machine: MachineId::new("local"),
                 folder: None,
                 secret_digest: Some(temet_work::peer::digest(secret)),
+                runtime: None,
+                model: None,
             });
         }
         // Decision 1 is the one to overturn; decision 2's rule is proposed too.
@@ -2718,6 +2735,8 @@ refining_at_once = 2
                 reason: "quieter".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             };
             w.apply(&Event::DecisionMade { decision });
             w.apply(&Event::RuleProposed {
@@ -3104,6 +3123,7 @@ refining_at_once = 2
                     TrackedMilestone {
                         title: "First".into(),
                         open: 1,
+                        due: None,
                     },
                 )],
                 ..FakeTracker::default()

@@ -366,6 +366,8 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
                 reason: "Scope names every elicitation field".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             },
         };
         let effects = w.apply(&ruling);
@@ -423,6 +425,8 @@ fn ruling(approve: bool) -> Event {
             reason: "scope names every field".into(),
             overturned_to: None,
             overturn_reason: String::new(),
+            cost: None,
+            point: None,
         },
     }
 }
@@ -575,6 +579,8 @@ fn overturning_a_choice_changes_no_stage_and_an_unknown_option_nothing_at_all() 
             reason: "easiest to undo".into(),
             overturned_to: None,
             overturn_reason: String::new(),
+            cost: None,
+            point: None,
         },
     });
     let before = w.issues.clone();
@@ -635,6 +641,8 @@ fn started(agent: &str, role: Role, key: &str) -> Event {
         machine: MachineId::new("morpork"),
         folder: None,
         secret_digest: None,
+        runtime: None,
+        model: None,
     }
 }
 

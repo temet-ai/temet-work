@@ -854,6 +854,8 @@ Problems
                     machine: MachineId::new("local"),
                     folder: None,
                     secret_digest: None,
+                    runtime: None,
+                    model: None,
                 },
             ]
         };

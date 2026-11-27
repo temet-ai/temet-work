@@ -357,6 +357,7 @@ impl Part for Runtimes {
             events: Vec::new(),
             effects: vec![Effect::Run {
                 launch: Box::new(launch),
+                runtime: runtime.id().to_string(),
                 program,
                 before,
             }],
@@ -397,6 +398,7 @@ mod tests {
         let [
             Effect::Run {
                 launch,
+                runtime,
                 program,
                 before: None,
             },
@@ -405,6 +407,10 @@ mod tests {
             panic!("{effects:?}");
         };
         assert_eq!(launch.agent.0, "refiner-1");
+        assert_eq!(
+            runtime, "fake",
+            "it names the runtime that made the program"
+        );
         assert_eq!(program.argv[0], "fake-agent");
         assert!(
             program
@@ -701,6 +707,7 @@ mod tests {
                 launch,
                 program,
                 before: Some(before),
+                ..
             },
         ] = effects.as_slice()
         else {

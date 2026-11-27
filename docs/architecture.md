@@ -7,6 +7,7 @@ session_id:
   - d1ccda48-cbb5-44cc-9ea0-c03999c970e9
   - 0645e4e2-33bd-43f8-980f-503649da2f15
   - edd1e649-f07a-4d7c-b5c6-ff74b0021fbb
+  - c14f6d16-7688-4e50-99d4-32021f0e29db
 ---
 
 # temet-work architecture
@@ -78,11 +79,11 @@ What exists today:
 
 | Crate | State |
 |---|---|
-| `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, the state as text and, beside it, as view data (`view.rs`) that the `view` command answers with, the daemon's reply, and the rule for where its socket is |
+| `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, the state as text and, beside it, as view data (`view.rs`) that the `view` command answers with, the daemon's reply, and the rule for where its socket is. The host applies each event at the time it logs it with, so the world knows when each issue last changed, and puts in the world each round the web addresses the tracker and code-host families give |
 | `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, holds text for an agent until its turn ends, and types `continue` into an agent whose usage limit has reset |
 | `temet-work-runner-herdr` | the herdr-core socket client; puts each agent's terminal on the herdr app's screens by starting it with `herdr.space`, `herdr.tab` and `herdr.name`, one space per group, one tab per issue and one for the group's investigator; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
 | `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |
-| `temet-work-tracker` | the contract (issues, milestones, comment, close, create), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, keeps each open issue's text from the last sync in memory for `temet-work issue`, and closes verified issues |
+| `temet-work-tracker` | the contract (issues, milestones with due dates, the address of a project's issues, comment, close, create), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes to issues and to the open milestones and their due dates, keeps each open issue's text from the last sync in memory for `temet-work issue`, and closes verified issues |
 | `temet-work-tracker-github` | issues and milestones through `gh`, and issues filed with `gh issue create`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-tracker-jira` | issues, fix versions as milestones, comments, new issues and Done transitions through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
 | `temet-work-codehost` | the contract, a fake and contract tests. The family reads each pull request in review every 30 seconds, reports a conflict, and reports CI finished once it has on all of an issue's pull requests, with the names of failing checks; it merges them when the loop asks, in the plan's order, each after the previous repository's main pipeline passed |

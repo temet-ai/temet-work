@@ -1,15 +1,17 @@
 ---
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
+  - c14f6d16-7688-4e50-99d4-32021f0e29db
 ---
 
 # What temet-work holds
 
 Every screen, command and message in temet-work is about one of these objects. The app,
 the CLI and the MCP server show and change them through the same commands. The core crate
-defines areas, projects, groups, agents, work folders, issues, plans, checks, decisions
-and events today; a milestone is an id on its issues, and the other objects are not built
-yet.
+defines areas, projects, groups, agents, work folders, issues, plans, checks, review
+rounds, decisions and events today. A milestone is an id on its issues, with the due date
+its tracker gives. A machine is known by the work folders on it, and a limit only while an
+agent waits for it to reset. The other objects are not built yet.
 
 ## Objects
 
@@ -31,7 +33,7 @@ yet.
 | Check | a plan | One "Done when" line from the issue and the test or command that proves it. |
 | Pull request | an issue | The branch, CI, and the review rounds. An issue has one in each repository it changes. |
 | Review round | a pull request | The reviewer's blocking points and the author's replies. A dispute between them goes to an arbiter. |
-| Decision | an issue | A choice an agent made: the options it weighed, the one it took, why, who decided, and the point after which overturning it costs more. Work carries on at once; a person reads decisions afterwards and can overturn them. |
+| Decision | an issue | A choice an agent made: the options it weighed, the one it took, why, who decided, its cost to undo (low, medium or high) and the point after which overturning it costs more. Work carries on at once; a person reads decisions afterwards and can overturn them. An arbiter's ruling records its cost and point (`docs/commands.md`); other choices do not yet. |
 | Message | an agent | Agent to agent, or agent to a person. |
 | Event | everything | What happened, with its time, in one append-only log. State is built from events. |
 

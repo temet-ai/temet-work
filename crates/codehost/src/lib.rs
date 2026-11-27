@@ -11,7 +11,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use temet_work_core::ids::{IssueId, ProjectId};
-use temet_work_core::model::{Issue, Stage};
+use temet_work_core::model::{Addresses, Issue, Stage};
 use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
 
 /// What a pull request's CI says about its latest commit.
@@ -95,6 +95,11 @@ pub trait CodeHost: Send {
     /// that pull request has not merged, or when its run waits for a person, who
     /// reads the error.
     fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError>;
+
+    /// The web address of the repository's code, made from its name and the
+    /// adapter's own settings, such as the host it reaches; none when the
+    /// adapter cannot say. It asks the code host nothing.
+    fn address(&self, repo: &str) -> Option<String>;
 }
 
 /// A code host in memory, for tests.
@@ -179,6 +184,10 @@ impl CodeHost for FakeCodeHost {
             .and_then(|m| m.get(repo).cloned())
             .unwrap_or(Checks::Passed))
     }
+
+    fn address(&self, repo: &str) -> Option<String> {
+        Some(format!("https://{}.example.com/{repo}", self.id))
+    }
 }
 
 /// The contract every code-host adapter runs.
@@ -207,6 +216,11 @@ pub mod contract {
     pub fn check(host: &mut dyn CodeHost, harness: &dyn Harness) -> Result<(), String> {
         let repo = harness.repo();
         let number = harness.pull();
+        ensure(
+            host.address(&repo)
+                .is_some_and(|a| a.starts_with("https://") && a.contains(&repo)),
+            "the repository's code has an https address that holds its name",
+        )?;
         let pull = host
             .pull(&repo, &number)
             .map_err(|e| format!("pull: {e}"))?;
@@ -598,6 +612,25 @@ impl Part for CodeHosts {
         };
         self.merge_next(world, issue)
     }
+
+    /// Where each project's code is, from the code host it names.
+    fn addresses(&self, world: &World) -> BTreeMap<ProjectId, Addresses> {
+        world
+            .projects
+            .values()
+            .filter_map(|p| {
+                let host = self.adapters.iter().find(|a| a.id() == p.code_host)?;
+                let code = host.address(&p.repo)?;
+                Some((
+                    p.id.clone(),
+                    Addresses {
+                        issues: None,
+                        code: Some(code),
+                    },
+                ))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -901,6 +934,29 @@ mod tests {
         add_in_review(&mut w, "ankh", "city/ankh", None);
         add_in_review(&mut w, "klatch", "desert/klatch", Some("other"));
         w
+    }
+
+    #[test]
+    fn two_adapters_each_projects_code_has_the_address_its_own_code_host_gives() {
+        let mut w = on_two_hosts();
+        add_in_review(&mut w, "lancre", "hills/lancre", Some("gitea"));
+        let addresses = part_of(two(&REPOS)).addresses(&w);
+        let code = |id: &str| {
+            addresses
+                .get(&ProjectId::new(id))
+                .and_then(|a| a.code.clone())
+        };
+        assert_eq!(
+            code("ankh").as_deref(),
+            Some("https://fake.example.com/city/ankh")
+        );
+        assert_eq!(
+            code("klatch").as_deref(),
+            Some("https://other.example.com/desert/klatch")
+        );
+        // A code host this build lacks gives none.
+        assert_eq!(code("lancre"), None);
+        assert!(addresses.values().all(|a| a.issues.is_none()));
     }
 
     /// A project on tracker "fake" whose issue 1 is in review with pull request 1.

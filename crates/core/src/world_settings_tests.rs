@@ -310,6 +310,8 @@ fn a_plain_model_keeps_the_runtime_it_was_written_for() {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: None,
+            runtime: None,
+            model: None,
         },
     ] {
         w.apply(&event);
@@ -468,6 +470,8 @@ fn starts_changes_how_many_agents_of_a_role_are_tried_on_one_issue() {
         machine: MachineId::new("morpork"),
         folder: None,
         secret_digest: None,
+        runtime: None,
+        model: None,
     };
     for e in [author(1), author(2)] {
         w.apply(&e);

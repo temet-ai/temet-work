@@ -4,7 +4,8 @@
 //!
 //! Work runs depth first: what an effect leads to is handled before the next
 //! effect, so an agent started by one effect is known before the next one is
-//! numbered.
+//! numbered. Each event is applied at the time it is logged with, so the world
+//! knows when each issue last changed.
 
 use std::collections::BTreeMap;
 
@@ -152,12 +153,28 @@ impl Host {
     /// A host over `world`, already built from the journal's events.
     pub fn new(mut world: World, parts: Vec<Box<dyn Part>>, journal: Box<dyn Journal>) -> Self {
         world.catalog = catalog(&parts);
-        Self {
+        let mut host = Self {
             world,
             parts,
             journal,
             problems: BTreeMap::new(),
+        };
+        host.put_addresses();
+        host
+    }
+
+    /// Puts in the world the web addresses the parts give for each project and
+    /// area; the first part to give one wins.
+    fn put_addresses(&mut self) {
+        let mut all: BTreeMap<crate::ids::ProjectId, crate::model::Addresses> = BTreeMap::new();
+        for part in &self.parts {
+            for (id, given) in part.addresses(&self.world) {
+                let a = all.entry(id).or_default();
+                a.issues = a.issues.take().or(given.issues);
+                a.code = a.code.take().or(given.code);
+            }
         }
+        self.world.addresses = all;
     }
 
     /// The loop's state.
@@ -262,7 +279,7 @@ impl Host {
             match work {
                 Work::Event(e) => {
                     self.journal.append(now_ms, &e)?;
-                    let effects = self.world.apply(&e);
+                    let effects = self.world.apply_at(now_ms, &e);
                     stack.extend(effects.into_iter().rev().map(Work::Effect));
                 }
                 Work::Effect(effect) => match self.offer(&effect) {
@@ -288,6 +305,7 @@ impl Host {
     /// Asks each part what it has seen and handles the events it reports, then
     /// starts the agents issues are missing. Returns how many events there were.
     pub fn tick(&mut self, now_ms: u64) -> Result<usize, String> {
+        self.put_addresses();
         let mut seen = Vec::new();
         for part in &mut self.parts {
             let polled = part.poll(&self.world, now_ms);

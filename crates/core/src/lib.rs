@@ -81,4 +81,16 @@ pub trait Part: Send {
         let _ = (world, issue);
         None
     }
+
+    /// The web addresses this part gives for the projects and areas it holds,
+    /// made from their names in the configuration: a tracker family gives where
+    /// their issues are, a code-host family where their code is. It asks nothing
+    /// of any service. The host puts them in the world each round.
+    fn addresses(
+        &self,
+        world: &World,
+    ) -> std::collections::BTreeMap<ids::ProjectId, model::Addresses> {
+        let _ = world;
+        std::collections::BTreeMap::new()
+    }
 }

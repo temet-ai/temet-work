@@ -828,6 +828,7 @@ impl World {
                     return Err("a ruling needs a reason".into());
                 }
                 let id = self.decisions.keys().next_back().map_or(1, |d| d.0 + 1);
+                let (cost, point) = Decision::ruling_cost(*approve);
                 Event::DecisionMade {
                     decision: Decision {
                         id: DecisionId(id),
@@ -840,6 +841,8 @@ impl World {
                         reason: reason.clone(),
                         overturned_to: None,
                         overturn_reason: String::new(),
+                        cost: Some(cost),
+                        point: Some(point),
                     },
                 }
             }
@@ -920,6 +923,8 @@ mod tests {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: None,
+            runtime: None,
+            model: None,
         }
     }
 
@@ -1375,6 +1380,8 @@ mod plan_settings {
                 machine: MachineId::new("local"),
                 folder: None,
                 secret_digest: None,
+                runtime: None,
+                model: None,
             },
         ]);
         w
@@ -2181,6 +2188,8 @@ mod plan_settings {
                 reason: "easiest to undo".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             },
         });
         w
@@ -2473,6 +2482,8 @@ mod ready_in_several_repositories {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: None,
+            runtime: None,
+            model: None,
         });
         World::replay(&events).0
     }

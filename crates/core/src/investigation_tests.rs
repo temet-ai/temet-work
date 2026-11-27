@@ -85,6 +85,8 @@ fn tick(w: &mut World, now_ms: u64) -> Vec<Launch> {
                     machine: launch.machine.clone(),
                     folder: launch.folder.clone(),
                     secret_digest: None,
+                    runtime: None,
+                    model: None,
                 });
                 started.push(launch);
             }
@@ -574,6 +576,8 @@ fn investigating() -> World {
         machine: MachineId::new("morpork"),
         folder: None,
         secret_digest: None,
+        runtime: None,
+        model: None,
     });
     w
 }

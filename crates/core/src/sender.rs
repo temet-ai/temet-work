@@ -249,6 +249,8 @@ mod tests {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: digest,
+            runtime: None,
+            model: None,
         }
     }
 

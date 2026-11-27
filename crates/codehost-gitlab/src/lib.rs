@@ -43,11 +43,15 @@ impl Transport for Cli {
 /// The GitLab adapter.
 pub struct GitLab {
     transport: Box<dyn Transport>,
+    /// The host `glab` reaches, which the web addresses name.
+    host: String,
 }
 
 impl Default for GitLab {
+    /// Runs the real `glab`, on the host `GITLAB_HOST` names when the daemon has
+    /// it, as `glab` does.
     fn default() -> Self {
-        Self::with(Box::new(Cli))
+        Self::with(Box::new(Cli)).host(&std::env::var("GITLAB_HOST").unwrap_or_default())
     }
 }
 
@@ -66,9 +70,26 @@ fn encode(repo: &str) -> String {
 }
 
 impl GitLab {
-    /// A GitLab code host that runs `glab` through `transport`.
+    /// A GitLab code host that runs `glab` through `transport`, on gitlab.com.
     pub fn with(transport: Box<dyn Transport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            host: "gitlab.com".into(),
+        }
+    }
+
+    /// The same code host on `host`: a name, or an address whose scheme is
+    /// dropped. An empty one leaves it as it was.
+    pub fn host(mut self, host: &str) -> Self {
+        let host = host
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        if !host.is_empty() {
+            self.host = host.to_string();
+        }
+        self
     }
 
     fn run(&mut self, args: &[&str]) -> Result<String, CodeHostError> {
@@ -237,6 +258,10 @@ impl CodeHost for GitLab {
         self.run(&args).map(|_| ())
     }
 
+    fn address(&self, repo: &str) -> Option<String> {
+        Some(format!("https://{}/{repo}", self.host))
+    }
+
     fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
         let project = encode(repo);
         let v = self.request(&project, number)?;
@@ -357,6 +382,21 @@ mod tests {
 
     fn job(name: &str, status: &str, allow: bool) -> Value {
         json!({"name": name, "status": status, "allow_failure": allow})
+    }
+
+    #[test]
+    fn the_code_is_on_gitlab_or_the_host_gitlab_host_names() {
+        let at = |host: GitLab| host.address("ankh-morpork/watch/clacks");
+        assert_eq!(
+            at(GitLab::with(Box::new(Recorded))).as_deref(),
+            Some("https://gitlab.com/ankh-morpork/watch/clacks")
+        );
+        for host in ["git.example.com", "https://git.example.com/"] {
+            assert_eq!(
+                at(GitLab::with(Box::new(Recorded)).host(host)).as_deref(),
+                Some("https://git.example.com/ankh-morpork/watch/clacks")
+            );
+        }
     }
 
     #[test]
