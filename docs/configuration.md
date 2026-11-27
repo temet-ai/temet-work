@@ -178,8 +178,10 @@ lists such an issue under Waiting, with a line for each of those dependencies, s
 say `no group covers it` for a dependency with no milestone the group leaves out, and
 `through radar#47` follows the dependency when radar#44 reaches it through radar#47. The issue
 counts again once the dependency is done or back in scope, or its "Depends on" line is gone.
+A dependency on a repository that no project or area matches is one no group covers: no sync
+looks it up, and the line shows it as the issue's text writes it, such as `nowhere#5`.
 Refining and new issues count whatever they depend on, and so does a ready issue whose
-dependency the daemon has never synced.
+dependency in a known project or area the daemon has never synced.
 
 When the queue holds fewer than `queue_low` issues, the daemon starts one
 investigator for the group. Left out, `queue_low` is twice the work folders of the group's

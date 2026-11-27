@@ -398,6 +398,35 @@ fn a_dependency_no_group_covers_keeps_a_ready_issue_out_of_the_queue() {
 }
 
 #[test]
+fn a_dependency_on_a_repository_nothing_matches_keeps_a_ready_issue_out_of_the_queue() {
+    // The tracker keeps a name no project or area matches as the key of an issue
+    // in the project that names it, and never syncs it.
+    let (short, long) = (ankh_issue("nowhere#5"), ankh_issue("desert/elsewhere#12"));
+    let mut w = unstaffed();
+    for key in 1..=8 {
+        make_ready(&mut w, &key.to_string(), &[&short]);
+    }
+    make_ready(&mut w, "9", &[&long]);
+    make_ready(&mut w, "10", &[&ankh_issue("9")]);
+    assert_eq!(queued(&w), 0);
+    assert_eq!(w.investigation_events(0, true).len(), 1);
+    let status = status(&w);
+    for line in [
+        "  ankh#1 waiting on nowhere#5, out of scope (no group covers it)\n",
+        "  ankh#8 waiting on nowhere#5, out of scope (no group covers it)\n",
+        "  ankh#9 waiting on desert/elsewhere#12, out of scope (no group covers it)\n",
+        "  ankh#10 waiting on desert/elsewhere#12 through ankh#9, out of scope \
+         (no group covers it)\n",
+    ] {
+        assert!(status.contains(line), "{line}{status}");
+    }
+
+    // Dropping the line counts the issue again.
+    w.apply(&sync_on(&ankh_issue("1"), Some("First"), &[]));
+    assert_eq!(queued(&w), 1);
+}
+
+#[test]
 fn a_dependency_in_a_milestone_another_group_takes_keeps_it_out_too() {
     let mut w = unstaffed();
     let guard = GroupId::new("guard");

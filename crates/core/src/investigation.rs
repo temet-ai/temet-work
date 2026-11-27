@@ -77,27 +77,33 @@ impl World {
     }
 
     /// The dependencies out of `group`'s scope that keep `issue` from starting:
-    /// those no group covers, and those in a milestone `group` does not take,
-    /// whoever else takes it. Open dependencies in scope are followed to their
-    /// own, nearest first, each issue once, so a cycle ends the walk. A done one
-    /// holds nothing up, and nothing says what scope an issue never synced is in.
+    /// those no group covers, among them any in a repository nothing matches, and
+    /// those in a milestone `group` does not take, whoever else takes it. Open
+    /// dependencies in scope are followed to their own, nearest first, each issue
+    /// once, so a cycle ends the walk. A done one holds nothing up, and nothing
+    /// says what scope any other issue never synced is in.
     fn blocked_on(&self, group: &Group, issue: &Issue) -> Vec<DependencyWait> {
         let mut out = Vec::new();
         let mut seen = BTreeSet::from([&issue.id]);
         let mut next = VecDeque::from([(issue, Vec::new())]);
         while let Some((from, through)) = next.pop_front() {
             for id in &from.depends_on {
-                let Some(on) = self.issues.get(id) else {
-                    continue;
-                };
-                if on.stage == Stage::Done || !seen.insert(id) {
+                let on = self.issues.get(id);
+                let open = on.map_or_else(|| id.unmatched().is_some(), |i| i.stage != Stage::Done);
+                if !open || !seen.insert(id) {
                     continue;
                 }
                 let left_out = on
-                    .milestone
-                    .as_ref()
+                    .and_then(|on| on.milestone.as_ref())
                     .filter(|m| !group.milestones.is_empty() && !group.milestones.contains(m));
-                if left_out.is_some() || !self.groups.values().any(|g| self.in_scope(g, on)) {
+                let in_scope = on.filter(|on| {
+                    left_out.is_none() && self.groups.values().any(|g| self.in_scope(g, on))
+                });
+                if let Some(on) = in_scope {
+                    let mut path = through.clone();
+                    path.push(id.clone());
+                    next.push_back((on, path));
+                } else {
                     out.push(DependencyWait {
                         issue: issue.id.clone(),
                         group: group.id.clone(),
@@ -105,10 +111,6 @@ impl World {
                         through: through.clone(),
                         left_out: left_out.cloned(),
                     });
-                } else {
-                    let mut path = through.clone();
-                    path.push(id.clone());
-                    next.push_back((on, path));
                 }
             }
         }

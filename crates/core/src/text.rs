@@ -259,10 +259,14 @@ fn waiting(out: &mut String, world: &World) {
             || "no group covers it".to_string(),
             |m| format!("{m} is not a milestone of {}", w.group),
         );
+        // A name nothing matches is shown as its "Depends on" line writes it.
+        let on =
+            w.on.unmatched()
+                .map_or_else(|| w.on.to_string(), str::to_string);
         let _ = writeln!(
             out,
-            "  {} waiting on {}{through}, out of scope ({why})",
-            w.issue, w.on
+            "  {} waiting on {on}{through}, out of scope ({why})",
+            w.issue
         );
     }
 }
