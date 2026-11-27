@@ -156,17 +156,17 @@ Projects with different `run_in` folders deploy side by side. The daemon reaches
 Settings at every level, from global down to one task, are in `docs/settings.md`. The
 tables `[settings]` (with `[settings.<role>]` inside it), `[project.settings]`,
 `[area.settings]` and `[[milestone]]` become `SettingSet` events recorded as set by
-`file`, when the daemon reads the file and again whenever it changes. A `model` table in
-any of them, or in a role's table, gives a model per runtime: `[settings.model]` with
-`claude = "sonnet"` is the setting `model.claude`. A group's `model` and a project's
-`ci`, `deploy`, `verify` and `run_in` are still accepted and are read as settings at their
-level, so an existing file behaves as before. A key the daemon does not know is an error
-naming the key, and so is a key in a role's table that takes no role (`docs/settings.md`,
-Roles). A value that names a runtime or runner the build does not have, or a model for
-such a runtime, stops the daemon at start, with the ones it has listed, and so does a
-build with no default runtime or runner and no global value for it. What a person or an
-agent has set since is not overwritten by the file; a value taken out of the file is
-unset.
+`file`. The daemon reads the file when it starts, so a change to it takes effect at the
+next start. A `model` table in any of them, or in a role's table, gives a model per
+runtime: `[settings.model]` with `claude = "sonnet"` is the setting `model.claude`. A
+group's `model` and a project's `ci`, `deploy`, `verify` and `run_in` are still accepted
+and are read as settings at their level, so an existing file behaves as before. A key the
+daemon does not know is an error naming the key, and so is a key in a role's table that
+takes no role (`docs/settings.md`, Roles). A value that names a runtime or runner the
+build does not have, or a model for such a runtime, stops the daemon at start, with the
+ones it has listed, and so does a build with no default runtime or runner and no global
+value for it. What a person or an agent has set since is not overwritten by the file; a
+value taken out of the file is unset.
 
 Listing a folder under `[[folder]]` is your choice to let agents work in it. Before each
 agent starts in a folder, the `claude` runtime marks the folder trusted
@@ -179,9 +179,9 @@ folder and the prompt, and the line goes when the agent goes on or ends. An agen
 turn ended in an error, such as a usage limit, is listed the same way with the line its
 turn ended on (`docs/architecture.md`, "Who coordinates").
 
-Each project, folder and group in the file becomes an event in the log the first time the
-daemon reads it, and again whenever it changes. Removing one from the file does not
-remove it from the daemon yet.
+Each project, folder and group in the file becomes an event in the log at the first start
+that reads it, and again at a start that finds it changed. Removing one from the file does
+not remove it from the daemon yet.
 
 ## A work folder on another machine
 

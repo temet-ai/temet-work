@@ -124,8 +124,9 @@ pub fn depends_on(body: &str) -> Vec<String> {
 }
 
 /// A tracker in memory, for tests.
-#[derive(Default)]
 pub struct FakeTracker {
+    /// Its id.
+    pub id: &'static str,
     /// Issues by project.
     pub issues: Vec<(String, TrackedIssue)>,
     /// Milestones by project.
@@ -134,9 +135,27 @@ pub struct FakeTracker {
     pub comments: Vec<(String, String, String)>,
 }
 
+impl Default for FakeTracker {
+    fn default() -> Self {
+        Self::named("fake")
+    }
+}
+
+impl FakeTracker {
+    /// A fake tracker with the given id.
+    pub fn named(id: &'static str) -> Self {
+        Self {
+            id,
+            issues: Vec::new(),
+            milestones: Vec::new(),
+            comments: Vec::new(),
+        }
+    }
+}
+
 impl Tracker for FakeTracker {
     fn id(&self) -> &'static str {
-        "fake"
+        self.id
     }
 
     fn issues(&mut self, project: &str) -> Result<Vec<TrackedIssue>, TrackerError> {
@@ -556,7 +575,7 @@ mod tests {
                     open: 1,
                 },
             )],
-            comments: vec![],
+            ..FakeTracker::default()
         }
     }
 
@@ -745,6 +764,123 @@ mod tests {
         part.add(Box::new(FakeTracker::default()));
         assert_eq!(part.ids(), ["fake"]);
         assert_eq!(part.id(), "tracker");
+    }
+
+    /// The tracker's names for the sources of [`two_sources`] and of a project
+    /// whose tracker the build lacks.
+    const NAMES: [&str; 3] = ["ankh/morpork", "GLD", "desert/klatch"];
+
+    /// Project ankh on tracker "fake" and area guild on tracker "other".
+    fn two_sources() -> World {
+        let mut w = configured();
+        w.apply(&Event::AreaDefined {
+            area: ProjectId::new("guild"),
+            name: "Guild".into(),
+            projects: vec![],
+            tracker: "other".into(),
+            tracker_name: "GLD".into(),
+        });
+        w
+    }
+
+    /// Trackers "fake" and "other", in that order. Each has an issue 1, titled
+    /// with its id, under every name, so reaching the wrong one shows.
+    fn two() -> Trackers {
+        let mut part = Trackers::default();
+        for id in ["fake", "other"] {
+            let mut tracker = FakeTracker::named(id);
+            tracker.issues = NAMES
+                .map(|name| {
+                    let titled = TrackedIssue {
+                        title: id.into(),
+                        ..issue("1", None)
+                    };
+                    (name.into(), titled)
+                })
+                .into();
+            part.add(Box::new(tracker));
+        }
+        part
+    }
+
+    /// Each synced issue, as (issue, title).
+    fn synced(events: &[Event]) -> Vec<(String, &str)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::IssueSynced { issue, title, .. } => {
+                    Some((issue.to_string(), title.as_str()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether issue 1 under `name` is closed, in "fake" and in "other".
+    fn closed_in(part: &mut Trackers, name: &str) -> Vec<bool> {
+        part.adapters
+            .iter_mut()
+            .map(|a| a.closed(name, "1").expect("there"))
+            .collect()
+    }
+
+    #[test]
+    fn two_adapters_a_project_and_an_area_each_sync_from_their_own() {
+        let polled = two().poll(&two_sources(), 0);
+        assert_eq!(polled.problem, None);
+        assert_eq!(
+            synced(&polled.events),
+            [("ankh#1".into(), "fake"), ("guild#1".into(), "other")]
+        );
+    }
+
+    #[test]
+    fn two_adapters_each_close_only_their_own_issue() {
+        let w = two_sources();
+        for (source, name, closed) in [
+            ("ankh", "ankh/morpork", [true, false]),
+            ("guild", "GLD", [false, true]),
+        ] {
+            let mut part = two();
+            let close = Effect::Close {
+                issue: IssueId::new(source, "1"),
+            };
+            assert_eq!(part.carry_out(&close, &w), Outcome::done());
+            assert_eq!(closed_in(&mut part, name), closed, "{source}");
+            for other in NAMES.into_iter().filter(|n| *n != name) {
+                assert_eq!(closed_in(&mut part, other), [false, false], "{other}");
+            }
+        }
+    }
+
+    #[test]
+    fn two_adapters_a_tracker_the_build_lacks_is_a_problem_and_the_others_still_sync() {
+        let mut w = two_sources();
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new("klatch"),
+            tracker: "nonesuch".into(),
+            name: "desert/klatch".into(),
+            code_host: None,
+            repo: None,
+        });
+        let mut part = two();
+        let polled = part.poll(&w, 0);
+        assert_eq!(
+            polled.problem.as_deref(),
+            Some("klatch: no tracker \"nonesuch\" in this build")
+        );
+        assert_eq!(
+            synced(&polled.events),
+            [("ankh#1".into(), "fake"), ("guild#1".into(), "other")]
+        );
+        let close = Effect::Close {
+            issue: IssueId::new("klatch", "1"),
+        };
+        assert_eq!(
+            part.carry_out(&close, &w),
+            Outcome::Failed("no tracker \"nonesuch\" in this build".into())
+        );
+        assert_eq!(closed_in(&mut part, "desert/klatch"), [false, false]);
     }
 
     #[test]

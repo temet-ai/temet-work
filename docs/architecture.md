@@ -223,8 +223,10 @@ In this order:
 
 1. The settings chain (`docs/settings.md`): global, area, project, milestone and task
    levels, with roles inside each; runtimes and runners chosen by it; every family tested
-   with two adapters at once. Done: Claude Code and Codex are both runtimes, chosen by the
-   `runtime` setting.
+   with two adapters at once. Done: the levels and the roles inside them are built, the
+   `runtime` setting chooses between Claude Code and Codex and the `runner` setting chooses
+   the runner, and the tracker, code-host, runtime and runner families are each tested with
+   two adapters.
 2. The app's theme generated from the design system's tokens, then the navbar with areas
    through review (`docs/ui.md`).
 3. The desktop window on GPUI, drawing the daemon's view data.
