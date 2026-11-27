@@ -194,7 +194,9 @@ impl Transport for Ssh {
             .spawn()
             .map_err(|e| self.hop(&format!("cannot run {}: {e}", self.program)))?;
         if let Some(mut stdin) = child.stdin.take() {
-            writeln!(stdin, "{line}").map_err(|e| self.hop(&format!("ssh closed early: {e}")))?;
+            // A hop that fails early closes its end before it reads: the exit
+            // status below says why, so a broken pipe here is not the answer.
+            let _ = writeln!(stdin, "{line}");
         }
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
         let stderr = String::from_utf8_lossy(&out.stderr);
