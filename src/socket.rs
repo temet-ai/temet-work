@@ -636,6 +636,24 @@ pub fn answer(
     }
 }
 
+/// The daemon's request log: who sent a command and what came of it. A command
+/// that only reads and was answered has no line, so the app's `view` once a
+/// second does not bury the commands that changed something or were refused.
+pub fn request_line(request: &Request, reply: &Reply) -> Option<String> {
+    let came_of_it = match reply {
+        Reply::Refused { why } => format!("refused: {why}"),
+        Reply::Done { .. } | Reply::View { .. } if request.command.changes() => "done".to_string(),
+        Reply::Done { .. } | Reply::View { .. } => return None,
+    };
+    // The variant's name alone: its fields may be long.
+    let debug = format!("{:?}", request.command);
+    Some(format!(
+        "request: by={} {} -> {came_of_it}",
+        request.by.as_ref().map_or("none", |a| a.0.as_str()),
+        debug.split([' ', '{', '(']).next().unwrap_or_default(),
+    ))
+}
+
 /// Files an issue for an investigator through the tracker, and answers with the
 /// new issue's id and how a later issue names it in a "Depends on" line.
 fn file(host: &mut Host, now_ms: u64, request: &Request) -> Result<Reply, String> {
@@ -756,6 +774,78 @@ mod tests {
             by.map(temet_work_core::ids::AgentId::new),
             temet_work_core::Command::Status,
         )
+    }
+
+    #[test]
+    fn request_line_logs_changes_and_refusals_and_no_answered_read() {
+        use temet_work_core::ids::{AgentId, IssueId};
+        use temet_work_core::settings::Target;
+        use temet_work_core::{Command, View, World};
+
+        let line = |by: Option<&str>, command: Command, reply: &Reply| {
+            request_line(&Request::new(by.map(AgentId::new), command), reply)
+        };
+        let done = Reply::Done {
+            text: "all quiet".into(),
+        };
+        let refused = Reply::Refused {
+            why: "the clacks are down".into(),
+        };
+        let view = Reply::View {
+            view: View::new(&World::default(), &Default::default()),
+        };
+        let issue = || IssueId::new("ankh", "1");
+        let screen = || Command::Screen {
+            agent: AgentId::new("author-1"),
+        };
+        let plan = || Command::Plan {
+            issue: issue(),
+            plan: temet_work_core::model::Plan {
+                checks: Vec::new(),
+                repos: Vec::new(),
+                settings: Default::default(),
+            },
+        };
+        let set = Command::Set {
+            target: Target::Global,
+            role: None,
+            key: "model".into(),
+            value: "sonnet".into(),
+        };
+        let settings = Command::Settings {
+            target: Target::Global,
+            role: None,
+        };
+
+        assert_eq!(line(None, Command::View, &view), None);
+        assert_eq!(line(None, Command::Status, &done), None);
+        let read = Command::Issue { issue: issue() };
+        assert_eq!(line(Some("author-1"), read, &done), None);
+        assert_eq!(line(None, screen(), &done), None);
+        assert_eq!(line(None, settings, &done), None);
+
+        for (by, command, name) in [
+            (None, Command::View, "none View"),
+            (Some("author-1"), Command::Status, "author-1 Status"),
+            (Some("author-1"), screen(), "author-1 Screen"),
+            (Some("refiner-1"), plan(), "refiner-1 Plan"),
+        ] {
+            assert_eq!(
+                line(by, command, &refused),
+                Some(format!(
+                    "request: by={name} -> refused: the clacks are down"
+                ))
+            );
+        }
+
+        assert_eq!(
+            line(Some("refiner-1"), plan(), &done).as_deref(),
+            Some("request: by=refiner-1 Plan -> done")
+        );
+        assert_eq!(
+            line(None, set, &done).as_deref(),
+            Some("request: by=none Set -> done")
+        );
     }
 
     #[test]
