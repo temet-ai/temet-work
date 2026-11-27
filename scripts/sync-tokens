@@ -197,7 +197,7 @@ function rgba(computed) {
 
 function classify(name, { raw, colour }) {
   let m;
-  if (name.includes("family")) {
+  if (name.includes("family") || name.startsWith("--tm-font-")) {
     const list = raw.split(",").map((f) => f.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
     return { kind: "font", rust: `&[${list.map((f) => JSON.stringify(f)).join(", ")}]`, doc: raw };
   }

@@ -226,7 +226,7 @@ pub fn motion(base: MotionTokens) -> MotionTokens {
     m.easing_move = curve(TM_EASE_STATE, m.easing_move);
     m.spring_control = Spring::new(TM_D_SMALL);
     m.spring_move = Spring::new(TM_D_PANEL);
-    let body = BP_TYPOGRAPHY_SIZE_BODY_MEDIUM.0;
+    let body = TM_TEXT_BODY.0;
     m.distance_short = rems(TM_RISE.0 / body);
     m.distance_medium = rems(TM_SLIDE.0 / body);
     m
@@ -250,12 +250,12 @@ pub fn apply(cx: &mut App) {
         t.motion = motion(t.motion.clone());
         t.radius = px(BP_SURFACE_BORDER_RADIUS.0);
         t.radius_lg = px(BP_SURFACE_BORDER_RADIUS.0);
-        t.font_size = px(BP_TYPOGRAPHY_SIZE_BODY_MEDIUM.0);
-        t.mono_font_size = px(BP_TYPOGRAPHY_SIZE_CODE_SMALL.0);
-        if let Some(family) = installed(BP_TYPOGRAPHY_FAMILY_DEFAULT, &fonts) {
+        t.font_size = px(TM_TEXT_BODY.0);
+        t.mono_font_size = px(TM_TEXT_CODE.0);
+        if let Some(family) = installed(TM_FONT_TEXT, &fonts) {
             t.font_family = family;
         }
-        if let Some(family) = installed(BP_TYPOGRAPHY_FAMILY_MONO, &fonts) {
+        if let Some(family) = installed(TM_FONT_CODE, &fonts) {
             t.mono_font_family = family;
         }
     });
