@@ -34,6 +34,11 @@ pub const CONTINUE: &str = "continue";
 /// sent too early comes straight back with the same error.
 pub const CONTINUE_AFTER_MS: u64 = 60_000;
 
+/// How long after a stop that failed the runner family tries it again: a
+/// terminal service that keeps refusing is asked once a minute, not at
+/// every poll.
+pub const STOP_AGAIN_MS: u64 = 60_000;
+
 /// A terminal, by the id its runner gave it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalId(pub String);
@@ -77,7 +82,8 @@ pub enum Status {
         /// What the runner says about the error, when it says anything.
         message: Option<String>,
     },
-    /// The program has ended.
+    /// The program has ended, or another has taken its place in the
+    /// terminal, as the shell herdr-core puts in place of a lost program.
     Gone,
     /// The program reports no status, as a plain shell does.
     Unknown,
@@ -233,7 +239,9 @@ enum Saw {
 ///
 /// It starts each agent's program in a labelled terminal with the runner its `runner`
 /// setting names (the build's default when none does), turns runner updates into agent events, and delivers text to an
-/// agent between its turns, holding it while the agent is working.
+/// agent between its turns, holding it while the agent is working. A terminal
+/// reported gone ends its agent, and is stopped so nothing stays under the
+/// agent's labels, such as the shell herdr-core puts in place of a lost program.
 #[derive(Default)]
 pub struct Runners {
     adapters: Vec<Box<dyn Runner>>,
@@ -246,6 +254,14 @@ pub struct Runners {
     started_here: std::collections::BTreeSet<String>,
     /// The reminder count of each idle or errored agent its issue waits on.
     counts: BTreeMap<String, Count>,
+    /// Agents whose terminal this daemon has stopped, so the update saying
+    /// it is gone is not taken for a terminal left behind.
+    stopped: std::collections::BTreeSet<String>,
+    /// The terminals of ended agents whose stop failed: the runner that holds
+    /// each and when it was last tried. Each is tried again
+    /// [`STOP_AGAIN_MS`] later, until it is stopped or its runner says it is
+    /// gone or unknown.
+    unstopped: BTreeMap<String, (usize, TerminalId, u64)>,
     /// The daemon's address as another machine reaches it over SSH
     /// (`daemon_host` in the configuration).
     daemon_host: Option<String>,
@@ -415,7 +431,7 @@ impl Runners {
                 continue;
             }
             if let Some((i, terminal)) = self.terminals.remove(agent) {
-                let _ = self.adapters[i].stop(&terminal);
+                self.stop(agent, i, terminal, now_ms);
             }
             events.push(Event::AgentChanged {
                 agent: a.id.clone(),
@@ -423,6 +439,39 @@ impl Runners {
             });
         }
         events
+    }
+
+    /// Stops `agent`'s terminal: its program is ended and the terminal removed.
+    /// A stop that fails is tried again [`STOP_AGAIN_MS`] after `now_ms`; one
+    /// the runner answers with the terminal gone or unknown has nothing left
+    /// to stop.
+    fn stop(&mut self, agent: &str, i: usize, terminal: TerminalId, now_ms: u64) {
+        match self.adapters[i].stop(&terminal) {
+            Ok(()) | Err(RunnerError::Gone | RunnerError::Unknown(_)) => {
+                self.unstopped.remove(agent);
+                self.stopped.insert(agent.to_string());
+            }
+            Err(e) => {
+                eprintln!(
+                    "cannot stop {agent}'s terminal {terminal}: {e}; trying again in a minute"
+                );
+                self.unstopped
+                    .insert(agent.to_string(), (i, terminal, now_ms));
+            }
+        }
+    }
+
+    /// Tries again each stop that failed [`STOP_AGAIN_MS`] or more before `now_ms`.
+    fn stop_again(&mut self, now_ms: u64) {
+        let due: Vec<(String, usize, TerminalId)> = self
+            .unstopped
+            .iter()
+            .filter(|(_, (_, _, at))| now_ms >= at.saturating_add(STOP_AGAIN_MS))
+            .map(|(agent, (i, terminal, _))| (agent.clone(), *i, terminal.clone()))
+            .collect();
+        for (agent, i, terminal) in due {
+            self.stop(&agent, i, terminal, now_ms);
+        }
     }
 
     /// Queues a message unless the same one is already waiting, then sends what
@@ -676,6 +725,8 @@ impl Part for Runners {
         // Every runner's updates first, so each agent's terminal is known to the
         // runner that holds it before any runner's full list is read.
         let mut lists: Vec<(usize, Vec<Update>)> = Vec::new();
+        // The terminals to stop, by agent, once every runner's updates are in.
+        let mut stops: BTreeMap<String, (usize, TerminalId)> = BTreeMap::new();
         for (i, adapter) in self.adapters.iter_mut().enumerate() {
             let updates = adapter.updates();
             let listed = adapter.listed();
@@ -692,11 +743,37 @@ impl Part for Runners {
                     .as_ref()
                     .is_some_and(|log| u.labels.get("log") != Some(log));
                 let id = AgentId::new(agent.clone());
+                if other_log || !world.agents.contains_key(&id) {
+                    continue;
+                }
                 let ended = world
                     .agents
                     .get(&id)
-                    .is_some_and(|a| a.state == AgentState::Ended);
-                if other_log || ended || !world.agents.contains_key(&id) {
+                    .is_some_and(|a| a.state == AgentState::Ended)
+                    || seen.get(&id) == Some(&AgentState::Ended);
+                if ended {
+                    // A gone terminal of an agent that has ended, which this
+                    // daemon has not stopped, as when a restart lost the stop
+                    // of a shell herdr-core put in place of its program.
+                    if u.status == Status::Gone
+                        && !self.stopped.contains(&agent)
+                        && !self.unstopped.contains_key(&agent)
+                    {
+                        stops.entry(agent).or_insert((i, u.terminal.clone()));
+                    }
+                    continue;
+                }
+                if u.status == Status::Gone {
+                    // Nothing more is sent to it: text typed now would go to
+                    // whatever holds the terminal, such as a shell.
+                    self.terminals.remove(&agent);
+                    self.outbox.retain(|m| m.agent != agent);
+                    seen.insert(id.clone(), AgentState::Ended);
+                    events.push(Event::AgentChanged {
+                        agent: id,
+                        state: AgentState::Ended,
+                    });
+                    stops.insert(agent, (i, u.terminal.clone()));
                     continue;
                 }
                 self.terminals.insert(agent, (i, u.terminal.clone()));
@@ -765,6 +842,10 @@ impl Part for Runners {
         if listed_any {
             self.started_here.clear();
         }
+        for (agent, (i, terminal)) in stops {
+            self.stop(&agent, i, terminal, now_ms);
+        }
+        self.stop_again(now_ms);
         events.extend(self.continue_after_reset(world, &mut seen, now_ms));
         events.extend(self.deliver(world, &seen));
         events.extend(self.remind(world, &seen, now_ms));
@@ -941,6 +1022,7 @@ impl Part for Runners {
                     Ok(()) | Err(RunnerError::Gone | RunnerError::Unknown(_)) => {
                         self.terminals.remove(&agent.0);
                         self.outbox.retain(|m| m.agent != agent.0);
+                        self.stopped.insert(agent.0.clone());
                         Outcome::Done {
                             events: vec![Event::AgentChanged {
                                 agent: agent.clone(),
@@ -1812,6 +1894,7 @@ mod tests {
                 fake::Call::Start(s) => {
                     format!("start on {}", s.machine.as_deref().unwrap_or("here"))
                 }
+                fake::Call::Stop(t) => format!("stop {t}"),
             })
             .collect()
     }
@@ -2917,5 +3000,252 @@ mod tests {
         assert_eq!(reminders(&handle), 1, "not on the old count");
         step(&mut part, &mut w, minute(25));
         assert_eq!(reminders(&handle), 2);
+    }
+
+    /// The stops the shared fake was given, failed or not.
+    fn stops(handle: &Shared) -> usize {
+        let calls = handle.fake.lock().expect("fake").calls();
+        calls
+            .lock()
+            .expect("calls")
+            .iter()
+            .filter(|c| matches!(c, fake::Call::Stop(_)))
+            .count()
+    }
+
+    /// An author on ankh#1, waited on, started at `now_ms` and seen working on
+    /// its brief, in a turn that stays working.
+    fn working_author(now_ms: u64) -> (World, Runners, Shared, AgentId) {
+        let t1 = TerminalId("t1".into());
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let author = run(&mut part, &mut w, &["claude"]);
+        {
+            let mut fake = handle.fake.lock().expect("lock");
+            fake.keep_working(&t1);
+            fake.send(&t1, "Mend the clock", false).expect("send");
+        }
+        step(&mut part, &mut w, now_ms);
+        assert!(working(&w.agents[&author].state));
+        (w, part, handle, author)
+    }
+
+    const FIX: &str = "the clock still stops at midnight";
+
+    /// Asks for a fix to ankh#1 and applies what the part reports.
+    fn request_fix(part: &mut Runners, w: &mut World) {
+        let fix = Effect::RequestFix {
+            issue: IssueId::new("ankh", "1"),
+            points: vec![FIX.into()],
+        };
+        let Outcome::Done { events, .. } = part.carry_out(&fix, w) else {
+            panic!("not done");
+        };
+        apply(w, &events);
+    }
+
+    /// Whether the loop now starts a new author on ankh#1.
+    fn starts_an_author(w: &World) -> bool {
+        w.missing().start.iter().any(|e| {
+            matches!(e, Effect::StartAgent { role: Role::Author, issue, .. }
+                     if *issue == IssueId::new("ankh", "1"))
+        })
+    }
+
+    #[test]
+    fn an_agent_whose_terminal_reports_no_status_yet_keeps_its_state_and_its_terminal() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = working_author(0);
+        let before = w.agents[&author].state.clone();
+        handle.fake.lock().expect("lock").no_status(&t1);
+        for minute in 1..=40 {
+            let polled = step(&mut part, &mut w, minute * 60_000);
+            assert_eq!(polled, vec![], "at {minute} min");
+        }
+        assert_eq!(w.agents[&author].state, before);
+        assert_eq!(stops(&handle), 0);
+        assert!(!starts_an_author(&w), "{:?}", w.missing());
+    }
+
+    /// Loses `author`'s terminal t1 to a shell, polls at `at_ms`, then every
+    /// minute for 70 minutes, and checks the author ended in that first poll,
+    /// a new author is due, the terminal was stopped once and nothing was
+    /// typed into the shell.
+    fn lose_to_a_shell_and_watch(
+        mut w: World,
+        mut part: Runners,
+        handle: &Shared,
+        author: &AgentId,
+        at_ms: u64,
+    ) {
+        let t1 = TerminalId("t1".into());
+        let before = screen_of(&handle.fake);
+        handle.fake.lock().expect("lock").lose_to_shell(&t1);
+        let polled = step(&mut part, &mut w, at_ms);
+        assert_eq!(
+            polled,
+            vec![Event::AgentChanged {
+                agent: author.clone(),
+                state: AgentState::Ended
+            }]
+        );
+        assert!(starts_an_author(&w), "{:?}", w.missing());
+        assert_eq!(stops(handle), 1);
+        assert_eq!(
+            part.waiting(),
+            0,
+            "a new author hears the fixes in its brief"
+        );
+        for minute in 1..=70 {
+            step(&mut part, &mut w, at_ms + minute * 60_000);
+        }
+        assert_eq!(stops(handle), 1, "stopped once");
+        assert_eq!(screen_of(&handle.fake), before, "typed into the shell");
+    }
+
+    #[test]
+    fn an_author_working_whose_terminal_comes_back_as_a_shell_is_ended_replaced_and_removed() {
+        let (mut w, mut part, handle, author) = working_author(0);
+        request_fix(&mut part, &mut w);
+        assert_eq!(part.waiting(), 1, "the fix waits for the turn to end");
+        lose_to_a_shell_and_watch(w, part, &handle, &author, 60_000);
+    }
+
+    #[test]
+    fn an_idle_or_limited_author_whose_terminal_comes_back_as_a_shell_is_neither_reminded_nor_continued()
+     {
+        // Idle: it would be reminded at ten minutes.
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let author = run(&mut part, &mut w, &["claude"]);
+        step(&mut part, &mut w, 0);
+        assert_eq!(w.agents[&author].state, AgentState::Idle);
+        lose_to_a_shell_and_watch(w, part, &handle, &author, 60_000);
+
+        // At its usage limit: it would be continued at 17:41.
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let author = run(&mut part, &mut w, &["claude"]);
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .end_in_error(&TerminalId("t1".into()), LIMIT);
+        step(&mut part, &mut w, nov27(16, 50));
+        assert!(limit_reset(&w.agents[&author], &BTreeMap::new()).is_some());
+        lose_to_a_shell_and_watch(w, part, &handle, &author, nov27(16, 51));
+    }
+
+    #[test]
+    fn the_shell_is_removed_a_minute_after_a_stop_that_failed_and_not_sooner() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = working_author(0);
+        let before = screen_of(&handle.fake);
+        {
+            let mut fake = handle.fake.lock().expect("lock");
+            fake.lose_to_shell(&t1);
+            // herdr-core will not remove a terminal it is still recovering.
+            fake.fail_next_stop(RunnerError::Other("t1 is still live after kill".into()));
+        }
+        let polled = step(&mut part, &mut w, 1_000);
+        assert!(ended(&polled, &author), "{polled:?}");
+        assert_eq!(stops(&handle), 1);
+        for at in [2_000, 30_000, 60_999] {
+            step(&mut part, &mut w, at);
+            assert_eq!(stops(&handle), 1, "tried again at {at} ms");
+        }
+        step(&mut part, &mut w, 61_000);
+        assert_eq!(stops(&handle), 2, "a minute after the first");
+        for at in [62_000, 121_000, 181_000, 600_000] {
+            step(&mut part, &mut w, at);
+        }
+        assert_eq!(stops(&handle), 2, "stopped");
+        assert_eq!(screen_of(&handle.fake), before, "typed into the shell");
+    }
+
+    #[test]
+    fn the_shell_is_removed_after_refusals_each_tried_a_minute_after_the_last() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = working_author(0);
+        let before = screen_of(&handle.fake);
+        {
+            let mut fake = handle.fake.lock().expect("lock");
+            fake.lose_to_shell(&t1);
+            // A core that refuses three times in a row, then removes it.
+            for _ in 0..3 {
+                fake.fail_next_stop(RunnerError::Other("t1 is still live after kill".into()));
+            }
+        }
+        // The first try at 1 s, each later one STOP_AGAIN_MS after the last.
+        let tries = [1_000, 61_000, 121_000, 181_000];
+        assert!(
+            tries
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] == STOP_AGAIN_MS)
+        );
+        // A poll every 10 s for five minutes, and one just before each retry.
+        let mut polls: Vec<u64> = (0..30).map(|k| 1_000 + k * 10_000).collect();
+        polls.extend(tries[1..].iter().map(|t| t - 1));
+        polls.sort_unstable();
+        for at in polls {
+            let polled = step(&mut part, &mut w, at);
+            if at == tries[0] {
+                assert!(ended(&polled, &author), "{polled:?}");
+            } else {
+                assert_eq!(polled, vec![], "at {at} ms");
+            }
+            let tried = tries.iter().filter(|t| at >= **t).count();
+            assert_eq!(stops(&handle), tried, "at {at} ms");
+        }
+        assert_eq!(screen_of(&handle.fake), before, "typed into the shell");
+    }
+
+    #[test]
+    fn the_shell_is_removed_once_a_stop_is_answered_with_the_terminal_gone_or_unknown() {
+        let t1 = TerminalId("t1".into());
+        for answer in [RunnerError::Gone, RunnerError::Unknown(t1.clone())] {
+            let (mut w, mut part, handle, _) = working_author(0);
+            {
+                let mut fake = handle.fake.lock().expect("lock");
+                fake.lose_to_shell(&t1);
+                fake.fail_next_stop(answer.clone());
+            }
+            for at in [1_000, 30_000, 61_000, 121_000, 600_000] {
+                step(&mut part, &mut w, at);
+            }
+            assert_eq!(stops(&handle), 1, "{answer:?} is not tried again");
+        }
+    }
+
+    #[test]
+    fn the_shell_is_removed_once_for_an_author_that_ended_before_a_restart() {
+        let t1 = TerminalId("t1".into());
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut before, handle) = shared();
+        let author = run(&mut before, &mut w, &["claude"]);
+        // The daemon before this one saw the program lost and ended the author,
+        // then restarted before it stopped the shell.
+        handle.fake.lock().expect("lock").lose_to_shell(&t1);
+        handle.fake.lock().expect("lock").updates();
+        w.apply(&Event::AgentChanged {
+            agent: author.clone(),
+            state: AgentState::Ended,
+        });
+        drop(before);
+        // This daemon connects, and the runner lists the terminal, gone.
+        let mut part = Runners::default();
+        part.add(Box::new(handle.clone()));
+        handle.fake.lock().expect("lock").reconnect();
+        assert_eq!(step(&mut part, &mut w, 0), vec![], "it has ended already");
+        assert_eq!(stops(&handle), 1);
+        for minute in 1..=5 {
+            handle.fake.lock().expect("lock").reconnect();
+            assert_eq!(step(&mut part, &mut w, minute * 60_000), vec![]);
+        }
+        assert_eq!(stops(&handle), 1, "stopped once");
     }
 }
