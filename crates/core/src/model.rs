@@ -75,7 +75,7 @@ pub enum CheckState {
     /// CI and the reviewer are checking the current change.
     Running,
     /// No change is being checked: none was made yet, or the last one went back
-    /// to its author before the reviewer judged it.
+    /// to its author, or had its review waived, before the reviewer judged it.
     Waiting,
     /// The reviewer found that it does not hold on the current change.
     Failed,
@@ -229,7 +229,8 @@ impl Issue {
     }
 
     /// Puts each check still running back to waiting: the change went back to
-    /// its author before anyone judged it.
+    /// its author, or a person's overturn waived its review, before anyone
+    /// judged it.
     pub fn checks_wait(&mut self) {
         for c in self.plan.iter_mut().flat_map(|p| p.checks.iter_mut()) {
             if c.state == Some(CheckState::Running) {

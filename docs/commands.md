@@ -220,7 +220,9 @@ has reached:
 - An arbiter's ruling that approved, before the issue has merged: the issue goes back to
   its author as a fix whose point is the reason.
 - A ruling that sent it back, while it is being fixed or in review: the author's fix
-  finishes, no review is asked for again, and the issue merges once the checks pass.
+  finishes, no review is asked for again, and the issue merges once the checks pass. In
+  review, the reviewer is stopped, so each check still running goes back to waiting: no
+  one judged it.
 - After the merge nothing changes: the merge is the point after which overturning costs
   more, and the loop does not undo it. The overturn is recorded and the rule is still
   proposed.

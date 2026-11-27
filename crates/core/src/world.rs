@@ -1396,6 +1396,9 @@ impl World {
                     out.extend(reviewers);
                     i.review_waived = true;
                     i.review_ok = true;
+                    // The stopped reviewer judges no check, and no one else
+                    // will: as with a send-back, the running ones wait.
+                    i.checks_wait();
                     Self::try_merge(i, out);
                 }
                 _ => {}

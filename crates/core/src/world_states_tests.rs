@@ -259,6 +259,66 @@ fn run_as_person(w: &mut World, command: &Command) {
 }
 
 #[test]
+fn an_overturn_that_waives_the_review_mid_round_puts_the_running_checks_back_to_waiting() {
+    let mut w = planned(1);
+    run(&mut w, "author-2", &ready(&[]));
+    run(
+        &mut w,
+        "reviewer-3",
+        &block(&["the rope snapped"], &[2], &[]),
+    );
+    run(
+        &mut w,
+        "arbiter-5",
+        &Command::Rule {
+            issue: watch4(),
+            approve: false,
+            reason: "the rope must hold a troll".into(),
+        },
+    );
+    run(&mut w, "author-2", &ready(&["a new rope"]));
+    assert_eq!(w.issues[&watch4()].stage, Stage::InReview { round: 2 });
+    assert_eq!(checks(&w), [Some(Running), Some(Running)]);
+    // A person overturns the ruling while round 2 is in review: the reviewer is
+    // stopped and no one judges the checks.
+    run_as_person(
+        &mut w,
+        &Command::Overturn {
+            decision: DecisionId(1),
+            option: 1,
+            reason: "the troll was heavier than any bell".into(),
+        },
+    );
+    assert!(w.issues[&watch4()].review_waived);
+    assert_eq!(checks(&w), [Some(Waiting), Some(Waiting)]);
+    // CI passes, the change merges and deploys: still no one judged them.
+    for e in [
+        Event::ChecksFinished {
+            issue: watch4(),
+            passed: true,
+            failing: Vec::new(),
+        },
+        Event::Merged {
+            issue: watch4(),
+            repo: None,
+        },
+    ] {
+        w.apply(&e);
+    }
+    assert_eq!(w.issues[&watch4()].stage, Stage::Deploying);
+    assert_eq!(checks(&w), [Some(Waiting), Some(Waiting)]);
+    // A failed verify sends it back to work, and the checks still wait.
+    w.apply(&Event::Deployed { issue: watch4() });
+    w.apply(&Event::Verified {
+        issue: watch4(),
+        passed: false,
+        output: "the bell fell".into(),
+    });
+    assert_eq!(w.issues[&watch4()].stage, Stage::Working);
+    assert_eq!(checks(&w), [Some(Waiting), Some(Waiting)]);
+}
+
+#[test]
 fn the_reviewers_verdict_marks_each_check_passed_or_failed() {
     let mut w = planned(3);
     run(&mut w, "author-2", &ready(&[]));
