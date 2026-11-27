@@ -2,9 +2,9 @@
 //! from these alone, in order.
 
 use crate::ids::{
-    AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId,
+    AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId, RuleId,
 };
-use crate::model::{AgentState, Decision, Plan, Role};
+use crate::model::{AgentState, Decision, Plan, Role, Rule};
 use crate::settings::{Scope, Value};
 
 /// The reviewer's answer for one round.
@@ -215,8 +215,26 @@ pub enum Event {
     DecisionOverturned {
         /// The decision.
         decision: DecisionId,
-        /// The option chosen instead.
+        /// The option chosen instead, as an index into its options.
         to: usize,
+        /// Why. Empty in logs from before overturns had reasons.
+        #[serde(default)]
+        reason: String,
+        /// Who overturned it: `person`.
+        #[serde(default)]
+        by: String,
+    },
+    /// A rule was proposed from an overturned decision.
+    RuleProposed {
+        /// The rule, in state `proposed`.
+        rule: Rule,
+    },
+    /// A person kept or dropped a proposed rule.
+    RuleAnswered {
+        /// The rule.
+        rule: RuleId,
+        /// True to keep it, false to drop it.
+        keep: bool,
     },
     /// The change merged.
     Merged {

@@ -12,6 +12,7 @@ use crate::model::{Issue, Role};
 /// Writes the brief for an agent of `role` on `issue`, run in `folder`.
 /// `shared` says the folder is held by another issue's author, so the agent must
 /// not change it.
+/// `rules` are the kept rules from overturned decisions; each brief ends with them.
 /// `source` is the tracker's name for where the issue comes from, and `repos`
 /// the repositories of its area when it comes from an area's tracker.
 pub fn write(
@@ -21,6 +22,7 @@ pub fn write(
     repos: &[ProjectId],
     folder: Option<PathBuf>,
     shared: bool,
+    rules: &[String],
 ) -> Brief {
     let id = &issue.id;
     let source = source.map_or_else(
@@ -96,6 +98,12 @@ pub fn write(
             "Answer questions about {id}: {title}. It is {source}. Change no file.",
             title = issue.title,
         ),
+    };
+    let task = if rules.is_empty() {
+        task
+    } else {
+        let list: String = rules.iter().map(|r| format!("- {r}\n")).collect();
+        format!("{task}\n\nRules from overturned decisions:\n{list}")
     };
     Brief {
         role,

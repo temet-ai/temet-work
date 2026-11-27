@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use temet_work_core::ids::{AgentId, IssueId};
+use temet_work_core::ids::{AgentId, DecisionId, IssueId, RuleId};
 use temet_work_core::model::{Plan, Role};
 use temet_work_core::settings::Target;
 use temet_work_core::{Command, Request, Verdict};
@@ -21,6 +21,10 @@ temet-work review ISSUE approve
 temet-work review ISSUE block POINT...      what to fix, one argument each
 temet-work rule ISSUE approve REASON
 temet-work rule ISSUE fix REASON
+temet-work overturn DECISION OPTION REASON
+                                            a person's: choose another option of a decision, as
+                                            `status` numbers them; REASON is required
+temet-work proposal RULE keep|drop          a person's: keep or drop a rule proposed from an overturn
 temet-work set TARGET [--role ROLE] KEY VALUE
                                             give a setting a value at one level
 temet-work unset TARGET [--role ROLE] KEY   remove it, so the next level answers
@@ -108,6 +112,32 @@ pub fn request(
                 other => return Err(format!("rule takes approve or fix, not {other}")),
             },
             reason: args.get(3..).unwrap_or_default().join(" "),
+        },
+        "overturn" => {
+            let number = |i: usize, what: &str| {
+                let s = arg(i, what)?;
+                s.parse::<usize>().map_err(|_| {
+                    format!("{s} is not a number; {what} is the number `status` lists")
+                })
+            };
+            Command::Overturn {
+                decision: DecisionId(number(1, "DECISION")? as u64),
+                option: number(2, "OPTION")?,
+                reason: args.get(3..).unwrap_or_default().join(" "),
+            }
+        }
+        "proposal" => Command::Proposal {
+            rule: {
+                let s = arg(1, "RULE")?;
+                RuleId(s.parse().map_err(|_| {
+                    format!("{s} is not a rule number; `status` lists them under Rules")
+                })?)
+            },
+            keep: match arg(2, "keep or drop")? {
+                "keep" => true,
+                "drop" => false,
+                other => return Err(format!("proposal takes keep or drop, not {other}")),
+            },
         },
         "set" => Command::Set {
             target: Target::parse(arg(1, "TARGET")?),
@@ -227,6 +257,36 @@ mod tests {
             request(&args("set radar --role janitor model x"), None, no_files)
                 .is_err_and(|e| e.contains("no role janitor"))
         );
+    }
+
+    #[test]
+    fn reads_overturn_and_proposal() {
+        let r =
+            request(&args("overturn 7 1 it was easier to undo"), None, no_files).expect("request");
+        assert_eq!(
+            r.command,
+            Command::Overturn {
+                decision: DecisionId(7),
+                option: 1,
+                reason: "it was easier to undo".into()
+            }
+        );
+        let keep = request(&args("proposal 2 keep"), None, no_files).expect("request");
+        assert_eq!(
+            keep.command,
+            Command::Proposal {
+                rule: RuleId(2),
+                keep: true
+            }
+        );
+        let drop = request(&args("proposal 2 drop"), None, no_files).expect("request");
+        assert!(matches!(
+            drop.command,
+            Command::Proposal { keep: false, .. }
+        ));
+        assert!(request(&args("proposal 2 maybe"), None, no_files).is_err());
+        assert!(request(&args("overturn x 1 why"), None, no_files).is_err());
+        assert!(request(&args("overturn 7"), None, no_files).is_err());
     }
 
     #[test]

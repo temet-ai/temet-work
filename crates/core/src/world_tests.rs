@@ -353,6 +353,7 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
                 chosen: if approve { 0 } else { 1 },
                 reason: "Scope names every elicitation field".into(),
                 overturned_to: None,
+                overturn_reason: String::new(),
             },
         };
         let effects = w.apply(&ruling);
@@ -370,43 +371,187 @@ fn an_arbiters_ruling_approves_or_sends_the_change_back() {
     }
 }
 
+/// A world where the arbiter ruled on issue 1 after three review rounds.
+fn ruled(approve: bool) -> World {
+    let mut w = working_on_one();
+    w.apply(&Event::PullRequestReady {
+        issue: issue("1"),
+        pull: None,
+    });
+    for round in 1..=3 {
+        w.apply(&Event::ReviewFinished {
+            issue: issue("1"),
+            round,
+            verdict: Verdict::Block { points: vec![] },
+        });
+        if round < 3 {
+            w.apply(&Event::PullRequestReady {
+                issue: issue("1"),
+                pull: None,
+            });
+        }
+    }
+    w.apply(&Event::ChecksFinished {
+        issue: issue("1"),
+        passed: true,
+        failing: vec![],
+    });
+    w.apply(&Event::DecisionMade {
+        decision: Decision {
+            id: DecisionId(1),
+            issue: issue("1"),
+            by: AgentId::new("arbiter-1"),
+            kind: DecisionKind::Ruling { approve },
+            question: "Must the fields be tested?".into(),
+            options: vec!["merge".into(), "fix first".into()],
+            chosen: usize::from(!approve),
+            reason: "scope names every field".into(),
+            overturned_to: None,
+            overturn_reason: String::new(),
+        },
+    });
+    w
+}
+
+fn overturned(to: usize) -> Event {
+    Event::DecisionOverturned {
+        decision: DecisionId(1),
+        to,
+        reason: "the fields are tested elsewhere".into(),
+        by: "person".into(),
+    }
+}
+
 #[test]
-fn overturning_a_decision_applies_it_and_proposes_a_rule_once() {
+fn overturning_an_approval_before_the_merge_sends_the_issue_back_to_its_author() {
+    let mut w = ruled(true);
+    assert_eq!(stage(&w, "1"), Stage::Merging);
+    assert_eq!(
+        w.apply(&overturned(1)),
+        vec![Effect::RequestFix {
+            issue: issue("1"),
+            points: vec!["the fields are tested elsewhere".into()]
+        }]
+    );
+    assert_eq!(stage(&w, "1"), Stage::Fixing { round: 3 });
+    assert!(!w.issues[&issue("1")].review_ok);
+    assert_eq!(w.decisions[&DecisionId(1)].overturned_to, Some(1));
+}
+
+#[test]
+fn overturning_a_send_back_while_it_is_fixed_merges_after_the_checks_pass() {
+    let mut w = ruled(false);
+    assert_eq!(stage(&w, "1"), Stage::Fixing { round: 3 });
+    assert_eq!(w.apply(&overturned(0)), vec![]);
+    assert_eq!(
+        stage(&w, "1"),
+        Stage::Fixing { round: 3 },
+        "the fix finishes"
+    );
+    // The author's fix arrives: no review is asked for, the checks decide.
+    assert_eq!(
+        w.apply(&Event::PullRequestReady {
+            issue: issue("1"),
+            pull: None
+        }),
+        vec![]
+    );
+    assert_eq!(stage(&w, "1"), Stage::InReview { round: 4 });
+    assert_eq!(w.missing().start, vec![], "no reviewer is started");
+    assert_eq!(
+        w.apply(&Event::ChecksFinished {
+            issue: issue("1"),
+            passed: true,
+            failing: vec![]
+        }),
+        vec![Effect::Merge { issue: issue("1") }]
+    );
+    assert_eq!(stage(&w, "1"), Stage::Merging);
+}
+
+#[test]
+fn overturning_a_send_back_still_in_review_merges_when_the_checks_have_passed() {
+    let mut w = ruled(false);
+    w.apply(&Event::PullRequestReady {
+        issue: issue("1"),
+        pull: None,
+    });
+    w.apply(&Event::ChecksFinished {
+        issue: issue("1"),
+        passed: true,
+        failing: vec![],
+    });
+    assert_eq!(stage(&w, "1"), Stage::InReview { round: 4 });
+    assert_eq!(
+        w.apply(&overturned(0)),
+        vec![Effect::Merge { issue: issue("1") }]
+    );
+}
+
+#[test]
+fn overturning_after_the_merge_changes_no_stage() {
+    for approve in [true, false] {
+        let mut w = ruled(approve);
+        if !approve {
+            w.apply(&Event::PullRequestReady {
+                issue: issue("1"),
+                pull: None,
+            });
+            w.apply(&Event::ReviewFinished {
+                issue: issue("1"),
+                round: 4,
+                verdict: Verdict::Approve,
+            });
+            w.apply(&Event::ChecksFinished {
+                issue: issue("1"),
+                passed: true,
+                failing: vec![],
+            });
+        }
+        w.apply(&Event::Merged { issue: issue("1") });
+        let before = w.issues[&issue("1")].clone();
+        assert_eq!(w.apply(&overturned(usize::from(approve))), vec![]);
+        assert_eq!(w.issues[&issue("1")], before);
+        assert_eq!(stage(&w, "1"), Stage::Deploying);
+        assert!(w.decisions[&DecisionId(1)].overturned_to.is_some());
+    }
+}
+
+#[test]
+fn overturning_the_same_decision_to_the_same_option_twice_changes_nothing() {
+    let mut w = ruled(true);
+    w.apply(&overturned(1));
+    let after_first = w.clone();
+    let again = w.apply(&overturned(1));
+    assert_eq!(again, vec![]);
+    assert_eq!(w.issues, after_first.issues);
+    assert_eq!(w.decisions, after_first.decisions);
+}
+
+#[test]
+fn overturning_a_choice_changes_no_stage_and_an_unknown_option_nothing_at_all() {
     let mut w = working_on_one();
     w.apply(&Event::DecisionMade {
         decision: Decision {
-            id: DecisionId(7),
+            id: DecisionId(1),
             issue: issue("1"),
             by: AgentId::new("refiner-1"),
             kind: DecisionKind::Choice,
-            question: "Which connection gives channel sessions the new protocol?".into(),
+            question: "Which connection?".into(),
             options: vec!["a second connection".into(), "stay legacy".into()],
             chosen: 1,
             reason: "easiest to undo".into(),
             overturned_to: None,
+            overturn_reason: String::new(),
         },
     });
-    let overturn = Event::DecisionOverturned {
-        decision: DecisionId(7),
-        to: 0,
-    };
-    assert_eq!(
-        w.apply(&overturn),
-        vec![
-            Effect::ApplyOverturn {
-                decision: DecisionId(7)
-            },
-            Effect::ProposeRule {
-                from: DecisionId(7)
-            }
-        ]
-    );
-    assert_eq!(w.apply(&overturn), vec![]);
-    let to_the_same = Event::DecisionOverturned {
-        decision: DecisionId(7),
-        to: 1,
-    };
-    assert_eq!(w.apply(&to_the_same), vec![]);
+    let before = w.issues.clone();
+    assert_eq!(w.apply(&overturned(5)), vec![]);
+    assert_eq!(w.decisions[&DecisionId(1)].overturned_to, None);
+    assert_eq!(w.apply(&overturned(1)), vec![], "the option already chosen");
+    assert_eq!(w.apply(&overturned(0)), vec![]);
+    assert_eq!(w.decisions[&DecisionId(1)].overturned_to, Some(0));
+    assert_eq!(w.issues, before);
 }
 
 #[test]

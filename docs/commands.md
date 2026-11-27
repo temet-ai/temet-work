@@ -21,6 +21,9 @@ reports its step done.
 | `temet-work retry ISSUE` | a person only | deploying or verifying: runs the deploy (or verify) again at once and clears its failure count and ten-minute wait, so a deploy that failed three times gets three fresh tries |
 | `temet-work rule ISSUE approve REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
 | `temet-work rule ISSUE fix REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
+| `temet-work overturn DECISION OPTION REASON` | a person only; `DECISION` and `OPTION` are the numbers `status` lists (options count from 1), `REASON` is required | any, if the decision exists, the option is another than the one chosen, and the reason is not empty. What it changes depends on the issue: see below |
+| `temet-work proposal RULE keep` | a person only: the rule moves to kept and ends every brief written from then on | the rule is proposed |
+| `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
 | `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines | any |
 | `temet-work unset TARGET [--role ROLE] KEY` | the same | any |
 | `temet-work settings TARGET [--role ROLE]` | anyone | any |
@@ -75,7 +78,33 @@ command was not understood or no daemon answered.
 
 The daemon starts every agent with `TEMET_WORK_AGENT` set to the agent's id, so a command
 an agent runs is recorded as that agent's. A ruling is recorded as a decision, listed by
-`temet-work status`; overturning one is not built yet.
+`temet-work status` with its numbered options.
+
+## Overturning a decision
+
+Agents decide and carry on; a person reads the decisions in `status` and can overturn one
+with `overturn DECISION OPTION REASON`. An agent may not: agents are the ones overturned.
+The daemon records who overturned it and why, and `status` shows the decision as
+overturned with the reason. The loop then acts on the decision's issue, by what the issue
+has reached:
+
+- An arbiter's ruling that approved, before the issue has merged: the issue goes back to
+  its author as a fix whose point is the reason.
+- A ruling that sent it back, while it is being fixed or in review: the author's fix
+  finishes, no review is asked for again, and the issue merges once the checks pass.
+- After the merge nothing changes: the merge is the point after which overturning costs
+  more, and the loop does not undo it. The overturn is recorded and the rule is still
+  proposed.
+- A choice that is not a ruling changes no stage.
+- Overturning the same decision to the same option again changes nothing.
+
+Every overturn also proposes a rule, once per decision: the decision's question, the
+option now preferred and the reason. `status` lists proposed and kept rules under Rules,
+each with its decision, issue, the agent that decided and who overturned it. `proposal
+RULE keep` or `proposal RULE drop` answers it (`proposal`, because `rule` is the
+arbiter's ruling). A kept rule ends every brief written afterwards, for every role, under
+"Rules from overturned decisions". Agents already running keep their old brief: new
+rules apply from the next start, so nothing waits on a person.
 
 A review from an agent that has not yet heard of the round under review is refused: it
 began on code that has since changed.

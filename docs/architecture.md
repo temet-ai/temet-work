@@ -88,8 +88,6 @@ What does not work yet:
 
 - A TCP transport with a token is not built: the daemon is reached over its local
   socket, or over SSH from another machine.
-- Overturning a decision: the loop records an overturn, but no command makes one and no
-  part applies it or proposes a rule from it.
 
 ## Who coordinates
 
@@ -195,4 +193,5 @@ In this order:
 4. Areas, stage 2: one issue across several repositories, merged in order
    (`docs/areas.md`).
 5. A Jira tracker and a GitLab code host.
-6. Overturning a decision by command, and rules proposed from overturns.
+6. Overturning a decision by command, and rules proposed from overturns. Done: the loop applies an
+   overturn itself, and a kept rule ends every brief written afterwards (`docs/commands.md`).

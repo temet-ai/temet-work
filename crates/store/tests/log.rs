@@ -83,6 +83,68 @@ fn replaying_the_log_gives_the_same_state_as_applying_the_events() {
 }
 
 #[test]
+fn replaying_the_log_gives_the_same_rules_section_after_a_restart() {
+    use temet_work_core::ids::{AgentId, DecisionId, RuleId};
+    use temet_work_core::model::{Decision, DecisionKind, Rule, RuleState};
+    let rule = |state| Rule {
+        id: RuleId(1),
+        text: "Which connection? Prefer: second. Why: legacy breaks channels".into(),
+        decision: DecisionId(1),
+        issue: IssueId::new("ankh", "1"),
+        decided_by: AgentId::new("refiner-1"),
+        overturned_by: "person".into(),
+        state,
+    };
+    let mut all = events();
+    all.extend([
+        Event::DecisionMade {
+            decision: Decision {
+                id: DecisionId(1),
+                issue: IssueId::new("ankh", "1"),
+                by: AgentId::new("refiner-1"),
+                kind: DecisionKind::Choice,
+                question: "Which connection?".into(),
+                options: vec!["second".into(), "legacy".into()],
+                chosen: 1,
+                reason: "easiest to undo".into(),
+                overturned_to: None,
+                overturn_reason: String::new(),
+            },
+        },
+        Event::DecisionOverturned {
+            decision: DecisionId(1),
+            to: 0,
+            reason: "legacy breaks channels".into(),
+            by: "person".into(),
+        },
+        Event::RuleProposed {
+            rule: rule(RuleState::Proposed),
+        },
+        Event::RuleAnswered {
+            rule: RuleId(1),
+            keep: true,
+        },
+    ]);
+    let p = path("rules");
+    let (mut log, _) = Log::open(&p).expect("open");
+    for e in &all {
+        log.append(0, e).expect("append");
+    }
+    drop(log);
+    let (_, entries) = Log::open(&p).expect("reopen");
+    let replayed = replay(&entries);
+    assert_eq!(replayed.rules[&RuleId(1)].state, RuleState::Kept);
+    let none = Default::default();
+    let live = temet_work_core::text::text(&World::replay(&all).0, &none);
+    let after = temet_work_core::text::text(&replayed, &none);
+    assert_eq!(live, after);
+    assert!(
+        after.contains("1 kept: Which connection? Prefer: second."),
+        "{after}"
+    );
+}
+
+#[test]
 fn numbering_carries_on_after_reopening() {
     let p = path("carry-on");
     let (mut log, _) = Log::open(&p).expect("open");

@@ -1,7 +1,7 @@
 //! The objects the work loop keeps. `docs/objects.md` describes each one.
 
 use crate::ids::{
-    AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId,
+    AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId, RuleId,
 };
 
 /// Where an issue is in the loop.
@@ -105,6 +105,10 @@ pub struct Issue {
     /// Whether the loop closed it, after verifying it. One the tracker closed and
     /// later reopened is worked again; one the loop closed stays closed.
     pub closed_by_loop: bool,
+    /// Whether a person's overturn of a ruling approved it: the review is not
+    /// asked again, and it merges once the checks pass.
+    #[serde(default)]
+    pub review_waived: bool,
 }
 
 /// What an agent does.
@@ -292,4 +296,48 @@ pub struct Decision {
     pub reason: String,
     /// The option a person chose instead, once overturned.
     pub overturned_to: Option<usize>,
+    /// Why the person overturned it.
+    #[serde(default)]
+    pub overturn_reason: String,
+}
+
+/// Where a rule is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RuleState {
+    /// Made from an overturn; a person has not answered yet. Not in any brief.
+    Proposed,
+    /// A person kept it: every brief written from now on holds it.
+    Kept,
+    /// A person dropped it.
+    Dropped,
+}
+
+impl RuleState {
+    /// The state in one lower-case word.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Kept => "kept",
+            Self::Dropped => "dropped",
+        }
+    }
+}
+
+/// A line agents are to work by, proposed from a decision a person overturned.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Rule {
+    /// Its number.
+    pub id: RuleId,
+    /// The rule, as an agent reads it.
+    pub text: String,
+    /// The decision it comes from.
+    pub decision: DecisionId,
+    /// The issue that decision was about.
+    pub issue: IssueId,
+    /// The agent that made the decision.
+    pub decided_by: AgentId,
+    /// Who overturned it.
+    pub overturned_by: String,
+    /// Where it is.
+    pub state: RuleState,
 }

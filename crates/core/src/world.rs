@@ -11,11 +11,12 @@ use std::collections::BTreeMap;
 use crate::brief;
 use crate::effect::Effect;
 use crate::event::{Event, Verdict};
-use crate::ids::{AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, ProjectId};
+use crate::ids::{AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, ProjectId, RuleId};
 use crate::launch::Launch;
 use crate::model::Decision;
 use crate::model::{
-    Agent, AgentState, Area, DecisionKind, Folder, Group, Issue, Project, Role, Stage,
+    Agent, AgentState, Area, DecisionKind, Folder, Group, Issue, Project, Role, Rule, RuleState,
+    Stage,
 };
 use crate::settings::{FILE, Scope, Value};
 
@@ -50,6 +51,8 @@ pub struct World {
     pub folders: BTreeMap<FolderId, Folder>,
     /// Decisions by id.
     pub decisions: BTreeMap<DecisionId, Decision>,
+    /// Rules proposed from overturned decisions, by id.
+    pub rules: BTreeMap<RuleId, Rule>,
     /// Settings by level, role and key (`docs/settings.md`).
     pub settings: BTreeMap<crate::settings::Key, crate::settings::Entry>,
     /// What the build's adapters offer for the settings that name one, put in by
@@ -237,6 +240,7 @@ impl World {
                     fix_keeps_round: false,
                     round: 0,
                     closed_by_loop: false,
+                    review_waived: false,
                 });
                 entry.title = title.clone();
                 entry.milestone = milestone.clone();
@@ -251,6 +255,7 @@ impl World {
                     entry.checks_ok = None;
                     entry.pull = None;
                     entry.fix.clear();
+                    entry.review_waived = false;
                 }
                 // A pull request that closes its issue on merge must not skip deploy
                 // and verify: the loop closes it itself when they pass.
@@ -348,15 +353,18 @@ impl World {
                     if let Some(round) = round {
                         i.stage = Stage::InReview { round };
                         i.round = round;
-                        i.review_ok = false;
+                        // A person's overturn approved this change: no review, only the checks.
+                        i.review_ok = i.review_waived;
                         i.checks_ok = None;
                         i.fix.clear();
                         i.told = false;
                         i.fix_keeps_round = false;
-                        out.push(Effect::StartReview {
-                            issue: issue.clone(),
-                            round,
-                        });
+                        if !i.review_waived {
+                            out.push(Effect::StartReview {
+                                issue: issue.clone(),
+                                round,
+                            });
+                        }
                     }
                 }
             }
@@ -434,17 +442,43 @@ impl World {
                     }
                 }
             }
-            Event::DecisionOverturned { decision, to } => {
+            Event::DecisionOverturned {
+                decision,
+                to,
+                reason,
+                ..
+            } => {
                 if let Some(d) = self.decisions.get_mut(decision)
                     && *to < d.options.len()
                     && *to != d.chosen
                     && d.overturned_to != Some(*to)
                 {
                     d.overturned_to = Some(*to);
-                    out.push(Effect::ApplyOverturn {
-                        decision: *decision,
-                    });
-                    out.push(Effect::ProposeRule { from: *decision });
+                    d.overturn_reason.clone_from(reason);
+                    if let DecisionKind::Ruling { approve } = d.kind {
+                        let issue = d.issue.clone();
+                        let reviewers = self.stop(&issue, &[Role::Reviewer]);
+                        if let Some(i) = self.issues.get_mut(&issue) {
+                            Self::overturn_ruling(i, approve, reason, reviewers, &mut out);
+                        }
+                    }
+                }
+            }
+            Event::RuleProposed { rule } => {
+                // One rule per decision, however often it is overturned.
+                if !self.rules.values().any(|r| r.decision == rule.decision) {
+                    self.rules.insert(rule.id, rule.clone());
+                }
+            }
+            Event::RuleAnswered { rule, keep } => {
+                if let Some(r) = self.rules.get_mut(rule)
+                    && r.state == RuleState::Proposed
+                {
+                    r.state = if *keep {
+                        RuleState::Kept
+                    } else {
+                        RuleState::Dropped
+                    };
                 }
             }
             Event::Merged { issue } => {
@@ -512,6 +546,7 @@ impl World {
                         i.review_ok = false;
                         i.checks_ok = None;
                         i.pull = None;
+                        i.review_waived = false;
                         i.fix = vec![format!(
                             "after the last change merged and deployed, the verify check failed: {output}"
                         )];
@@ -631,6 +666,7 @@ impl World {
                         folder: i.folder.clone(),
                     },
                 ),
+                Stage::InReview { .. } if i.review_waived => continue,
                 Stage::InReview { round } => (
                     Role::Reviewer,
                     Effect::StartReview {
@@ -732,9 +768,19 @@ impl World {
                     &self.area_repos(issue),
                     path,
                     shared,
+                    &self.kept_rules(),
                 )
             },
         })
+    }
+
+    /// The text of every kept rule, in the order they were proposed.
+    pub fn kept_rules(&self) -> Vec<String> {
+        self.rules
+            .values()
+            .filter(|r| r.state == RuleState::Kept)
+            .map(|r| r.text.clone())
+            .collect()
     }
 
     /// Stops the running agents of `roles` on `issue`.
@@ -768,6 +814,55 @@ impl World {
             issue: i.id.clone(),
             points,
         });
+    }
+
+    /// What a person's overturn of an arbiter's ruling does to its issue. Once the
+    /// issue has merged nothing changes: the loop cannot undo a merge.
+    fn overturn_ruling(
+        i: &mut Issue,
+        was_approve: bool,
+        reason: &str,
+        reviewers: Vec<Effect>,
+        out: &mut Vec<Effect>,
+    ) {
+        if was_approve {
+            // Approved, now to be fixed: back to the author, with the person's reason.
+            match i.stage {
+                Stage::Arbitration { round } | Stage::InReview { round } => {
+                    if matches!(i.stage, Stage::InReview { .. }) {
+                        out.extend(reviewers);
+                    }
+                    i.review_ok = false;
+                    Self::send_back(i, round, vec![reason.to_string()], false, out);
+                }
+                Stage::Merging => {
+                    i.review_ok = false;
+                    let round = i.round.max(1);
+                    Self::send_back(i, round, vec![reason.to_string()], false, out);
+                }
+                Stage::Fixing { .. } => {
+                    i.fix.push(reason.to_string());
+                    i.told = false;
+                    out.push(Effect::RequestFix {
+                        issue: i.id.clone(),
+                        points: i.fix.clone(),
+                    });
+                }
+                _ => {}
+            }
+        } else {
+            // Sent back, now to merge: the fix finishes, then the checks decide.
+            match i.stage {
+                Stage::Fixing { .. } => i.review_waived = true,
+                Stage::InReview { .. } => {
+                    out.extend(reviewers);
+                    i.review_waived = true;
+                    i.review_ok = true;
+                    Self::try_merge(i, out);
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Merges when the review and the checks have both passed.

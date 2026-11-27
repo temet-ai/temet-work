@@ -122,12 +122,47 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
         let chosen = d.options.get(d.chosen).map_or("?", String::as_str);
         let overturned = d
             .overturned_to
-            .and_then(|o| d.options.get(o))
-            .map_or_else(String::new, |o| format!("; overturned to {o}"));
+            .and_then(|o| d.options.get(o).map(|text| (o, text)))
+            .map_or_else(String::new, |(o, text)| {
+                format!(
+                    "; overturned to option {} ({text}): {}",
+                    o + 1,
+                    d.overturn_reason
+                )
+            });
+        let options: Vec<String> = d
+            .options
+            .iter()
+            .enumerate()
+            .map(|(n, o)| format!("{}={o}", n + 1))
+            .collect();
         let _ = writeln!(
             out,
-            "  {} {}: {} {chosen}, by {}: {}{overturned}",
-            d.id.0, d.issue, d.question, d.by, d.reason
+            "  {} {}: {} [{}] chose {chosen}, by {}: {}{overturned}",
+            d.id.0,
+            d.issue,
+            d.question,
+            options.join(", "),
+            d.by,
+            d.reason
+        );
+    }
+    let _ = writeln!(out, "Rules");
+    for r in world
+        .rules
+        .values()
+        .filter(|r| r.state != crate::model::RuleState::Dropped)
+    {
+        let _ = writeln!(
+            out,
+            "  {} {}: {} (from decision {} on {}, decided by {}, overturned by {})",
+            r.id.0,
+            r.state.name(),
+            r.text,
+            r.decision.0,
+            r.issue,
+            r.decided_by,
+            r.overturned_by
         );
     }
     let _ = writeln!(out, "Settings");

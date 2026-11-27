@@ -355,6 +355,19 @@ pub fn answer(host: &mut Host, now_ms: u64, request: &Request) -> Result<Reply, 
                         text: format!("{key} is no longer set at {target}{for_role}"),
                     });
                 }
+                temet_work_core::Command::Overturn {
+                    decision, option, ..
+                } => {
+                    return Ok(Reply::Done {
+                        text: format!("decision {} is overturned to option {option}", decision.0),
+                    });
+                }
+                temet_work_core::Command::Proposal { rule, keep } => {
+                    let state = if *keep { "kept" } else { "dropped" };
+                    return Ok(Reply::Done {
+                        text: format!("rule {} is {state}", rule.0),
+                    });
+                }
                 _ => (),
             };
             let text = request
