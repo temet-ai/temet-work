@@ -39,6 +39,8 @@ fn working() -> World {
         milestones: Vec::new(),
         refining_at_once: 3,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     });
     for (n, (project, key)) in [("ankh", "1"), ("ankh", "2"), ("klatch", "1")]
         .into_iter()
@@ -513,6 +515,8 @@ fn an_older_log_with_commands_and_a_group_model_reads_as_settings() {
         milestones: Vec::new(),
         refining_at_once: 1,
         model: Some("haiku".into()),
+        queue_low: None,
+        investigate_every: None,
     });
     let i = id("ankh", "1");
     assert_eq!(
@@ -548,6 +552,8 @@ fn machines(folders: &[(&str, &str)]) -> World {
         milestones: Vec::new(),
         refining_at_once: 3,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     });
     events.extend(["1", "2"].map(|key| Event::IssueSynced {
         issue: id("ankh", key),
@@ -661,6 +667,8 @@ fn pinned_below_unpinned(held: Option<&str>) -> World {
         milestones: Vec::new(),
         refining_at_once: 4,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     });
     let blocker = id("watch", "WATCH-11");
     events.extend(
@@ -1007,6 +1015,8 @@ fn an_issue_across_repositories_takes_all_its_folders_on_its_machine_or_none() {
             milestones: Vec::new(),
             refining_at_once: 1,
             model: None,
+            queue_low: None,
+            investigate_every: None,
         },
         Event::IssueSynced {
             issue: issue.clone(),

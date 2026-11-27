@@ -15,7 +15,7 @@ use temet_work_core::ids::AgentId;
 use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 use temet_work_core::model::{AgentState, Role};
 use temet_work_core::sender::Digest;
-use temet_work_core::settings::Choice;
+use temet_work_core::settings::{Choice, Scope};
 use temet_work_core::world::LOCAL;
 use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
 
@@ -191,7 +191,8 @@ pub trait Runner: Send {
 /// Text waiting for an agent to finish its turn.
 struct Message {
     agent: String,
-    issue: temet_work_core::ids::IssueId,
+    /// The issue it is about; none for an investigator's.
+    issue: Option<temet_work_core::ids::IssueId>,
     text: String,
     /// Whether it is what the issue's stage needs the agent to hear, so its
     /// arrival counts as told. A reminder does not.
@@ -270,14 +271,10 @@ impl Runners {
             .map(|a| a.id())
     }
 
-    /// The index of the runner an agent of `role` on `issue` runs in: the one its
-    /// `runner` setting names, else this build's default.
-    fn pick(
-        &self,
-        world: &World,
-        issue: &temet_work_core::ids::IssueId,
-        role: Role,
-    ) -> Result<usize, String> {
+    /// The index of the runner an agent of `role` runs in at `scope` (its issue's,
+    /// or its group's for an agent with none): the one its `runner` setting
+    /// names, else this build's default.
+    fn pick(&self, world: &World, scope: &Scope, role: Role) -> Result<usize, String> {
         let list = || {
             let ids = self.ids();
             if ids.is_empty() {
@@ -286,13 +283,13 @@ impl Runners {
                 ids.join(", ")
             }
         };
-        let named = world.setting_text(issue, Some(role), "runner");
+        let named = world.text_at(scope, Some(role), "runner");
         let id = named
             .as_deref()
             .or_else(|| self.default_id())
             .ok_or_else(|| {
                 format!(
-                    "no runner is set for {issue}'s {}s and this build has no default; set runner \
+                    "no runner is set for {scope}'s {}s and this build has no default; set runner \
                  globally. This build has: {}",
                     role.name(),
                     list()
@@ -342,9 +339,10 @@ impl Runners {
         let mut events = Vec::new();
         let mut counts = std::mem::take(&mut self.counts);
         for a in world.agents.values() {
-            let Some(issue) = a.issue.as_ref().filter(|_| world.waiting_on(a)) else {
+            if !world.waiting_on(a) {
                 continue;
-            };
+            }
+            let issue = a.issue.as_ref();
             let agent = &a.id.0;
             let before = counts.remove(agent);
             let state = seen.get(&a.id).unwrap_or(&a.state);
@@ -371,8 +369,10 @@ impl Runners {
                     saw,
                 });
             count.saw = saw;
-            let after_ms = world.setting_number(issue, Some(a.role), "remind_after") * 60_000;
-            let reminders = world.setting_number(issue, Some(a.role), "reminders");
+            // An investigator works on no issue: its group's settings answer.
+            let scope = world.agent_scope(&a.group, issue);
+            let after_ms = world.number_at(&scope, Some(a.role), "remind_after") * 60_000;
+            let reminders = world.number_at(&scope, Some(a.role), "reminders");
             if now_ms < count.since + after_ms {
                 self.counts.insert(agent.clone(), count);
                 continue;
@@ -386,8 +386,11 @@ impl Runners {
                     seen,
                     Message {
                         agent: agent.clone(),
-                        issue: issue.clone(),
-                        text: brief::nudge(a.role, issue),
+                        issue: issue.cloned(),
+                        text: issue.map_or_else(
+                            || brief::investigation_nudge(&a.group),
+                            |issue| brief::nudge(a.role, issue),
+                        ),
                         tells: false,
                     },
                 ));
@@ -444,7 +447,7 @@ impl Runners {
                 continue;
             }
             match self.adapters[i].send(&terminal, &m.text, true) {
-                Ok(()) if m.tells => told.push(Event::Told { issue: m.issue }),
+                Ok(()) if m.tells => told.extend(m.issue.map(|issue| Event::Told { issue })),
                 Ok(()) => {}
                 // The terminal is gone, so its agent has ended; the loop starts and
                 // tells the next one.
@@ -762,7 +765,8 @@ impl Part for Runners {
                 before,
             } => {
                 let brief = &launch.brief;
-                let chosen = match self.pick(world, &brief.issue, brief.role) {
+                let scope = world.agent_scope(&launch.group, brief.issue.as_ref());
+                let chosen = match self.pick(world, &scope, brief.role) {
                     Ok(i) => i,
                     Err(e) => return Outcome::Failed(e),
                 };
@@ -770,9 +774,11 @@ impl Part for Runners {
                 let mut labels = BTreeMap::from([
                     ("agent".to_string(), launch.agent.0.clone()),
                     ("group".to_string(), launch.group.0.clone()),
-                    ("issue".to_string(), brief.issue.to_string()),
                     ("role".to_string(), brief.role.name().to_string()),
                 ]);
+                if let Some(issue) = &brief.issue {
+                    labels.insert("issue".to_string(), issue.to_string());
+                }
                 if let Some(log) = &world.log {
                     labels.insert("log".to_string(), log.clone());
                 }
@@ -853,7 +859,7 @@ impl Part for Runners {
                                 agent: launch.agent.clone(),
                                 group: launch.group.clone(),
                                 role: brief.role,
-                                issue: Some(brief.issue.clone()),
+                                issue: brief.issue.clone(),
                                 machine: launch.machine.clone(),
                                 folder: launch.folder.clone(),
                                 secret_digest: Some(secret_digest),
@@ -875,7 +881,7 @@ impl Part for Runners {
                     &BTreeMap::new(),
                     Message {
                         agent: author.id.0.clone(),
-                        issue: issue.clone(),
+                        issue: Some(issue.clone()),
                         text: brief::fixes(issue, points),
                         tells: true,
                     },
@@ -896,7 +902,7 @@ impl Part for Runners {
                     &BTreeMap::new(),
                     Message {
                         agent: reviewer.id.0.clone(),
-                        issue: issue.clone(),
+                        issue: Some(issue.clone()),
                         text: brief::next_round(issue, *round),
                         tells: true,
                     },
@@ -1315,6 +1321,109 @@ mod tests {
             agent: author,
             state: AgentState::Ended
         }));
+    }
+
+    #[test]
+    fn an_idle_investigator_is_reminded_then_stopped() {
+        let mut w = world();
+        let watch = GroupId::new("watch");
+        for e in [
+            Event::ProjectAdded {
+                project: ProjectId::new("ankh"),
+                tracker: "fake".into(),
+                name: "city/ankh".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::GroupCreated {
+                group: watch.clone(),
+                name: "Night watch".into(),
+                projects: vec![ProjectId::new("ankh")],
+                areas: vec![],
+                milestones: vec![],
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+            // One reminder, a minute apart, read at the group's first project.
+            Event::SettingSet {
+                scope: temet_work_core::settings::Scope::Project(ProjectId::new("ankh")),
+                role: Some(Role::Investigator),
+                key: "reminders".into(),
+                value: temet_work_core::settings::Value::Number(1),
+                by: "person".into(),
+            },
+            Event::SettingSet {
+                scope: temet_work_core::settings::Scope::Project(ProjectId::new("ankh")),
+                role: None,
+                key: "remind_after".into(),
+                value: temet_work_core::settings::Value::Number(1),
+                by: "person".into(),
+            },
+            Event::InvestigationStarted {
+                group: watch.clone(),
+                agent: AgentId::new("investigator-1"),
+                at_ms: 0,
+            },
+        ] {
+            w.apply(&e);
+        }
+        let mut part = runners();
+        let launch = w.launch_investigator(&watch).expect("launch");
+        let run = Effect::Run {
+            launch: Box::new(launch),
+            before: None,
+            program: Program {
+                argv: vec!["cat".into()],
+                env: vec![],
+            },
+        };
+        let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
+            panic!("not started");
+        };
+        let [
+            Event::AgentStarted {
+                agent, issue: None, ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("{events:?}");
+        };
+        let agent = agent.clone();
+        apply(&mut w, &events);
+        let first = part.poll(&w, 0).events;
+        apply(&mut w, &first);
+        let minute = 60_000;
+        let polled = part.poll(&w, minute).events;
+        apply(&mut w, &polled);
+        let screen = part.screen(&agent.0).expect("screen");
+        assert!(
+            screen.contains(
+                "The investigation for watch is still running. If you have filed every issue you \
+                 found, run: temet-work investigated watch."
+            ),
+            "{screen}"
+        );
+        assert!(!polled.iter().any(|e| matches!(e, Event::Told { .. })));
+        let ended = part.poll(&w, 2 * minute).events;
+        assert!(
+            ended.ends_with(&[Event::AgentChanged {
+                agent: agent.clone(),
+                state: AgentState::Ended
+            }]),
+            "stopped a minute after its one reminder: {ended:?}"
+        );
+        apply(&mut w, &ended);
+        assert_eq!(
+            w.investigation_events(2 * minute, false),
+            [Event::InvestigationEnded {
+                group: watch,
+                at_ms: 2 * minute,
+                filed: 0,
+            }],
+            "so it cannot hold its group for ever"
+        );
     }
 
     #[test]

@@ -83,6 +83,16 @@ pub trait Tracker: Send {
 
     /// Closes an issue.
     fn close(&mut self, project: &str, key: &str) -> Result<(), TrackerError>;
+
+    /// Files a new open issue in the project, in `milestone` when one is named,
+    /// and returns it as the tracker will list it.
+    fn create(
+        &mut self,
+        project: &str,
+        title: &str,
+        body: &str,
+        milestone: Option<&str>,
+    ) -> Result<TrackedIssue, TrackerError>;
 }
 
 /// The keys an issue's text says it depends on: on each line that starts with
@@ -211,6 +221,50 @@ impl Tracker for FakeTracker {
         issue.1.closed = true;
         Ok(())
     }
+
+    /// Numbers the new issue after the highest of the project's, as GitHub does.
+    fn create(
+        &mut self,
+        project: &str,
+        title: &str,
+        body: &str,
+        milestone: Option<&str>,
+    ) -> Result<TrackedIssue, TrackerError> {
+        let known = self.issues.iter().any(|(p, _)| p == project)
+            || self.milestones.iter().any(|(p, _)| p == project);
+        if !known {
+            return Err(TrackerError::NotFound(project.to_string()));
+        }
+        if let Some(m) = milestone
+            && !self
+                .milestones
+                .iter()
+                .any(|(p, x)| p == project && x.title == m)
+        {
+            return Err(TrackerError::NotFound(format!(
+                "milestone {m} in {project}"
+            )));
+        }
+        let number = self
+            .issues
+            .iter()
+            .filter(|(p, _)| p == project)
+            .map(|(_, i)| i.order)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let issue = TrackedIssue {
+            key: number.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            milestone: milestone.map(String::from),
+            depends_on: depends_on(body),
+            order: number,
+            closed: false,
+        };
+        self.issues.push((project.to_string(), issue.clone()));
+        Ok(issue)
+    }
 }
 
 /// The contract every tracker adapter runs.
@@ -226,6 +280,12 @@ pub mod contract {
         /// writes. A live tracker's harness answers `None`: the contract never
         /// changes a real project.
         fn writable_issue(&self) -> Option<String>;
+
+        /// Whether the contract may file a new issue in the project. A live
+        /// tracker's harness answers false, as it does for writes.
+        fn may_create(&self) -> bool {
+            self.writable_issue().is_some()
+        }
     }
 
     fn ensure(ok: bool, what: &str) -> Result<(), String> {
@@ -270,6 +330,36 @@ pub mod contract {
                 .all(|m| milestones.iter().any(|x| x.title == m)),
             "an open issue's milestone is one of the open milestones",
         )?;
+        if harness.may_create() {
+            let milestone = &milestones[0].title;
+            let body = format!("Filed by the contract check.\nDepends on #{first}");
+            let created = tracker
+                .create(&project, "Contract check", &body, Some(milestone))
+                .map_err(|e| format!("create: {e}"))?;
+            ensure(
+                created.title == "Contract check"
+                    && created.milestone.as_deref() == Some(milestone.as_str())
+                    && !created.closed,
+                "a created issue is open, with its title and milestone",
+            )?;
+            ensure(
+                !issues.iter().any(|i| i.key == created.key),
+                "a created issue has a key of its own",
+            )?;
+            let listed = tracker
+                .issues(&project)
+                .map_err(|e| format!("issues after create: {e}"))?;
+            ensure(
+                listed.iter().any(|i| {
+                    i.key == created.key
+                        && i.title == created.title
+                        && i.milestone == created.milestone
+                        && i.order == created.order
+                        && i.depends_on == created.depends_on
+                }),
+                "a created issue is then listed as it was returned, with its milestone",
+            )?;
+        }
         if let Some(key) = harness.writable_issue() {
             tracker
                 .comment(&project, &key, "contract check")
@@ -311,7 +401,6 @@ pub struct Trackers {
 /// its tracker lists as open now.
 pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec<Event> {
     use temet_work_core::model::Stage;
-    let id = |key: &str| IssueId::new(project.0.clone(), key);
     let mut out = Vec::new();
     let open_keys: BTreeSet<&str> = open.iter().map(|t| t.key.as_str()).collect();
     // Oldest first, so a group placing issues as they arrive takes them in the
@@ -319,35 +408,26 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
     let mut open: Vec<&TrackedIssue> = open.iter().collect();
     open.sort_by_key(|t| t.order);
     for t in open {
-        let issue = id(&t.key);
-        let milestone = t.milestone.clone().map(MilestoneId::new);
-        let depends_on: Vec<IssueId> = t
-            .depends_on
-            .iter()
-            .map(|k| {
-                // `other#12`: the project or area by id, or by its tracker's name for it.
-                k.split_once('#')
-                    .and_then(|(source, n)| resolve(world, source).map(|s| IssueId::new(s.0, n)))
-                    .unwrap_or_else(|| id(k))
-            })
-            .collect();
+        let synced = synced(world, project, t);
+        let Event::IssueSynced {
+            issue,
+            milestone,
+            depends_on,
+            ..
+        } = &synced
+        else {
+            continue;
+        };
         // Unchanged, unless it was closed in the tracker and is open there again.
-        let same = world.issues.get(&issue).is_some_and(|i| {
+        let same = world.issues.get(issue).is_some_and(|i| {
             i.title == t.title
-                && i.milestone == milestone
-                && i.depends_on == depends_on
+                && &i.milestone == milestone
+                && &i.depends_on == depends_on
                 && i.order == t.order
                 && (i.stage != Stage::Done || i.closed_by_loop)
         });
         if !same {
-            out.push(Event::IssueSynced {
-                issue,
-                title: t.title.clone(),
-                milestone,
-                depends_on,
-                order: t.order,
-                closed: false,
-            });
+            out.push(synced);
         }
     }
     for i in world.issues.values() {
@@ -373,6 +453,29 @@ pub fn changes(world: &World, project: &ProjectId, open: &[TrackedIssue]) -> Vec
         }
     }
     out
+}
+
+/// The open issue `t` of `project` as the loop takes it in.
+pub fn synced(world: &World, project: &ProjectId, t: &TrackedIssue) -> Event {
+    let id = |key: &str| IssueId::new(project.0.clone(), key);
+    let depends_on: Vec<IssueId> = t
+        .depends_on
+        .iter()
+        .map(|k| {
+            // `other#12`: the project or area by id, or by its tracker's name for it.
+            k.split_once('#')
+                .and_then(|(source, n)| resolve(world, source).map(|s| IssueId::new(s.0, n)))
+                .unwrap_or_else(|| id(k))
+        })
+        .collect();
+    Event::IssueSynced {
+        issue: id(&t.key),
+        title: t.title.clone(),
+        milestone: t.milestone.clone().map(MilestoneId::new),
+        depends_on,
+        order: t.order,
+        closed: false,
+    }
 }
 
 /// The project or area a dependency names: by its id, or by its tracker's or code
@@ -527,21 +630,55 @@ impl Part for Trackers {
     }
 
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
-        let Effect::Close { issue } = effect else {
-            return Outcome::NotMine;
+        let source = match effect {
+            Effect::Close { issue } => &issue.project,
+            Effect::File { source, .. } => source,
+            _ => return Outcome::NotMine,
         };
-        let Some((_, tracker_id, name)) = sources(world)
-            .into_iter()
-            .find(|(id, _, _)| id == &issue.project)
+        let Some((_, tracker_id, name)) =
+            sources(world).into_iter().find(|(id, _, _)| id == source)
         else {
-            return Outcome::Failed(format!("{} has no tracker configured", issue.project));
+            return Outcome::Failed(format!("{source} has no tracker configured"));
         };
         let Some(tracker) = self.adapters.iter_mut().find(|a| a.id() == tracker_id) else {
             return Outcome::Failed(format!("no tracker \"{tracker_id}\" in this build"));
         };
-        match tracker.close(&name, &issue.key) {
-            Ok(()) => Outcome::done(),
-            Err(e) => Outcome::Failed(e.to_string()),
+        match effect {
+            Effect::File {
+                group,
+                agent,
+                title,
+                body,
+                milestone,
+                ..
+            } => match tracker.create(&name, title, body, milestone.as_ref().map(|m| m.0.as_str()))
+            {
+                // Reported as synced at once, so the loop has it before the next
+                // sync; that sync then finds nothing changed.
+                Ok(created) => {
+                    let synced = synced(world, source, &created);
+                    let issue = IssueId::new(source.0.clone(), created.key.as_str());
+                    Outcome::Done {
+                        events: vec![
+                            synced,
+                            Event::IssueFiled {
+                                group: group.clone(),
+                                agent: agent.clone(),
+                                issue,
+                                title: created.title,
+                                milestone: created.milestone.map(MilestoneId::new),
+                            },
+                        ],
+                        effects: Vec::new(),
+                    }
+                }
+                Err(e) => Outcome::Failed(format!("filing in {name}: {e}")),
+            },
+            Effect::Close { issue } => match tracker.close(&name, &issue.key) {
+                Ok(()) => Outcome::done(),
+                Err(e) => Outcome::Failed(e.to_string()),
+            },
+            _ => Outcome::NotMine,
         }
     }
 }
@@ -756,6 +893,64 @@ mod tests {
             issue: IssueId::new("klatch", "1"),
         };
         assert!(matches!(part.carry_out(&unknown, &w), Outcome::Failed(_)));
+    }
+
+    #[test]
+    fn a_filed_issue_is_reported_at_once_and_the_next_sync_finds_nothing_changed() {
+        use temet_work_core::ids::{AgentId, GroupId};
+        let mut w = configured();
+        let mut part = Trackers::default().every(0);
+        part.add(Box::new(fake()));
+        let first = part.poll(&w, 0).events;
+        apply(&mut w, &first);
+        let file = Effect::File {
+            group: GroupId::new("watch"),
+            agent: AgentId::new("investigator-1"),
+            source: ProjectId::new("ankh"),
+            title: "Wind the clock".into(),
+            body: "Depends on #1".into(),
+            milestone: Some(MilestoneId::new("Watch")),
+        };
+        let Outcome::Done { events, effects } = part.carry_out(&file, &w) else {
+            panic!("not filed");
+        };
+        assert!(effects.is_empty());
+        let issue = IssueId::new("ankh", "3");
+        assert_eq!(
+            events,
+            [
+                Event::IssueSynced {
+                    issue: issue.clone(),
+                    title: "Wind the clock".into(),
+                    milestone: Some(MilestoneId::new("Watch")),
+                    depends_on: vec![IssueId::new("ankh", "1")],
+                    order: 3,
+                    closed: false,
+                },
+                Event::IssueFiled {
+                    group: GroupId::new("watch"),
+                    agent: AgentId::new("investigator-1"),
+                    issue,
+                    title: "Wind the clock".into(),
+                    milestone: Some(MilestoneId::new("Watch")),
+                },
+            ]
+        );
+        apply(&mut w, &events);
+        assert_eq!(
+            part.poll(&w, 1).events,
+            vec![],
+            "the next sync changes nothing"
+        );
+        let elsewhere = Effect::File {
+            group: GroupId::new("watch"),
+            agent: AgentId::new("investigator-1"),
+            source: ProjectId::new("klatch"),
+            title: "Wind the clock".into(),
+            body: String::new(),
+            milestone: None,
+        };
+        assert!(matches!(part.carry_out(&elsewhere, &w), Outcome::Failed(_)));
     }
 
     #[test]

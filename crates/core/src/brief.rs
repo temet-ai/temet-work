@@ -192,23 +192,175 @@ pub fn write(
             title = issue.title,
         ),
     };
-    let task = if rules.is_empty() {
+    Brief {
+        role,
+        issue: Some(id.clone()),
+        task: with_rules(task, rules),
+        model: None,
+        permission: builtin_permission(),
+        folder,
+    }
+}
+
+/// The permission an agent starts with when no setting names one.
+fn builtin_permission() -> String {
+    match crate::settings::builtin("permission") {
+        Some(v) => v.to_string(),
+        None => String::new(),
+    }
+}
+
+/// A task ended by the kept rules, when there are any.
+fn with_rules(task: String, rules: &[String]) -> String {
+    if rules.is_empty() {
         task
     } else {
         let list: String = rules.iter().map(|r| format!("- {r}\n")).collect();
         format!("{task}\n\nRules from overturned decisions:\n{list}")
-    };
-    Brief {
-        role,
-        issue: id.clone(),
-        task,
-        model: None,
-        permission: match crate::settings::builtin("permission") {
-            Some(v) => v.to_string(),
-            None => String::new(),
-        },
-        folder,
     }
+}
+
+/// One place an investigator files issues in: a project, or an area whose tracker
+/// holds its repositories' issues.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Covered {
+    /// The project or area, as `temet-work file` takes it.
+    pub source: ProjectId,
+    /// The tracker's name for it.
+    pub tracker: String,
+    /// Whether it is an area.
+    pub area: bool,
+    /// The repositories whose issues it holds, each with a checkout's path when
+    /// one is known.
+    pub repos: Vec<(ProjectId, Option<String>)>,
+}
+
+/// What an investigator is told about its group.
+#[derive(Debug)]
+pub struct Investigating<'a> {
+    /// The group.
+    pub group: &'a crate::model::Group,
+    /// Where it files issues.
+    pub covered: Vec<Covered>,
+    /// Each repository's `investigate` setting, under the repository's name.
+    pub notes: Vec<(ProjectId, String)>,
+    /// The milestone its issues get when it names none.
+    pub milestone: Option<crate::ids::MilestoneId>,
+    /// When the group's last investigation started, in words; none for its first.
+    pub since: Option<String>,
+}
+
+/// Writes the brief for a group's investigator, run in `place`. It names no tool
+/// or service: the investigator files issues through `temet-work file`.
+pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> Brief {
+    let g = what.group;
+    let folder_note = if place.shared {
+        "Another issue's author is changing files in this folder: do not switch its branch or change \
+         anything here.\n"
+    } else {
+        ""
+    };
+    let covered: String = what
+        .covered
+        .iter()
+        .map(|c| {
+            let repos: Vec<String> = c
+                .repos
+                .iter()
+                .map(|(r, path)| match path {
+                    Some(p) => format!("{r} (a checkout is at {p})"),
+                    None => r.to_string(),
+                })
+                .collect();
+            if c.area {
+                format!(
+                    "- {}: {} in its tracker, for the area's repositories {}\n",
+                    c.source,
+                    c.tracker,
+                    repos.join(", ")
+                )
+            } else {
+                let at = c
+                    .repos
+                    .first()
+                    .and_then(|(_, p)| p.as_deref())
+                    .map_or_else(String::new, |p| format!("; a checkout is at {p}"));
+                format!("- {}: {} in its tracker{at}\n", c.source, c.tracker)
+            }
+        })
+        .collect();
+    let milestone = match (&what.milestone, g.milestones.len()) {
+        (Some(m), 1) => {
+            format!("Each issue you file goes in milestone {m}, the one the group takes.\n")
+        }
+        (Some(m), _) => {
+            let all: Vec<String> = g.milestones.iter().map(ToString::to_string).collect();
+            format!(
+                "Each issue you file goes in milestone {m}, the last the group takes; to file one in \
+                 another the group takes, add --milestone M. The group takes, first to last: {}.\n",
+                all.join(", ")
+            )
+        }
+        (None, _) => "The group takes issues of every milestone; file them with none.\n".into(),
+    };
+    let since = what.since.as_ref().map_or_else(
+        || {
+            format!(
+                "in the last {} days",
+                crate::investigation::FIRST_SINCE_DAYS
+            )
+        },
+        |s| format!("since {s}, when the group's last investigation started"),
+    );
+    let notes: String = what
+        .notes
+        .iter()
+        .map(|(p, text)| format!("For {p}:\n{}\n", text.trim_end()))
+        .collect();
+    let notes = if notes.is_empty() {
+        String::new()
+    } else {
+        format!("What the projects add:\n{notes}")
+    };
+    let task = format!(
+        "Investigate for group {name} ({id}): its work queue is short. Find the work that should \
+         come next and file an issue for each item.\n\
+         {folder_note}It takes issues from:\n{covered}{milestone}\
+         Read, in this order:\n\
+         1. Each project's docs, for work they plan that is not built yet.\n\
+         2. The open issues of each project, so you know what is covered already.\n\
+         3. The pull requests merged {since}, for defects you can show in that work.\n\
+         Then file one issue for each planned item no open issue covers, and one for each defect \
+         you can show in merged work:\n\
+         temet-work file PROJECT \"<title>\" - <<'BODY'\n\
+         <what to change, and what done means>\n\
+         BODY\n\
+         PROJECT is one of the ids above. The reply names the new issue and the Depends on line \
+         an issue that waits for it carries: file the issue another waits for first, and end the \
+         waiting one's body with that line.\n\
+         Never file an issue an open one already covers. Change no file.\n\
+         {notes}\
+         When you have filed every issue you found, run: temet-work investigated {id}",
+        name = g.name,
+        id = g.id,
+    );
+    Brief {
+        role: Role::Investigator,
+        issue: None,
+        task: with_rules(task, rules),
+        model: None,
+        permission: builtin_permission(),
+        folder: place.folder,
+    }
+}
+
+/// What an investigator hears when it has been idle a while.
+pub fn investigation_nudge(group: &crate::ids::GroupId) -> String {
+    format!(
+        "The investigation for {group} is still running. If you have filed every issue you found, \
+         run: temet-work investigated {group}. If a choice stops you, take the default you would \
+         defend, say so, and finish."
+    )
 }
 
 /// The settings no agent may set.
@@ -257,6 +409,7 @@ pub fn nudge(role: Role, issue: &IssueId) -> String {
 mod tests {
     use super::*;
     use crate::event::Event;
+    use crate::ids::{AgentId, FolderId, GroupId, MachineId, MilestoneId, ProjectId};
     use crate::world::World;
 
     #[test]
@@ -289,5 +442,113 @@ mod tests {
         for key in ["runtime", "runner", "review_rounds"] {
             assert!(named.contains(&key), "{key} is not in {named:?}");
         }
+    }
+
+    /// A world where the group watch, over ankh and the area guild (whose tracker
+    /// holds its repositories' issues), investigates; `since_ms` is when its last
+    /// investigation started, if it had one.
+    fn investigating(since_ms: Option<u64>) -> World {
+        let mut events = vec![
+            Event::ProjectAdded {
+                project: ProjectId::new("ankh"),
+                tracker: "fake".into(),
+                name: "city/ankh".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::ProjectAdded {
+                project: ProjectId::new("ui"),
+                tracker: String::new(),
+                name: String::new(),
+                code_host: Some("fake".into()),
+                repo: Some("guild/ui".into()),
+            },
+            Event::AreaDefined {
+                area: ProjectId::new("guild"),
+                name: "Thieves' Guild".into(),
+                projects: vec![ProjectId::new("ui")],
+                tracker: "fake".into(),
+                tracker_name: "GLD".into(),
+            },
+            Event::FolderAdded {
+                folder: FolderId::new("f1"),
+                project: ProjectId::new("ankh"),
+                machine: MachineId::new("morpork"),
+                path: "/srv/ankh/1".into(),
+            },
+            Event::GroupCreated {
+                group: GroupId::new("watch"),
+                name: "Night watch".into(),
+                projects: vec![ProjectId::new("ankh")],
+                areas: vec![ProjectId::new("guild")],
+                milestones: vec![MilestoneId::new("First"), MilestoneId::new("Second")],
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+        ];
+        let start = |at_ms| Event::InvestigationStarted {
+            group: GroupId::new("watch"),
+            agent: AgentId::new("investigator-1"),
+            at_ms,
+        };
+        if let Some(at) = since_ms {
+            events.push(start(at));
+            events.push(Event::InvestigationEnded {
+                group: GroupId::new("watch"),
+                at_ms: at + 1,
+                filed: 0,
+            });
+        }
+        events.push(start(1_795_784_700_000 + 7_200_000));
+        World::replay(&events).0
+    }
+
+    fn task(w: &World) -> String {
+        w.launch_investigator(&GroupId::new("watch"))
+            .expect("launch")
+            .brief
+            .task
+    }
+
+    #[test]
+    fn the_investigator_brief_names_projects_milestone_and_since() {
+        let t = task(&investigating(Some(1_795_784_700_000)));
+        for line in [
+            "Investigate for group Night watch (watch): its work queue is short.",
+            "It takes issues from:\n\
+             - ankh: city/ankh in its tracker; a checkout is at /srv/ankh/1\n\
+             - guild: GLD in its tracker, for the area's repositories ui\n",
+            "Each issue you file goes in milestone Second, the last the group takes; to file one \
+             in another the group takes, add --milestone M. The group takes, first to last: First, \
+             Second.",
+            "1. Each project's docs, for work they plan that is not built yet.",
+            "2. The open issues of each project, so you know what is covered already.",
+            "3. The pull requests merged since 2026-11-27 13:05 UTC, when the group's last \
+             investigation started, for defects you can show in that work.",
+            "Then file one issue for each planned item no open issue covers, and one for each \
+             defect you can show in merged work:\ntemet-work file PROJECT \"<title>\" - <<'BODY'\n",
+            "the Depends on line an issue that waits for it carries",
+            "Never file an issue an open one already covers. Change no file.",
+        ] {
+            assert!(t.contains(line), "missing {line:?} in:\n{t}");
+        }
+        assert!(
+            t.ends_with(
+                "When you have filed every issue you found, run: temet-work investigated watch"
+            ),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn a_first_investigation_reads_the_last_seven_days() {
+        let t = task(&investigating(None));
+        assert!(
+            t.contains("3. The pull requests merged in the last 7 days, for defects"),
+            "{t}"
+        );
+        assert!(!t.contains("since"), "{t}");
     }
 }

@@ -135,6 +135,8 @@ projects = ["radar"]
 # areas = ["guild"]                        # whole areas: their own issues and their projects'
 milestones = ["Slack sign-in rework"]   # first to last; leave out for every issue
 refining_at_once = 1                    # the default
+# queue_low = 4                         # starts an investigator below this many issues in its queue
+# investigate_every = 120               # minutes from one investigation's end to the next; the default
 ```
 
 A group takes its projects' open issues in milestone order, then in the tracker's order.
@@ -163,6 +165,27 @@ Three cases go differently:
 When the issue is back in its group's lists it carries on from the stage it reached: the
 agent that stage needs starts or is told, or the merge goes ahead. An issue with a plan is
 not refined again.
+
+A group's work queue is its issues being refined or ready, and the new issues it would take
+that no group has taken yet. When the queue holds fewer than `queue_low` issues, the daemon
+starts one investigator for the group. Left out, `queue_low` is twice the work folders of
+the group's projects and of the projects in its areas, or 2 when they have none; 0 starts
+no investigator. The investigator holds no work folder and changes no file: it runs in a
+free folder of the group's first project, or in one an author holds when none is free. It
+reads each project's docs for planned work that is not built, the open issues, and the pull
+requests merged since the group's last investigation started (the last 7 days for its
+first), and files an issue for each planned item no open issue covers and for each defect
+it can show (`temet-work file`, `docs/commands.md`). Each goes in the last milestone of the
+group's list unless it names another the group takes, and is in the loop as soon as it is
+filed. A project's `investigate` setting adds lines to the investigator's brief
+(`docs/settings.md`).
+
+The investigation ends when the investigator runs `temet-work investigated GROUP` or its
+session ends. An idle investigator is reminded and then stopped after `remind_after` and
+`reminders`, like any agent the loop waits on. The next one starts once the queue is short
+again and `investigate_every` minutes have passed since the last one ended: 120 when left
+out, and at least 1. A group never investigated may start one at once. `temet-work status`
+shows the group's queue and `queue_low`, and `investigating: investigator-N` while one runs.
 
 A project's `deploy` and `verify` commands run through `sh -c` in its `run_in` folder (your
 home folder when left out), with `TEMET_WORK_ISSUE` (the issue, such as `radar#44`),

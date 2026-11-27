@@ -6,8 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::effect::Effect;
 use crate::event::{Event, Verdict};
-use crate::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
+use crate::ids::{AgentId, DecisionId, GroupId, IssueId, MilestoneId, ProjectId, RuleId};
 use crate::model::{Decision, DecisionKind, Plan, Role, Rule, RuleState, Stage};
 use crate::settings::{self, Agents, Scope, Target};
 use crate::text::stage;
@@ -115,6 +116,25 @@ pub enum Command {
         /// True to keep it, false to drop it.
         keep: bool,
     },
+    /// An investigator files an issue in the tracker of a project or area its
+    /// group takes issues from. The reply names the new issue.
+    File {
+        /// The project or area.
+        project: ProjectId,
+        /// The issue's title.
+        title: String,
+        /// Its text.
+        #[serde(default)]
+        body: String,
+        /// Its milestone; the last of the group's when none is named.
+        #[serde(default)]
+        milestone: Option<String>,
+    },
+    /// An investigator says its group's investigation is done.
+    Investigated {
+        /// The group.
+        group: GroupId,
+    },
 }
 
 impl Command {
@@ -127,7 +147,9 @@ impl Command {
             | Self::Unset { .. }
             | Self::Settings { .. }
             | Self::Overturn { .. }
-            | Self::Proposal { .. } => None,
+            | Self::Proposal { .. }
+            | Self::File { .. }
+            | Self::Investigated { .. } => None,
             Self::Issue { issue } => Some(issue),
             Self::Plan { issue, .. }
             | Self::Ready { issue, .. }
@@ -360,6 +382,119 @@ impl World {
         ))
     }
 
+    /// The investigator `by` names, with its group, when it runs its group's
+    /// investigation; why `step` is not `by`'s otherwise.
+    fn investigator(
+        &self,
+        by: Option<&AgentId>,
+        step: &str,
+    ) -> Result<&crate::model::Group, String> {
+        let Some(by) = by else {
+            return Err(format!(
+                "{step} is a group's investigator's: a person may not run it; a person files \
+                 issues in the tracker itself"
+            ));
+        };
+        let agent = self.agents.get(by).ok_or_else(|| {
+            format!("{step} is an investigator's: {by} is not an agent this daemon started")
+        })?;
+        if agent.role != Role::Investigator {
+            return Err(format!(
+                "{step} is an investigator's: {by} is the {} of {}",
+                agent.role.name(),
+                agent
+                    .issue
+                    .as_ref()
+                    .map_or_else(|| agent.group.to_string(), ToString::to_string)
+            ));
+        }
+        match self.investigating(&agent.group) {
+            Some(i) if i.agent == *by && !i.done => self
+                .groups
+                .get(&agent.group)
+                .ok_or_else(|| format!("there is no group {}", agent.group)),
+            _ => Err(format!(
+                "{step} is the running investigator's: {by}'s investigation of {} is over",
+                agent.group
+            )),
+        }
+    }
+
+    /// The effect a `file` command becomes: an issue to file in the tracker of
+    /// `project`, for the investigator `by`. Refused for anyone but a group's
+    /// running investigator, for a project or area its group does not take issues
+    /// from, for a milestone the group does not take, and for a title an open
+    /// issue of that project already has (the plainest duplicate; judging whether
+    /// an open issue covers it otherwise is the investigator's). The milestone is
+    /// the last of the group's when none is named, and none for a group that names
+    /// none.
+    pub fn filing(&self, by: Option<&AgentId>, command: &Command) -> Result<Effect, String> {
+        let Command::File {
+            project,
+            title,
+            body,
+            milestone,
+        } = command
+        else {
+            return Err(format!("{} is not file", command.name()));
+        };
+        let group = self.investigator(by, "file")?;
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("an issue needs a title".into());
+        }
+        let sources = self.group_sources(group);
+        if !sources.contains(project) {
+            let list: Vec<String> = sources.iter().map(ToString::to_string).collect();
+            return Err(format!(
+                "{} takes no issues from {project}; it files in: {}",
+                group.id,
+                if list.is_empty() {
+                    "none".into()
+                } else {
+                    list.join(", ")
+                }
+            ));
+        }
+        let milestone = match milestone
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            Some(m) if group.milestones.is_empty() || group.milestones.iter().any(|g| g.0 == m) => {
+                Some(MilestoneId::new(m))
+            }
+            Some(m) => {
+                let list: Vec<String> = group.milestones.iter().map(ToString::to_string).collect();
+                return Err(format!(
+                    "{} does not take milestone {m}; it takes: {}",
+                    group.id,
+                    list.join(", ")
+                ));
+            }
+            None => self.filing_milestone(group),
+        };
+        let same = |t: &str| t.trim().eq_ignore_ascii_case(title);
+        if let Some(open) = self
+            .issues
+            .values()
+            .find(|i| &i.id.project == project && i.stage != Stage::Done && same(&i.title))
+        {
+            return Err(format!(
+                "{} is open with the title \"{}\" already; file an issue no open one covers",
+                open.id, open.title
+            ));
+        }
+        Ok(Effect::File {
+            group: group.id.clone(),
+            agent: by.cloned().unwrap_or_else(|| AgentId::new(PERSON)),
+            source: project.clone(),
+            title: title.to_string(),
+            body: body.clone(),
+            milestone,
+        })
+    }
+
     /// The event a command becomes, or why the loop refuses it. `Status`
     /// becomes no event.
     pub fn check(&self, by: Option<&AgentId>, command: &Command) -> Result<Option<Event>, String> {
@@ -374,6 +509,25 @@ impl World {
         };
         let event = match command {
             Command::Status | Command::Screen { .. } => return Ok(None),
+            // Filing waits for the tracker's answer: the daemon carries it out
+            // through `World::filing`, not as an event of its own.
+            Command::File { .. } => {
+                self.filing(by, command)?;
+                return Ok(None);
+            }
+            Command::Investigated { group } => {
+                let g = self.investigator(by, "investigated")?;
+                if &g.id != group {
+                    return Err(format!(
+                        "investigated {group}: you investigate for {}, not {group}",
+                        g.id
+                    ));
+                }
+                Event::Investigated {
+                    group: group.clone(),
+                    agent: by.cloned().unwrap_or_else(|| AgentId::new(PERSON)),
+                }
+            }
             Command::Issue { issue } => {
                 at(issue)?;
                 return Ok(None);
@@ -696,6 +850,8 @@ mod tests {
                 milestones: vec![],
                 refining_at_once: 1,
                 model: None,
+                queue_low: None,
+                investigate_every: None,
             },
             Event::IssueSynced {
                 issue: issue(),
@@ -1147,6 +1303,8 @@ mod plan_settings {
                 milestones: vec![],
                 refining_at_once: 1,
                 model: None,
+                queue_low: None,
+                investigate_every: None,
             },
             Event::IssueSynced {
                 issue: issue(),
@@ -1624,7 +1782,7 @@ mod plan_settings {
         assert!(
             task.contains(
                 "Only a person sets runtime, runner, permission, review_rounds, ci, deploy, \
-                 verify, run_in:"
+                 verify, run_in, investigate:"
             ),
             "{task}"
         );
@@ -2009,11 +2167,20 @@ mod plan_settings {
             Role::Arbiter,
             Role::Investigator,
         ];
+        // An investigator works for its group: it starts once its group investigates.
         let task = |w: &World, role| {
-            w.launch(&GroupId::new("watch"), role, &issue(), None)
-                .expect("launch")
-                .brief
-                .task
+            let launch = if role == Role::Investigator {
+                let mut w = w.clone();
+                w.apply(&Event::InvestigationStarted {
+                    group: GroupId::new("watch"),
+                    agent: AgentId::new("investigator-1"),
+                    at_ms: 0,
+                });
+                w.launch_investigator(&GroupId::new("watch"))
+            } else {
+                w.launch(&GroupId::new("watch"), role, &issue(), None)
+            };
+            launch.expect("launch").brief.task
         };
         let mut w = with_rule();
         for role in roles {
@@ -2092,6 +2259,8 @@ mod ready_in_several_repositories {
             milestones: vec![],
             refining_at_once: 1,
             model: None,
+            queue_low: None,
+            investigate_every: None,
         });
         events.push(Event::IssueSynced {
             issue: gld(),

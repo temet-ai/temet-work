@@ -39,6 +39,8 @@ fn the_documented_example_gives_each_runtime_only_its_own_model() {
         milestones: Vec::new(),
         refining_at_once: 2,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     });
     // radar#1 is in no milestone; radar#2 is in the example's.
     for (key, milestone) in [("1", None), ("2", Some("Slack sign-in rework"))] {

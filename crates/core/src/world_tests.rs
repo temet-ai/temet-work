@@ -18,6 +18,8 @@ fn group(milestones: &[&str], refining_at_once: usize) -> Event {
         milestones: milestones.iter().map(|m| MilestoneId::new(*m)).collect(),
         refining_at_once,
         model: None,
+        queue_low: None,
+        investigate_every: None,
     }
 }
 
@@ -1181,6 +1183,8 @@ fn area_events() -> Vec<Event> {
             milestones: vec![],
             refining_at_once: 2,
             model: None,
+            queue_low: None,
+            investigate_every: None,
         },
     ]
 }

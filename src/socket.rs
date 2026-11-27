@@ -583,6 +583,9 @@ pub fn answer(
     if let Err(why) = host.world().admit(&sender, &request.command) {
         return Ok(Reply::Refused { why });
     }
+    if let temet_work_core::Command::File { .. } = &request.command {
+        return file(host, now_ms, request);
+    }
     match host.world().events(request.by.as_ref(), &request.command) {
         Err(why) => Ok(Reply::Refused { why }),
         Ok(events) if events.is_empty() => Ok(match &request.command {
@@ -625,6 +628,20 @@ pub fn answer(
                         text: format!("rule {} is {state}", rule.0),
                     });
                 }
+                temet_work_core::Command::Investigated { group } => {
+                    let filed = host
+                        .world()
+                        .investigations
+                        .get(group)
+                        .map_or(0, |i| i.filed.len());
+                    return Ok(Reply::Done {
+                        text: format!(
+                            "the investigation for {group} has ended with {filed} issue{} filed; \
+                             your session is stopped",
+                            if filed == 1 { "" } else { "s" }
+                        ),
+                    });
+                }
                 _ => (),
             };
             let text = request
@@ -638,6 +655,45 @@ pub fn answer(
             Ok(Reply::Done { text })
         }
     }
+}
+
+/// Files an issue for an investigator through the tracker, and answers with the
+/// new issue's id and how a later issue names it in a "Depends on" line.
+fn file(host: &mut Host, now_ms: u64, request: &Request) -> Result<Reply, String> {
+    let effect = match host.world().filing(request.by.as_ref(), &request.command) {
+        Ok(effect) => effect,
+        Err(why) => return Ok(Reply::Refused { why }),
+    };
+    let events = match host.perform(now_ms, &effect)? {
+        Ok(events) => events,
+        Err(why) => return Ok(Reply::Refused { why }),
+    };
+    let Some((issue, milestone)) = events.iter().find_map(|e| match e {
+        temet_work_core::Event::IssueFiled {
+            issue, milestone, ..
+        } => Some((issue, milestone)),
+        _ => None,
+    }) else {
+        return Ok(Reply::Refused {
+            why: "the tracker filed nothing".into(),
+        });
+    };
+    // A number is written `#12` in a "Depends on" line; a key such as GLD-12 as it is.
+    let named = if issue.key.chars().all(|c| c.is_ascii_digit()) {
+        format!("#{}", issue.key)
+    } else {
+        issue.key.clone()
+    };
+    let milestone = milestone.as_ref().map_or_else(
+        || " with no milestone".to_string(),
+        |m| format!(" in milestone {m}"),
+    );
+    Ok(Reply::Done {
+        text: format!(
+            "filed {issue}{milestone}; an issue of {} that waits for it says: Depends on {named}",
+            issue.project
+        ),
+    })
 }
 
 /// What a `set` or `unset` is answered with, read from the event it was recorded

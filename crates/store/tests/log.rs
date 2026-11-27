@@ -27,6 +27,8 @@ fn events() -> Vec<Event> {
             milestones: vec![MilestoneId::new("m1")],
             refining_at_once: 1,
             model: None,
+            queue_low: None,
+            investigate_every: None,
         },
         Event::FolderAdded {
             folder: FolderId::new("f1"),
@@ -316,4 +318,79 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
     assert_eq!(world, World::replay(&events).0);
     assert_eq!(world.agents[&author].continued, Some(1_796_060_400_000));
     assert_eq!(world.agents[&author].limit_reset(), None);
+}
+
+#[test]
+fn replaying_an_investigation_gives_the_same_state_as_applying_its_events() {
+    use temet_work_core::ids::AgentId;
+    let watch = GroupId::new("watch");
+    let me = AgentId::new("investigator-1");
+    let mut all = events();
+    all.extend([
+        Event::InvestigationStarted {
+            group: watch.clone(),
+            agent: me.clone(),
+            at_ms: 1_795_784_700_000,
+        },
+        Event::IssueSynced {
+            issue: IssueId::new("ankh", "2"),
+            title: "Wind the clock".into(),
+            milestone: Some(MilestoneId::new("m1")),
+            depends_on: vec![IssueId::new("ankh", "1")],
+            order: 2,
+            closed: false,
+        },
+        Event::IssueFiled {
+            group: watch.clone(),
+            agent: me,
+            issue: IssueId::new("ankh", "2"),
+            title: "Wind the clock".into(),
+            milestone: Some(MilestoneId::new("m1")),
+        },
+        Event::InvestigationEnded {
+            group: watch.clone(),
+            at_ms: 1_795_784_760_000,
+            filed: 1,
+        },
+    ]);
+    let p = path("investigation");
+    let (mut log, _) = Log::open(&p).expect("open");
+    for e in &all {
+        log.append(0, e).expect("append");
+    }
+    drop(log);
+    let (_, entries) = Log::open(&p).expect("reopen");
+    let replayed = replay(&entries);
+    assert_eq!(replayed, World::replay(&all).0);
+    let investigation = &replayed.investigations[&watch];
+    assert_eq!(
+        (
+            investigation.started_ms,
+            investigation.ended_ms,
+            investigation.filed.as_slice()
+        ),
+        (
+            1_795_784_700_000,
+            Some(1_795_784_760_000),
+            [IssueId::new("ankh", "2")].as_slice()
+        )
+    );
+}
+
+#[test]
+fn an_older_logs_group_replays_with_the_default_queue_low_and_investigate_every() {
+    let p = path("older-group");
+    let line = r#"{"seq":1,"at_ms":0,"event":{"GroupCreated":{"group":"watch","name":"Night watch","projects":["ankh"],"milestones":[],"refining_at_once":1}}}"#;
+    std::fs::write(&p, format!("{line}\n")).expect("write");
+    let (_, entries) = Log::open(&p).expect("open");
+    let world = replay(&entries);
+    let group = &world.groups[&GroupId::new("watch")];
+    assert_eq!(group.queue_low, None, "twice its work folders");
+    assert_eq!(world.queue_low(group), 2, "it has none");
+    assert_eq!(group.investigate_every, 120);
+    // And a group written now leaves the defaults out, so older daemons read it.
+    let (mut log, _) = Log::open(&path("new-group")).expect("open");
+    let entry = log.append(0, &events()[0]).expect("append");
+    let text = serde_json::to_string(&entry).expect("json");
+    assert!(!text.contains("queue_low"), "{text}");
 }

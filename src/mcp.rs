@@ -159,6 +159,25 @@ fn tools() -> Vec<Tool> {
             }, "required": ["rule", "action"]}),
         },
         Tool {
+            name: "file",
+            description: "An investigator's: file an issue in a project or area its group takes issues from. The milestone is the last of the group's when none is named. The reply names the new issue, so a later one can say it depends on it.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "project": {"type": "string", "description": "The project or area id, as the investigator's brief lists it."},
+                "title": {"type": "string"},
+                "body": {"type": "string", "description": "What to change and what done means; a line Depends on <id> for each issue it waits for."},
+                "milestone": {"type": "string", "description": "A milestone the group takes; the last of its milestones when left out."}
+            }, "required": ["project", "title", "body"]}),
+        },
+        Tool {
+            name: "investigated",
+            description: "An investigator's: its group's investigation is done. Its session is then stopped.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "group": {"type": "string", "description": "The group's id."}
+            }, "required": ["group"]}),
+        },
+        Tool {
             name: "set",
             description: "Gives a setting a value at one level, for one role or for every role. A refiner may set task-level values of the issue it is refining, where its model is the author's only; a wider level is a person's.",
             acts: true,
@@ -323,6 +342,18 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
             role: role(args)?,
             key: text(args, "key")?,
         },
+        "file" => Command::File {
+            project: ProjectId::new(text(args, "project")?),
+            title: text(args, "title")?,
+            body: text(args, "body")?,
+            milestone: args
+                .get("milestone")
+                .and_then(Value::as_str)
+                .map(String::from),
+        },
+        "investigated" => Command::Investigated {
+            group: temet_work_core::ids::GroupId::new(text(args, "group")?),
+        },
         other => return Err(format!("no tool {other}")),
     })
 }
@@ -456,7 +487,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 13);
+        assert_eq!(names(Level::Act).len(), 15);
     }
 
     #[test]
@@ -548,6 +579,38 @@ mod tests {
         );
         assert!(names(Level::Act).contains(&"overturn".to_string()));
         assert!(!names(Level::Read).contains(&"proposal".to_string()));
+    }
+
+    #[test]
+    fn file_and_investigated_become_the_same_requests_the_command_line_sends() {
+        let mut sent = Vec::new();
+        call(
+            Level::Act,
+            "file",
+            json!({"project": "ankh", "title": "Wind the clock", "body": "Depends on #12", "milestone": "First"}),
+            &mut sent,
+        );
+        call(
+            Level::Act,
+            "investigated",
+            json!({"group": "watch"}),
+            &mut sent,
+        );
+        let commands: Vec<Command> = sent.into_iter().map(|r| r.command).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::File {
+                    project: ProjectId::new("ankh"),
+                    title: "Wind the clock".into(),
+                    body: "Depends on #12".into(),
+                    milestone: Some("First".into()),
+                },
+                Command::Investigated {
+                    group: temet_work_core::ids::GroupId::new("watch"),
+                },
+            ]
+        );
     }
 
     #[test]

@@ -271,6 +271,50 @@ pub struct Group {
     pub milestones: Vec<MilestoneId>,
     /// How many issues it refines at once.
     pub refining_at_once: usize,
+    /// Below how many issues in its work queue it starts an investigator; none
+    /// for the default, twice the work folders of its projects
+    /// ([`crate::World::queue_low`]). 0 starts none.
+    #[serde(default)]
+    pub queue_low: Option<usize>,
+    /// Minutes from the end of its last investigation before another may start.
+    #[serde(default = "investigate_every")]
+    pub investigate_every: u64,
+}
+
+/// How many minutes a group waits after an investigation ends before it starts
+/// another, when its configuration names none.
+pub const INVESTIGATE_EVERY: u64 = 120;
+
+fn investigate_every() -> u64 {
+    INVESTIGATE_EVERY
+}
+
+/// A group's investigation: an investigator reads the group's projects for
+/// planned work that is not built and defects in merged work, and files an issue
+/// for each. A group has at most one running at a time.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Investigation {
+    /// The group.
+    pub group: GroupId,
+    /// Its investigator.
+    pub agent: AgentId,
+    /// When it started, in milliseconds since the Unix epoch.
+    pub started_ms: u64,
+    /// When the group's investigation before it started; none for its first.
+    pub since_ms: Option<u64>,
+    /// When it ended; none while it runs.
+    pub ended_ms: Option<u64>,
+    /// The issues its investigator filed, in order.
+    pub filed: Vec<IssueId>,
+    /// Whether its investigator said it is done.
+    pub done: bool,
+}
+
+impl Investigation {
+    /// Whether it is still running.
+    pub fn running(&self) -> bool {
+        self.ended_ms.is_none()
+    }
 }
 
 /// A work folder: a checkout on one machine, held by one issue at a time.

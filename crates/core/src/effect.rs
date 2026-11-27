@@ -19,6 +19,28 @@ pub enum Effect {
         /// The work folder, for an author.
         folder: Option<FolderId>,
     },
+    /// Start a group's investigator, for the investigation the group began. It
+    /// holds no folder and works on no issue ([`crate::World::launch_investigator`]).
+    Investigate {
+        /// The group.
+        group: GroupId,
+    },
+    /// File an issue in the tracker of `source`, for `agent`, the investigator of
+    /// `group`. The part that does it reports the new issue as synced and filed.
+    File {
+        /// The group.
+        group: GroupId,
+        /// The investigator.
+        agent: crate::ids::AgentId,
+        /// The project or area whose tracker it goes in.
+        source: crate::ids::ProjectId,
+        /// Its title.
+        title: String,
+        /// Its text.
+        body: String,
+        /// Its milestone, if any.
+        milestone: Option<crate::ids::MilestoneId>,
+    },
     /// Ask the issue's author to fix what the review or the checks found.
     RequestFix {
         /// The issue.
@@ -88,6 +110,8 @@ impl Effect {
     pub fn describe(&self) -> String {
         match self {
             Self::StartAgent { role, issue, .. } => format!("start a {} on {issue}", role.name()),
+            Self::Investigate { group } => format!("start an investigator for {group}"),
+            Self::File { source, title, .. } => format!("file \"{title}\" in {source}"),
             Self::RequestFix { issue, .. } => format!("send the fixes for {issue} to its author"),
             Self::StartReview { issue, round } => format!("start review round {round} of {issue}"),
             Self::Merge { issue } => format!("merge {issue}"),

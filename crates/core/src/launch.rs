@@ -49,8 +49,8 @@ impl std::fmt::Debug for Program {
 pub struct Brief {
     /// What the agent does.
     pub role: Role,
-    /// The issue it works on.
-    pub issue: IssueId,
+    /// The issue it works on; none for an investigator, which works for its group.
+    pub issue: Option<IssueId>,
     /// Its task, in full: what to do, what done means, what to read first.
     pub task: String,
     /// The model to run, when a setting names one.

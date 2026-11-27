@@ -84,13 +84,30 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
         } else {
             milestones.join(", ")
         };
+        let investigation = match world.investigations.get(&g.id) {
+            Some(i) if i.running() => format!("; investigating: {}", i.agent),
+            Some(i) => {
+                let filed = match i.filed.len() {
+                    1 => "1 issue".to_string(),
+                    n => format!("{n} issues"),
+                };
+                let ended = i
+                    .ended_ms
+                    .map(crate::investigation::utc)
+                    .unwrap_or_default();
+                format!("; last investigated {ended}, filed {filed}")
+            }
+            None => String::new(),
+        };
         let _ = writeln!(
             out,
-            "  {} ({}): {}; {scope}; refines {} at a time",
+            "  {} ({}): {}; {scope}; refines {} at a time; {} in its queue, investigates below {}{investigation}",
             g.id,
             g.name,
             projects.join(", "),
-            g.refining_at_once
+            g.refining_at_once,
+            world.queue(g),
+            world.queue_low(g),
         );
     }
     let _ = writeln!(out, "Issues");
@@ -610,6 +627,8 @@ radar#44, author
                 milestones: Vec::new(),
                 refining_at_once: 3,
                 model: None,
+                queue_low: None,
+                investigate_every: None,
             },
             // radar#1 takes the Mac folder, radar#2 waits for it, radar#3 for radar#2.
             synced("1", vec![]),
@@ -626,7 +645,7 @@ radar#44, author
 Projects
   radar: city/radar in t
 Groups
-  watch (Night watch): radar; every milestone; refines 3 at a time
+  watch (Night watch): radar; every milestone; refines 3 at a time; 2 in its queue, investigates below 2
 Issues
   radar#1  working  Issue 1
   radar#2  ready  Issue 2
@@ -737,6 +756,73 @@ Problems
             !text.contains("  model "),
             "the refiner's model is for the author, not the refiner: {text}"
         );
+    }
+
+    #[test]
+    fn the_status_shows_a_group_investigating_and_one_that_investigated() {
+        use crate::ids::{AgentId, GroupId, MachineId};
+        let group = |id: &str| Event::GroupCreated {
+            group: GroupId::new(id),
+            name: id.to_uppercase(),
+            projects: vec![ProjectId::new("radar")],
+            areas: Vec::new(),
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: None,
+            queue_low: Some(3),
+            investigate_every: None,
+        };
+        let started = |group: &str, agent: &str, at_ms| {
+            [
+                Event::InvestigationStarted {
+                    group: GroupId::new(group),
+                    agent: AgentId::new(agent),
+                    at_ms,
+                },
+                Event::AgentStarted {
+                    agent: AgentId::new(agent),
+                    group: GroupId::new(group),
+                    role: Role::Investigator,
+                    issue: None,
+                    machine: MachineId::new("local"),
+                    folder: None,
+                    secret_digest: None,
+                },
+            ]
+        };
+        let filed = |key: &str| Event::IssueFiled {
+            group: GroupId::new("guard"),
+            agent: AgentId::new("investigator-1"),
+            issue: IssueId::new("radar", key),
+            title: format!("Issue {key}"),
+            milestone: None,
+        };
+        let mut w = world();
+        for e in [group("guard"), group("watch")]
+            .into_iter()
+            .chain(started("guard", "investigator-1", 0))
+            .chain([filed("7"), filed("8")])
+            .chain([Event::InvestigationEnded {
+                group: GroupId::new("guard"),
+                at_ms: 1_795_784_700_000,
+                filed: 2,
+            }])
+            .chain(started("watch", "investigator-2", 1_795_784_700_000))
+        {
+            w.apply(&e);
+        }
+        let all = text(&w, &BTreeMap::new());
+        assert!(
+            all.contains(
+                "Groups\n  \
+                 guard (GUARD): radar; every milestone; refines 1 at a time; 1 in its queue, \
+                 investigates below 3; last investigated 2026-11-27 13:05 UTC, filed 2 issues\n  \
+                 watch (WATCH): radar; every milestone; refines 1 at a time; 0 in its queue, \
+                 investigates below 3; investigating: investigator-2\n"
+            ),
+            "{all}"
+        );
+        assert!(all.contains("  investigator-2: idle (on local)\n"), "{all}");
     }
 
     #[test]

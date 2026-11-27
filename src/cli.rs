@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
+use temet_work_core::ids::{AgentId, DecisionId, GroupId, IssueId, ProjectId, RuleId};
 use temet_work_core::model::{Plan, Role};
 use temet_work_core::settings::Target;
 use temet_work_core::{Command, Request, Verdict};
@@ -25,6 +25,11 @@ temet-work overturn DECISION OPTION REASON
                                             a person's: choose another option of a decision, as
                                             `status` numbers them; REASON is required
 temet-work proposal RULE keep|drop          a person's: keep or drop a rule proposed from an overturn
+temet-work file PROJECT TITLE BODY [--milestone M]
+                                            an investigator's: file an issue in a project or area its
+                                            group takes; BODY - reads it from standard input; the
+                                            reply names the new issue
+temet-work investigated GROUP               an investigator's: its group's investigation is done
 temet-work set TARGET [--role ROLE] KEY VALUE
                                             give a setting a value at one level
 temet-work unset TARGET [--role ROLE] KEY   remove it, so the next level answers
@@ -46,18 +51,24 @@ pub fn plan(yaml: &str) -> Result<Plan, String> {
 
 /// Takes `--role ROLE` out of `args`, wherever it is.
 fn take_role(args: &[String]) -> Result<(Vec<String>, Option<Role>), String> {
+    let (rest, role) = take(args, "--role")?;
+    Ok((rest, role.as_deref().map(Role::parse).transpose()?))
+}
+
+/// Takes `flag VALUE` out of `args`, wherever it is.
+fn take(args: &[String], flag: &str) -> Result<(Vec<String>, Option<String>), String> {
     let mut rest = Vec::new();
-    let mut role = None;
+    let mut value = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--role" {
-            let name = it.next().ok_or("--role needs a role")?;
-            role = Some(Role::parse(name)?);
+        if a == flag {
+            let v = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
+            value = Some(v.clone());
         } else {
             rest.push(a.clone());
         }
     }
-    Ok((rest, role))
+    Ok((rest, value))
 }
 
 /// Reads the arguments after the program name into a request. `by` is the
@@ -69,6 +80,7 @@ pub fn request(
     read: impl Fn(&Path) -> Result<String, String>,
 ) -> Result<Request, String> {
     let (args, role) = take_role(args)?;
+    let (args, milestone) = take(&args, "--milestone")?;
     let args = args.as_slice();
     let arg = |i: usize, what: &str| {
         args.get(i)
@@ -178,6 +190,19 @@ pub fn request(
             target: Target::parse(arg(1, "TARGET")?),
             role,
         },
+        "file" => Command::File {
+            project: ProjectId::new(arg(1, "PROJECT")?),
+            title: arg(2, "TITLE")?.to_string(),
+            // `-` is standard input, so a body can run over several lines.
+            body: match arg(3, "BODY")? {
+                "-" => read(Path::new("-"))?,
+                _ => args[3..].join(" "),
+            },
+            milestone,
+        },
+        "investigated" => Command::Investigated {
+            group: GroupId::new(arg(1, "GROUP")?),
+        },
         other => return Err(format!("no command {other}\n\n{USAGE}")),
     };
     Ok(Request::new(
@@ -223,6 +248,57 @@ mod tests {
         );
         assert!(ready("ready ankh#1 57 58").is_err());
         assert!(ready("ready ankh#1 ui=").is_err());
+    }
+
+    #[test]
+    fn file_reads_project_title_body_and_milestone_and_investigated_its_group() {
+        let line = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let r = request(
+            &line(&[
+                "file",
+                "ankh",
+                "Wind the clock",
+                "-",
+                "--milestone",
+                "First",
+            ]),
+            Some("investigator-1".into()),
+            |p| {
+                assert_eq!(p, Path::new("-"));
+                Ok("Wind it nightly.\nDepends on #12\n".into())
+            },
+        )
+        .expect("request");
+        assert_eq!(r.by, Some(AgentId::new("investigator-1")));
+        assert_eq!(
+            r.command,
+            Command::File {
+                project: ProjectId::new("ankh"),
+                title: "Wind the clock".into(),
+                body: "Wind it nightly.\nDepends on #12\n".into(),
+                milestone: Some("First".into()),
+            }
+        );
+        let inline = request(
+            &line(&["file", "ankh", "Wind the clock", "Wind", "it"]),
+            None,
+            no_files,
+        )
+        .expect("request");
+        assert!(matches!(
+            inline.command,
+            Command::File { body, milestone: None, .. } if body == "Wind it"
+        ));
+        assert!(
+            request(&args("file ankh title"), None, no_files).is_err(),
+            "no body"
+        );
+        assert_eq!(
+            request(&args("investigated watch"), None, no_files).map(|r| r.command),
+            Ok(Command::Investigated {
+                group: GroupId::new("watch")
+            })
+        );
     }
 
     #[test]
