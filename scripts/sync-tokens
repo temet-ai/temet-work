@@ -1,39 +1,34 @@
 #!/usr/bin/env node
-// scripts/sync-tokens: writes crates/style/src/tokens.rs from the tokens of the design system,
-// @temet-ai/design.
+// scripts/sync-tokens: writes crates/style/src/tokens.rs, and the faces in app/assets/fonts/, from
+// the design system's token export, @temet-ai/design's dist/tokens.json.
 //
-//   scripts/sync-tokens [storybook-url]      default http://127.0.0.1:6106
+//   scripts/sync-tokens [design-system-ui-folder]
 //
-// It opens one story of the design system's running Storybook in headless Chromium, reads each
-// token the design system documents as the page resolves it in each theme, and writes one Rust
-// value per theme (DARK, LIGHT) of a struct with a field per token, named after the token. Both
-// themes must set the same tokens. It also reads the StatusTag and StageTag maps. Nothing in the
-// design system changes. Start its Storybook first (`npm run storybook` in temet-design/ui).
+// The folder is the design system's ui/ checkout: the argument, else TEMET_DESIGN_UI, else the
+// "ui" entry of ~/.config/temet-design/config.json, the file its Storybook tools read. Build the
+// export there first with `npm run build`.
 //
-// The values must come from a pushed commit of the design system, so the script refuses a
-// checkout of it with uncommitted changes, or whose commit is on no remote branch. It finds the
-// checkout's ui/ folder from TEMET_DESIGN_UI, else from ~/.config/temet-design/config.json, the
-// file the design system's Storybook tools read.
-// Set CHROME to the browser to use; the default is the first of chromium, google-chrome-stable
-// and the Mac's Google Chrome that is installed.
+// The values must come from a pushed commit of the design system. The script refuses a checkout
+// with uncommitted changes, a commit that is on no remote branch, and a dist/tokens.json built
+// from any commit other than the checkout's. Nothing in the design system changes.
+//
+// tokens.rs holds one `Tokens` value per theme (DARK, LIGHT) with a field per token, named after
+// it, and each theme's measured component looks; then the status and stage maps, the part list,
+// the tokens a user may change and the font files. Every theme must set the same tokens.
 "use strict";
 
-const { spawn, execFileSync } = require("node:child_process");
+const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const STORYBOOK = (process.argv[2] || "http://127.0.0.1:6106").replace(/\/$/, "");
-const STORY = "temet-statustag--all-statuses";
-const OUT = path.join(__dirname, "..", "crates", "style", "src", "tokens.rs");
-// The classes that put the page in each theme, as the design system's Storybook sets them on <html>.
-const THEMES = { dark: "bp6-dark tm-theme-dark", light: "tm-theme-light" };
-// A width between --tm-screen-medium and --tm-screen-wide. The values do not depend on it: the
-// tokens that switch with the width are left out below, and their fixed values are kept.
-const WIDTH = 1440;
+const ROOT = path.join(__dirname, "..");
+const OUT = path.join(ROOT, "crates", "style", "src", "tokens.rs");
+const FONTS_OUT = path.join(ROOT, "app", "assets", "fonts");
 
-// The tokens the design system documents (Theme/Colours, Theme/Motion, the ramps table). Blueprint's
-// other ramps stay out, and with them its turquoise, cerulean and sepia, which the Rules leave unused.
+// The tokens the design system documents (Theme/Colours, Theme/Type, Theme/Motion, the ramps
+// table). Blueprint's other ramps stay out, and with them its turquoise, cerulean and sepia, which
+// the Rules leave unused.
 const KEEP = [
   /^--tm-/,
   /^--bp-palette-(blue|green|orange|red)-[1-6]$/,
@@ -48,211 +43,52 @@ const KEEP = [
 // window's width. The app makes that choice itself from --tm-screen-medium and --tm-screen-wide.
 const DROP = [/^--tm-col-(left|right)$/];
 
+const STATES = { rest: "Rest", hover: "Hover", active: "Active", focus: "Focus", disabled: "Disabled" };
+const INTENTS = { none: "None", primary: "Primary", success: "Success", warning: "Warning", danger: "Danger" };
+const TYPES = {
+  colour: "Rgba",
+  px: "Px",
+  duration: "Duration",
+  curve: "Curve",
+  number: "f32",
+  font: "&'static [&'static str]",
+  shadow: "&'static [Shadow]",
+};
+const LISTS = {
+  colour: "colours",
+  px: "sizes",
+  duration: "durations",
+  curve: "curves",
+  number: "numbers",
+  font: "fonts",
+  shadow: "shadows",
+};
+
 function fail(message) {
   console.error(`sync-tokens: ${message}`);
   process.exit(1);
 }
 
-function browser() {
-  const mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-  const names = process.env.CHROME ? [process.env.CHROME] : ["chromium", "google-chrome-stable", mac];
-  for (const name of names) {
-    if (name.startsWith("/") && fs.existsSync(name)) return name;
-    try {
-      execFileSync("which", [name], { stdio: "ignore" });
-      return name;
-    } catch {}
-  }
-  fail(`no browser found (tried ${names.join(", ")}); set CHROME`);
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function waitFor(what, test, ms = 30000) {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    const value = await test();
-    if (value) return value;
-    await sleep(200);
-  }
-  fail(`timed out waiting for ${what}`);
-}
-
-// Runs in the Storybook page. Returns every custom property its stylesheets set, resolved on the
-// body in the theme whose classes are given, each colour as the browser computes it, and the two
-// maps.
-async function probe(classes) {
-  const html = document.documentElement;
-  html.className = classes;
-  document.body.className = classes.includes("bp6-dark") ? "bp6-dark" : "";
-  // The Storybook toolbar can switch the attention colour; read the theme's default.
-  html.removeAttribute("data-attention");
-  const names = new Set();
-  const walk = (rules) => {
-    for (const rule of rules) {
-      if (rule.style) for (const p of rule.style) if (p.startsWith("--")) names.add(p);
-      if (rule.cssRules) walk(rule.cssRules);
-    }
-  };
-  for (const sheet of document.styleSheets) {
-    try {
-      walk(sheet.cssRules);
-    } catch {}
-  }
-  const body = getComputedStyle(document.body);
-  const el = document.createElement("div");
-  document.body.append(el);
-  const values = {};
-  for (const name of names) {
-    const raw = body.getPropertyValue(name).trim();
-    el.style.color = "";
-    el.style.color = raw;
-    const colour = el.style.color && !/^[\d.]+$/.test(raw) ? getComputedStyle(el).color : null;
-    values[name] = { raw, colour };
-  }
-  el.remove();
-  const iconName = (c) => {
-    // Blueprint's icon components are named after the icon, as TickCircleIcon for tick-circle.
-    const n = String(c.displayName || c.name || "").split(".").pop().replace(/Icon$/, "");
-    return n.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
-  };
-  const { STATUS } = await import("/src/temet/status.ts");
-  const { STAGES } = await import("/src/temet/stages.ts");
-  return JSON.stringify({
-    values,
-    status: Object.entries(STATUS).map(([name, s]) => ({ name, word: s.word, icon: iconName(s.icon), intent: s.intent })),
-    stages: Object.entries(STAGES).map(([name, icon]) => ({ name, icon: iconName(icon) })),
-  });
-}
-
-async function read() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sync-tokens-"));
-  const chrome = spawn(
-    browser(),
-    ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${dir}`, "--no-first-run", "--no-default-browser-check", "about:blank"],
-    { stdio: "ignore" },
-  );
+/** The design system's ui/ folder. */
+function designUi() {
+  const given = process.argv[2] || process.env.TEMET_DESIGN_UI;
+  if (given) return path.resolve(given);
+  const config = path.join(os.homedir(), ".config", "temet-design", "config.json");
   try {
-    const port = await waitFor("the browser", () => {
-      try {
-        return fs.readFileSync(path.join(dir, "DevToolsActivePort"), "utf8").split("\n")[0];
-      } catch {
-        return null;
-      }
-    });
-    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-    const page = targets.find((t) => t.type === "page");
-    if (!page) fail("the browser has no page");
-    const ws = new WebSocket(page.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      ws.onopen = resolve;
-      ws.onerror = () => reject(new Error("cannot reach the browser"));
-    });
-    let id = 0;
-    const pending = new Map();
-    ws.onmessage = (e) => {
-      const m = JSON.parse(e.data);
-      const p = pending.get(m.id);
-      if (!p) return;
-      pending.delete(m.id);
-      if (m.error) p.reject(new Error(m.error.message));
-      else p.resolve(m.result);
-    };
-    const send = (method, params = {}) =>
-      new Promise((resolve, reject) => {
-        pending.set(++id, { resolve, reject });
-        ws.send(JSON.stringify({ id, method, params }));
-      });
-    const evaluate = async (expression) => {
-      const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-      if (r.exceptionDetails) fail(`the page threw: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
-      return r.result.value;
-    };
-    await send("Emulation.setDeviceMetricsOverride", { width: WIDTH, height: 900, deviceScaleFactor: 1, mobile: false });
-    await send("Page.navigate", { url: `${STORYBOOK}/iframe.html?id=${STORY}&viewMode=story` });
-    await waitFor("the story to render", () =>
-      evaluate(`document.readyState === "complete" && !!document.querySelector("#storybook-root > *")`),
-    );
-    const themes = {};
-    for (const [name, classes] of Object.entries(THEMES)) {
-      themes[name] = JSON.parse(await evaluate(`(${probe.toString()})(${JSON.stringify(classes)})`));
-    }
-    ws.close();
-    return themes;
-  } finally {
-    chrome.kill();
-    fs.rmSync(dir, { recursive: true, force: true });
+    return JSON.parse(fs.readFileSync(config, "utf8")).ui;
+  } catch {
+    fail(`cannot find the design system's checkout: pass its ui/ folder, set TEMET_DESIGN_UI, or write {"ui": "<checkout>/ui"} to ${config}`);
   }
 }
 
-// ---------- Values to Rust ----------
-
-
-/** "rgb(20, 16, 26)", "rgba(255, 255, 255, 0.08)" or "color(srgb 0.8 0.1 0.4 / 0.2)" as 0xRRGGBBAA. */
-function rgba(computed) {
-  let r, g, b, a = 1;
-  let m = computed.match(/^rgba?\(([^)]*)\)$/);
-  if (m) {
-    const p = m[1].split(/[\s,/]+/).filter(Boolean).map(Number);
-    [r, g, b] = p;
-    if (p.length > 3) a = p[3];
-  } else if ((m = computed.match(/^color\(srgb ([^)]*)\)$/))) {
-    const p = m[1].split(/[\s/]+/).filter(Boolean).map(Number);
-    [r, g, b] = p.slice(0, 3).map((v) => v * 255);
-    if (p.length > 3) a = p[3];
-  } else {
-    return null;
-  }
-  const byte = (v) => Math.max(0, Math.min(255, Math.round(v)));
-  const hex = [r, g, b, a * 255].map((v) => byte(v).toString(16).padStart(2, "0")).join("");
-  return `0x${hex}`;
-}
-
-function classify(name, { raw, colour }) {
-  let m;
-  if (name.includes("family") || name.startsWith("--tm-font-")) {
-    const list = raw.split(",").map((f) => f.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
-    return { kind: "font", rust: `&[${list.map((f) => JSON.stringify(f)).join(", ")}]`, doc: raw };
-  }
-  if (colour) {
-    const hex = rgba(colour);
-    if (hex) return { kind: "colour", rust: `Rgba(${hex})`, doc: `#${hex.slice(2, 8)}${hex.endsWith("ff") ? "" : ` at ${Math.round((parseInt(hex.slice(8), 16) / 255) * 100)}%`}` };
-  }
-  if ((m = raw.match(/^(-?\d*\.?\d+)px$/))) return { kind: "px", rust: `Px(${Number(m[1]).toFixed(1)})`, doc: raw };
-  if ((m = raw.match(/^(\d*\.?\d+)(ms|s)$/))) {
-    const ms = Number(m[1]) * (m[2] === "s" ? 1000 : 1);
-    return { kind: "duration", rust: `Duration::from_millis(${Math.round(ms)})`, doc: raw };
-  }
-  if ((m = raw.match(/^cubic-bezier\(([^)]*)\)$/))) {
-    const p = m[1].split(",").map((v) => Number(v.trim()).toFixed(2));
-    return { kind: "curve", rust: `Curve(${p.join(", ")})`, doc: raw };
-  }
-  if (/^-?\d*\.?\d+$/.test(raw)) return { kind: "number", rust: Number(raw).toString().includes(".") ? Number(raw).toString() : `${raw}.0`, doc: raw };
-  return null;
-}
-
-const TYPES = { colour: "Rgba", px: "Px", duration: "Duration", curve: "Curve", number: "f32", font: "&[&str]" };
-const LISTS = { colour: "COLOURS", px: "SIZES", duration: "DURATIONS", curve: "CURVES", number: "NUMBERS", font: "FONTS" };
-const INTENTS = { none: "None", primary: "Primary", success: "Success", warning: "Warning", danger: "Danger" };
-
-/** The design system's version and pushed commit, or a refusal. */
-function source() {
-  let ui = process.env.TEMET_DESIGN_UI;
-  if (!ui) {
-    const config = path.join(os.homedir(), ".config", "temet-design", "config.json");
-    try {
-      ui = JSON.parse(fs.readFileSync(config, "utf8")).ui;
-    } catch {
-      fail(`cannot find the design system's checkout: set TEMET_DESIGN_UI or write {"ui": "<checkout>/ui"} to ${config}`);
-    }
-  }
+/** The export, once the checkout and the export are shown to come from pushed commits. */
+function load(ui) {
   const git = (...args) => execFileSync("git", ["-C", ui, ...args], { encoding: "utf8" }).trim();
-  let version, commit, dirty, remotes;
+  const pushed = (commit) => git("branch", "-r", "--contains", commit) !== "";
+  let head, dirty;
   try {
-    version = JSON.parse(fs.readFileSync(path.join(ui, "package.json"), "utf8")).version;
-    commit = git("rev-parse", "--short", "HEAD");
+    head = git("rev-parse", "HEAD");
     dirty = git("status", "--porcelain", "--", ".");
-    remotes = git("branch", "-r", "--contains", "HEAD");
   } catch (e) {
     fail(`cannot read the design system's checkout at ${ui}: ${e.message}`);
   }
@@ -260,76 +96,168 @@ function source() {
     const n = dirty.split("\n").length;
     fail(`${ui} has ${n} uncommitted change${n === 1 ? "" : "s"}; the tokens must come from a pushed commit, so ask its maintainers to commit and push`);
   }
-  if (!remotes) fail(`commit ${commit} of ${ui} is on no remote branch; ask its maintainers to push it`);
-  return `@temet-ai/design ${version}, commit ${commit}`;
+  if (!pushed(head)) fail(`commit ${head.slice(0, 7)} of ${ui} is on no remote branch; ask its maintainers to push it`);
+  const file = path.join(ui, "dist", "tokens.json");
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (e) {
+    fail(`cannot read ${file} (${e.code || e.message}); run \`npm run build\` in ${ui}`);
+  }
+  if (data.commit !== head) {
+    fail(`${file} was built from ${String(data.commit).slice(0, 7)}, but the checkout is at ${head.slice(0, 7)}; run \`npm run build\` in ${ui}`);
+  }
+  const measured = data.componentsCommit;
+  let ancestor = true;
+  try {
+    git("merge-base", "--is-ancestor", measured, head);
+  } catch {
+    ancestor = false;
+  }
+  if (!ancestor || !pushed(measured)) fail(`the looks in ${file} were measured at ${measured}, which is not a pushed ancestor of ${head.slice(0, 7)}`);
+  for (const key of ["version", "settings", "themes", "fonts", "status", "stages", "parts", "components"]) {
+    if (!(key in data)) fail(`${file} has no "${key}"`);
+  }
+  return { data, ui, from: `@temet-ai/design ${data.version}, commit ${head.slice(0, 7)} (looks measured at ${measured.slice(0, 7)})` };
 }
+
+// ---------- Values to Rust ----------
 
 const fieldName = (token) => token.replace(/^--/, "").replace(/-/g, "_");
+const float = (n) => (Number.isInteger(n) ? `${n}.0` : `${n}`);
+const rgba = (hex) => {
+  if (!/^#[0-9a-f]{8}$/.test(hex)) fail(`not a colour: ${hex}`);
+  return `Rgba(0x${hex.slice(1)})`;
+};
+const colourDoc = (hex) => {
+  const a = parseInt(hex.slice(7), 16);
+  return `${hex.slice(0, 7)}${a === 255 ? "" : ` at ${Math.round((a / 255) * 100)}%`}`;
+};
+const shadow = (layers) =>
+  `&[${layers
+    .map((l) => `Shadow { inset: ${l.inset}, x: Px(${float(l.x)}), y: Px(${float(l.y)}), blur: Px(${float(l.blur)}), spread: Px(${float(l.spread)}), colour: ${rgba(l.color)} }`)
+    .join(", ")}]`;
 
-/** One theme's tokens, classified, sorted by name; and the names that are not a single value. */
-function classifyAll(values) {
-  const kept = Object.keys(values)
-    .filter((n) => KEEP.some((re) => re.test(n)) && !DROP.some((re) => re.test(n)))
-    .sort();
-  const tokens = [];
-  const skipped = [];
-  for (const name of kept) {
-    const t = classify(name, values[name]);
-    if (t) tokens.push({ name, ...t });
-    else skipped.push(name);
-  }
-  return { tokens, skipped };
+/** The unit of a bare number: the export's `units` map when it has one, else the token's name. */
+function unitOf(name, units) {
+  if (units && units[name]) return { px: "px", ms: "duration", number: "number" }[units[name]] || fail(`unknown unit ${units[name]} for ${name}`);
+  if (/^--tm-d-|duration/.test(name)) return "duration";
+  if (/weight|line-height|leading|z-index|opacity|motion-reduced/.test(name)) return "number";
+  return "px";
 }
 
-function rust(themes, from) {
-  const names = Object.keys(themes);
-  const first = themes[names[0]];
-  const per = Object.fromEntries(names.map((n) => [n, classifyAll(themes[n].values)]));
-  const tokens = per[names[0]].tokens;
-  const skipped = per[names[0]].skipped;
-  // A theme is a full set of values for the same keys, each of the same kind.
-  for (const n of names.slice(1)) {
-    const a = tokens.map((t) => `${t.name}:${t.kind}`).join(" ");
-    const b = per[n].tokens.map((t) => `${t.name}:${t.kind}`).join(" ");
-    if (a !== b) {
-      const left = new Set(a.split(" "));
-      const right = new Set(b.split(" "));
-      const only = (x, y) => [...x].filter((k) => !y.has(k));
-      fail(`the ${names[0]} and ${n} themes differ: only in ${names[0]}: ${only(left, right).join(", ") || "none"}; only in ${n}: ${only(right, left).join(", ") || "none"}`);
+function classify(name, value, units) {
+  if (typeof value === "string") return { kind: "colour", rust: rgba(value), doc: colourDoc(value) };
+  if (typeof value === "number") {
+    const kind = unitOf(name, units);
+    if (kind === "duration") return { kind, rust: `Duration::from_millis(${Math.round(value)})`, doc: `${value}ms` };
+    if (kind === "px") return { kind, rust: `Px(${float(value)})`, doc: `${value}px` };
+    return { kind, rust: float(value), doc: `${value}` };
+  }
+  if (Array.isArray(value) && value.length === 4 && value.every((v) => typeof v === "number")) {
+    return { kind: "curve", rust: `Curve(${value.map(float).join(", ")})`, doc: `cubic-bezier(${value.join(", ")})` };
+  }
+  if (Array.isArray(value) && value.every((v) => typeof v === "string")) {
+    return { kind: "font", rust: `&[${value.map((f) => JSON.stringify(f)).join(", ")}]`, doc: value.join(", ") };
+  }
+  if (Array.isArray(value) && value.every((v) => v && typeof v === "object")) {
+    return { kind: "shadow", rust: shadow(value), doc: `${value.length} layer${value.length === 1 ? "" : "s"}` };
+  }
+  return null;
+}
+
+/** One theme's tokens, classified and sorted by name. */
+function tokensOf(theme, units) {
+  const names = Object.keys(theme)
+    .filter((n) => KEEP.some((re) => re.test(n)) && !DROP.some((re) => re.test(n)))
+    .sort();
+  return names.map((name) => {
+    const t = classify(name, theme[name], units);
+    if (!t) fail(`${name} has a value this script cannot read: ${JSON.stringify(theme[name])}`);
+    return { name, ...t };
+  });
+}
+
+/** One theme's measured looks, in the export's order. */
+function looksOf(components) {
+  const out = [];
+  for (const [component, variants] of Object.entries(components)) {
+    for (const [variant, states] of Object.entries(variants)) {
+      for (const [state, m] of Object.entries(states)) {
+        if (!(state in STATES)) fail(`${component} ${variant} has a state this script does not know: ${state}`);
+        const px4 = (a) => `[${a.map((v) => `Px(${float(v)})`).join(", ")}]`;
+        out.push(
+          `Look { component: ${JSON.stringify(component)}, variant: ${JSON.stringify(variant)}, state: State::${STATES[state]}, ` +
+            `background: ${rgba(m.background)}, text: ${rgba(m.text)}, border: ${px4(m.border.width)}, ` +
+            `border_colour: ${m.border.color ? `Some(${rgba(m.border.color)})` : "None"}, radius: Px(${float(m.radius)}), ` +
+            `height: Px(${float(m.height)}), padding: ${px4(m.padding)}, font_size: Px(${float(m.fontSize)}), ` +
+            `font_weight: ${float(m.fontWeight)}, shadow: ${shadow(m.shadow)} },`,
+        );
+      }
     }
   }
+  return out;
+}
+
+function rust(data, from) {
+  const names = Object.keys(data.themes);
+  const per = Object.fromEntries(names.map((n) => [n, tokensOf(data.themes[n], data.units)]));
+  const tokens = per[names[0]];
+  // A theme is a full set of values for the same keys, each of the same kind.
+  const shape = (list) => list.map((t) => `${t.name}:${t.kind}`);
+  for (const n of names.slice(1)) {
+    const a = new Set(shape(tokens));
+    const b = new Set(shape(per[n]));
+    const only = (x, y) => [...x].filter((k) => !y.has(k));
+    if (only(a, b).length || only(b, a).length) {
+      fail(`the ${names[0]} and ${n} themes differ: only in ${names[0]}: ${only(a, b).join(", ") || "none"}; only in ${n}: ${only(b, a).join(", ") || "none"}`);
+    }
+    if (!data.components[n]) fail(`no measured looks for the ${n} theme`);
+  }
+  const looks = Object.fromEntries(names.map((n) => [n, looksOf(data.components[n])]));
+
   const out = [];
   out.push(`//! The design system's tokens, from ${from}.`);
-  out.push("//! Written by `scripts/sync-tokens`; do not edit, run the script again.");
+  out.push("//! Written by `scripts/sync-tokens` from the design system's dist/tokens.json; do not edit, run");
+  out.push("//! the script again.");
   out.push("//!");
   out.push("//! A theme is one [`Tokens`] value with a field per token, named after it: `--tm-edge-quiet` is");
   out.push("//! `tm_edge_quiet`. Blueprint's ramp names hold other hues in the temet theme: blue holds magenta");
   out.push("//! (the accent), green holds blue (success) and orange holds yellow (warning). Each value is the");
-  out.push("//! theme's default; the user's settings win over it.");
-  if (skipped.length) {
-    out.push("//!");
-    out.push("//! Not a single value, so left out:");
-    for (const s of skipped) out.push(`//! - \`${s}\``);
-  }
+  out.push("//! theme's default; the user's settings win over it, for the tokens in [`SETTINGS`].");
+  out.push("//!");
+  out.push("//! A theme's `looks` are its parts as the design system's stories draw them, measured per");
+  out.push("//! component, variant (the element's classes) and state.");
   out.push("");
   out.push("use std::time::Duration;");
   out.push("");
-  out.push("use crate::{Curve, Intent, Px, Rgba, StageView, StatusView};");
+  out.push("use crate::{Curve, FontFile, Intent, Look, Px, Rgba, Shadow, StageView, State, StatusView};");
   out.push("");
-  out.push("/// One theme: a value for every token.");
+  out.push("/// One theme: a value for every token, and its parts' measured looks.");
   out.push("#[derive(Clone, Copy, Debug, PartialEq)]");
   out.push("pub struct Tokens {");
   for (const t of tokens) {
     out.push(`    /// \`${t.name}\``);
-    out.push(`    pub ${fieldName(t.name)}: ${TYPES[t.kind] === "&[&str]" ? "&'static [&'static str]" : TYPES[t.kind]},`);
+    out.push(`    pub ${fieldName(t.name)}: ${TYPES[t.kind]},`);
   }
+  out.push("    /// The parts' looks, by component, variant and state.");
+  out.push("    pub looks: &'static [Look],");
   out.push("}");
   for (const n of names) {
     out.push("");
     out.push(`/// The ${n} theme.`);
     out.push(`pub const ${n.toUpperCase()}: Tokens = Tokens {`);
-    for (const t of per[n].tokens) out.push(`    ${fieldName(t.name)}: ${t.rust}, // ${t.doc.replace(/`/g, "")}`);
+    for (const t of per[n]) out.push(`    ${fieldName(t.name)}: ${t.rust}, // ${t.doc.replace(/`/g, "")}`);
+    out.push(`    looks: &${n.toUpperCase()}_LOOKS,`);
     out.push("};");
+  }
+  for (const n of names) {
+    out.push("");
+    out.push(`/// The ${n} theme's parts, as its stories draw them.`);
+    out.push("#[rustfmt::skip]");
+    out.push(`static ${n.toUpperCase()}_LOOKS: [Look; ${looks[n].length}] = [`);
+    for (const l of looks[n]) out.push(`    ${l}`);
+    out.push("];");
   }
   out.push("");
   out.push("/// Every theme, by name.");
@@ -338,44 +266,93 @@ function rust(themes, from) {
   out.push("impl Tokens {");
   for (const kind of Object.keys(LISTS)) {
     const of = tokens.filter((t) => t.kind === kind);
-    const ty = TYPES[kind] === "&[&str]" ? "&'static [&'static str]" : TYPES[kind];
     out.push(`    /// Every ${kind === "px" ? "size" : kind} token, by name.`);
-    out.push(`    pub fn ${LISTS[kind].toLowerCase()}(&self) -> [(&'static str, ${ty}); ${of.length}] {`);
+    out.push(`    pub fn ${LISTS[kind]}(&self) -> [(&'static str, ${TYPES[kind]}); ${of.length}] {`);
     out.push(`        [${of.map((t) => `("${t.name}", self.${fieldName(t.name)})`).join(", ")}]`);
     out.push("    }");
   }
+  out.push("    /// A part's look in one variant and state, as the design system names them.");
+  out.push("    pub fn look(&self, component: &str, variant: &str, state: State) -> Option<&'static Look> {");
+  out.push("        self.looks");
+  out.push("            .iter()");
+  out.push("            .find(|l| l.component == component && l.variant == variant && l.state == state)");
+  out.push("    }");
   out.push("}");
   out.push("");
   out.push("/// StatusTag's statuses, in the design system's order.");
-  out.push(`pub const STATUS: [StatusView; ${first.status.length}] = [`);
-  for (const s of first.status) {
+  out.push(`pub const STATUS: [StatusView; ${data.status.length}] = [`);
+  for (const s of data.status) {
     if (!(s.intent in INTENTS)) fail(`status ${s.name} has an intent this script does not know: ${s.intent}`);
     out.push(`    StatusView { name: "${s.name}", word: "${s.word}", icon: "${s.icon}", intent: Intent::${INTENTS[s.intent]} },`);
   }
   out.push("];");
   out.push("");
   out.push("/// StageTag's stages, in the order an issue goes through them.");
-  out.push(`pub const STAGES: [StageView; ${first.stages.length}] = [`);
-  for (const s of first.stages) out.push(`    StageView { name: "${s.name}", icon: "${s.icon}" },`);
+  out.push(`pub const STAGES: [StageView; ${data.stages.length}] = [`);
+  for (const s of data.stages) out.push(`    StageView { name: "${s.name}", icon: "${s.icon}" },`);
   out.push("];");
-  return { text: out.join("\n") + "\n", count: tokens.length, skipped, first };
+  out.push("");
+  out.push("/// The design system's parts and docs entries, as (id, name): the ids its docs tools take.");
+  out.push(`pub const PARTS: [(&str, &str); ${data.parts.length}] = [`);
+  for (const p of data.parts) out.push(`    (${JSON.stringify(p.id)}, ${JSON.stringify(p.name)}),`);
+  out.push("];");
+  out.push("");
+  out.push("/// The tokens a person may override in temet-work's settings, the same in every theme.");
+  out.push(`pub const SETTINGS: [&str; ${data.settings.length}] = [${data.settings.map((s) => JSON.stringify(s)).join(", ")}];`);
+  const files = staticFonts(data);
+  out.push("");
+  out.push("/// The faces' font files the app embeds, under `app/assets/fonts/`, each with its licence.");
+  out.push(`pub const FONTS: [FontFile; ${files.length}] = [`);
+  for (const f of files) {
+    out.push(`    FontFile { family: ${JSON.stringify(f.family)}, weight: ${float(f.weight)}, file: ${JSON.stringify(f.file)}, licence: ${JSON.stringify(f.licence)} },`);
+  }
+  out.push("];");
+  return { text: out.join("\n") + "\n", count: tokens.length, looks: looks[names[0]].length, themes: names };
 }
 
-(async () => {
-  const from = source();
-  try {
-    await fetch(STORYBOOK);
-  } catch {
-    fail(`no Storybook at ${STORYBOOK}; start it with \`npm run storybook\` in temet-design/ui`);
+/** The static font files: a variable file repeats the weights the static ones give. */
+function staticFonts(data) {
+  const all = data.fonts.filter((f) => f.weight !== null);
+  for (const f of data.fonts) {
+    for (const p of [f.file, f.licence]) {
+      if (!/^fonts\/[\w-]+\/[\w.\-[\],]+$/.test(p)) fail(`a font path the script will not copy: ${p}`);
+    }
   }
-  const themes = await read();
-  const { text, count, skipped, first: data } = rust(themes, from);
-  fs.writeFileSync(OUT, text);
-  try {
-    execFileSync("rustfmt", ["--edition", "2024", OUT], { stdio: "inherit" });
-  } catch {
-    fail(`wrote ${OUT} but rustfmt failed on it`);
+  return all.map((f) => ({ ...f, file: f.file.replace(/^fonts\//, ""), licence: f.licence.replace(/^fonts\//, "") }));
+}
+
+/** Copies the static faces, their licences and source notes into app/assets/fonts/. */
+function copyFonts(ui, data) {
+  const dist = path.join(ui, "dist", "fonts");
+  fs.rmSync(FONTS_OUT, { recursive: true, force: true });
+  const dirs = new Set();
+  for (const f of staticFonts(data)) {
+    for (const p of [f.file, f.licence]) {
+      const to = path.join(FONTS_OUT, p);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(path.join(dist, p), to);
+    }
+    dirs.add(path.dirname(f.file));
   }
-  console.log(`sync-tokens: ${count} tokens in ${Object.keys(themes).length} themes, ${data.status.length} statuses, ${data.stages.length} stages -> ${path.relative(process.cwd(), OUT)}`);
-  if (skipped.length) console.log(`sync-tokens: left out ${skipped.length}: ${skipped.join(", ")}`);
-})().catch((e) => fail(e.message));
+  for (const d of dirs) {
+    const note = path.join(dist, d, "SOURCE.txt");
+    if (!fs.existsSync(note)) fail(`${note} is missing: every face says where it came from`);
+    fs.copyFileSync(note, path.join(FONTS_OUT, d, "SOURCE.txt"));
+  }
+  return dirs.size;
+}
+
+const { data, ui, from } = load(designUi());
+const { text, count, looks, themes } = rust(data, from);
+fs.writeFileSync(OUT, text);
+try {
+  execFileSync("rustfmt", ["--edition", "2024", OUT], { stdio: "inherit" });
+} catch {
+  fail(`wrote ${OUT} but rustfmt failed on it`);
+}
+const families = copyFonts(ui, data);
+console.log(
+  `sync-tokens: ${count} tokens and ${looks} looks in ${themes.length} themes (${themes.join(", ")}), ` +
+    `${data.status.length} statuses, ${data.stages.length} stages, ${data.parts.length} parts, ${families} font families -> ` +
+    `${path.relative(process.cwd(), OUT)}, ${path.relative(process.cwd(), FONTS_OUT)}`,
+);

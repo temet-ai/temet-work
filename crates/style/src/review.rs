@@ -61,6 +61,9 @@ fn layer_of(path: &str) -> Layer {
 pub struct MapRow {
     pub names: Vec<String>,
     pub id: Option<String>,
+    /// Whether the id cell says the part is a subcomponent of the part with that id, as
+    /// AttentionText is of AttentionButton.
+    pub subcomponent: bool,
 }
 
 /// The parts the map lists, by layer.
@@ -116,9 +119,47 @@ pub fn parse_map(markdown: &str) -> Map {
         } else {
             cell.split('`').nth(1).map(str::to_string)
         };
-        rows.push(MapRow { names, id });
+        let subcomponent = cell.contains("(subcomponent)");
+        rows.push(MapRow {
+            names,
+            id,
+            subcomponent,
+        });
     }
     map
+}
+
+/// The map's rows whose id is not one of the design system's parts, or whose part has another
+/// name, each as a line. `parts` is the design system's list of (id, name). A page is named after
+/// temet-work's object, not after the design system's example screen, so only its id is checked;
+/// so is a subcomponent's.
+pub fn unknown_parts(map: &Map, parts: &[(&str, &str)]) -> Vec<String> {
+    let mut out = Vec::new();
+    let layers = [
+        ("Components", &map.components, true),
+        ("Composites", &map.composites, true),
+        ("Pages", &map.pages, false),
+    ];
+    for (layer, rows, named) in layers {
+        for row in rows {
+            let Some(id) = &row.id else { continue };
+            let who = row.names.join(", ");
+            match parts.iter().find(|(p, _)| p == id) {
+                None => out.push(format!(
+                    "{layer}: {who} maps to `{id}`, which is not a part of the design system"
+                )),
+                Some((_, name))
+                    if named && !row.subcomponent && !row.names.iter().any(|n| n == name) =>
+                {
+                    out.push(format!(
+                        "{layer}: {who} maps to `{id}`, whose name in the design system is {name}"
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    out
 }
 
 /// A part's name as a file stem: `StatusTag` is `status_tag`, `HTMLTable` is `html_table`.
@@ -162,7 +203,7 @@ pub fn review(files: &[(String, String)], map_markdown: &str) -> Vec<Finding> {
                     found.push(f);
                 }
             };
-            for what in inline_values(line) {
+            for what in inline_values(line, layer) {
                 add(Rule::InlineValue, what);
             }
             for what in layer_breaks(layer, line) {
@@ -286,7 +327,7 @@ fn scale_helper(name: &str) -> bool {
     })
 }
 
-fn inline_values(line: &str) -> Vec<String> {
+fn inline_values(line: &str, layer: Layer) -> Vec<String> {
     let mut out = Vec::new();
     for (method, name, args) in calls(line) {
         let what = match name {
@@ -342,8 +383,10 @@ fn inline_values(line: &str) -> Vec<String> {
             out.push(format!("a colour literal: `0x{hex}`"));
         }
     }
+    // The theme module builds a shadow from a token's layers; anywhere else a shadow is set by
+    // hand. Its fields still pass the checks above.
     for word in ["FontWeight::", "BoxShadow"] {
-        if names(line, word) {
+        if names(line, word) && !(word == "BoxShadow" && layer == Layer::Theme) {
             out.push(format!("a literal `{}`", word.trim_end_matches(':')));
         }
     }
@@ -534,6 +577,53 @@ mod tests {
     }
 
     #[test]
+    fn every_id_is_a_part_of_the_design_system_with_the_same_name() {
+        let m = parse_map(MAP);
+        let parts = [
+            ("temet-tag", "Tag"),
+            ("temet-statustag", "StatusTag"),
+            ("blueprint-htmltable", "HTMLTable"),
+            ("blueprint-tabs", "Tabs"),
+            ("temet-issuetable", "IssueTable"),
+            ("pages-temet-work-radar", "RadarScreen"),
+        ];
+        assert!(
+            unknown_parts(&m, &parts).is_empty(),
+            "{:?}",
+            unknown_parts(&m, &parts)
+        );
+        let renamed = [("temet-tag", "Chip"), ("temet-statustag", "StatusTag")];
+        let got = unknown_parts(&m, &renamed);
+        assert!(
+            got.iter()
+                .any(|l| l
+                    .contains("Tag maps to `temet-tag`, whose name in the design system is Chip")),
+            "{got:?}"
+        );
+        assert!(
+            got.iter()
+                .any(|l| l.contains("`blueprint-htmltable`, which is not a part")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_subcomponent_and_a_page_keep_their_own_names() {
+        let map = "## Components\n\n| Part | Design system id |\n|---|---|\n| AttentionText | `temet-attentionbutton` (subcomponent) |\n\n## Pages\n\n| Page | Design system |\n|---|---|\n| Project | `pages-temet-work-radar` (RadarScreen) |\n";
+        let parts = [
+            ("temet-attentionbutton", "AttentionButton"),
+            ("pages-temet-work-radar", "RadarScreen"),
+        ];
+        let m = parse_map(map);
+        assert!(m.components[0].subcomponent);
+        assert!(
+            unknown_parts(&m, &parts).is_empty(),
+            "{:?}",
+            unknown_parts(&m, &parts)
+        );
+    }
+
+    #[test]
     fn snake_names_follow_the_part() {
         assert_eq!(snake("StatusTag"), "status_tag");
         assert_eq!(snake("HTMLTable"), "html_table");
@@ -595,6 +685,22 @@ fn tag(t: &Theme) -> Div {
                 .any(|w| w.starts_with("a colour literal"))
         );
         assert!(whats("theme.rs", "use temet_work_style::tokens::*;").is_empty());
+        // It builds a shadow from a token's layers, but not from literals.
+        assert!(
+            whats(
+                "theme.rs",
+                "BoxShadow { color: c(s.colour), blur_radius: size_of(s.blur) }"
+            )
+            .is_empty()
+        );
+        assert!(!whats("theme.rs", "BoxShadow { blur_radius: px(4.) }").is_empty());
+        assert!(
+            !whats(
+                "components/tag.rs",
+                "pub struct Tag; BoxShadow { blur_radius: b }"
+            )
+            .is_empty()
+        );
     }
 
     #[test]

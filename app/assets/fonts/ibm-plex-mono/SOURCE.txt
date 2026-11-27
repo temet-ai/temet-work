@@ -1,0 +1,3 @@
+IBM Plex Mono by IBM Corp., SIL Open Font License 1.1 (LICENSE.txt).
+From https://github.com/IBM/plex at commit ba3013d72a8419a22c758cc51c44e04ac7ea565b:
+  packages/plex-mono/fonts/complete/ttf/IBMPlexMono-{Regular,Medium,SemiBold}.ttf

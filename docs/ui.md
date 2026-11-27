@@ -64,14 +64,19 @@ A new variant of an existing part goes the same way.
 
 ## Base items
 
-`scripts/sync-tokens` reads the design system's tokens from its running Storybook and writes
-`crates/style/src/tokens.rs`; nobody edits that file by hand. It refuses a design system with
-uncommitted changes or a commit that is not pushed, and the file names the commit it came from.
-Each theme is one `Tokens` value, `DARK` or `LIGHT`, with a field per token named after it:
-`--tm-edge-quiet` is `tm_edge_quiet`. Both themes set the same tokens, or the sync fails.
+`scripts/sync-tokens` reads the design system's token export, `dist/tokens.json`, which its
+`npm run build` writes, and writes `crates/style/src/tokens.rs` and the faces in
+`app/assets/fonts/`; nobody edits those by hand. It refuses a design system with uncommitted
+changes, a commit that is not pushed, or an export built from another commit, and `tokens.rs`
+names the commit it came from. Each theme is one `Tokens` value, `DARK` or `LIGHT`, with a field
+per token named after it: `--tm-edge-quiet` is `tm_edge_quiet`. Both themes set the same tokens,
+or the sync fails. A theme also holds its parts' looks: each part, variant and state as the
+design system's stories draw it, measured by its build. `tokens.rs` also holds the status and
+stage maps, the design system's part list, the tokens a user may change (`SETTINGS`) and the
+font files.
 
 Each value in `tokens.rs` is a theme's default. The user picks the theme and can change the
-values the design system makes theme settings, such as the attention colour (not built yet).
+tokens in `SETTINGS`, such as the attention colour (not built yet).
 `theme::apply` puts a theme in force; the parts read its values through the theme module's
 `colour`, `text`, `shape`, `motion`, `space` and `size` functions, each named for a role on the
 design system's Theme pages. Nothing in the app bakes a token's value in.
@@ -177,17 +182,9 @@ its row above takes the part's id in place of "gap". The composites, AppShell, H
 PropertyList, Meter and ListRow are on the design system's branch `fleet/temet-workers`, which
 has not merged to its main yet, and `crates/style/src/tokens.rs` is synced from that branch.
 
-- A token export: every token in the Base items table, resolved for each theme, as JSON from
-  the package's build, with the status and stage maps, each component's look per variant and
-  state, and the movements as data. `scripts/sync-tokens` then reads
-  that file in place of the running Storybook.
-- Which tokens a user may change, such as `--tm-attention`, marked in the token export.
-- The faces' font files as TTF or OTF, which the app embeds. The design system ships them as
-  woff2, and GPUI's Linux text system (cosmic-text, reading fonts through fontdb and
-  ttf-parser) parses TrueType and OpenType only. Until then the app falls back to the system's
-  fonts.
-- The design system's part list in the token export, so the review check can confirm every id
-  in this map.
+- A unit for each number in the token export (px, ms or none). Until it lands,
+  `scripts/sync-tokens` takes the unit from the token's name: `--tm-d-*` and `*duration*` are
+  ms; weights, line heights, leading, z-indexes and opacities have none; the rest are px.
 - TerminalView and AgentPane, once temet-work sends their definitions.
 
 ## Checks
@@ -199,12 +196,13 @@ compiles its UI library: run them after changing `app/` or the tokens.
 
 | Check | Where | State |
 |---|---|---|
-| The synced tokens keep the design system's rules: the accent, corners of 2 px at most, success in blue, no teal, cyan, brown or green | `temet-work-style` tests and a build-time assertion | built |
-| Tokens come from a pushed commit of the design system | `scripts/sync-tokens` refuses any other | built |
+| The synced tokens keep the design system's rules in every theme: the accent, corners of 2 px at most, success in blue, no teal, cyan, brown or green | `temet-work-style` tests and a build-time assertion | built |
+| Every part's measured look, in every variant, state and theme, keeps those rules too, and every theme measures the same parts | `temet-work-style` tests | built |
+| Tokens and faces come from a pushed commit of the design system, and the export from that commit | `scripts/sync-tokens` refuses any other | built |
 | Every one of gpui-component's colour slots takes a token, and none breaks the ban list | `app/src/theme.rs` tests | built |
 | The app is a workspace of its own and depends on `temet-work-core` and `temet-work-style` only | `tests/parts.rs` | built |
 | No colour, size, corner, border, shadow, weight, opacity or duration written as a literal anywhere in `app/src`, the theme module included | `review` | built |
 | Only the theme module reads `temet-work-style` | `review` | built |
 | Each file in `app/src/components/`, `composites/` and `pages/` has a row in this map with a design-system id, in its layer's table, and declares a type with the part's name | `review` | built |
 | A part uses no layer above its own; a composite sets no colour, type, shape or motion and uses the UI library only through components; a page and the plumbing draw nothing of their own | `review` | built |
-| Every design-system id in this map is in the design system's part list | `review`, from the list `scripts/sync-tokens` will read | to build, with the next sync |
+| Every design-system id in this map is in the design system's part list, and each component and composite has that part's name | `review`, against `tokens::PARTS` | built |
