@@ -26,10 +26,10 @@ yet.
 | Rule | the app or a project | A line in an agent's brief or in the config, with where it came from (a ruling, an overturned decision, a measured change), its state (proposed, kept or dropped; on trial and reverted are not built) and what it is measured by. |
 | Milestone | a project or area | From the tracker. A group's focus is a list of milestones. |
 | Issue | a project, in a milestone or none | From the tracker. One group at a time takes it through the loop. |
-| Work folder | a project | A checkout on one machine, used by one agent at a time, with a target directory that stays warm between issues. |
-| Plan | an issue | Written by the refiner as YAML: the checks and, for an area's issue, the repositories it changes in merge order (`repos`). The parts and who does each, the folder and the merge rule are not built yet. |
+| Work folder | a project | A checkout on one machine, held by one issue at a time (an issue holds one in each repository it changes), with a target directory that stays warm between issues. |
+| Plan | an issue | Written by the refiner as YAML: the checks and, for an area's issue, the repositories it changes in merge order (`repos`). The parts and who does each are not built yet. |
 | Check | a plan | One "Done when" line from the issue and the test or command that proves it. |
-| Pull request | an issue | The branch, CI, and the review rounds. |
+| Pull request | an issue | The branch, CI, and the review rounds. An issue has one in each repository it changes. |
 | Review round | a pull request | The reviewer's blocking points and the author's replies. A dispute between them goes to an arbiter. |
 | Decision | an issue | A choice an agent made: the options it weighed, the one it took, why, who decided, and the point after which overturning it costs more. Work carries on at once; a person reads decisions afterwards and can overturn them. |
 | Message | an agent | Agent to agent, or agent to a person. |

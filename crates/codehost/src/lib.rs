@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use temet_work_core::ids::IssueId;
-use temet_work_core::model::Stage;
+use temet_work_core::ids::{IssueId, ProjectId};
+use temet_work_core::model::{Issue, Stage};
 use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
 
 /// What a pull request's CI says about its latest commit.
@@ -89,6 +89,10 @@ pub trait CodeHost: Send {
     /// Merges the pull request `number` the way `how` says: `squash`, `merge` or
     /// `rebase`.
     fn merge(&mut self, repo: &str, number: &str, how: &str) -> Result<(), CodeHostError>;
+
+    /// The CI of the repository's default branch at the commit the merged pull
+    /// request `number` made. An error when that pull request has not merged.
+    fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError>;
 }
 
 /// A code host in memory, for tests.
@@ -98,6 +102,11 @@ pub struct FakeCodeHost {
     pub pulls: Vec<(String, Pull)>,
     /// How each merge was asked for (`squash`, `merge` or `rebase`), in order.
     pub merges: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// What each repository's default-branch CI says after a merge; a repository
+    /// not named here passes. Shared, so a test can change it while the part runs.
+    pub mains: std::sync::Arc<std::sync::Mutex<BTreeMap<String, Checks>>>,
+    /// The repository of each merge, in order.
+    pub merged_repos: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl CodeHost for FakeCodeHost {
@@ -128,7 +137,25 @@ impl CodeHost for FakeCodeHost {
         if let Ok(mut merges) = self.merges.lock() {
             merges.push(how.to_string());
         }
+        if let Ok(mut repos) = self.merged_repos.lock() {
+            repos.push(repo.to_string());
+        }
         Ok(())
+    }
+
+    fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
+        let pull = self.pull(repo, number)?;
+        if pull.state != PullState::Merged {
+            return Err(CodeHostError::Other(format!(
+                "pull request {number} has not merged"
+            )));
+        }
+        Ok(self
+            .mains
+            .lock()
+            .ok()
+            .and_then(|m| m.get(repo).cloned())
+            .unwrap_or(Checks::Passed))
     }
 }
 
@@ -173,6 +200,19 @@ pub mod contract {
             host.pull("no-such/repository", &number).is_err(),
             "an unknown repository is an error",
         )?;
+        ensure(
+            host.main_pipeline(&repo, "999999999").is_err(),
+            "the main pipeline of a pull request the code host does not have is an error",
+        )?;
+        if pull.state == PullState::Merged {
+            host.main_pipeline(&repo, &number)
+                .map_err(|e| format!("main pipeline of a merged pull request: {e}"))?;
+        } else {
+            ensure(
+                host.main_pipeline(&repo, &number).is_err(),
+                "the main pipeline of a pull request that has not merged is an error",
+            )?;
+        }
         if let Some(n) = harness.mergeable() {
             host.merge(&repo, &n, "squash")
                 .map_err(|e| format!("merge: {e}"))?;
@@ -183,6 +223,8 @@ pub mod contract {
                 after.state == PullState::Merged,
                 "a merged pull request reads as merged",
             )?;
+            host.main_pipeline(&repo, &n)
+                .map_err(|e| format!("main pipeline after merge: {e}"))?;
             ensure(
                 host.merge(&repo, &n, "squash").is_err(),
                 "merging twice is an error",
@@ -199,7 +241,10 @@ pub const MERGE_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// they were added.
 ///
 /// It reads the CI of each pull request under review, as often as its `ci_every`
-/// setting says (30 seconds by default), and reports when it has finished, and merges an issue's pull request when the loop asks.
+/// setting says (30 seconds by default), and reports when it has finished. An issue
+/// that changes several repositories passes only when CI passed on every pull
+/// request. It merges an issue's pull requests when the loop asks, one repository at
+/// a time in the plan's order, each after the previous one's main pipeline passed.
 #[derive(Default)]
 pub struct CodeHosts {
     adapters: Vec<Box<dyn CodeHost>>,
@@ -208,6 +253,39 @@ pub struct CodeHosts {
     read_at: BTreeMap<IssueId, u64>,
     errors: BTreeMap<IssueId, String>,
     merge_failed: BTreeMap<IssueId, (String, Instant)>,
+    /// When the main pipeline after a merge was last read, and what it said,
+    /// by issue, repository and pull request.
+    main_read: BTreeMap<(IssueId, ProjectId, String), (Instant, Wait)>,
+}
+
+/// Why the next repository does not merge yet.
+enum Wait {
+    /// The main pipeline is running.
+    Running,
+    /// Something a person may have to look at.
+    Stuck(String),
+}
+
+impl Wait {
+    fn outcome(&self, issue: &IssueId, repo: &ProjectId) -> Outcome {
+        match self {
+            Self::Running => Outcome::done(),
+            Self::Stuck(why) => {
+                Outcome::Failed(format!("{issue} waits to merge after {repo}: {why}"))
+            }
+        }
+    }
+}
+
+/// The code host would not let it merge: its author has to hear why.
+fn refused(issue: &IssueId, reason: String) -> Outcome {
+    Outcome::Done {
+        events: vec![Event::MergeRefused {
+            issue: issue.clone(),
+            reason,
+        }],
+        effects: Vec::new(),
+    }
 }
 
 impl CodeHosts {
@@ -227,17 +305,16 @@ impl CodeHosts {
         self
     }
 
-    /// The adapter and repository for an issue's project.
+    /// The adapter and the code host's name for the repository of project `repo`.
     fn host_for(
         &mut self,
         world: &World,
-        issue: &IssueId,
+        repo: &ProjectId,
     ) -> Result<(&mut Box<dyn CodeHost>, String), String> {
         let project = world
-            .issues
-            .get(issue)
-            .and_then(|i| world.repo_of(i))
-            .ok_or_else(|| format!("{issue} has no repository configured"))?;
+            .projects
+            .get(repo)
+            .ok_or_else(|| format!("{repo} has no repository configured"))?;
         let host = self
             .adapters
             .iter_mut()
@@ -245,110 +322,156 @@ impl CodeHosts {
             .ok_or_else(|| format!("no code host \"{}\" in this build", project.code_host))?;
         Ok((host, project.repo.clone()))
     }
-}
 
-impl Part for CodeHosts {
-    fn id(&self) -> &'static str {
-        "codehost"
-    }
-
-    fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
-        let mut events = Vec::new();
-        let waiting: Vec<(IssueId, String)> = world
-            .issues
-            .values()
-            .filter(|i| matches!(i.stage, Stage::InReview { .. } | Stage::Arbitration { .. }))
-            .filter_map(|i| i.pull.clone().map(|p| (i.id.clone(), p)))
-            .collect();
-        self.errors
-            .retain(|id, _| waiting.iter().any(|(w, _)| w == id));
-        for (issue, number) in waiting {
-            let every = self
-                .every_ms
-                .unwrap_or_else(|| world.setting_number(&issue, None, "ci_every") * 1000);
-            let due = self
-                .read_at
-                .get(&issue)
-                .is_none_or(|at| now_ms >= at + every);
-            if !due {
+    /// Reads every unmerged pull request of an issue, and says what to report: a
+    /// conflict in any of them first; else, while CI has not been reported, a
+    /// failure in any at once, with the repository named when the issue has several,
+    /// or a pass once every one has passed.
+    fn read_pulls(&mut self, world: &World, issue: &Issue) -> Result<Option<Event>, String> {
+        let several = issue.pulls.len() > 1;
+        let (mut failed, mut pending) = (Vec::new(), false);
+        for repo in world.repos_of(issue) {
+            let Some(number) = issue
+                .pulls
+                .get(&repo)
+                .filter(|_| !issue.merged.contains(&repo))
+            else {
                 continue;
-            }
-            self.read_at.insert(issue.clone(), now_ms);
-            let read = self
-                .host_for(world, &issue)
-                .and_then(|(host, repo)| host.pull(&repo, &number).map_err(|e| e.to_string()));
-            let pull = match read {
-                Ok(p) => {
-                    self.errors.remove(&issue);
-                    p
-                }
-                Err(e) => {
-                    self.errors.insert(issue.clone(), format!("{issue}: {e}"));
-                    continue;
-                }
             };
+            let (host, name) = self.host_for(world, &repo)?;
+            let pull = host.pull(&name, number).map_err(|e| e.to_string())?;
             // A conflict is caught on every read, even after CI finished.
             if pull.state == PullState::Open && pull.conflicting {
-                events.push(Event::PullConflicts { issue });
-                continue;
-            }
-            if world
-                .issues
-                .get(&issue)
-                .is_some_and(|i| i.checks_ok.is_some())
-            {
-                continue;
+                return Ok(Some(Event::PullConflicts {
+                    issue: issue.id.clone(),
+                    repo: Some(repo),
+                }));
             }
             // No checks yet usually means CI has not started on the new commit; only
-            // a project that runs no CI leaves the plan's checks to the reviewer.
-            let runs_ci = world.setting_flag(&issue, None, "ci");
-            let finished = match pull.checks {
-                Checks::Pending => None,
-                Checks::None if runs_ci => None,
-                Checks::Passed | Checks::None => Some((true, Vec::new())),
-                Checks::Failed { failing } => Some((false, failing)),
-            };
-            if let Some((passed, failing)) = finished {
-                events.push(Event::ChecksFinished {
-                    issue,
-                    passed,
-                    failing,
-                });
+            // a repository that runs no CI leaves the plan's checks to the reviewer.
+            match pull.checks {
+                Checks::Pending => pending = true,
+                Checks::None if world.repo_flag(&issue.id, &repo, "ci") => pending = true,
+                Checks::Passed | Checks::None => {}
+                Checks::Failed { failing } => failed.extend(
+                    failing
+                        .into_iter()
+                        .map(|c| if several { format!("{c} ({repo})") } else { c }),
+                ),
             }
         }
-        let problem = (!self.errors.is_empty())
-            .then(|| self.errors.values().cloned().collect::<Vec<_>>().join("; "));
-        Polled { events, problem }
+        let passed = failed.is_empty();
+        Ok(
+            (issue.checks_ok.is_none() && (!passed || !pending)).then(|| Event::ChecksFinished {
+                issue: issue.id.clone(),
+                passed,
+                failing: failed,
+            }),
+        )
     }
 
-    fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
-        let Effect::Merge { issue } = effect else {
-            return Outcome::NotMine;
+    /// Whether the main pipeline of `repo`, after its pull request `number` merged,
+    /// lets the next repository merge: `None` when it does, else what to do instead.
+    /// It is read at most once each `ci_every`; in between the last answer stands.
+    fn wait_for_main(
+        &mut self,
+        world: &World,
+        issue: &IssueId,
+        repo: &ProjectId,
+        number: &str,
+    ) -> Option<Outcome> {
+        let every = self
+            .every_ms
+            .unwrap_or_else(|| world.setting_number(issue, None, "ci_every") * 1000);
+        let key = (issue.clone(), repo.clone(), number.to_string());
+        if let Some((at, last)) = self.main_read.get(&key)
+            && at.elapsed() < Duration::from_millis(every)
+        {
+            return Some(last.outcome(issue, repo));
+        }
+        let read = self
+            .host_for(world, repo)
+            .and_then(|(host, name)| host.main_pipeline(&name, number).map_err(|e| e.to_string()));
+        let wait = match read {
+            Ok(Checks::Passed) => {
+                self.main_read.remove(&key);
+                return None;
+            }
+            Ok(Checks::Pending) => Wait::Running,
+            Ok(Checks::None) => Wait::Stuck(format!(
+                "no CI run on the main branch of {repo} for its merge yet; set ci to false \
+                 for {repo} if it runs none there"
+            )),
+            Ok(Checks::Failed { failing }) => {
+                self.main_read.remove(&key);
+                return Some(refused(
+                    issue,
+                    format!(
+                        "the main pipeline of {repo} failed ({}); run it again, or fix it with \
+                         a new pull request in {repo} and name that with ready",
+                        failing.join(", ")
+                    ),
+                ));
+            }
+            Err(e) => Wait::Stuck(e),
         };
-        let Some(number) = world.issues.get(issue).and_then(|i| i.pull.clone()) else {
+        let outcome = wait.outcome(issue, repo);
+        self.main_read.insert(key, (Instant::now(), wait));
+        Some(outcome)
+    }
+
+    /// Merges the next unmerged pull request of the issue, in the plan's order,
+    /// once the one before it has a passing main pipeline.
+    fn merge_next(&mut self, world: &World, issue: &IssueId) -> Outcome {
+        let Some(i) = world.issues.get(issue) else {
+            return Outcome::Failed(format!("{issue} is not known"));
+        };
+        // An issue from an older log may name repositories it has no pull request
+        // in; only those it has one in merge.
+        let repos: Vec<ProjectId> = world
+            .repos_of(i)
+            .into_iter()
+            .filter(|r| i.pulls.contains_key(r))
+            .collect();
+        if repos.is_empty() {
             return Outcome::Failed(format!("{issue} has no pull request on record"));
+        }
+        let Some(at) = repos.iter().position(|r| !i.merged.contains(r)) else {
+            // Every pull request merged; the loop only needs to hear it.
+            return Outcome::Done {
+                events: vec![Event::Merged {
+                    issue: issue.clone(),
+                    repo: None,
+                }],
+                effects: Vec::new(),
+            };
+        };
+        let repo = repos[at].clone();
+        let Some(number) = i.pulls.get(&repo).cloned() else {
+            return Outcome::Failed(format!("{issue} has no pull request on record for {repo}"));
         };
         if let Some((why, at)) = self.merge_failed.get(issue)
             && at.elapsed() < MERGE_RETRY_AFTER
         {
             return Outcome::Failed(format!("{why}; tried again a minute after it failed"));
         }
-        let refused = |reason: String| Outcome::Done {
-            events: vec![Event::MergeRefused {
-                issue: issue.clone(),
-                reason,
-            }],
-            effects: Vec::new(),
-        };
+        // The repository before this one must be passing on its main branch first.
+        if let Some(before) = at.checked_sub(1).map(|b| &repos[b])
+            && world.repo_flag(issue, before, "ci")
+            && let Some(prev) = i.pulls.get(before)
+            && let Some(wait) = self.wait_for_main(world, issue, before, prev)
+        {
+            return wait;
+        }
         let how = world
             .setting_text(issue, None, "merge")
             .unwrap_or_else(|| "squash".into());
-        let (host, repo) = match self.host_for(world, issue) {
+        let (host, name) = match self.host_for(world, &repo) {
             Ok(found) => found,
             Err(e) => return Outcome::Failed(e),
         };
         let tried = host
-            .pull(&repo, &number)
+            .pull(&name, &number)
             .map_err(|e| e.to_string())
             .and_then(|pull| {
                 match pull.state {
@@ -360,7 +483,7 @@ impl Part for CodeHosts {
                     PullState::Open if pull.conflicting => Ok(Some(format!(
                         "pull request {number} conflicts with the branch it merges into"
                     ))),
-                    PullState::Open => match host.merge(&repo, &number, &how) {
+                    PullState::Open => match host.merge(&name, &number, &how) {
                         Ok(()) => Ok(None),
                         Err(e)
                             if ["not mergeable", "merge conflict", "conflicts"]
@@ -379,18 +502,73 @@ impl Part for CodeHosts {
                 Outcome::Done {
                     events: vec![Event::Merged {
                         issue: issue.clone(),
+                        repo: Some(repo),
                     }],
                     effects: Vec::new(),
                 }
             }
             // Only its author can fix it: back to work.
-            Ok(Some(reason)) => refused(reason),
+            Ok(Some(reason)) => refused(issue, reason),
             Err(e) => {
                 self.merge_failed
                     .insert(issue.clone(), (e.clone(), Instant::now()));
                 Outcome::Failed(e)
             }
         }
+    }
+}
+
+impl Part for CodeHosts {
+    fn id(&self) -> &'static str {
+        "codehost"
+    }
+
+    fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
+        let mut events = Vec::new();
+        let waiting: Vec<Issue> = world
+            .issues
+            .values()
+            .filter(|i| {
+                matches!(i.stage, Stage::InReview { .. } | Stage::Arbitration { .. })
+                    && !i.pulls.is_empty()
+            })
+            .cloned()
+            .collect();
+        self.errors
+            .retain(|id, _| waiting.iter().any(|w| &w.id == id));
+        for i in waiting {
+            let issue = i.id.clone();
+            let every = self
+                .every_ms
+                .unwrap_or_else(|| world.setting_number(&issue, None, "ci_every") * 1000);
+            let due = self
+                .read_at
+                .get(&issue)
+                .is_none_or(|at| now_ms >= at + every);
+            if !due {
+                continue;
+            }
+            self.read_at.insert(issue.clone(), now_ms);
+            match self.read_pulls(world, &i) {
+                Ok(event) => {
+                    self.errors.remove(&issue);
+                    events.extend(event);
+                }
+                Err(e) => {
+                    self.errors.insert(issue.clone(), format!("{issue}: {e}"));
+                }
+            }
+        }
+        let problem = (!self.errors.is_empty())
+            .then(|| self.errors.values().cloned().collect::<Vec<_>>().join("; "));
+        Polled { events, problem }
+    }
+
+    fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
+        let Effect::Merge { issue } = effect else {
+            return Outcome::NotMine;
+        };
+        self.merge_next(world, issue)
     }
 }
 
@@ -424,7 +602,7 @@ mod tests {
                     ),
                 ),
             ],
-            merges: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -464,7 +642,7 @@ mod tests {
             });
             if let Some(i) = w.issues.get_mut(&issue) {
                 i.stage = Stage::InReview { round: 1 };
-                i.pull = Some(number.into());
+                i.pulls.insert(ProjectId::new("ankh"), number.into());
             }
         }
         w
@@ -510,10 +688,11 @@ mod tests {
         host.pulls[0].1.conflicting = true;
         let mut part = CodeHosts::default();
         part.add(Box::new(host));
-        let polled = part.poll(&w, 0);
-        assert!(polled.events.contains(&Event::PullConflicts {
-            issue: IssueId::new("ankh", "1")
-        }));
+        let conflict = Event::PullConflicts {
+            issue: IssueId::new("ankh", "1"),
+            repo: Some(ProjectId::new("ankh")),
+        };
+        assert!(part.poll(&w, 0).events.contains(&conflict));
         let mut clean = CodeHosts::default();
         clean.add(Box::new(fake()));
         assert!(
@@ -536,6 +715,7 @@ mod tests {
         let merged = Outcome::Done {
             events: vec![Event::Merged {
                 issue: IssueId::new("ankh", "1"),
+                repo: Some(ProjectId::new("ankh")),
             }],
             effects: vec![],
         };
@@ -648,7 +828,7 @@ mod tests {
     fn an_issue_without_a_pull_request_cannot_merge() {
         let mut w = in_review();
         if let Some(i) = w.issues.get_mut(&IssueId::new("ankh", "1")) {
-            i.pull = None;
+            i.pulls.clear();
         }
         let mut part = CodeHosts::default();
         part.add(Box::new(fake()));
@@ -664,5 +844,294 @@ mod tests {
         part.add(Box::new(FakeCodeHost::default()));
         assert_eq!(part.ids(), ["fake"]);
         assert_eq!(part.id(), "codehost");
+    }
+
+    // An issue that changes two repositories, in the order [ui, svc].
+    mod two_repositories {
+        use super::*;
+
+        fn pid(s: &str) -> ProjectId {
+            ProjectId::new(s)
+        }
+
+        fn gld() -> IssueId {
+            IssueId::new("guild", "GLD-1")
+        }
+
+        fn world(stage: Stage) -> World {
+            let mut w = World::default();
+            w.apply(&Event::AreaDefined {
+                area: pid("guild"),
+                name: "Guild".into(),
+                projects: vec![pid("ui"), pid("svc")],
+                tracker: "fake".into(),
+                tracker_name: "GLD".into(),
+            });
+            for p in ["ui", "svc"] {
+                w.apply(&Event::ProjectAdded {
+                    project: pid(p),
+                    tracker: String::new(),
+                    name: format!("group/{p}"),
+                    code_host: Some("fake".into()),
+                    repo: None,
+                });
+            }
+            w.apply(&Event::IssueSynced {
+                issue: gld(),
+                title: "t".into(),
+                milestone: None,
+                depends_on: vec![],
+                order: 1,
+                closed: false,
+            });
+            let i = w.issues.get_mut(&gld()).expect("issue");
+            i.plan = Some(temet_work_core::model::Plan {
+                repos: vec![pid("ui"), pid("svc")],
+                ..Default::default()
+            });
+            i.stage = stage;
+            i.pulls = [(pid("ui"), "1".to_string()), (pid("svc"), "2".to_string())].into();
+            w
+        }
+
+        fn host(ui: Checks, svc: Checks) -> FakeCodeHost {
+            FakeCodeHost {
+                pulls: vec![
+                    ("group/ui".into(), pull("1", ui)),
+                    ("group/svc".into(), pull("2", svc)),
+                ],
+                ..Default::default()
+            }
+        }
+
+        fn part(host: FakeCodeHost) -> CodeHosts {
+            let mut part = CodeHosts::default().every(0);
+            part.add(Box::new(host));
+            part
+        }
+
+        fn failed(name: &str) -> Checks {
+            Checks::Failed {
+                failing: vec![name.into()],
+            }
+        }
+
+        #[test]
+        fn ci_must_pass_on_every_pull_request_and_a_failure_names_its_repository() {
+            let w = world(Stage::InReview { round: 1 });
+            let polled = part(host(Checks::Passed, failed("rust"))).poll(&w, 0);
+            assert_eq!(
+                polled.events,
+                vec![Event::ChecksFinished {
+                    issue: gld(),
+                    passed: false,
+                    failing: vec!["rust (svc)".into()],
+                }]
+            );
+            let polled = part(host(Checks::Passed, Checks::Passed)).poll(&w, 0);
+            assert!(matches!(
+                polled.events.as_slice(),
+                [Event::ChecksFinished { passed: true, .. }]
+            ));
+            let polled = part(host(Checks::Passed, Checks::Pending)).poll(&w, 0);
+            assert_eq!(polled.events, vec![], "svc is still running");
+        }
+
+        #[test]
+        fn the_loop_sends_the_author_back_with_the_failing_repository_named() {
+            let mut w = world(Stage::InReview { round: 1 });
+            let polled = part(host(Checks::Passed, failed("rust"))).poll(&w, 0);
+            for e in &polled.events {
+                w.apply(e);
+            }
+            let i = &w.issues[&gld()];
+            assert_eq!(i.checks_ok, Some(false));
+            assert_eq!(i.fix, vec!["CI check rust (svc) failed".to_string()]);
+        }
+
+        fn merge() -> Effect {
+            Effect::Merge { issue: gld() }
+        }
+
+        fn merged(repo: &str) -> Outcome {
+            Outcome::Done {
+                events: vec![Event::Merged {
+                    issue: gld(),
+                    repo: Some(pid(repo)),
+                }],
+                effects: vec![],
+            }
+        }
+
+        #[test]
+        fn svc_merges_only_after_uis_main_pipeline_passed_and_deploy_fires_once() {
+            let mut w = world(Stage::Merging);
+            let fake = host(Checks::Passed, Checks::Passed);
+            let repos = fake.merged_repos.clone();
+            let mains = fake.mains.clone();
+            let mut part = part(fake);
+            assert_eq!(part.carry_out(&merge(), &w), merged("ui"));
+            w.apply(&Event::Merged {
+                issue: gld(),
+                repo: Some(pid("ui")),
+            });
+            // ui's main pipeline is running: nothing merges, nothing is reported.
+            mains
+                .lock()
+                .expect("lock")
+                .insert("group/ui".into(), Checks::Pending);
+            assert_eq!(part.carry_out(&merge(), &w), Outcome::done());
+            assert_eq!(*repos.lock().expect("lock"), ["group/ui"]);
+            mains
+                .lock()
+                .expect("lock")
+                .insert("group/ui".into(), Checks::Passed);
+            assert_eq!(part.carry_out(&merge(), &w), merged("svc"));
+            assert_eq!(*repos.lock().expect("lock"), ["group/ui", "group/svc"]);
+            let effects = w.apply(&Event::Merged {
+                issue: gld(),
+                repo: Some(pid("svc")),
+            });
+            let deploys = effects
+                .iter()
+                .filter(|e| matches!(e, Effect::Deploy { .. }))
+                .count();
+            assert_eq!(deploys, 1);
+        }
+
+        #[test]
+        fn a_failed_main_pipeline_merges_nothing_further_and_goes_back_to_the_author() {
+            let mut w = world(Stage::Merging);
+            let fake = host(Checks::Passed, Checks::Passed);
+            let repos = fake.merged_repos.clone();
+            fake.mains
+                .lock()
+                .expect("lock")
+                .insert("group/ui".into(), failed("deploy-tests"));
+            let mut part = part(fake);
+            assert_eq!(part.carry_out(&merge(), &w), merged("ui"));
+            w.apply(&Event::Merged {
+                issue: gld(),
+                repo: Some(pid("ui")),
+            });
+            let Outcome::Done { events, .. } = part.carry_out(&merge(), &w) else {
+                panic!("expected the loop to hear it");
+            };
+            assert!(
+                matches!(events.as_slice(), [Event::MergeRefused { reason, .. }] if reason.contains("main pipeline of ui failed (deploy-tests)")),
+                "{events:?}"
+            );
+            for e in &events {
+                w.apply(e);
+            }
+            assert_eq!(*repos.lock().expect("lock"), ["group/ui"], "svc not merged");
+            let i = &w.issues[&gld()];
+            assert!(matches!(i.stage, Stage::Fixing { .. }));
+            assert!(
+                i.fix[0].starts_with("ui is merged, svc cannot merge: "),
+                "{:?}",
+                i.fix
+            );
+        }
+
+        #[test]
+        fn without_ci_it_does_not_wait_for_the_main_pipeline() {
+            let mut w = world(Stage::Merging);
+            set(&mut w, Scope::Area(pid("guild")), "ci", Value::Flag(false));
+            let fake = host(Checks::Passed, Checks::Passed);
+            fake.mains
+                .lock()
+                .expect("lock")
+                .insert("group/ui".into(), Checks::Pending);
+            let mut part = part(fake);
+            assert_eq!(part.carry_out(&merge(), &w), merged("ui"));
+            w.apply(&Event::Merged {
+                issue: gld(),
+                repo: Some(pid("ui")),
+            });
+            assert_eq!(part.carry_out(&merge(), &w), merged("svc"));
+        }
+
+        #[test]
+        fn a_conflict_in_the_second_repository_names_it() {
+            let mut w = world(Stage::InReview { round: 1 });
+            let mut fake = host(Checks::Passed, Checks::Passed);
+            fake.pulls[1].1.conflicting = true;
+            let events = part(fake).poll(&w, 0).events;
+            for e in &events {
+                w.apply(e);
+            }
+            assert_eq!(
+                w.issues[&gld()].fix,
+                ["the pull request in svc conflicts with the branch it merges into"]
+            );
+        }
+
+        #[test]
+        fn each_repository_says_whether_it_runs_ci() {
+            let mut w = world(Stage::InReview { round: 1 });
+            set(&mut w, Scope::Project(pid("svc")), "ci", Value::Flag(false));
+            let polled = part(host(Checks::Passed, Checks::None)).poll(&w, 0);
+            assert!(matches!(
+                polled.events.as_slice(),
+                [Event::ChecksFinished { passed: true, .. }]
+            ));
+        }
+
+        #[test]
+        fn a_main_branch_with_no_run_is_listed_as_a_problem_until_it_has_one() {
+            let mut w = world(Stage::Merging);
+            let fake = host(Checks::Passed, Checks::Passed);
+            let mains = fake.mains.clone();
+            mains
+                .lock()
+                .expect("lock")
+                .insert("group/ui".into(), Checks::None);
+            let mut part = part(fake);
+            assert_eq!(part.carry_out(&merge(), &w), merged("ui"));
+            w.apply(&Event::Merged {
+                issue: gld(),
+                repo: Some(pid("ui")),
+            });
+            assert!(matches!(
+                part.carry_out(&merge(), &w),
+                Outcome::Failed(why) if why.contains("no CI run on the main branch of ui")
+            ));
+            mains.lock().expect("lock").clear();
+            assert_eq!(part.carry_out(&merge(), &w), merged("svc"));
+        }
+
+        #[test]
+        fn an_older_issue_with_one_pull_request_merges_it_and_deploys() {
+            let mut w = world(Stage::Merging);
+            w.issues
+                .get_mut(&gld())
+                .expect("issue")
+                .pulls
+                .remove(&pid("svc"));
+            let mut part = part(host(Checks::Passed, Checks::Passed));
+            assert_eq!(part.carry_out(&merge(), &w), merged("ui"));
+            let effects = w.apply(&Event::Merged {
+                issue: gld(),
+                repo: Some(pid("ui")),
+            });
+            assert!(effects.contains(&Effect::Deploy { issue: gld() }));
+        }
+
+        #[test]
+        fn a_restart_asks_again_only_for_the_unmerged_pull_request() {
+            let mut w = world(Stage::Merging);
+            w.issues
+                .get_mut(&gld())
+                .expect("issue")
+                .merged
+                .insert(pid("ui"));
+            let mut fake = host(Checks::Passed, Checks::Passed);
+            fake.pulls[0].1.state = PullState::Merged;
+            let repos = fake.merged_repos.clone();
+            let mut part = part(fake);
+            assert_eq!(part.carry_out(&merge(), &w), merged("svc"));
+            assert_eq!(*repos.lock().expect("lock"), ["group/svc"]);
+        }
     }
 }

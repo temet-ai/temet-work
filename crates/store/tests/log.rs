@@ -193,3 +193,38 @@ fn a_second_writer_is_refused_while_the_first_has_the_log() {
     drop(first);
     assert!(Log::open(&p).is_ok(), "free again once the first closes it");
 }
+
+#[test]
+fn an_old_pull_request_event_replays_as_the_first_repositorys_pull_request() {
+    let p = path("old-pull");
+    let lines = [
+        r#"{"seq":1,"at_ms":0,"event":{"ProjectAdded":{"project":"ankh","tracker":"fake","name":"city/ankh"}}}"#,
+        r#"{"seq":2,"at_ms":0,"event":{"IssueSynced":{"issue":{"project":"ankh","key":"1"},"title":"t","milestone":null,"depends_on":[],"order":1,"closed":false}}}"#,
+        r#"{"seq":3,"at_ms":0,"event":{"PullRequestReady":{"issue":{"project":"ankh","key":"1"},"pull":"57"}}}"#,
+        r#"{"seq":4,"at_ms":0,"event":{"Merged":{"issue":{"project":"ankh","key":"1"}}}}"#,
+    ];
+    std::fs::write(&p, lines.join("\n") + "\n").expect("write");
+    let entries = Log::read(&p).expect("old entries read");
+    let world = replay(&entries[..3]);
+    let issue = &world.issues[&IssueId::new("ankh", "1")];
+    assert_eq!(
+        issue.pulls.get(&ProjectId::new("ankh")).map(String::as_str),
+        Some("57")
+    );
+    assert_eq!(replay(&entries).issues.len(), 1, "an old Merged reads too");
+}
+
+#[test]
+fn pull_requests_by_repository_survive_the_log() {
+    let p = path("pulls-by-repo");
+    let (mut log, _) = Log::open(&p).expect("open");
+    let event = Event::PullRequestReady {
+        issue: IssueId::new("guild", "GLD-1"),
+        pull: None,
+        pulls: [(ProjectId::new("ui"), "12".to_string())].into(),
+    };
+    log.append(0, &event).expect("append");
+    drop(log);
+    let entries = Log::read(&p).expect("read");
+    assert_eq!(entries[0].event, event);
+}

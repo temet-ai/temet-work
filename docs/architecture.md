@@ -55,7 +55,7 @@ says what each crate holds today.
 | `temet-work-runtime` | core | The agent runtime contract: start a session with a brief and a model, tell working from idle. A fake and the contract tests. |
 | `temet-work-runtime-claude` | runtime only | Claude Code. |
 | `temet-work-runtime-codex` | runtime only | Codex. |
-| `temet-work-codehost` | core | The code-host contract: read a pull request and its CI, merge it. A fake and the contract tests. A project's code host can differ from its tracker. |
+| `temet-work-codehost` | core | The code-host contract: read a pull request and its CI, merge it, read the main pipeline after the merge. A fake and the contract tests. A project's code host can differ from its tracker. |
 | `temet-work-codehost-github` | codehost only | GitHub pull requests. |
 | `temet-work-codehost-gitlab` | codehost only | GitLab merge requests. |
 | `temet-work-deploy` | core | Runs a project's deploy and verify commands after a merge. |
@@ -78,7 +78,7 @@ What exists today:
 | `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
 | `temet-work-tracker-github` | issues and milestones through `gh`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-tracker-jira` | issues, fix versions as milestones, comments and Done transitions through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
-| `temet-work-codehost` | the contract, a fake and contract tests. The family reads the CI of each pull request in review every 30 seconds and reports it finished, with the names of failing checks; it merges when the loop asks |
+| `temet-work-codehost` | the contract, a fake and contract tests. The family reads each pull request in review every 30 seconds, reports a conflict, and reports CI finished once it has on all of an issue's pull requests, with the names of failing checks; it merges them when the loop asks, in the plan's order, each after the previous repository's main pipeline passed |
 | `temet-work-codehost-github` | pull requests through `gh`, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-codehost-gitlab` | merge requests through `glab` and its sign-in, merged with `--squash`, `--rebase` or neither; a pipeline reads as failed once a job that may not fail has failed; passes the contract on recorded output and, read only, against GitLab (`--features live`) |
 | `temet-work-deploy` | runs the deploy command after a merge and the verify command after a deploy, each on its own thread; a failed deploy is listed as a problem, a failed verify sends the issue back to ready |
@@ -99,8 +99,8 @@ What does not work yet:
 The daemon does, in code; agents do only what needs judgement: refining, writing code,
 reviewing and arbitrating. The core's `World::apply` takes one event and returns the
 effects for the daemon to carry out; after every event it takes the next issue for refining
-and starts an author on a ready issue when a work folder of its project is free and the
-issues it depends on are done. Review runs for at most three rounds before an arbiter
+and starts an author on a ready issue when a work folder is free in every repository it
+changes and the issues it depends on are done. Review runs for at most three rounds before an arbiter
 rules. Every round the daemon also starts any agent an issue needs and does not have: one
 whose session ended, or one it decided on and did not start before it stopped. After three
 agents of one role have ended on one issue it stops and lists the issue as a problem. It
@@ -109,7 +109,7 @@ repeat work already done or running; a deploy that restarts the daemon is record
 the new daemon, which finds the build in the handoff file (`docs/configuration.md`). An agent its issue waits on that sits idle is
 reminded after ten minutes and again after twenty, and its session is stopped after thirty
 so a fresh one takes over. A refiner stops once its plan is in; the author, reviewer and
-arbiter stop once the issue merges. A group has no coordinator agent: in the research fleet the standing seat waited 25
+arbiter stop once the issue's last pull request merges. A group has no coordinator agent: in the research fleet the standing seat waited 25
 of its 28 minutes, and in mike's larger runs such seats were where the token and turn costs
 came from (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
 

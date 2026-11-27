@@ -52,11 +52,33 @@ more than about five areas, the area becomes a selector at the top of the nav ba
 
 ## What is built
 
-Stage 1, now: areas in the configuration and the loop; area trackers synced like project
+Stage 1: areas in the configuration and the loop; area trackers synced like project
 trackers; groups that take areas; dependencies across projects; an area issue worked in
 one repository, the first in its plan's `repos`.
 
-Stage 2, next: an issue that changes several repositories. Its author holds a work
-folder in each and opens a pull request in each; `ready` names them all; CI must pass on
-all of them; they merge in the plan's order, each after the previous repository's main
-pipeline has passed.
+Stage 2: an issue that changes several repositories.
+
+- The issue holds one free work folder in each repository its plan names, all or none, so
+  two issues cannot each hold half of what the other needs. Its author starts in the first,
+  and makes the branch and one pull request per repository itself, on one branch name; the
+  daemon only holds the folders.
+- `temet-work ready ISSUE REPO=NUMBER...` names the pull requests; a bare number works
+  when the plan names one repository. `temet-work issue` lists each with its repository
+  and whether it merged. Event logs from stage 1 replay: their single pull request is the
+  first repository's.
+- CI must pass on every pull request, and a failure or a conflict names its repository.
+  Each repository's own `ci` setting says whether it runs any.
+- They merge in the plan's order, each after the previous repository's main pipeline has
+  passed (with `ci = false` there, without waiting). A main branch that shows no run for
+  the merge is listed as a problem until it has one.
+- Deploy and verify run once, after the last merge. The folders are released together,
+  then or when the issue is closed.
+- Merged pull requests are recorded per repository, so a restart or a refused merge
+  part-way never merges one twice. Nothing is reverted: the author hears what merged and
+  what cannot, and fixes forward. To change a repository that already merged, the author
+  opens a new pull request there and names it with `ready`; it merges in its turn.
+- Once one has merged, closing the issue in the tracker no longer drops the rest, since a
+  pull request that closes its issue on merge would otherwise do so.
+
+Not built: deploy and verify run with the settings of the first repository only, and a
+reviewer reads the other repositories' changes from the code host.
