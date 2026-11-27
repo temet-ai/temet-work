@@ -1,20 +1,41 @@
-//! The theme module: the one file in the app that reads `temet-work-style`. It turns the design
-//! system's tokens into gpui-component's `Theme`, so that the library's own widgets draw in the
-//! temet theme. Every value here is a token; the roles follow the design system's Theme/Colours
-//! page.
+//! The theme module: the one file in the app that reads `temet-work-style`. It holds the theme in
+//! force, one of the design system's themes, and turns its tokens into GPUI values in two ways:
 //!
-//! Today the tokens are the dark theme's, as `scripts/sync-tokens` wrote them. When the design
-//! system's token file brings its light theme and the settings a user may change, such as the
-//! attention colour, `apply` takes the theme in force instead of the constants.
+//! - gpui-component's `Theme`, so the library's own widgets draw in the temet theme;
+//! - the modules below, which the app's parts read: `colour`, `text`, `shape` and `motion` for
+//!   components, `space` and `size` for composites (`docs/ui.md`). Each function names a role
+//!   from the design system's Theme pages and returns the active theme's token for it.
 //!
-//! Some slots are a component's own look (a switch track, a slider thumb, a tab). The design
-//! system's token file will carry each component's look per variant and state; until then those
-//! slots take the colour of the nearest role on the Colours page.
+//! Every value here is a token; the roles follow the design system's Theme/Colours page. Some
+//! library slots are a component's own look (a switch track, a slider thumb, a tab); until the
+//! design system's token export carries each component's look, those take the nearest role.
 
-use gpui::{App, Hsla, SharedString, px, rems, rgba};
+use gpui::{App, Global, Hsla, Pixels, SharedString, px, rems, rgba};
 use gpui_base::{Easing, Spring};
 use gpui_component::{MotionTokens, Theme, ThemeColor, ThemeMode};
-use temet_work_style::{Curve, Rgba, tokens::*};
+use temet_work_style::tokens::{self, Tokens};
+use temet_work_style::{Curve, Rgba};
+
+/// The theme in force: one of the design system's themes, by name, and its tokens. Set by
+/// [`apply`]; the parts read it through the modules below.
+#[derive(Clone, Copy, Debug)]
+pub struct Active {
+    /// The theme's name, as the design system names it.
+    pub name: &'static str,
+    tokens: Tokens,
+}
+
+impl Global for Active {}
+
+/// The design system's themes, by name.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    tokens::THEMES.iter().map(|(name, _)| *name)
+}
+
+/// The tokens of the theme in force.
+fn active(cx: &App) -> &Tokens {
+    &cx.global::<Active>().tokens
+}
 
 /// A token's colour as the library's colour.
 fn c(token: Rgba) -> Hsla {
@@ -23,26 +44,26 @@ fn c(token: Rgba) -> Hsla {
 
 /// gpui-component's colour slots, each set from the token for its role. `base` matters only to
 /// the tests: every slot is overwritten.
-pub fn colours(base: ThemeColor) -> ThemeColor {
+pub fn colours(t: &Tokens, base: ThemeColor) -> ThemeColor {
     let mut s = base;
 
     // Surfaces, edges and text (Theme/Colours: Surfaces, Text).
-    let page = c(BP_PALETTE_BLACK);
-    let panel = c(BP_PALETTE_DARK_GRAY_1);
-    let hover = c(BP_PALETTE_DARK_GRAY_2);
-    let raised = c(BP_PALETTE_DARK_GRAY_3);
-    let edge = c(TM_EDGE);
-    let quiet = c(TM_EDGE_QUIET);
-    let strong = c(BP_SURFACE_BORDER_COLOR_STRONG);
-    let text = c(BP_TYPOGRAPHY_COLOR_DEFAULT_REST);
-    let muted = c(BP_TYPOGRAPHY_COLOR_MUTED);
+    let page = c(t.tm_surface_page);
+    let panel = c(t.tm_surface_panel);
+    let hover = c(t.tm_surface_hover);
+    let raised = c(t.tm_surface_raised);
+    let edge = c(t.tm_edge);
+    let quiet = c(t.tm_edge_quiet);
+    let strong = c(t.bp_surface_border_color_strong);
+    let text = c(t.bp_typography_color_default_rest);
+    let muted = c(t.bp_typography_color_muted);
     let clear = Hsla::transparent_black();
 
     // The accent, the selected row and the focus ring (Theme/Colours: Accent and attention).
-    let accent_text = c(BP_TYPOGRAPHY_COLOR_PRIMARY_REST);
-    let selected = c(TM_SELECTED_FILL);
-    let selected_line = c(TM_SELECTED_LINE);
-    let focus = c(BP_EMPHASIS_FOCUS_COLOR);
+    let accent_text = c(t.bp_typography_color_primary_rest);
+    let selected = c(t.tm_selected_fill);
+    let selected_line = c(t.tm_selected_line);
+    let focus = c(t.bp_emphasis_focus_color);
 
     s.background = page;
     s.foreground = text;
@@ -52,7 +73,7 @@ pub fn colours(base: ThemeColor) -> ThemeColor {
     s.muted_foreground = muted;
     s.accent = hover;
     s.accent_foreground = text;
-    s.overlay = c(BP_SURFACE_COLOR_CODE);
+    s.overlay = c(t.bp_surface_color_code);
     s.window_border = edge;
     s.ring = focus;
     s.caret = accent_text;
@@ -61,36 +82,36 @@ pub fn colours(base: ThemeColor) -> ThemeColor {
     s.drop_target = selected;
 
     // Intents. The design system has no info intent; info takes the primary one.
-    s.primary = c(BP_INTENT_PRIMARY_REST);
-    s.primary_hover = c(BP_INTENT_PRIMARY_HOVER);
-    s.primary_active = c(BP_INTENT_PRIMARY_ACTIVE);
-    s.primary_foreground = c(BP_INTENT_PRIMARY_FOREGROUND);
+    s.primary = c(t.bp_intent_primary_rest);
+    s.primary_hover = c(t.bp_intent_primary_hover);
+    s.primary_active = c(t.bp_intent_primary_active);
+    s.primary_foreground = c(t.bp_intent_primary_foreground);
     s.info = s.primary;
     s.info_hover = s.primary_hover;
     s.info_active = s.primary_active;
     s.info_foreground = s.primary_foreground;
-    s.success = c(BP_INTENT_SUCCESS_REST);
-    s.success_hover = c(BP_INTENT_SUCCESS_HOVER);
-    s.success_active = c(BP_INTENT_SUCCESS_ACTIVE);
-    s.success_foreground = c(BP_INTENT_SUCCESS_FOREGROUND);
-    s.warning = c(BP_INTENT_WARNING_REST);
-    s.warning_hover = c(BP_INTENT_WARNING_HOVER);
-    s.warning_active = c(BP_INTENT_WARNING_ACTIVE);
-    s.warning_foreground = c(BP_INTENT_WARNING_FOREGROUND);
-    s.danger = c(BP_INTENT_DANGER_REST);
-    s.danger_hover = c(BP_INTENT_DANGER_HOVER);
-    s.danger_active = c(BP_INTENT_DANGER_ACTIVE);
-    s.danger_foreground = c(BP_INTENT_DANGER_FOREGROUND);
+    s.success = c(t.bp_intent_success_rest);
+    s.success_hover = c(t.bp_intent_success_hover);
+    s.success_active = c(t.bp_intent_success_active);
+    s.success_foreground = c(t.bp_intent_success_foreground);
+    s.warning = c(t.bp_intent_warning_rest);
+    s.warning_hover = c(t.bp_intent_warning_hover);
+    s.warning_active = c(t.bp_intent_warning_active);
+    s.warning_foreground = c(t.bp_intent_warning_foreground);
+    s.danger = c(t.bp_intent_danger_rest);
+    s.danger_hover = c(t.bp_intent_danger_hover);
+    s.danger_active = c(t.bp_intent_danger_active);
+    s.danger_foreground = c(t.bp_intent_danger_foreground);
     s.secondary = panel;
     s.secondary_hover = hover;
     s.secondary_active = raised;
     s.secondary_foreground = text;
 
     // Buttons: Button's solid variant in each intent.
-    s.button = c(BP_INTENT_DEFAULT_REST);
-    s.button_hover = c(BP_INTENT_DEFAULT_HOVER);
-    s.button_active = c(BP_INTENT_DEFAULT_ACTIVE);
-    s.button_foreground = c(BP_INTENT_DEFAULT_FOREGROUND);
+    s.button = c(t.bp_intent_default_rest);
+    s.button_hover = c(t.bp_intent_default_hover);
+    s.button_active = c(t.bp_intent_default_active);
+    s.button_foreground = c(t.bp_intent_default_foreground);
     s.button_primary = s.primary;
     s.button_primary_hover = s.primary_hover;
     s.button_primary_active = s.primary_active;
@@ -118,8 +139,8 @@ pub fn colours(base: ThemeColor) -> ThemeColor {
 
     // Links.
     s.link = accent_text;
-    s.link_hover = c(BP_TYPOGRAPHY_COLOR_PRIMARY_HOVER);
-    s.link_active = c(BP_TYPOGRAPHY_COLOR_PRIMARY_ACTIVE);
+    s.link_hover = c(t.bp_typography_color_primary_hover);
+    s.link_active = c(t.bp_typography_color_primary_active);
 
     // Containers on panels: side columns, menus and popovers, title and status bars.
     s.sidebar = panel;
@@ -184,14 +205,14 @@ pub fn colours(base: ThemeColor) -> ThemeColor {
 
     // The library's base hues. The design system has no green, teal or cyan: those slots take
     // its blue, the success colour, so red never stands against green.
-    s.red = c(BP_PALETTE_RED_3);
-    s.red_light = c(BP_PALETTE_RED_5);
-    s.yellow = c(BP_PALETTE_ORANGE_3);
-    s.yellow_light = c(BP_PALETTE_ORANGE_5);
-    s.magenta = c(BP_PALETTE_BLUE_3);
-    s.magenta_light = c(BP_PALETTE_BLUE_5);
-    s.blue = c(BP_PALETTE_GREEN_3);
-    s.blue_light = c(BP_PALETTE_GREEN_5);
+    s.red = c(t.bp_palette_red_3);
+    s.red_light = c(t.bp_palette_red_5);
+    s.yellow = c(t.bp_palette_orange_3);
+    s.yellow_light = c(t.bp_palette_orange_5);
+    s.magenta = c(t.bp_palette_blue_3);
+    s.magenta_light = c(t.bp_palette_blue_5);
+    s.blue = c(t.bp_palette_green_3);
+    s.blue_light = c(t.bp_palette_green_5);
     s.green = s.blue;
     s.green_light = s.blue_light;
     s.cyan = s.blue;
@@ -213,22 +234,22 @@ pub fn colours(base: ThemeColor) -> ThemeColor {
 }
 
 /// The library's movements, from the design system's motion tokens (Theme/Motion).
-pub fn motion(base: MotionTokens) -> MotionTokens {
+pub fn motion(t: &Tokens, base: MotionTokens) -> MotionTokens {
     let curve =
         |t: Curve, fallback: Easing| Easing::cubic_bezier(t.0, t.1, t.2, t.3).unwrap_or(fallback);
     let mut m = base;
-    m.duration_instant = TM_D_STATE;
-    m.duration_fast = TM_D_SMALL;
-    m.duration_normal = TM_D_PANEL;
-    m.duration_slow = TM_D_STAGE;
-    m.easing_enter = curve(TM_EASE_OUT, m.easing_enter);
-    m.easing_exit = curve(TM_EASE_IN, m.easing_exit);
-    m.easing_move = curve(TM_EASE_STATE, m.easing_move);
-    m.spring_control = Spring::new(TM_D_SMALL);
-    m.spring_move = Spring::new(TM_D_PANEL);
-    let body = TM_TEXT_BODY.0;
-    m.distance_short = rems(TM_RISE.0 / body);
-    m.distance_medium = rems(TM_SLIDE.0 / body);
+    m.duration_instant = t.tm_d_state;
+    m.duration_fast = t.tm_d_small;
+    m.duration_normal = t.tm_d_panel;
+    m.duration_slow = t.tm_d_stage;
+    m.easing_enter = curve(t.tm_ease_out, m.easing_enter);
+    m.easing_exit = curve(t.tm_ease_in, m.easing_exit);
+    m.easing_move = curve(t.tm_ease_state, m.easing_move);
+    m.spring_control = Spring::new(t.tm_d_small);
+    m.spring_move = Spring::new(t.tm_d_panel);
+    let body = t.tm_text_body.0;
+    m.distance_short = rems(t.tm_rise.0 / body);
+    m.distance_medium = rems(t.tm_slide.0 / body);
     m
 }
 
@@ -241,24 +262,250 @@ fn installed(stack: &[&str], fonts: &[String]) -> Option<SharedString> {
         .map(|f| SharedString::from(f.to_string()))
 }
 
-/// Sets the library's theme from the tokens. Call it once, after `gpui_component::init`.
-pub fn apply(cx: &mut App) {
+/// Puts the design system's theme `name` in force: the parts' values and the library's theme.
+/// Call it after `gpui_component::init`, and again to switch themes. An unknown name keeps the
+/// theme in force and says so.
+pub fn apply(cx: &mut App, name: &str) -> Result<(), String> {
+    let Some((name, tokens)) = tokens::THEMES.iter().find(|(n, _)| *n == name) else {
+        return Err(format!(
+            "no theme named {name}; the design system has {}",
+            names().collect::<Vec<_>>().join(", ")
+        ));
+    };
+    let t = **tokens;
+    cx.set_global(Active { name, tokens: t });
     let fonts = cx.text_system().all_font_names();
-    Theme::update(cx, |t| {
-        t.mode = ThemeMode::Dark;
-        t.colors = colours(t.colors);
-        t.motion = motion(t.motion.clone());
-        t.radius = px(BP_SURFACE_BORDER_RADIUS.0);
-        t.radius_lg = px(BP_SURFACE_BORDER_RADIUS.0);
-        t.font_size = px(TM_TEXT_BODY.0);
-        t.mono_font_size = px(TM_TEXT_CODE.0);
-        if let Some(family) = installed(TM_FONT_TEXT, &fonts) {
-            t.font_family = family;
+    Theme::update(cx, |lib| {
+        lib.mode = if *name == "light" {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        };
+        lib.colors = colours(&t, lib.colors);
+        lib.motion = motion(&t, lib.motion.clone());
+        lib.radius = px(t.bp_surface_border_radius.0);
+        lib.radius_lg = px(t.bp_surface_border_radius.0);
+        lib.font_size = px(t.tm_text_body.0);
+        lib.mono_font_size = px(t.tm_text_code.0);
+        if let Some(family) = installed(t.tm_font_text, &fonts) {
+            lib.font_family = family;
         }
-        if let Some(family) = installed(TM_FONT_CODE, &fonts) {
-            t.mono_font_family = family;
+        if let Some(family) = installed(t.tm_font_code, &fonts) {
+            lib.mono_font_family = family;
         }
     });
+    cx.refresh_windows();
+    Ok(())
+}
+
+/// A size token as GPUI's size.
+fn size_of(token: temet_work_style::Px) -> Pixels {
+    px(token.0)
+}
+
+/// Colours by role (Theme/Colours). For components only.
+pub mod colour {
+    use gpui::{App, Hsla};
+    use temet_work_style::Intent;
+
+    use super::{active, c};
+
+    /// The window's ground.
+    pub fn page(cx: &App) -> Hsla {
+        c(active(cx).tm_surface_page)
+    }
+    /// A panel on the ground: the side columns, a CutPanel's body.
+    pub fn panel(cx: &App) -> Hsla {
+        c(active(cx).tm_surface_panel)
+    }
+    /// A row or control under the pointer.
+    pub fn hover(cx: &App) -> Hsla {
+        c(active(cx).tm_surface_hover)
+    }
+    /// A surface raised above a panel: menus, popovers.
+    pub fn raised(cx: &App) -> Hsla {
+        c(active(cx).tm_surface_raised)
+    }
+    /// A panel's border.
+    pub fn edge(cx: &App) -> Hsla {
+        c(active(cx).tm_edge)
+    }
+    /// The rule between rows.
+    pub fn edge_quiet(cx: &App) -> Hsla {
+        c(active(cx).tm_edge_quiet)
+    }
+    /// Body text.
+    pub fn text(cx: &App) -> Hsla {
+        c(active(cx).bp_typography_color_default_rest)
+    }
+    /// Muted text: notes, meta lines, column heads.
+    pub fn muted(cx: &App) -> Hsla {
+        c(active(cx).bp_typography_color_muted)
+    }
+    /// The selected row's wash.
+    pub fn selected_fill(cx: &App) -> Hsla {
+        c(active(cx).tm_selected_fill)
+    }
+    /// The lines above and below the selected row.
+    pub fn selected_line(cx: &App) -> Hsla {
+        c(active(cx).tm_selected_line)
+    }
+    /// The focus ring.
+    pub fn focus(cx: &App) -> Hsla {
+        c(active(cx).bp_emphasis_focus_color)
+    }
+    /// What asks for the person: labels, borders and buttons. A theme setting.
+    pub fn attention(cx: &App) -> Hsla {
+        c(active(cx).tm_attention)
+    }
+    /// Text in an intent's colour, as a minimal tag or a link shows it.
+    pub fn intent_text(cx: &App, intent: Intent) -> Hsla {
+        let t = active(cx);
+        c(match intent {
+            Intent::None => t.bp_typography_color_default_rest,
+            Intent::Primary => t.bp_typography_color_primary_rest,
+            Intent::Success => t.bp_typography_color_success_rest,
+            Intent::Warning => t.bp_typography_color_warning_rest,
+            Intent::Danger => t.bp_typography_color_danger_rest,
+        })
+    }
+    /// An intent's solid fill, as a solid button or tag shows it.
+    pub fn intent_fill(cx: &App, intent: Intent) -> Hsla {
+        let t = active(cx);
+        c(match intent {
+            Intent::None => t.bp_intent_default_rest,
+            Intent::Primary => t.bp_intent_primary_rest,
+            Intent::Success => t.bp_intent_success_rest,
+            Intent::Warning => t.bp_intent_warning_rest,
+            Intent::Danger => t.bp_intent_danger_rest,
+        })
+    }
+}
+
+/// Type (Theme/Type). For components only.
+pub mod text {
+    use gpui::{App, FontWeight, Pixels};
+
+    use super::{active, size_of};
+
+    /// Body text and controls.
+    pub fn body(cx: &App) -> Pixels {
+        size_of(active(cx).tm_text_body)
+    }
+    /// Small text: meta lines, notes, tags.
+    pub fn small(cx: &App) -> Pixels {
+        size_of(active(cx).tm_text_small)
+    }
+    /// Code and keys, in the mono face.
+    pub fn code(cx: &App) -> Pixels {
+        size_of(active(cx).tm_text_code)
+    }
+    /// A section's heading.
+    pub fn section(cx: &App) -> Pixels {
+        size_of(active(cx).tm_text_section)
+    }
+    /// A side pane's heading.
+    pub fn pane(cx: &App) -> Pixels {
+        size_of(active(cx).tm_text_pane)
+    }
+    /// A screen's one title.
+    pub fn page(cx: &App) -> Pixels {
+        size_of(active(cx).tm_text_page)
+    }
+    /// The weight of every heading and of a strong row's title.
+    pub fn heading_weight(cx: &App) -> FontWeight {
+        FontWeight(active(cx).tm_weight_heading)
+    }
+}
+
+/// Corners and borders (Theme/Colours, Rules). For components only.
+pub mod shape {
+    use gpui::{App, Pixels};
+
+    use super::{active, size_of};
+
+    /// Every corner: 2 px at most, no pills.
+    pub fn radius(cx: &App) -> Pixels {
+        size_of(active(cx).bp_surface_border_radius)
+    }
+    /// A border's width.
+    pub fn border(cx: &App) -> Pixels {
+        size_of(active(cx).bp_surface_border_width)
+    }
+    /// A CutPanel's cut corner.
+    pub fn cut(cx: &App) -> Pixels {
+        size_of(active(cx).tm_cut)
+    }
+}
+
+/// Spacing steps (`--tm-space-1` to `-6`). For components and composites.
+pub mod space {
+    use gpui::{App, Pixels};
+
+    use super::{active, size_of};
+
+    /// 2 px.
+    pub fn s1(cx: &App) -> Pixels {
+        size_of(active(cx).tm_space_1)
+    }
+    /// 4 px.
+    pub fn s2(cx: &App) -> Pixels {
+        size_of(active(cx).tm_space_2)
+    }
+    /// 6 px.
+    pub fn s3(cx: &App) -> Pixels {
+        size_of(active(cx).tm_space_3)
+    }
+    /// 8 px.
+    pub fn s4(cx: &App) -> Pixels {
+        size_of(active(cx).tm_space_4)
+    }
+    /// 12 px.
+    pub fn s5(cx: &App) -> Pixels {
+        size_of(active(cx).tm_space_5)
+    }
+    /// 16 px.
+    pub fn s6(cx: &App) -> Pixels {
+        size_of(active(cx).tm_space_6)
+    }
+}
+
+/// Layout sizes: columns, rows, labels. For components and composites.
+pub mod size {
+    use gpui::{App, Pixels};
+
+    use super::{active, size_of};
+
+    /// The left column at a window this wide.
+    pub fn col_left(cx: &App, window: Pixels) -> Pixels {
+        let t = active(cx);
+        size_of(if window < size_of(t.tm_screen_medium) {
+            t.tm_col_left_narrow
+        } else if window < size_of(t.tm_screen_wide) {
+            t.tm_col_left_medium
+        } else {
+            t.tm_col_left_wide
+        })
+    }
+    /// The right column at a window this wide.
+    pub fn col_right(cx: &App, window: Pixels) -> Pixels {
+        let t = active(cx);
+        size_of(if window < size_of(t.tm_screen_medium) {
+            t.tm_col_right_narrow
+        } else if window < size_of(t.tm_screen_wide) {
+            t.tm_col_right_medium
+        } else {
+            t.tm_col_right_wide
+        })
+    }
+    /// A row in a side column.
+    pub fn row_side(cx: &App) -> Pixels {
+        size_of(active(cx).tm_row_side)
+    }
+    /// A label column, as in a PropertyList.
+    pub fn label(cx: &App) -> Pixels {
+        size_of(active(cx).tm_label_width)
+    }
 }
 
 #[cfg(test)]
@@ -287,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn every_slot_comes_from_a_token() {
+    fn every_slot_comes_from_a_token_in_every_theme() {
         // Fill every slot with one colour no token has, then set them: a slot left unset keeps it.
         let mut base = slots(&ThemeColor::default());
         for v in base.values_mut() {
@@ -295,61 +542,81 @@ mod tests {
         }
         let marked: ThemeColor =
             serde_json::from_value(Value::Object(base)).expect("slots read back");
-        let from_marked = slots(&colours(marked));
-        let from_default = slots(&colours(ThemeColor::default()));
-        let unset: Vec<&String> = from_marked
-            .keys()
-            .filter(|k| from_marked[*k] != from_default[*k])
-            .collect();
-        assert!(
-            unset.is_empty(),
-            "slots left at the library's own colour: {unset:?}"
-        );
-        assert!(
-            from_marked.len() > 100,
-            "only {} slots read",
-            from_marked.len()
-        );
+        for (theme, t) in tokens::THEMES {
+            let from_marked = slots(&colours(t, marked));
+            let from_default = slots(&colours(t, ThemeColor::default()));
+            let unset: Vec<&String> = from_marked
+                .keys()
+                .filter(|k| from_marked[*k] != from_default[*k])
+                .collect();
+            assert!(
+                unset.is_empty(),
+                "{theme}: slots left at the library's own colour: {unset:?}"
+            );
+            assert!(
+                from_marked.len() > 100,
+                "only {} slots read",
+                from_marked.len()
+            );
+        }
     }
 
     #[test]
-    fn no_slot_breaks_the_ban_list() {
-        let found: Vec<String> = slots(&colours(ThemeColor::default()))
-            .into_iter()
-            .filter_map(|(slot, v)| {
-                let hex = v.as_str()?.to_string();
-                banned(rgba_of(&hex)).map(|b| format!("{slot} {hex} is {}", b.name))
-            })
-            .collect();
+    fn no_slot_breaks_the_ban_list_in_any_theme() {
+        let mut found: Vec<String> = Vec::new();
+        for (theme, t) in tokens::THEMES {
+            for (slot, v) in slots(&colours(t, ThemeColor::default())) {
+                let Some(hex) = v.as_str() else { continue };
+                if let Some(b) = banned(rgba_of(hex)) {
+                    found.push(format!("{theme}: {slot} {hex} is {}", b.name));
+                }
+            }
+        }
         assert!(found.is_empty(), "{}", found.join("\n"));
     }
 
     #[test]
     fn slots_take_the_roles_on_the_colours_page() {
-        let s = slots(&colours(ThemeColor::default()));
-        let hex = |slot: &str| rgba_of(s[slot].as_str().expect("a colour"));
-        assert_eq!(hex("background"), BP_PALETTE_BLACK, "the page");
-        assert_eq!(hex("sidebar"), BP_PALETTE_DARK_GRAY_1, "side columns");
-        assert_eq!(hex("popover"), BP_PALETTE_DARK_GRAY_3, "menus and popovers");
-        assert_eq!(
-            hex("primary"),
-            BP_INTENT_PRIMARY_REST,
-            "the accent as a fill"
-        );
-        assert_eq!(hex("ring"), BP_EMPHASIS_FOCUS_COLOR, "the focus ring");
-        assert_eq!(hex("table_active"), TM_SELECTED_FILL, "the selected row");
-        assert_eq!(hex("table_row_border"), TM_EDGE_QUIET, "rules between rows");
+        for (theme, t) in tokens::THEMES {
+            let s = slots(&colours(t, ThemeColor::default()));
+            let hex = |slot: &str| rgba_of(s[slot].as_str().expect("a colour"));
+            let roles = [
+                ("background", t.tm_surface_page, "the page"),
+                ("sidebar", t.tm_surface_panel, "side columns"),
+                ("popover", t.tm_surface_raised, "menus and popovers"),
+                ("primary", t.bp_intent_primary_rest, "the accent as a fill"),
+                ("ring", t.bp_emphasis_focus_color, "the focus ring"),
+                ("table_active", t.tm_selected_fill, "the selected row"),
+                ("table_row_border", t.tm_edge_quiet, "rules between rows"),
+            ];
+            for (slot, token, role) in roles {
+                assert_eq!(hex(slot), token, "{theme}: {role}");
+            }
+        }
     }
 
     #[test]
     fn motion_takes_the_design_systems_durations_and_curves() {
-        let m = motion(MotionTokens::default());
-        assert_eq!(m.duration_fast, TM_D_SMALL);
-        assert_eq!(m.duration_normal, TM_D_PANEL);
-        let Easing::CubicBezier { x1, y1, x2, y2 } = m.easing_enter else {
-            panic!("enter is not a curve: {:?}", m.easing_enter);
-        };
-        assert_eq!(Curve(x1, y1, x2, y2), TM_EASE_OUT);
+        for (theme, t) in tokens::THEMES {
+            let m = motion(t, MotionTokens::default());
+            assert_eq!(m.duration_fast, t.tm_d_small, "{theme}");
+            assert_eq!(m.duration_normal, t.tm_d_panel, "{theme}");
+            let Easing::CubicBezier { x1, y1, x2, y2 } = m.easing_enter else {
+                panic!("{theme}: enter is not a curve: {:?}", m.easing_enter);
+            };
+            assert_eq!(Curve(x1, y1, x2, y2), t.tm_ease_out, "{theme}");
+        }
+    }
+
+    #[test]
+    fn the_light_theme_has_a_light_ground_and_dark_text() {
+        let (_, l) = tokens::THEMES
+            .iter()
+            .find(|(n, _)| *n == "light")
+            .expect("a light theme");
+        let (.., ground) = l.tm_surface_page.hsl();
+        let (.., ink) = l.bp_typography_color_default_rest.hsl();
+        assert!(ground > 0.8 && ink < 0.3, "ground {ground}, text {ink}");
     }
 
     #[test]

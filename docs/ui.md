@@ -45,9 +45,8 @@ These rules hold the layers in place:
   `CutPanel::new().attention(true).build_up(true)`.
 - A part that is not in the design system does not go in the app. A part marked gap below
   waits until the design system has it.
-- Use only the props the design system documents or its stories show. Where the props
-  listing is missing (NavbarGroup, MenuItem, OverlayToaster), the stories' props are the
-  whole set.
+- Use only the props the design system documents or its stories show. Where a part has no
+  props listing, its stories' props are the whole set.
 
 ## Adding a part
 
@@ -67,18 +66,19 @@ A new variant of an existing part goes the same way.
 
 `scripts/sync-tokens` reads the design system's tokens from its running Storybook and writes
 `crates/style/src/tokens.rs`; nobody edits that file by hand. It refuses a design system with
-uncommitted changes or a commit that is not pushed, and the file names the commit it came from. Each constant there has its token's
-name: `--tm-edge-quiet` is `TM_EDGE_QUIET`.
+uncommitted changes or a commit that is not pushed, and the file names the commit it came from.
+Each theme is one `Tokens` value, `DARK` or `LIGHT`, with a field per token named after it:
+`--tm-edge-quiet` is `tm_edge_quiet`. Both themes set the same tokens, or the sync fails.
 
-Every value belongs to a theme, and each constant in `tokens.rs` is a theme's default. The user
-picks the theme and can change the values the design system makes theme settings, such as the
-attention colour. So the theme module reads the theme in force when the app runs, with the
-user's settings, and turns it into gpui-component's `Theme` and the values temet's own parts
-read. Nothing in the app bakes a token's value in.
+Each value in `tokens.rs` is a theme's default. The user picks the theme and can change the
+values the design system makes theme settings, such as the attention colour (not built yet).
+`theme::apply` puts a theme in force; the parts read its values through the theme module's
+`colour`, `text`, `shape`, `motion`, `space` and `size` functions, each named for a role on the
+design system's Theme pages. Nothing in the app bakes a token's value in.
 
 | Item | Design system source | Values |
 |---|---|---|
-| Surfaces | `--bp-palette-black` (the page), `--bp-palette-dark-gray-1` (panels, side columns), `-2` (hover), `-3` (menus, popovers, pressed), `-4` (toasts) | plum-tinted greys |
+| Surfaces | `--tm-surface-page`, `-panel` (side columns, panels), `-hover`, `-raised` (menus, popovers, pressed), `-toast`, `-tooltip` | plum-tinted greys in the dark theme, light plum in the light one |
 | Edges | `--tm-edge` (panel borders, column rules), `--tm-edge-quiet` (rules between rows), `--bp-surface-border-color-default`, `-strong` | white at 8 to 24% |
 | Text | `--bp-typography-color-default-rest`, `-muted`, `-default-disabled` | |
 | Accent | `--bp-intent-primary-rest` (`#D41B6F`, fills), `--bp-typography-color-primary-rest` (text), `--bp-emphasis-focus-color` (`#F77CB3`, focus ring) | magenta |
@@ -101,7 +101,7 @@ tokens.
 
 | Part | Design system id | Variants temet-work uses | GPUI basis |
 |---|---|---|---|
-| AppShell | gap | regions: nav bar, main area, side pane, optional top bar | |
+| AppShell | `temet-appshell` | regions: nav bar, main area, side pane, optional top bar | |
 | Icon | `blueprint-icon` | 16, 20 px | `icon` |
 | Button | `blueprint-button` | `variant` solid, minimal, outlined; `intent` none, primary; `size` small, medium; `icon`; `loading`; `disabled` | `button` |
 | AttentionButton | `temet-attentionbutton` | `size` small | `button` |
@@ -114,7 +114,7 @@ tokens.
 | ProgressBar | `blueprint-progressbar` | `intent` primary; `stripes` off; `animate` off | `progress` |
 | Spinner | `blueprint-spinner` | | `spinner` |
 | Divider | `blueprint-divider` | | `separator` |
-| InputGroup | `blueprint-inputgroup` | `leftIcon` (search); `size` small, medium | `input` |
+| InputGroup | `temet-inputgroup` | `leftIcon` (search); `size` small, medium | `input` |
 | TextArea | `blueprint-textarea` | | `input` |
 | HTMLSelect | `blueprint-htmlselect` | | `select` |
 | Switch | `blueprint-switch` | | `switch` |
@@ -137,28 +137,28 @@ tokens.
 | CutPanel | `temet-cutpanel` | `attention`; `padded`; `buildUp` | |
 | Disclosure | `temet-disclosure` | `defaultOpen`; `rightElement` | `collapsible` |
 | PlusMinusTree | `temet-plusminustree` | `defaultExpanded`; node `secondaryLabel` | `tree` |
-| Heading | gap | page title 20 px, pane title 16 px, section title 14 px with a muted note at the right | |
-| PropertyList | gap | label and value pairs, labels muted in a fixed column | `description_list` |
-| Meter | gap | name and value on one line, ProgressBar under them | |
-| ListRow | gap | a row outside a table with a quiet rule above: title, muted meta line, muted detail line, an end element | |
+| Heading | `temet-heading` | page title 20 px, pane title 16 px, section title 14 px with a muted note at the right | |
+| PropertyList | `temet-propertylist` | label and value pairs, labels muted in a fixed column | `description_list` |
+| Meter | `temet-meter` | name and value on one line, ProgressBar under them | |
+| ListRow | `temet-listrow` | a row outside a table with a quiet rule above: title, muted meta line, muted detail line, an end element | |
 | TerminalView | gap | an agent's terminal screen, read only, in the mono face | |
 
 ## Composites
 
 | Part | What it is | Built from | Design system |
 |---|---|---|---|
-| SideNav | the guide's nav bar, the left column's areas and projects: an area is a group label that opens and closes, a project an item with its icon, name and a count of what waits on a person; two levels at most; past about five areas, an area selector at the top (`docs/areas.md`) | PlusMinusTree, Tag, Tooltip, Icon, HTMLSelect | gap; the Storybook page `pages-temet-work-radar` draws it in its own code |
-| TopBar | across the window: the app's sections and search; needed once the app has a second section, such as settings (`docs/settings.md`) | Navbar, NavbarGroup, NavbarHeading, Button, InputGroup, Omnibar | gap |
-| GroupList | the left column's groups: each group's name and milestone, and its agents with role, machine and model, and status | Heading, ListRow, StatusTag | gap |
-| MeterList | the left column's machines (build slots in use) and limits (use per window, when it resets) | Heading, Meter | gap |
-| PageHeader | the top of the main area: the project or area name, where its issues and code are, and the controls for the whole page | Heading, Icon, SegmentedControl, Button | gap |
-| NeedsYou | the decisions that wait on a person, costliest to undo first | CutPanel (`attention`, `buildUp`), AttentionText, DecisionRow | gap |
-| DecisionRow | one agent decision: who, when, what it took, the cost to undo, what it weighed and why, the deadline and Overturn | ListRow, Tag, PropertyList, AttentionText, AttentionButton | gap; the AttentionButton story "Decision Row" shows one |
-| MilestonePanel | one milestone: name, done of total, due date, progress, and its issues | CutPanel, Section, ProgressBar, IssueTable | gap |
-| IssueTable | issues as rows: key, title, stage, agent, updated; optional group rows; one set of column widths in every panel | HTMLTable, TableRow, StageTag | gap |
-| IssuePane | the side pane for an issue: title, key, stage, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | gap |
-| CheckList | a plan's checks: what is done when, its status, and what proves it | ListRow, StatusTag | gap |
-| ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points, the author's reply and each point's status | Disclosure, ListRow, StatusTag | gap; the Disclosure story "Open" shows one round |
+| SideNav | the guide's nav bar, the left column's areas and projects: an area is a group label that opens and closes, a project an item with its icon, name and a count of what waits on a person; two levels at most; past about five areas, an area selector at the top (`docs/areas.md`) | PlusMinusTree, Tag, Tooltip, Icon, HTMLSelect | `temet-sidenav` |
+| TopBar | across the window: the app's sections and search; needed once the app has a second section, such as settings (`docs/settings.md`) | Navbar, NavbarGroup, NavbarHeading, Button, InputGroup, Omnibar | `temet-topbar` |
+| GroupList | the left column's groups: each group's name and milestone, and its agents with role, machine and model, and status | Heading, ListRow, StatusTag | `temet-grouplist` |
+| MeterList | the left column's machines (build slots in use) and limits (use per window, when it resets) | Heading, Meter | `temet-meterlist` |
+| PageHeader | the top of the main area: the project or area name, where its issues and code are, and the controls for the whole page | Heading, Icon, SegmentedControl, Button | `temet-pageheader` |
+| NeedsYou | the decisions that wait on a person, costliest to undo first | CutPanel (`attention`, `buildUp`), AttentionText, DecisionRow | `temet-needsyou` |
+| DecisionRow | one agent decision: who, when, what it took, the cost to undo, what it weighed and why, the deadline and Overturn | ListRow, Tag, PropertyList, AttentionText, AttentionButton | `temet-decisionrow` |
+| MilestonePanel | one milestone: name, done of total, due date, progress, and its issues | CutPanel, Section, ProgressBar, IssueTable | `temet-milestonepanel` |
+| IssueTable | issues as rows: key, title, stage, agent, updated; optional group rows; one set of column widths in every panel | HTMLTable, TableRow, StageTag | `temet-issuetable` |
+| IssuePane | the side pane for an issue: title, key, stage, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
+| CheckList | a plan's checks: what is done when, its status, and what proves it | ListRow, StatusTag | `temet-checklist` |
+| ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points, the author's reply and each point's status | Disclosure, ListRow, StatusTag | `temet-reviewrounds` |
 | AgentPane | the side pane for an agent: its role, state, terminal and decisions | Heading, StatusTag, TerminalView, DecisionRow | gap |
 
 ## Pages
@@ -173,27 +173,22 @@ tokens.
 ## Gaps in the design system
 
 Each of these goes to the design system as a definition. When the part lands with its story,
-its row above takes the part's id in place of "gap".
+its row above takes the part's id in place of "gap". The composites, AppShell, Heading,
+PropertyList, Meter and ListRow are on the design system's branch `fleet/temet-workers`, which
+has not merged to its main yet, and `crates/style/src/tokens.rs` is synced from that branch.
 
 - A token export: every token in the Base items table, resolved for each theme, as JSON from
   the package's build, with the status and stage maps, each component's look per variant and
   state, and the movements as data. `scripts/sync-tokens` then reads
   that file in place of the running Storybook.
-- A light theme beside the dark one, with the same tokens.
 - Which tokens a user may change, such as `--tm-attention`, marked in the token export.
-- The spacing steps and the column widths the radar page sets in its own CSS, as tokens. The
-  text sizes and faces are tokens now (`--tm-text-*`, `--tm-font-*`).
 - The faces' font files as TTF or OTF, which the app embeds. The design system ships them as
   woff2, and GPUI's Linux text system (cosmic-text, reading fonts through fontdb and
   ttf-parser) parses TrueType and OpenType only. Until then the app falls back to the system's
   fonts.
 - The design system's part list in the token export, so the review check can confirm every id
   in this map.
-- AppShell, Heading, PropertyList, Meter and ListRow as components, and every composite above
-  but AgentPane.
 - TerminalView and AgentPane, once temet-work sends their definitions.
-- InputGroup without `round`, as Tag has: a round input is a pill.
-- Props the Storybook does not document: NavbarGroup, MenuItem and OverlayToaster.
 
 ## Checks
 

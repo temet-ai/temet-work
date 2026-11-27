@@ -45,8 +45,9 @@ pub const HUES: [HueBan; 3] = [
 /// but for this.
 pub const MAX_RADIUS: Px = Px(2.0);
 
-// The synced corner radius stays within it, or the crate does not build.
-const _: () = assert!(crate::tokens::BP_SURFACE_BORDER_RADIUS.0 <= MAX_RADIUS.0);
+// Every theme's corner radius stays within it, or the crate does not build.
+const _: () = assert!(crate::tokens::DARK.bp_surface_border_radius.0 <= MAX_RADIUS.0);
+const _: () = assert!(crate::tokens::LIGHT.bp_surface_border_radius.0 <= MAX_RADIUS.0);
 
 /// The ban a colour falls under, if any. A colour under 10% alpha is a wash too faint to read
 /// as a hue.
@@ -83,36 +84,68 @@ mod tests {
         assert!(banned(Rgba(0xdcbb2aff)).is_none(), "the warning yellow");
     }
 
+    /// Banned colours the design system has been told about, by theme, token and value. Each
+    /// one fails the test below once its value changes, so none outlives its fix.
+    const REPORTED: [(&str, &str, Rgba); 0] = [];
+
     #[test]
-    fn no_token_colour_is_banned() {
-        let found: Vec<String> = COLOURS
-            .iter()
-            .filter_map(|(name, c)| banned(*c).map(|b| format!("{name} {:08x} is {}", c.0, b.name)))
-            .collect();
+    fn no_token_colour_is_banned_in_any_theme() {
+        let mut found: Vec<String> = Vec::new();
+        for (theme, t) in THEMES {
+            for (name, c) in t.colours() {
+                let reported = REPORTED.iter().any(|r| (r.0, r.1, r.2) == (theme, name, c));
+                if let Some(b) = banned(c).filter(|_| !reported) {
+                    found.push(format!("{theme}: {name} {:08x} is {}", c.0, b.name));
+                }
+            }
+        }
         assert!(found.is_empty(), "{}", found.join("\n"));
+        for (theme, name, value) in REPORTED {
+            let (_, t) = THEMES.iter().find(|(n, _)| *n == theme).expect("a theme");
+            let now = t
+                .colours()
+                .into_iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, c)| c);
+            assert_eq!(
+                now,
+                Some(value),
+                "{theme}: {name} changed, so take it off REPORTED"
+            );
+        }
     }
 
     #[test]
-    fn the_accent_is_the_rules_magenta() {
-        assert_eq!(
-            BP_INTENT_PRIMARY_REST,
-            Rgba(0xd41b6fff),
-            "the accent as a fill"
-        );
-        assert_eq!(BP_EMPHASIS_FOCUS_COLOR, Rgba(0xf77cb3ff), "the focus ring");
-        assert_eq!(
-            BP_TYPOGRAPHY_COLOR_PRIMARY_REST,
-            Rgba(0xf77cb3ff),
-            "the accent as text"
-        );
+    fn the_accent_is_the_rules_magenta_in_every_theme() {
+        for (theme, t) in THEMES {
+            assert_eq!(
+                t.bp_intent_primary_rest,
+                Rgba(0xd41b6fff),
+                "{theme}: the accent as a fill"
+            );
+            for (what, c) in [
+                ("focus ring", t.bp_emphasis_focus_color),
+                ("accent as text", t.bp_typography_color_primary_rest),
+            ] {
+                let (h, s, _) = c.hsl();
+                assert!(
+                    (320.0..345.0).contains(&h) && s > 0.5,
+                    "{theme}: the {what} {:08x} is not magenta",
+                    c.0
+                );
+            }
+        }
+        assert_eq!(DARK.bp_typography_color_primary_rest, Rgba(0xf77cb3ff));
     }
 
     #[test]
-    fn success_is_blue_and_danger_red() {
-        let (h, ..) = BP_INTENT_SUCCESS_REST.hsl();
-        assert!((200.0..250.0).contains(&h), "success hue {h}");
-        let (h, ..) = BP_INTENT_DANGER_REST.hsl();
-        assert!(!(15.0..345.0).contains(&h), "danger hue {h}");
+    fn success_is_blue_and_danger_red_in_every_theme() {
+        for (theme, t) in THEMES {
+            let (h, ..) = t.bp_intent_success_rest.hsl();
+            assert!((200.0..250.0).contains(&h), "{theme}: success hue {h}");
+            let (h, ..) = t.bp_intent_danger_rest.hsl();
+            assert!(!(15.0..345.0).contains(&h), "{theme}: danger hue {h}");
+        }
     }
 
     #[test]

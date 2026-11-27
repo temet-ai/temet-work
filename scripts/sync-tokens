@@ -5,9 +5,10 @@
 //   scripts/sync-tokens [storybook-url]      default http://127.0.0.1:6106
 //
 // It opens one story of the design system's running Storybook in headless Chromium, reads each
-// token the design system documents as the page resolves it in the dark theme, and writes it as
-// a Rust constant with the token's name. It also reads the StatusTag and StageTag maps. Nothing in
-// the design system changes. Start its Storybook first (`npm run storybook` in temet-design/ui).
+// token the design system documents as the page resolves it in each theme, and writes one Rust
+// value per theme (DARK, LIGHT) of a struct with a field per token, named after the token. Both
+// themes must set the same tokens. It also reads the StatusTag and StageTag maps. Nothing in the
+// design system changes. Start its Storybook first (`npm run storybook` in temet-design/ui).
 //
 // The values must come from a pushed commit of the design system, so the script refuses a
 // checkout of it with uncommitted changes, or whose commit is on no remote branch. It finds the
@@ -25,6 +26,11 @@ const path = require("node:path");
 const STORYBOOK = (process.argv[2] || "http://127.0.0.1:6106").replace(/\/$/, "");
 const STORY = "temet-statustag--all-statuses";
 const OUT = path.join(__dirname, "..", "crates", "style", "src", "tokens.rs");
+// The classes that put the page in each theme, as the design system's Storybook sets them on <html>.
+const THEMES = { dark: "bp6-dark tm-theme-dark", light: "tm-theme-light" };
+// A width between --tm-screen-medium and --tm-screen-wide. The values do not depend on it: the
+// tokens that switch with the width are left out below, and their fixed values are kept.
+const WIDTH = 1440;
 
 // The tokens the design system documents (Theme/Colours, Theme/Motion, the ramps table). Blueprint's
 // other ramps stay out, and with them its turquoise, cerulean and sepia, which the Rules leave unused.
@@ -38,6 +44,9 @@ const KEEP = [
   /^--bp-surface-/,
   /^--bp-emphasis-/,
 ];
+// --tm-col-left and --tm-col-right switch between their -narrow, -medium and -wide values with the
+// window's width. The app makes that choice itself from --tm-screen-medium and --tm-screen-wide.
+const DROP = [/^--tm-col-(left|right)$/];
 
 function fail(message) {
   console.error(`sync-tokens: ${message}`);
@@ -70,11 +79,12 @@ async function waitFor(what, test, ms = 30000) {
 }
 
 // Runs in the Storybook page. Returns every custom property its stylesheets set, resolved on the
-// body in the dark theme, each colour as the browser computes it, and the two maps.
-async function probe() {
+// body in the theme whose classes are given, each colour as the browser computes it, and the two
+// maps.
+async function probe(classes) {
   const html = document.documentElement;
-  html.classList.add("bp6-dark");
-  document.body.classList.add("bp6-dark");
+  html.className = classes;
+  document.body.className = classes.includes("bp6-dark") ? "bp6-dark" : "";
   // The Storybook toolbar can switch the attention colour; read the theme's default.
   html.removeAttribute("data-attention");
   const names = new Set();
@@ -158,13 +168,17 @@ async function read() {
       if (r.exceptionDetails) fail(`the page threw: ${r.exceptionDetails.exception?.description || r.exceptionDetails.text}`);
       return r.result.value;
     };
+    await send("Emulation.setDeviceMetricsOverride", { width: WIDTH, height: 900, deviceScaleFactor: 1, mobile: false });
     await send("Page.navigate", { url: `${STORYBOOK}/iframe.html?id=${STORY}&viewMode=story` });
     await waitFor("the story to render", () =>
       evaluate(`document.readyState === "complete" && !!document.querySelector("#storybook-root > *")`),
     );
-    const json = await evaluate(`(${probe.toString()})()`);
+    const themes = {};
+    for (const [name, classes] of Object.entries(THEMES)) {
+      themes[name] = JSON.parse(await evaluate(`(${probe.toString()})(${JSON.stringify(classes)})`));
+    }
     ws.close();
-    return JSON.parse(json);
+    return themes;
   } finally {
     chrome.kill();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -173,7 +187,6 @@ async function read() {
 
 // ---------- Values to Rust ----------
 
-const constName = (token) => token.replace(/^--/, "").replace(/-/g, "_").toUpperCase();
 
 /** "rgb(20, 16, 26)", "rgba(255, 255, 255, 0.08)" or "color(srgb 0.8 0.1 0.4 / 0.2)" as 0xRRGGBBAA. */
 function rgba(computed) {
@@ -251,24 +264,48 @@ function source() {
   return `@temet-ai/design ${version}, commit ${commit}`;
 }
 
-function rust(data, from) {
-  const kept = Object.keys(data.values)
-    .filter((n) => KEEP.some((re) => re.test(n)))
+const fieldName = (token) => token.replace(/^--/, "").replace(/-/g, "_");
+
+/** One theme's tokens, classified, sorted by name; and the names that are not a single value. */
+function classifyAll(values) {
+  const kept = Object.keys(values)
+    .filter((n) => KEEP.some((re) => re.test(n)) && !DROP.some((re) => re.test(n)))
     .sort();
   const tokens = [];
   const skipped = [];
   for (const name of kept) {
-    const t = classify(name, data.values[name]);
+    const t = classify(name, values[name]);
     if (t) tokens.push({ name, ...t });
     else skipped.push(name);
+  }
+  return { tokens, skipped };
+}
+
+function rust(themes, from) {
+  const names = Object.keys(themes);
+  const first = themes[names[0]];
+  const per = Object.fromEntries(names.map((n) => [n, classifyAll(themes[n].values)]));
+  const tokens = per[names[0]].tokens;
+  const skipped = per[names[0]].skipped;
+  // A theme is a full set of values for the same keys, each of the same kind.
+  for (const n of names.slice(1)) {
+    const a = tokens.map((t) => `${t.name}:${t.kind}`).join(" ");
+    const b = per[n].tokens.map((t) => `${t.name}:${t.kind}`).join(" ");
+    if (a !== b) {
+      const left = new Set(a.split(" "));
+      const right = new Set(b.split(" "));
+      const only = (x, y) => [...x].filter((k) => !y.has(k));
+      fail(`the ${names[0]} and ${n} themes differ: only in ${names[0]}: ${only(left, right).join(", ") || "none"}; only in ${n}: ${only(right, left).join(", ") || "none"}`);
+    }
   }
   const out = [];
   out.push(`//! The design system's tokens, from ${from}.`);
   out.push("//! Written by `scripts/sync-tokens`; do not edit, run the script again.");
   out.push("//!");
-  out.push("//! Each constant has its token's name and holds its value in the dark theme. Blueprint's ramp");
-  out.push("//! names hold other hues in the temet theme: blue holds magenta (the accent), green holds blue");
-  out.push("//! (success) and orange holds yellow (warning). `TM_ATTENTION` is the theme's default.");
+  out.push("//! A theme is one [`Tokens`] value with a field per token, named after it: `--tm-edge-quiet` is");
+  out.push("//! `tm_edge_quiet`. Blueprint's ramp names hold other hues in the temet theme: blue holds magenta");
+  out.push("//! (the accent), green holds blue (success) and orange holds yellow (warning). Each value is the");
+  out.push("//! theme's default; the user's settings win over it.");
   if (skipped.length) {
     out.push("//!");
     out.push("//! Not a single value, so left out:");
@@ -278,33 +315,50 @@ function rust(data, from) {
   out.push("use std::time::Duration;");
   out.push("");
   out.push("use crate::{Curve, Intent, Px, Rgba, StageView, StatusView};");
+  out.push("");
+  out.push("/// One theme: a value for every token.");
+  out.push("#[derive(Clone, Copy, Debug, PartialEq)]");
+  out.push("pub struct Tokens {");
   for (const t of tokens) {
-    out.push("");
-    out.push(`/// \`${t.name}\`: ${t.doc.replace(/`/g, "")}`);
-    out.push(`pub const ${constName(t.name)}: ${TYPES[t.kind]} = ${t.rust};`);
+    out.push(`    /// \`${t.name}\``);
+    out.push(`    pub ${fieldName(t.name)}: ${TYPES[t.kind] === "&[&str]" ? "&'static [&'static str]" : TYPES[t.kind]},`);
   }
-  for (const kind of Object.keys(LISTS)) {
-    const of = tokens.filter((t) => t.kind === kind);
+  out.push("}");
+  for (const n of names) {
     out.push("");
-    out.push(`/// Every ${kind === "px" ? "size" : kind} token, by name.`);
-    out.push(`pub const ${LISTS[kind]}: &[(&str, ${TYPES[kind]})] = &[`);
-    for (const t of of) out.push(`    ("${t.name}", ${constName(t.name)}),`);
-    out.push("];");
+    out.push(`/// The ${n} theme.`);
+    out.push(`pub const ${n.toUpperCase()}: Tokens = Tokens {`);
+    for (const t of per[n].tokens) out.push(`    ${fieldName(t.name)}: ${t.rust}, // ${t.doc.replace(/`/g, "")}`);
+    out.push("};");
   }
   out.push("");
+  out.push("/// Every theme, by name.");
+  out.push(`pub const THEMES: [(&str, &Tokens); ${names.length}] = [${names.map((n) => `("${n}", &${n.toUpperCase()})`).join(", ")}];`);
+  out.push("");
+  out.push("impl Tokens {");
+  for (const kind of Object.keys(LISTS)) {
+    const of = tokens.filter((t) => t.kind === kind);
+    const ty = TYPES[kind] === "&[&str]" ? "&'static [&'static str]" : TYPES[kind];
+    out.push(`    /// Every ${kind === "px" ? "size" : kind} token, by name.`);
+    out.push(`    pub fn ${LISTS[kind].toLowerCase()}(&self) -> [(&'static str, ${ty}); ${of.length}] {`);
+    out.push(`        [${of.map((t) => `("${t.name}", self.${fieldName(t.name)})`).join(", ")}]`);
+    out.push("    }");
+  }
+  out.push("}");
+  out.push("");
   out.push("/// StatusTag's statuses, in the design system's order.");
-  out.push(`pub const STATUS: [StatusView; ${data.status.length}] = [`);
-  for (const s of data.status) {
+  out.push(`pub const STATUS: [StatusView; ${first.status.length}] = [`);
+  for (const s of first.status) {
     if (!(s.intent in INTENTS)) fail(`status ${s.name} has an intent this script does not know: ${s.intent}`);
     out.push(`    StatusView { name: "${s.name}", word: "${s.word}", icon: "${s.icon}", intent: Intent::${INTENTS[s.intent]} },`);
   }
   out.push("];");
   out.push("");
   out.push("/// StageTag's stages, in the order an issue goes through them.");
-  out.push(`pub const STAGES: [StageView; ${data.stages.length}] = [`);
-  for (const s of data.stages) out.push(`    StageView { name: "${s.name}", icon: "${s.icon}" },`);
+  out.push(`pub const STAGES: [StageView; ${first.stages.length}] = [`);
+  for (const s of first.stages) out.push(`    StageView { name: "${s.name}", icon: "${s.icon}" },`);
   out.push("];");
-  return { text: out.join("\n") + "\n", count: tokens.length, skipped };
+  return { text: out.join("\n") + "\n", count: tokens.length, skipped, first };
 }
 
 (async () => {
@@ -314,14 +368,14 @@ function rust(data, from) {
   } catch {
     fail(`no Storybook at ${STORYBOOK}; start it with \`npm run storybook\` in temet-design/ui`);
   }
-  const data = await read();
-  const { text, count, skipped } = rust(data, from);
+  const themes = await read();
+  const { text, count, skipped, first: data } = rust(themes, from);
   fs.writeFileSync(OUT, text);
   try {
     execFileSync("rustfmt", ["--edition", "2024", OUT], { stdio: "inherit" });
   } catch {
     fail(`wrote ${OUT} but rustfmt failed on it`);
   }
-  console.log(`sync-tokens: ${count} tokens, ${data.status.length} statuses, ${data.stages.length} stages -> ${path.relative(process.cwd(), OUT)}`);
+  console.log(`sync-tokens: ${count} tokens in ${Object.keys(themes).length} themes, ${data.status.length} statuses, ${data.stages.length} stages -> ${path.relative(process.cwd(), OUT)}`);
   if (skipped.length) console.log(`sync-tokens: left out ${skipped.length}: ${skipped.join(", ")}`);
 })().catch((e) => fail(e.message));
