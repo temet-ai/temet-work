@@ -251,6 +251,15 @@ fn calls(line: &str) -> Vec<(bool, &str, &str)> {
 }
 
 /// Whether an argument list starts with a number other than zero.
+/// A number, or a number in a size call: `4.`, `px(4.)`, `rems(0.25)`.
+fn literal_size(args: &str) -> bool {
+    let a = args.trim_start();
+    literal(a)
+        || ["px(", "rems(", "rem(", "relative("]
+            .iter()
+            .any(|p| a.strip_prefix(p).is_some_and(literal))
+}
+
 fn literal(args: &str) -> bool {
     let a = args.trim_start();
     let a = a.strip_prefix('-').unwrap_or(a);
@@ -343,8 +352,9 @@ fn inline_values(line: &str, layer: Layer) -> Vec<String> {
                 "a duration literal"
             }
             "opacity" if method && literal(args) => "an opacity literal",
-            "corner_radii" => "a corner set by hand",
-            n if method && (n == "rounded" || n.starts_with("rounded_")) => "a corner set by hand",
+            // A corner read from a token or a look passes; a number or the library's scale does not.
+            "corner_radii" | "rounded" if literal_size(args) => "a corner set by hand",
+            n if method && n.starts_with("rounded_") => "a corner set by hand",
             n if method && no_args(args) && scale_helper(n) => "a size from the library's scale",
             "text_xs" | "text_sm" | "text_base" | "text_lg" | "text_xl" | "text_2xl"
             | "text_3xl" | "text_4xl"
@@ -669,6 +679,7 @@ pub struct Tag;
 fn tag(t: &Theme) -> Div {
     div().w_full().h_full().size_full().flex_1().p(t.space.small).bg(rgba(t.colour.edge.0))
         .w(px(0.)).border_0().top_0().opacity(t.motion.dim).border_color(Hsla::transparent_black())
+        .rounded(look.radius)
 }";
         assert!(
             one("components/tag.rs", code).is_empty(),
