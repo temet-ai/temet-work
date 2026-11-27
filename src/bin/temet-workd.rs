@@ -5,7 +5,11 @@
 //!
 //! ```text
 //! temet-workd [--config FILE] [--log FILE] [--once]
+//! temet-workd --version | --build
 //! ```
+//!
+//! `--version` prints the version and the build id, `--build` the id alone: the
+//! commit it was built from, which a deploy that restarts the daemon compares.
 //!
 //! `--once` runs one round and prints the state as text. The configuration
 //! defaults to `$XDG_CONFIG_HOME/temet-work/config.toml` and the log to
@@ -56,6 +60,18 @@ fn run() -> Result<(), String> {
             }
             "--log" => log_path = args.next().map(PathBuf::from).ok_or("--log needs a file")?,
             "--once" => once = true,
+            "--version" => {
+                println!(
+                    "temet-workd {} ({})",
+                    env!("CARGO_PKG_VERSION"),
+                    temet_work::BUILD
+                );
+                return Ok(());
+            }
+            "--build" => {
+                println!("{}", temet_work::BUILD);
+                return Ok(());
+            }
             other => {
                 return Err(format!(
                     "unknown argument {other}; see temet-workd --help in docs/configuration.md"
@@ -76,7 +92,11 @@ fn run() -> Result<(), String> {
     let (journal, world) = temet_work::journal(&log_path)?;
     let mut host = Host::new(
         world,
-        temet_work::parts_with(config.daemon_host.clone()),
+        // A deploy that restarts this daemon leaves its note next to the log.
+        temet_work::parts_with(
+            config.daemon_host.clone(),
+            Some(log_path.with_file_name("deploy-handoff")),
+        ),
         journal,
     );
     if host.world().log.is_none() {

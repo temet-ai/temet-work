@@ -7,19 +7,25 @@ pub mod config;
 pub mod mcp;
 pub mod socket;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use temet_work_core::{Journal, Part, World};
 
 /// The parts compiled into this build, in a fixed order: families first, then
 /// services.
 pub fn parts() -> Vec<Box<dyn Part>> {
-    parts_with(None)
+    parts_with(None, None)
 }
 
-/// The parts, with `daemon_host`: this machine as other machines reach it over SSH.
+/// The id of this build: the commit it was built from, `-dirty` when the
+/// checkout had changes, or `unknown` outside a git checkout.
+pub const BUILD: &str = env!("TEMET_WORK_BUILD");
+
+/// The parts, with `daemon_host`: this machine as other machines reach it over
+/// SSH; and `handoff`, the file a deploy that restarts the daemon records itself in.
 #[cfg_attr(not(feature = "runner"), allow(unused_variables))]
-pub fn parts_with(daemon_host: Option<String>) -> Vec<Box<dyn Part>> {
+#[cfg_attr(not(feature = "deploy"), allow(unused_variables))]
+pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<Box<dyn Part>> {
     #[allow(unused_mut)]
     let mut parts: Vec<Box<dyn Part>> = Vec::new();
     #[cfg(feature = "tracker")]
@@ -57,7 +63,13 @@ pub fn parts_with(daemon_host: Option<String>) -> Vec<Box<dyn Part>> {
         parts.push(Box::new(family));
     }
     #[cfg(feature = "deploy")]
-    parts.push(Box::new(temet_work_deploy::Deploys::default()));
+    {
+        let mut deploys = temet_work_deploy::Deploys::default();
+        if let Some(file) = handoff {
+            deploys = deploys.handoff(file, BUILD);
+        }
+        parts.push(Box::new(deploys));
+    }
     #[cfg(feature = "store")]
     parts.push(Box::new(temet_work_store::Store));
     #[cfg(feature = "style")]

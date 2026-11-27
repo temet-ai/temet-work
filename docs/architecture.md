@@ -105,7 +105,8 @@ rules. Every round the daemon also starts any agent an issue needs and does not 
 whose session ended, or one it decided on and did not start before it stopped. After three
 agents of one role have ended on one issue it stops and lists the issue as a problem. It
 also asks again for a merge, deploy or verify that was lost; the parts that do them do not
-repeat work already done or running. An agent its issue waits on that sits idle is
+repeat work already done or running; a deploy that restarts the daemon is recorded by
+the new daemon, which finds the build in the handoff file (`docs/configuration.md`). An agent its issue waits on that sits idle is
 reminded after ten minutes and again after twenty, and its session is stopped after thirty
 so a fresh one takes over. A refiner stops once its plan is in; the author, reviewer and
 arbiter stop once the issue merges. A group has no coordinator agent: in the research fleet the standing seat waited 25
