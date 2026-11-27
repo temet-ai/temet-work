@@ -134,8 +134,9 @@ refining_at_once = 1                    # the default
 
 A group takes its projects' open issues in milestone order, then in the tracker's order.
 It refines `refining_at_once` issues at a time. It starts an author on a refined issue
-when one of the project's folders is free and every issue in the issue's "Depends on"
-lines is done. A project with two folders has at most two authors working at once.
+when one of the project's folders is free (on the issue's `machine`, when that setting
+names one) and every issue in the issue's "Depends on" lines is done. A project with two
+folders has at most two authors working at once.
 
 A project's `deploy` and `verify` commands run through `sh -c` in its `run_in` folder (your
 home folder when left out), with `TEMET_WORK_ISSUE` (the issue, such as `radar#44`),
@@ -211,6 +212,56 @@ answers at ...` (the daemon is not running there). A refusal from the daemon is 
 refusal, as for a local agent.
 
 To send one command from your own shell the same way: `TEMET_WORK_DAEMON=ssh://omit temet-work status`.
+
+## Sending work to one machine
+
+The `machine` setting (`docs/settings.md`) names the machine whose work folders an issue's
+agents may be given. This project has a checkout on the daemon's own machine (`local`) and
+one on a Mac. Agents for the issues in the milestone run on the Mac, and their reviewers
+stay on the daemon's machine:
+
+```toml
+daemon_host = "omit"
+
+[[project]]
+id = "radar"
+tracker = "github"
+name = "temet-ai/radar"
+
+[[folder]]
+id = "radar-1"
+project = "radar"
+machine = "local"
+path = "/home/me/src/radar-1"
+
+[[folder]]
+id = "radar-mac"
+project = "radar"
+machine = "mac"
+path = "/Users/me/projects/radar"
+
+[[milestone]]
+of = "radar"
+name = "Slack sign-in rework"
+
+[milestone.settings]
+machine = "mac"
+
+[milestone.settings.reviewer]
+machine = "local"
+
+[[group]]
+id = "group-1"
+projects = ["radar"]
+```
+
+When no folder on that machine is free, the issue stays ready, even while a folder on
+another machine is free, and its author starts when a folder on that machine is released.
+`temet-work status` lists it as `radar#44 waiting for a work folder on mac`.
+
+`machine` picks which `[[folder]]` an agent is given, and so which machine it runs on. The
+folder's own `machine` field still says where that folder is. The daemon's own machine is
+`local`, whatever its host name.
 
 ## temet-work deploying itself
 

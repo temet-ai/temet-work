@@ -220,7 +220,9 @@ impl Host {
                 .issue
                 .as_ref()
                 .and_then(|i| self.world.issues.get(i))
-                .and_then(|i| self.world.folder_for(i, agent.folder.as_ref()))
+                .and_then(|i| self.world.folder_for(i, agent.role, agent.folder.as_ref()))
+                // A reader's folder is not recorded: name none on another machine.
+                .filter(|f| f.machine == agent.machine)
                 .map_or_else(String::new, |f| format!(" in {}", f.path));
             self.problems.insert(
                 format!("{BLOCKED}{}", agent.id),

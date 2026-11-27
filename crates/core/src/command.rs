@@ -1109,6 +1109,38 @@ mod plan_settings {
     }
 
     #[test]
+    fn a_machine_in_a_plan_is_the_refiners_task_level_setting() {
+        let mut w = refining();
+        let refiner = AgentId::new("refiner-1");
+        let command = plan(&[("machine", Value::Text("mac".into()))]);
+        let events = w.events(Some(&refiner), &command).expect("accepted");
+        assert_eq!(
+            events[0],
+            Event::SettingSet {
+                scope: Scope::Task(issue()),
+                role: None,
+                key: "machine".into(),
+                value: Value::Text("mac".into()),
+                by: "refiner-1".into(),
+            }
+        );
+        apply_all(&mut w, &events);
+        assert_eq!(
+            w.machine_for(&issue(), Role::Author),
+            Some(MachineId::new("mac"))
+        );
+        // No folder is on it: accepted all the same, and the issue waits.
+        assert_eq!(w.issues[&issue()].stage, Stage::Ready);
+        assert_eq!(w.machine_waits().len(), 1);
+        let empty = plan(&[("machine", Value::Text(String::new()))]);
+        assert!(
+            refining()
+                .check(Some(&refiner), &empty)
+                .is_err_and(|e| e.contains("machine"))
+        );
+    }
+
+    #[test]
     fn a_person_can_overturn_what_a_refiner_set() {
         let mut w = refining();
         let refiner = AgentId::new("refiner-1");

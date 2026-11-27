@@ -101,7 +101,8 @@ The daemon does, in code; agents do only what needs judgement: refining, writing
 reviewing and arbitrating. The core's `World::apply` takes one event and returns the
 effects for the daemon to carry out; after every event it takes the next issue for refining
 and starts an author on a ready issue when a work folder is free in every repository it
-changes and the issues it depends on are done. Review runs for at most three rounds before an arbiter
+changes (on the issue's `machine`, when that setting names one) and the issues it depends
+on are done. Review runs for at most three rounds before an arbiter
 rules. Every round the daemon also starts any agent an issue needs and does not have: one
 whose session ended, or one it decided on and did not start before it stopped. After three
 agents of one role have ended on one issue it stops and lists the issue as a problem. It
