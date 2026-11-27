@@ -143,19 +143,9 @@ fn run() -> Result<(), String> {
         match requests.recv_timeout(next_round.saturating_duration_since(Instant::now())) {
             Ok(pending) => {
                 let reply = socket::answer(&mut host, now_ms(), &pending.request, &pending.peer)?;
-                // Who sent what, and what came of it: a request log on stderr.
-                let debug = format!("{:?}", pending.request.command);
-                eprintln!(
-                    "request: by={} {} -> {}",
-                    pending.request.by.as_ref().map_or("none", |a| a.0.as_str()),
-                    debug.split([' ', '{', '(']).next().unwrap_or_default(),
-                    match &reply {
-                        socket::Reply::Done { .. } | socket::Reply::View { .. } => {
-                            "done".to_string()
-                        }
-                        socket::Reply::Refused { why } => format!("refused: {why}"),
-                    }
-                );
+                if let Some(line) = socket::request_line(&pending.request, &reply) {
+                    eprintln!("{line}");
+                }
                 pending.answer(reply);
             }
             Err(RecvTimeoutError::Timeout) => {}
