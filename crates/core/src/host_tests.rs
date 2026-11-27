@@ -48,7 +48,11 @@ impl Part for Brains {
         };
         Outcome::Done {
             events: vec![],
-            effects: vec![Effect::Run { launch, program }],
+            effects: vec![Effect::Run {
+                launch: Box::new(launch),
+                program,
+                before: None,
+            }],
         }
     }
 }

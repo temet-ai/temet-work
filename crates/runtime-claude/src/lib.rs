@@ -19,7 +19,9 @@
 //! where Claude Code keeps the answer: `hasTrustDialogAccepted` for the folder in
 //! its user file, `.claude.json` in the folder `CLAUDE_CONFIG_DIR` names, else in
 //! the home folder. Listing a folder in the configuration is the person's choice
-//! to give agents that folder.
+//! to give agents that folder. For a folder on another machine the daemon runs
+//! `temet-work trust-folder claude PATH` there, which does the same in that
+//! machine's user file.
 
 use std::path::Path;
 
@@ -57,6 +59,12 @@ impl Runtime for Claude {
 
     fn trust(&self, folder: &Path, home: &Path) -> Result<(), String> {
         trust_folder(folder, &home.join(".claude.json"))
+    }
+
+    /// `temet-work trust-folder claude PATH`, which runs [`Claude::trust`] on
+    /// the folder's machine.
+    fn trust_program(&self, folder: &Path) -> Option<Program> {
+        Some(temet_work_runtime::trust_folder_program(self.id(), folder))
     }
 }
 
@@ -204,6 +212,17 @@ mod tests {
             "{ not json"
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_folder_on_another_machine_is_trusted_by_the_command_line_there() {
+        let program = Claude
+            .trust_program(Path::new("/Users/vimes/watch"))
+            .expect("a program");
+        assert_eq!(
+            program.argv,
+            ["temet-work", "trust-folder", "claude", "/Users/vimes/watch"]
+        );
     }
 
     #[test]

@@ -72,10 +72,14 @@ pub enum Effect {
     /// Run an agent's program in a terminal. The part that turns a brief into
     /// a program asks for this; the part that runs terminals carries it out.
     Run {
-        /// The agent.
-        launch: Launch,
+        /// The agent. Boxed, so the effect stays small.
+        launch: Box<Launch>,
         /// Its program.
         program: Program,
+        /// A program run to its end on the agent's machine before its program
+        /// starts: the one that marks its folder trusted there, for a folder on
+        /// another machine. When it fails, the agent does not start.
+        before: Option<Program>,
     },
 }
 

@@ -125,8 +125,10 @@ an effect leads to is handled before the next effect.
 
 Starting an agent shows the path. The loop decides to start a refiner on an issue. The
 runtime family asks the loop for the agent's id, folder and brief (`World::launch`),
-makes the program with its runtime, and asks for it to run (`Effect::Run`). The runner
-family starts it in a terminal labelled with the agent, group, issue and role, and reports
+makes the program with its runtime, and asks for it to run (`Effect::Run`). For a folder
+on another machine the runtime also gives the program that trusts the folder there, and the
+runner family runs that on the machine first (`Runner::exec`). The runner family starts the
+agent's program in a terminal labelled with the agent, group, issue and role, and reports
 `AgentStarted`. From then on the runner family turns the terminal's updates into the
 agent's state. Neither family names the other.
 

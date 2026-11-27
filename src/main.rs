@@ -15,6 +15,7 @@ fn main() -> ExitCode {
         }
         Some("mcp") => return mcp(&args[1..]),
         Some("relay") => return relay(&args[1..]),
+        Some("trust-folder") => return trust_folder(&args[1..]),
         Some("parts") => {
             let parts = temet_work::parts();
             let ids: Vec<String> = parts
@@ -114,6 +115,25 @@ fn relay(args: &[String]) -> ExitCode {
             } else {
                 1
             })
+        }
+    }
+}
+
+/// `temet-work trust-folder RUNTIME PATH` (hidden): marks PATH trusted for the
+/// runtime in its user files on this machine, as the daemon does before an agent
+/// starts in a folder on its own machine. The daemon runs it on the machine a
+/// folder on another machine is on. Exits 0 when the folder is trusted or
+/// already was, else 1 with the reason on one line of standard error.
+fn trust_folder(args: &[String]) -> ExitCode {
+    let [runtime, path] = args else {
+        eprintln!("temet-work trust-folder RUNTIME PATH");
+        return ExitCode::from(2);
+    };
+    match temet_work::trust_folder(runtime, std::path::Path::new(path)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(1)
         }
     }
 }

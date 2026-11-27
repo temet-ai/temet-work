@@ -38,6 +38,34 @@ pub trait Runtime: Send {
     fn trust(&self, _folder: &Path, _home: &Path) -> Result<(), String> {
         Ok(())
     }
+
+    /// The program that does what [`Runtime::trust`] does, run on the machine
+    /// `folder` is on, for a folder on another machine: the daemon cannot reach
+    /// the runtime's user files there. `None`, the default, when the runtime
+    /// needs no folder trusted.
+    fn trust_program(&self, _folder: &Path) -> Option<Program> {
+        None
+    }
+}
+
+/// The command line's hidden command that marks a folder trusted for a runtime,
+/// `temet-work trust-folder RUNTIME PATH`, with `CLAUDE_CONFIG_DIR` from the
+/// daemon's environment when it is set, as each agent gets it, so the folder is
+/// trusted in the user files the agent reads. A runtime whose
+/// [`Runtime::trust`] does something returns this from [`Runtime::trust_program`].
+pub fn trust_folder_program(runtime: &str, folder: &Path) -> Program {
+    Program {
+        argv: vec![
+            "temet-work".into(),
+            "trust-folder".into(),
+            runtime.into(),
+            folder.to_string_lossy().into_owned(),
+        ],
+        env: passed_on_env()
+            .into_iter()
+            .filter(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+            .collect(),
+    }
 }
 
 /// Where a runtime's user files are: the folder `CLAUDE_CONFIG_DIR` names when it
@@ -105,6 +133,13 @@ impl Runtime for FakeRuntime {
             env: Vec::new(),
         }
     }
+
+    fn trust_program(&self, folder: &Path) -> Option<Program> {
+        Some(Program {
+            argv: vec!["fake-trust".into(), folder.to_string_lossy().into_owned()],
+            env: Vec::new(),
+        })
+    }
 }
 
 /// The contract every runtime adapter runs.
@@ -142,6 +177,12 @@ pub mod contract {
         if !with_model.argv.iter().any(|a| a == "contract-model") {
             return Err("the brief's model reaches the program".into());
         }
+        let folder = std::path::Path::new("/contract/folder");
+        if let Some(trust) = runtime.trust_program(folder)
+            && !trust.argv.iter().any(|a| a == "/contract/folder")
+        {
+            return Err("the program that trusts a folder on another machine names it".into());
+        }
         Ok(())
     }
 }
@@ -173,6 +214,24 @@ impl Runtimes {
     /// Adds a runtime. The root package calls this once per compiled-in adapter.
     pub fn add(&mut self, adapter: Box<dyn Runtime>) {
         self.adapters.push(adapter);
+    }
+
+    /// Marks `folder` trusted for the runtime `id`, in its user files under the
+    /// home this family was given ([`user_home`] by default), as a start in a
+    /// folder on this machine does. `temet-work trust-folder` runs this on the
+    /// machine a folder is on.
+    pub fn trust(&self, id: &str, folder: &Path) -> Result<(), String> {
+        let runtime = self.adapters.iter().find(|a| a.id() == id).ok_or_else(|| {
+            format!(
+                "no runtime \"{id}\" in this build; this build has: {}",
+                list(&self.ids())
+            )
+        })?;
+        let home = self
+            .home
+            .as_ref()
+            .ok_or("neither CLAUDE_CONFIG_DIR nor HOME is set, so there are no user files")?;
+        runtime.trust(folder, home)
     }
 
     /// The ids of the runtimes in this build.
@@ -268,19 +327,27 @@ impl Part for Runtimes {
                 role.name()
             ));
         };
-        // A folder on this machine is trusted before the agent starts in it. One on
-        // another machine cannot be from here: the terminal's blocked prompt
-        // reports it.
+        // A folder on this machine is trusted here before the agent starts in it.
+        // One on another machine is trusted there, by the program the runner runs
+        // on that machine before the agent's.
         let local = launch.machine.0 == LOCAL;
         if let (Some(dir), Some(home), true) = (&launch.brief.folder, &self.home, local)
             && let Err(e) = runtime.trust(dir, home)
         {
             return Outcome::Failed(format!("cannot trust {}: {e}", dir.display()));
         }
+        let before = match &launch.brief.folder {
+            Some(dir) if !local => runtime.trust_program(dir),
+            _ => None,
+        };
         let program = runtime.program(&launch.brief);
         Outcome::Done {
             events: Vec::new(),
-            effects: vec![Effect::Run { launch, program }],
+            effects: vec![Effect::Run {
+                launch: Box::new(launch),
+                program,
+                before,
+            }],
         }
     }
 }
@@ -315,7 +382,14 @@ mod tests {
         let Outcome::Done { effects, .. } = part.carry_out(&start, &world) else {
             panic!("not done");
         };
-        let [Effect::Run { launch, program }] = effects.as_slice() else {
+        let [
+            Effect::Run {
+                launch,
+                program,
+                before: None,
+            },
+        ] = effects.as_slice()
+        else {
             panic!("{effects:?}");
         };
         assert_eq!(launch.agent.0, "refiner-1");
@@ -537,6 +611,12 @@ mod tests {
                 env: Vec::new(),
             }
         }
+        fn trust_program(&self, folder: &Path) -> Option<Program> {
+            Some(Program {
+                argv: vec!["rec-trust".into(), folder.to_string_lossy().into_owned()],
+                env: Vec::new(),
+            })
+        }
         fn trust(&self, folder: &Path, home: &Path) -> Result<(), String> {
             if self.1 {
                 return Err("no way".into());
@@ -580,7 +660,10 @@ mod tests {
         let Outcome::Done { effects, .. } = part.carry_out(&start_in(Some("f1")), &world) else {
             panic!("not done");
         };
-        assert!(matches!(effects.as_slice(), [Effect::Run { .. }]));
+        assert!(
+            matches!(effects.as_slice(), [Effect::Run { before: None, .. }]),
+            "a local folder needs nothing run before the agent: {effects:?}"
+        );
         assert_eq!(
             *seen.lock().expect("lock"),
             [(PathBuf::from("/work/a"), PathBuf::from("/h"))]
@@ -589,6 +672,112 @@ mod tests {
         let _ = part.carry_out(&start_in(None), &world_with_issue());
         let _ = part.carry_out(&start_in(Some("f1")), &with_folder("far"));
         assert_eq!(seen.lock().expect("lock").len(), 1);
+    }
+
+    #[test]
+    fn a_folder_on_another_machine_is_trusted_there_by_the_runtimes_program_before_the_agent() {
+        let seen = Default::default();
+        let mut part = Runtimes::default().with_home("/h");
+        part.add(Box::new(Records(std::sync::Arc::clone(&seen), false)));
+        let Outcome::Done { effects, .. } =
+            part.carry_out(&start_in(Some("f1")), &with_folder("far"))
+        else {
+            panic!("not done");
+        };
+        let [
+            Effect::Run {
+                launch,
+                program,
+                before: Some(before),
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(launch.machine.0, "far");
+        assert_eq!(before.argv, ["rec-trust", "/work/a"]);
+        assert_eq!(program.argv[0], "rec");
+        assert!(
+            seen.lock().expect("lock").is_empty(),
+            "nothing is trusted on this machine"
+        );
+        // A runtime with no folder to trust runs nothing before its agent.
+        struct Plain;
+        impl Runtime for Plain {
+            fn id(&self) -> &'static str {
+                "plain"
+            }
+            fn is_default(&self) -> bool {
+                true
+            }
+            fn program(&self, brief: &Brief) -> Program {
+                Other.program(brief)
+            }
+        }
+        let mut part = Runtimes::default().with_home("/h");
+        part.add(Box::new(Plain));
+        let world = with_folder("far");
+        let Outcome::Done { effects, .. } = part.carry_out(&start_in(Some("f1")), &world) else {
+            panic!("not done");
+        };
+        assert!(
+            matches!(effects.as_slice(), [Effect::Run { before: None, .. }]),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn the_family_trusts_a_folder_for_the_runtime_it_is_asked_for() {
+        let seen = Default::default();
+        let mut part = Runtimes::default().with_home("/h");
+        part.add(Box::new(Other));
+        part.add(Box::new(Records(std::sync::Arc::clone(&seen), false)));
+        assert_eq!(part.trust("records", Path::new("/work/a")), Ok(()));
+        assert_eq!(
+            *seen.lock().expect("lock"),
+            [(PathBuf::from("/work/a"), PathBuf::from("/h"))]
+        );
+        assert_eq!(part.trust("other", Path::new("/work/a")), Ok(()));
+        let why = part
+            .trust("nonesuch", Path::new("/work/a"))
+            .expect_err("unknown");
+        assert!(
+            why.contains("nonesuch") && why.contains("other, records"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn the_fake_trusts_a_far_folder_with_a_program_naming_it() {
+        let program = FakeRuntime
+            .trust_program(Path::new("/work/a"))
+            .expect("a program");
+        assert_eq!(program.argv, ["fake-trust", "/work/a"]);
+        let cli = trust_folder_program("fake", Path::new("/work/a"));
+        assert_eq!(cli.argv, ["temet-work", "trust-folder", "fake", "/work/a"]);
+    }
+
+    #[test]
+    fn the_contract_rejects_a_trust_program_that_drops_the_folder() {
+        struct Drops;
+        impl Runtime for Drops {
+            fn id(&self) -> &'static str {
+                "drops"
+            }
+            fn program(&self, brief: &Brief) -> Program {
+                FakeRuntime.program(brief)
+            }
+            fn trust_program(&self, _folder: &Path) -> Option<Program> {
+                Some(Program {
+                    argv: vec!["trust".into()],
+                    env: Vec::new(),
+                })
+            }
+        }
+        assert_eq!(
+            contract::check(&Drops),
+            Err("the program that trusts a folder on another machine names it".into())
+        );
     }
 
     #[test]
