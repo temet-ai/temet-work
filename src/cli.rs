@@ -7,7 +7,7 @@ use temet_work_core::model::{Plan, Role};
 use temet_work_core::settings::Target;
 use temet_work_core::{Command, Request, Verdict};
 
-pub use temet_work_core::launch::AGENT_VAR;
+pub use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 
 /// How to call `temet-work`.
 pub const USAGE: &str = "\
@@ -36,7 +36,8 @@ temet-work parts                            the parts in this build
 ISSUE is project#key, such as radar#44. TARGET is global, an area or project id, a
 milestone as project:Milestone name, or an issue. ROLE is refiner, author, reviewer,
 arbiter or investigator. Agents' commands are recorded as theirs
-through TEMET_WORK_AGENT, which the daemon sets when it starts them.";
+through TEMET_WORK_AGENT and carry the secret in TEMET_WORK_AGENT_TOKEN; the
+daemon sets both when it starts an agent.";
 
 /// A plan from its YAML text.
 pub fn plan(yaml: &str) -> Result<Plan, String> {
@@ -60,7 +61,8 @@ fn take_role(args: &[String]) -> Result<(Vec<String>, Option<Role>), String> {
 }
 
 /// Reads the arguments after the program name into a request. `by` is the
-/// agent sending it; `read` reads a file.
+/// agent sending it; `read` reads a file. The request carries no secret: the
+/// caller adds the one in [`SECRET_VAR`].
 pub fn request(
     args: &[String],
     by: Option<String>,
@@ -178,10 +180,10 @@ pub fn request(
         },
         other => return Err(format!("no command {other}\n\n{USAGE}")),
     };
-    Ok(Request {
-        by: by.filter(|b| !b.is_empty()).map(AgentId::new),
+    Ok(Request::new(
+        by.filter(|b| !b.is_empty()).map(AgentId::new),
         command,
-    })
+    ))
 }
 
 #[cfg(test)]

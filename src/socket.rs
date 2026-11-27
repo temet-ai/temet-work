@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use temet_work_core::{Host, Request};
+use temet_work_core::{Host, Peer, Request};
 
 /// The daemon's answer to one request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +53,8 @@ pub fn path() -> PathBuf {
 pub struct Pending {
     /// The request.
     pub request: Request,
+    /// What the daemon learned about the process that sent it.
+    pub peer: Peer,
     reply: Sender<Reply>,
 }
 
@@ -89,6 +91,9 @@ pub fn listen(path: &Path) -> Result<Receiver<Pending>, String> {
 }
 
 fn serve(stream: UnixStream, tx: &Sender<Pending>) {
+    // Who sent it, read once: the process at the other end of a connection
+    // stays the same.
+    let peer = crate::peer::of(&stream);
     let Ok(read) = stream.try_clone() else { return };
     let mut writer = stream;
     for line in BufReader::new(read).lines() {
@@ -99,7 +104,14 @@ fn serve(stream: UnixStream, tx: &Sender<Pending>) {
             },
             Ok(request) => {
                 let (reply, answered) = mpsc::channel();
-                if tx.send(Pending { request, reply }).is_err() {
+                if tx
+                    .send(Pending {
+                        request,
+                        peer: peer.clone(),
+                        reply,
+                    })
+                    .is_err()
+                {
                     return;
                 }
                 answered.recv().unwrap_or(Reply::Refused {
@@ -420,7 +432,8 @@ pub struct Caller<'a> {
 /// socket at `path` and its reply line to `out`, so the other end of an SSH hop
 /// speaks the daemon's own wire format. A `caller` that is not this build gets a
 /// refusal naming both builds, and the daemon is not contacted: this program and
-/// the daemon come from one install.
+/// the daemon come from one install. The request is marked as relayed, so the
+/// daemon knows it came from another machine.
 pub fn relay(
     path: &Path,
     caller: Caller,
@@ -444,9 +457,10 @@ pub fn relay(
             .and_then(|()| out.flush())
             .map_err(|e| e.to_string());
     }
+    let line = relayed(line.trim_end());
     let mut stream = connect(path)?;
     stream
-        .write_all(line.trim_end().as_bytes())
+        .write_all(line.as_bytes())
         .and_then(|()| stream.write_all(b"\n"))
         .map_err(|e| e.to_string())?;
     let mut reply = String::new();
@@ -456,6 +470,18 @@ pub fn relay(
     out.write_all(reply.as_bytes())
         .and_then(|()| out.flush())
         .map_err(|e| e.to_string())
+}
+
+/// A request line marked as relayed. A line that is not a JSON object goes on
+/// as it is, and the daemon refuses it.
+fn relayed(line: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(serde_json::Value::Object(mut fields)) => {
+            fields.insert("relayed".into(), true.into());
+            serde_json::Value::Object(fields).to_string()
+        }
+        _ => line.to_string(),
+    }
 }
 
 fn connect(path: &Path) -> Result<UnixStream, String> {
@@ -479,9 +505,28 @@ pub fn send(path: &Path, request: &Request) -> Result<Reply, String> {
     serde_json::from_str(&reply).map_err(|e| format!("the daemon's reply is not readable: {e}"))
 }
 
-/// Answers one request against the host. The error stops the daemon: an event
-/// could not be logged.
-pub fn answer(host: &mut Host, now_ms: u64, request: &Request) -> Result<Reply, String> {
+/// Answers one request against the host, from a sender the daemon learned
+/// `peer` about. The sender is checked first ([`temet_work_core::World::admit`]).
+/// The error stops the daemon: an event could not be logged.
+pub fn answer(
+    host: &mut Host,
+    now_ms: u64,
+    request: &Request,
+    peer: &Peer,
+) -> Result<Reply, String> {
+    let sender = temet_work_core::Sender {
+        by: request.by.clone(),
+        proof: request
+            .secret
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::peer::digest),
+        peer: peer.clone(),
+        relayed: request.relayed,
+    };
+    if let Err(why) = host.world().admit(&sender, &request.command) {
+        return Ok(Reply::Refused { why });
+    }
     match host.world().events(request.by.as_ref(), &request.command) {
         Err(why) => Ok(Reply::Refused { why }),
         Ok(events) if events.is_empty() => Ok(match &request.command {
@@ -606,10 +651,47 @@ mod tests {
     }
 
     fn status(by: Option<String>) -> Request {
-        Request {
-            by: by.map(temet_work_core::ids::AgentId::new),
-            command: temet_work_core::Command::Status,
-        }
+        Request::new(
+            by.map(temet_work_core::ids::AgentId::new),
+            temet_work_core::Command::Status,
+        )
+    }
+
+    #[test]
+    fn the_relay_marks_a_request_and_passes_anything_else_on() {
+        let line = r#"{"by":"author-1","secret":"s","command":{"command":"status"}}"#;
+        let marked: Request = serde_json::from_str(&relayed(line)).expect("a request");
+        assert!(marked.relayed);
+        assert_eq!(marked.secret.as_deref(), Some("s"));
+        // A request that says it was not relayed is marked all the same.
+        let lying = r#"{"by":null,"relayed":false,"command":{"command":"status"}}"#;
+        assert!(
+            serde_json::from_str::<Request>(&relayed(lying))
+                .expect("request")
+                .relayed
+        );
+        assert_eq!(relayed("not json"), "not json");
+    }
+
+    #[test]
+    fn a_request_without_the_new_fields_still_parses_and_debug_hides_the_secret() {
+        let old: Request =
+            serde_json::from_str(r#"{"by":"author-1","command":{"command":"status"}}"#)
+                .expect("an old request");
+        assert_eq!(old.secret, None);
+        assert!(!old.relayed);
+        let mut new = old.clone();
+        new.secret = Some("0123456789abcdef".into());
+        let shown = format!("{new:?}");
+        assert!(
+            !shown.contains("0123456789abcdef") && shown.contains("<hidden>"),
+            "{shown}"
+        );
+        // A request without a secret is sent as before.
+        assert_eq!(
+            serde_json::to_string(&old).expect("json"),
+            r#"{"by":"author-1","command":{"command":"status"}}"#
+        );
     }
 
     const REPLY: &str = r#"printf '{"reply":"done","text":"all quiet"}\n'"#;

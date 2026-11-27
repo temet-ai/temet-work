@@ -9,22 +9,27 @@
 | GitHub, through `gh` | Reads issues, milestones, pull requests and their CI, and the workflow runs of a merge commit; comments on and closes issues; merges pull requests by the `merge` setting (`--squash` unless set otherwise) | Issues every 60 s; a pull request every 30 s while it is in review, and a merge commit's runs every 30 s while the next repository waits for them; comments, closes and merges when the loop calls for them |
 | GitLab, through `glab`, for a project whose `code_host` is `gitlab` | Reads merge requests, their pipelines and jobs, and the pipelines of a merged commit; merges merge requests | A merge request every 30 s while it is in review, and a merged commit's pipelines every 30 s while the next repository waits for them; merges when the loop calls for them |
 | Jira Cloud, through `curl`, for a project or area whose tracker is `jira` | Searches the open issues (summary, description, fix versions, links, status) and checks the status of the issues they depend on; comments on issues; runs the transition to Done. It signs in over HTTPS with `JIRA_USER` and `JIRA_TOKEN` from the daemon's environment, gives the token to `curl` on standard input, and does not store either | Issues every 60 s; comments and transitions when the loop calls for them |
-| herdr-core, over its local socket | Starts, reads, sends text to and stops agents' terminals, on this machine or on another machine herdr-core knows, with each agent's brief and environment (`SECURITY.md`). For a work folder on another machine it also runs `temet-work trust-folder RUNTIME PATH` there, with `CLAUDE_CONFIG_DIR` when the daemon has it | Every 2 s, and with each command; the trust command before each agent starts on another machine |
+| herdr-core, over its local socket | Starts, reads, sends text to and stops agents' terminals, on this machine or on another machine herdr-core knows, with each agent's brief and environment, which holds the agent's secret (`SECURITY.md`). herdr-core passes the environment to the other machine for an agent there. For a work folder on another machine it also runs `temet-work trust-folder RUNTIME PATH` there, with `CLAUDE_CONFIG_DIR` when the daemon has it | Every 2 s, and with each command; the trust command before each agent starts on another machine |
 | Anthropic or OpenAI, through the Claude Code or Codex sessions it starts | What Claude Code or Codex itself sends, including the agent's brief. A kept rule (`docs/commands.md`) is in every brief on every project | While an agent runs |
-| The daemon's machine, over your own `ssh`, from an agent on another machine | Each `temet-work` command the agent runs (a plan, a review, a ruling) goes to the daemon's socket through `temet-work relay`, with that machine's `temet-work` build and its name (`uname -n`), and the reply comes back. Nothing listens on a port | While an agent on that machine runs |
+| The daemon's machine, over your own `ssh`, from an agent on another machine | Each `temet-work` command the agent runs (a plan, a review, a ruling) goes to the daemon's socket through `temet-work relay`, with that machine's `temet-work` build and its name (`uname -n`) and the agent's secret, and the reply comes back. Nothing listens on a port | While an agent on that machine runs |
 | A project's `deploy` and `verify` commands | Whatever those commands send; temet-work runs them with `sh -c` | After a merge, and after a deploy |
 | Nothing else | No telemetry. The daemon has no network client of its own. | |
 
-Each agent gets `TEMET_WORK_AGENT`, `TEMET_WORK_DAEMON` when it is on another machine, and
-these from the daemon's environment when they are set: `CLAUDE_CONFIG_DIR`, `HTTPS_PROXY`,
-`NO_PROXY`, `NODE_EXTRA_CA_CERTS`, `GITHUB_TOKEN` and `GH_TOKEN` (`SECURITY.md`).
+Each agent gets `TEMET_WORK_AGENT`, `TEMET_WORK_AGENT_TOKEN` (a random secret of its own,
+`docs/commands.md`), `TEMET_WORK_DAEMON` when it is on another machine, and these from the
+daemon's environment when they are set: `CLAUDE_CONFIG_DIR`, `HTTPS_PROXY`, `NO_PROXY`,
+`NODE_EXTRA_CA_CERTS`, `GITHUB_TOKEN` and `GH_TOKEN` (`SECURITY.md`).
+
+On Linux the daemon reads the environment of the process that sent a command, and of that
+process's parents, from `/proc`. It takes the `TEMET_WORK_AGENT_TOKEN` values it finds,
+compares their SHA-256 digests with the ones it recorded, and keeps nothing it read.
 
 ## Where it writes files
 
 | Where | What | Moved by |
 |---|---|---|
 | `~/.config/temet-work/` | `config.toml`, which temet-work reads at start and does not write | `XDG_CONFIG_HOME`, or `temet-workd --config FILE` |
-| `~/.local/state/temet-work/` | `events.jsonl`, the event log. It holds the issues, plans, review points, rulings, a person's overturn reasons and the rules made from them, the text `gh` or `glab` returns when it refuses a merge, and the output of each verify command. `deploy-handoff` holds the issue and build of a deploy that restarts the daemon. `deploy-handoff.stale` holds, for each deploy run again because the daemon that came up was another build, the issue, the build installed and the build running | `XDG_STATE_HOME`, or `temet-workd --log FILE` |
+| `~/.local/state/temet-work/` | `events.jsonl`, the event log. It holds the issues, plans, review points, rulings, a person's overturn reasons and the rules made from them, the text `gh` or `glab` returns when it refuses a merge, the output of each verify command, and the SHA-256 digest of each agent's secret. `deploy-handoff` holds the issue and build of a deploy that restarts the daemon. `deploy-handoff.stale` holds, for each deploy run again because the daemon that came up was another build, the issue, the build installed and the build running | `XDG_STATE_HOME`, or `temet-workd --log FILE` |
 | `$XDG_RUNTIME_DIR/temet-work/` | `daemon.sock`, the daemon's socket. It is in `~/.local/state/temet-work/` when `XDG_RUNTIME_DIR` is not set, as on a Mac | `TEMET_WORK_SOCKET` |
 | Standard error | A line per request, `request: by=AGENT COMMAND -> done` or `-> refused: REASON`, a line per new problem, a line per agent started (`started: AGENT on MACHINE in FOLDER (terminal T)`), and before it, for a folder on another machine, `trusted: FOLDER on MACHINE, for AGENT`. Under systemd it goes to the journal | |
 | `~/.claude.json`, Claude Code's user file, on the daemon's machine and on each other machine a work folder is on | `projects.<folder>.hasTrustDialogAccepted` for each work folder on that machine, so a Claude Code agent does not stop at the folder-trust question. On another machine `temet-work trust-folder` writes it there. Nothing else in the file changes | `CLAUDE_CONFIG_DIR` |

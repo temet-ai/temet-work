@@ -5,6 +5,7 @@ use crate::ids::{
     AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId, RuleId,
 };
 use crate::model::{AgentState, Decision, Plan, Role, Rule};
+use crate::sender::Digest;
 use crate::settings::{Scope, Value};
 
 /// The reviewer's answer for one round.
@@ -159,6 +160,10 @@ pub enum Event {
         machine: MachineId,
         /// Its folder.
         folder: Option<FolderId>,
+        /// The SHA-256 digest of the secret it was started with; none for an
+        /// agent started before agents had secrets.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret_digest: Option<Digest>,
     },
     /// An agent's state changed.
     AgentChanged {

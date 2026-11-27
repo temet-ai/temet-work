@@ -12,8 +12,9 @@ use std::path::PathBuf;
 
 use temet_work_core::brief;
 use temet_work_core::ids::AgentId;
-use temet_work_core::launch::AGENT_VAR;
+use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 use temet_work_core::model::{AgentState, Role};
+use temet_work_core::sender::Digest;
 use temet_work_core::settings::Choice;
 use temet_work_core::world::LOCAL;
 use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
@@ -427,6 +428,24 @@ fn daemon_env(
 /// The variable that tells `temet-work` how to reach the daemon.
 const DAEMON_VAR: &str = "TEMET_WORK_DAEMON";
 
+/// A new agent's secret: 256 random bits as 64 hex digits, read from the
+/// system's random source. It goes into the agent's environment only; the log
+/// keeps its [`digest`].
+fn secret() -> Result<String, String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .map_err(|e| format!("/dev/urandom: {e}"))?;
+    Ok(Digest::from_bytes(&bytes).0)
+}
+
+/// The SHA-256 digest of a secret, the form the log and the core keep.
+pub fn digest(secret: &str) -> Digest {
+    use sha2::Digest as _;
+    Digest::from_bytes(&sha2::Sha256::digest(secret.as_bytes()))
+}
+
 fn state_of(status: &Status, doing: Option<&str>) -> Option<AgentState> {
     match status {
         Status::Between => Some(AgentState::Idle),
@@ -576,11 +595,23 @@ impl Part for Runners {
                     labels.insert("log".to_string(), log.clone());
                 }
                 let mut program = program.clone();
-                // Commands the agent runs are recorded as its own, and reach this
-                // daemon with this daemon's own command line.
+                // Commands the agent runs are recorded as its own, carry a secret
+                // only it was given, and reach this daemon with this daemon's own
+                // command line.
+                let secret = match secret() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Outcome::Failed(format!(
+                            "cannot make a secret for {}: {e}",
+                            launch.agent
+                        ));
+                    }
+                };
+                let secret_digest = digest(&secret);
                 program
                     .env
                     .push((AGENT_VAR.to_string(), launch.agent.0.clone()));
+                program.env.push((SECRET_VAR.to_string(), secret));
                 let machine = (launch.machine.0 != LOCAL).then(|| launch.machine.0.clone());
                 let remote = match (&machine, &self.daemon_host) {
                     (None, _) => None,
@@ -643,6 +674,7 @@ impl Part for Runners {
                                 issue: Some(brief.issue.clone()),
                                 machine: launch.machine.clone(),
                                 folder: launch.folder.clone(),
+                                secret_digest: Some(secret_digest),
                             }],
                             effects: Vec::new(),
                         }
@@ -896,6 +928,7 @@ mod tests {
             issue: Some(IssueId::new("ankh", "1")),
             machine: MachineId::new(LOCAL),
             folder: None,
+            secret_digest: None,
         });
         assert_eq!(part.poll(&other, 0).events, vec![]);
         let stop = Effect::StopAgent {
@@ -1473,6 +1506,87 @@ mod tests {
         assert!(!env.contains_key("TEMET_WORK_DAEMON"), "{env:?}");
         assert!(env["PATH"].contains(':'), "{env:?}");
         assert!(env.contains_key("TEMET_WORK_AGENT"));
+    }
+
+    #[test]
+    fn every_agent_gets_a_secret_of_its_own_and_only_its_digest_is_recorded() {
+        let w = world();
+        let fake = FakeRunner::default();
+        let starts = fake.starts();
+        let mut part = Runners::default().daemon_host(Some("omit".into()));
+        part.add(Box::new(fake));
+        let first = w
+            .launch(
+                &GroupId::new("watch"),
+                Role::Author,
+                &IssueId::new("ankh", "1"),
+                Some(&FolderId::new("f1")),
+            )
+            .expect("launch");
+        let mut events = Vec::new();
+        // Two agents on this machine and one on another.
+        for (id, machine) in [
+            ("author-1", LOCAL),
+            ("reviewer-1", LOCAL),
+            ("arbiter-1", "mac"),
+        ] {
+            let mut launch = first.clone();
+            launch.agent = AgentId::new(id);
+            launch.machine = MachineId::new(machine);
+            let run = Effect::Run {
+                launch: Box::new(launch),
+                before: None,
+                program: Program {
+                    argv: vec!["cat".into()],
+                    env: vec![],
+                },
+            };
+            match part.carry_out(&run, &w) {
+                Outcome::Done { events: e, .. } => events.extend(e),
+                other => panic!("{other:?}"),
+            }
+        }
+        let starts = starts.lock().expect("starts").clone();
+        let secrets: Vec<String> = starts
+            .iter()
+            .map(|s| env_of(s)[SECRET_VAR].to_string())
+            .collect();
+        assert_eq!(starts[2].machine.as_deref(), Some("mac"));
+        assert!(
+            secrets
+                .iter()
+                .all(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())),
+            "256 bits each"
+        );
+        let mut distinct = secrets.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 3, "three different secrets");
+        let digests: Vec<Option<Digest>> = events
+            .iter()
+            .map(|e| match e {
+                Event::AgentStarted { secret_digest, .. } => secret_digest.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            digests,
+            secrets.iter().map(|s| Some(digest(s))).collect::<Vec<_>>()
+        );
+        // Neither the events nor any Debug form shows a secret.
+        let shown = format!("{events:?} {starts:?}");
+        for secret in &secrets {
+            assert!(!shown.contains(secret.as_str()), "{shown}");
+        }
+        assert!(shown.contains("<hidden>"), "{shown}");
+    }
+
+    #[test]
+    fn a_digest_is_sha256_in_lowercase_hex() {
+        assert_eq!(
+            digest("abc").0,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]

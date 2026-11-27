@@ -2,6 +2,7 @@
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
   - 30de12a8-8bb8-4310-a59b-8d5267ce0b97
+  - 26cd49d9-7565-4506-b988-a9b64ed0fa45
 ---
 
 # Commands
@@ -47,6 +48,60 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
 - `status`, `issue`, `screen` and `settings` are open to anyone. `set` and `unset` keep
   their own rule, in the table.
 
+## How the daemon knows who sent a command
+
+The daemon starts every agent with two variables: `TEMET_WORK_AGENT`, the agent's id, and
+`TEMET_WORK_AGENT_TOKEN`, a random 256-bit secret of the agent's own. `temet-work` and
+`temet-work mcp` send both with every command. The event log keeps the secret's SHA-256
+digest, so agents that were running before a restart keep working after it; the secret
+itself is in no log, reply, status or issue text.
+
+- A command that names an agent, a read included, is refused unless it carries that
+  agent's secret. The refusal names the agent and says what was wrong: no secret, a wrong
+  one, another agent's, or an id this daemon did not start. A command that names an agent
+  whose session has ended is refused too. An agent started before agents had secrets has
+  no digest in the log and is taken by its id until it ends.
+- On Linux the daemon also reads the process that sent the command, through its socket
+  (`SO_PEERCRED`), and that process's parents in `/proc`, and looks in each one's
+  environment for a secret it issued. A command that names agent A from inside agent B's
+  process tree is refused, even with A's own secret, so an agent that reads another
+  agent's secret from `/proc` cannot use it from inside its own process tree. For a
+  command that came through `temet-work relay` the tree read is the relay's own, on the
+  daemon's machine under `sshd`, which says nothing of the machine the command came from.
+  The relay's mark only adds refusals, so a process on the daemon's machine that sets it
+  is still judged by its own tree.
+- A command that names no agent is a person's. It may read from anywhere. A command that
+  changes something (`rule`, `overturn`, `retry`, `proposal`, `set` and `unset`) is
+  refused when it carries an agent's secret; when, on Linux, the sending process or one of
+  its parents holds a secret this daemon issued, which still holds after the agent unsets
+  both variables with `env -u`; when the sending process cannot be read; or when it came
+  through `temet-work relay` from another machine, whose processes the daemon cannot see.
+  A person runs these commands in a shell outside any agent's terminal, on the daemon's
+  machine.
+- A secret another daemon issued does not count, so a second daemon, and the tests, work
+  from inside an agent's terminal.
+
+Agents run as the same user as the daemon, so this does not stop an agent that:
+
+- starts a process that leaves its process tree (`setsid -f`): with both variables
+  dropped it passes as a person, and with another agent's id and secret it passes as
+  that agent;
+- edits the daemon's files or its event log;
+- logs in to the daemon's machine over SSH and runs `temet-work` there, outside the relay;
+- runs on another machine and reads another agent's secret from that machine's `/proc`:
+  through the relay it passes as that agent, since the daemon cannot see the processes
+  there;
+- types into a person's terminal.
+
+On macOS the daemon checks secrets but not process trees, because `SO_PEERCRED` and
+`/proc` are Linux only and refusing every command a person sends would leave a person no
+way to run them. There an agent that unsets both variables passes as a person, and one
+that has read another agent's secret passes as that agent.
+
+An agent on another machine sends its secret through `temet-work` on that machine, so
+that machine needs a build that sends it: install the same one there as on the daemon's
+machine.
+
 `ISSUE` is `project#key`, such as `radar#44`. A plan file looks like this:
 
 ```yaml
@@ -86,9 +141,9 @@ standard input and output, for an agent's MCP client. At `read`, the default, it
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
 
-The daemon starts every agent with `TEMET_WORK_AGENT` set to the agent's id, so a command
-an agent runs is recorded as that agent's. A ruling is recorded as a decision, listed by
-`temet-work status` with its numbered options.
+A command an agent runs is recorded as that agent's (see "How the daemon knows who sent a
+command"). A ruling is recorded as a decision, listed by `temet-work status` with its
+numbered options.
 
 ## Overturning a decision
 
@@ -132,8 +187,8 @@ connect, about 45 s of silence on an open link, and 60 s in all; past that ssh i
 and the command fails with `ssh HOST: no answer within 60 s`. A host ssh cannot reach
 fails with `ssh HOST: could not connect: ...`.
 The hidden command `temet-work relay` copies one request line from standard input to the
-local socket and the reply line back; it exits 4 when no daemon answers. When `--build`
-is missing or is not its own build, it does not contact the daemon and replies with a
+local socket, marked as relayed, and the reply line back; it exits 4 when no daemon
+answers. When `--build` is missing or is not its own build, it does not contact the daemon and replies with a
 refusal: `temet-work on NAME is build X, the daemon is build Y: update it`.
 The hidden command `temet-work trust-folder RUNTIME PATH` marks PATH trusted for the
 runtime in its user files on the machine it runs on, as the daemon does before an agent

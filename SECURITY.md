@@ -24,11 +24,18 @@ Only the latest release is supported.
 
 ## What temet-work does with your credentials
 
-temet-work keeps no credentials of its own and has no setting for one. GitHub access goes
-through `gh` and its own sign-in, and GitLab access through `glab` and its own. When
-`GITHUB_TOKEN` or `GH_TOKEN` is set in the daemon's environment, the daemon passes it to
-each agent it starts, with `HTTPS_PROXY`, `NO_PROXY` and `NODE_EXTRA_CA_CERTS`, over
-herdr-core's local socket. temet-work writes none of these to disk.
+temet-work has no setting for a credential. GitHub access goes through `gh` and its own
+sign-in, and GitLab access through `glab` and its own. When `GITHUB_TOKEN` or `GH_TOKEN`
+is set in the daemon's environment, the daemon passes it to each agent it starts, with
+`HTTPS_PROXY`, `NO_PROXY` and `NODE_EXTRA_CA_CERTS`, over herdr-core's local socket.
+temet-work writes none of these to disk.
+
+Each agent the daemon starts gets a random 256-bit secret in `TEMET_WORK_AGENT_TOKEN`, which
+tells the daemon which agent sent a command (`docs/commands.md` says what it checks and
+what it does not). The daemon makes the secret when it starts the agent and passes it, in
+the agent's environment, over herdr-core's local socket; herdr-core passes it to the other
+machine for an agent there, and that agent sends it back with each command over SSH. The
+event log keeps the secret's SHA-256 digest, and the secret is in no log or reply.
 
 The event log (`docs/privacy.md`) records the text `gh` or `glab` returns when it refuses
 a merge and the output of each verify command, so a command that prints a secret puts it

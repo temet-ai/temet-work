@@ -213,6 +213,9 @@ pub struct Agent {
     /// When it started: how many events the loop had applied by then. A later
     /// agent has a larger number.
     pub started: u64,
+    /// The SHA-256 digest of the secret it was started with; none for an agent
+    /// started before agents had secrets, which is taken by its id.
+    pub secret_digest: Option<crate::sender::Digest>,
 }
 
 /// A group of sessions working on a goal.

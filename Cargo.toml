@@ -16,6 +16,8 @@ serde = { version = "1", features = ["derive"] }
 serde-saphyr = "2.2"
 serde_json = "1"
 toml = "1"
+sha2 = "0.11"
+rustix = { version = "1.1", features = ["net"] }
 temet-work-core = { path = "crates/core" }
 temet-work-tracker = { path = "crates/tracker" }
 temet-work-codehost = { path = "crates/codehost" }
@@ -75,6 +77,7 @@ temet-work-core.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 toml.workspace = true
 temet-work-tracker = { workspace = true, optional = true }
 temet-work-runner = { workspace = true, optional = true }
@@ -91,6 +94,10 @@ temet-work-runtime-claude = { workspace = true, optional = true }
 temet-work-runtime-codex = { workspace = true, optional = true }
 temet-work-codehost-github = { workspace = true, optional = true }
 temet-work-codehost-gitlab = { workspace = true, optional = true }
+
+# SO_PEERCRED, to read who sent a request on the daemon's socket.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
 temet-work-runtime-codex.workspace = true

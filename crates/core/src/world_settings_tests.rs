@@ -201,6 +201,7 @@ fn starts_changes_how_many_agents_of_a_role_are_tried_on_one_issue() {
         issue: Some(id("ankh", "1")),
         machine: MachineId::new("morpork"),
         folder: None,
+        secret_digest: None,
     };
     for e in [author(1), author(2)] {
         w.apply(&e);
