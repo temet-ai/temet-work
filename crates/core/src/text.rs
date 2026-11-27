@@ -26,7 +26,7 @@ pub fn stage(stage: Stage) -> String {
 }
 
 /// An issue's stage, and "out of scope" when its group no longer covers it.
-fn issue_stage(world: &World, issue: &crate::model::Issue) -> String {
+pub(crate) fn issue_stage(world: &World, issue: &crate::model::Issue) -> String {
     let at = stage(issue.stage);
     if world.out_of_scope(issue) {
         format!("{at}, out of scope")
@@ -331,19 +331,13 @@ pub fn issue(
         let _ = writeln!(out, "{label}: {}", folders.join(", "));
     }
     // One line per repository, in the order they merge.
-    for repo in world
-        .repos_of(i)
-        .iter()
-        .chain(i.pulls.keys().filter(|r| !world.repos_of(i).contains(r)))
-    {
-        if let Some(number) = i.pulls.get(repo) {
-            let state = if i.merged.contains(repo) {
-                ", merged"
-            } else {
-                ""
-            };
-            let _ = writeln!(out, "Pull request: {repo} #{number}{state}");
-        }
+    for (repo, number) in world.pulls_of(i) {
+        let state = if i.merged.contains(repo) {
+            ", merged"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "Pull request: {repo} #{number}{state}");
     }
     own_text(&mut out, read);
     if let Some(plan) = &i.plan {

@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use crate::Part;
 use crate::effect::Effect;
 use crate::event::Event;
-use crate::model::AgentState;
+use crate::model::{Agent, AgentState};
 use crate::world::World;
 
 /// Where the host writes every event before it applies it.
@@ -107,6 +107,45 @@ pub fn catalog(parts: &[Box<dyn Part>]) -> BTreeMap<String, crate::settings::Cho
         .flat_map(|p| p.choices())
         .map(|c| (c.key.clone(), c))
         .collect()
+}
+
+/// Whether the problem under `key` is one the host writes for a stopped agent
+/// ([`stopped`]).
+pub(crate) fn of_a_stopped_agent(key: &str) -> bool {
+    key.starts_with(BLOCKED) || key.starts_with(ERRORED)
+}
+
+/// The problem an agent stopped at a prompt or on an error is listed as, with
+/// its key; none for an agent in any other state. `place` says where it runs, as
+/// ` in PATH`, or is empty.
+pub(crate) fn stopped(agent: &Agent, place: impl FnOnce() -> String) -> Option<(String, String)> {
+    match &agent.state {
+        AgentState::Blocked { reason } => Some((
+            format!("{BLOCKED}{}", agent.id),
+            format!(
+                "{}{} is blocked: {reason}; the daemon cannot answer it",
+                agent.id,
+                place()
+            ),
+        )),
+        AgentState::Errored { line, .. } => {
+            let line = if line.is_empty() {
+                String::new()
+            } else {
+                format!(": {line}")
+            };
+            let next = if agent.limit_reset().is_some() {
+                "the daemon sends continue after it resets"
+            } else {
+                "the daemon reminds it and stops it as it does an idle agent"
+            };
+            Some((
+                format!("{ERRORED}{}", agent.id),
+                format!("{}{} stopped on an error{line}; {next}", agent.id, place()),
+            ))
+        }
+        _ => None,
+    }
 }
 
 impl Host {
@@ -272,8 +311,7 @@ impl Host {
     /// an error too, with what the daemon will do about it. Rebuilt on each tick,
     /// so each goes when the agent leaves the state or ends.
     fn report_blocked(&mut self) {
-        self.problems
-            .retain(|k, _| !k.starts_with(BLOCKED) && !k.starts_with(ERRORED));
+        self.problems.retain(|k, _| !of_a_stopped_agent(k));
         for agent in self.world.agents.values() {
             let place = || {
                 agent
@@ -285,34 +323,8 @@ impl Host {
                     .filter(|f| f.machine == agent.machine)
                     .map_or_else(String::new, |f| format!(" in {}", f.path))
             };
-            match &agent.state {
-                AgentState::Blocked { reason } => {
-                    self.problems.insert(
-                        format!("{BLOCKED}{}", agent.id),
-                        format!(
-                            "{}{} is blocked: {reason}; the daemon cannot answer it",
-                            agent.id,
-                            place()
-                        ),
-                    );
-                }
-                AgentState::Errored { line, .. } => {
-                    let line = if line.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {line}")
-                    };
-                    let next = if agent.limit_reset().is_some() {
-                        "the daemon sends continue after it resets"
-                    } else {
-                        "the daemon reminds it and stops it as it does an idle agent"
-                    };
-                    self.problems.insert(
-                        format!("{ERRORED}{}", agent.id),
-                        format!("{}{} stopped on an error{line}; {next}", agent.id, place()),
-                    );
-                }
-                _ => {}
+            if let Some((key, line)) = stopped(agent, place) {
+                self.problems.insert(key, line);
             }
         }
     }

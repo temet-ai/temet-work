@@ -20,6 +20,8 @@ use crate::world::World;
 pub enum Command {
     /// The state as text.
     Status,
+    /// The state as data ([`View`](crate::View)), for a front end.
+    View,
     /// One issue in full, as text.
     Issue {
         /// The issue.
@@ -142,6 +144,7 @@ impl Command {
     pub fn issue(&self) -> Option<&IssueId> {
         match self {
             Self::Status
+            | Self::View
             | Self::Screen { .. }
             | Self::Set { .. }
             | Self::Unset { .. }
@@ -484,8 +487,8 @@ impl World {
         })
     }
 
-    /// The event a command becomes, or why the loop refuses it. `Status`
-    /// becomes no event.
+    /// The event a command becomes, or why the loop refuses it. A command that
+    /// only reads, such as `Status`, becomes no event.
     pub fn check(&self, by: Option<&AgentId>, command: &Command) -> Result<Option<Event>, String> {
         let at = |issue: &IssueId| {
             self.issues
@@ -497,7 +500,7 @@ impl World {
             Err(format!("{issue} is {}, not {wanted}", stage(now)))
         };
         let event = match command {
-            Command::Status | Command::Screen { .. } => return Ok(None),
+            Command::Status | Command::View | Command::Screen { .. } => return Ok(None),
             // Filing waits for the tracker's answer: the daemon carries it out
             // through `World::filing`, not as an event of its own.
             Command::File { .. } => {
@@ -1001,6 +1004,23 @@ mod tests {
         };
         let refiner = AgentId::new("refiner-1");
         assert!(w.check(Some(&refiner), &empty).is_err());
+    }
+
+    #[test]
+    fn view_reads_back_from_its_line_and_becomes_no_event() {
+        let line = r#"{"command":"view"}"#;
+        assert_eq!(serde_json::to_string(&Command::View).expect("json"), line);
+        assert_eq!(
+            serde_json::from_str::<Command>(line).expect("a command"),
+            Command::View
+        );
+        let w = refining();
+        for by in [None, Some(AgentId::new("author-1"))] {
+            assert_eq!(w.events(by.as_ref(), &Command::View), Ok(Vec::new()));
+        }
+        assert!(!Command::View.changes());
+        assert_eq!(Command::View.issue(), None);
+        assert_eq!(Command::View.name(), "view");
     }
 
     #[test]

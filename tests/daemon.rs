@@ -335,6 +335,7 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
         match answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     };
     run(
@@ -416,6 +417,7 @@ fn a_refiners_plan_naming_runtime_is_refused_and_the_author_runs_claude_in_plan_
     let done = |reply: Reply| match reply {
         Reply::Done { text } => text,
         Reply::Refused { why } => panic!("refused: {why}"),
+        Reply::View { view } => panic!("a view: {view:?}"),
     };
     done(run(
         &mut host,
@@ -601,6 +603,7 @@ fn issue_view(host: &mut Host) -> String {
     match socket::answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
         Reply::Done { text } => text,
         Reply::Refused { why } => panic!("refused: {why}"),
+        Reply::View { view } => panic!("a view: {view:?}"),
     }
 }
 
@@ -680,6 +683,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         match answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("{by}: refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     };
     let plan = Plan {
@@ -831,6 +835,7 @@ mod settings_commands {
         match reply {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     }
 
@@ -838,6 +843,7 @@ mod settings_commands {
         match reply {
             Reply::Refused { why } => why,
             Reply::Done { text } => panic!("done: {text}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     }
 
@@ -1128,7 +1134,7 @@ fn the_same_request_gets_equal_replies_through_the_socket_and_through_ssh() {
         let path = path.clone();
         std::thread::spawn(move || {
             let request = from(&starts, Some("refiner-1"), Command::Status);
-            let local = Local { path }.send(&request);
+            let local = Local { path: path.clone() }.send(&request);
             let ssh = Ssh {
                 target: "stub".into(),
                 port: None,
@@ -1137,22 +1143,96 @@ fn the_same_request_gets_equal_replies_through_the_socket_and_through_ssh() {
                 deadline: socket::SSH_DEADLINE,
             }
             .send(&request);
-            (local, ssh)
+            let view = from(&starts, Some("refiner-1"), Command::View);
+            let ssh_view = Ssh {
+                target: "stub".into(),
+                port: None,
+                socket: None,
+                program: stub.display().to_string(),
+                deadline: socket::SSH_DEADLINE,
+            }
+            .send(&view);
+            let local_view = Local { path }.send(&view);
+            (local, ssh, local_view, ssh_view)
         })
     };
-    for _ in 0..2 {
+    for _ in 0..4 {
         let pending = requests
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("a request");
         let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
         pending.answer(reply);
     }
-    let (local, ssh) = client.join().expect("client");
+    let (local, ssh, local_view, ssh_view) = client.join().expect("client");
     assert!(
         matches!(&local, Ok(socket::Reply::Done { text }) if text.contains("refiner-1 on ankh#1")),
         "{local:?}"
     );
     assert_eq!(local, ssh);
+    assert!(
+        matches!(&local_view, Ok(socket::Reply::View { view })
+            if view.agents.iter().any(|a| a.id.0 == "refiner-1")),
+        "{local_view:?}"
+    );
+    assert_eq!(local_view, ssh_view);
+}
+
+#[test]
+fn status_json_prints_the_view() {
+    use temet_work::socket;
+
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("view.sock");
+    let requests = socket::listen(&path).expect("listen");
+    let client = std::thread::spawn(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+            .args(["status", "--json"])
+            .env("TEMET_WORK_SOCKET", &path)
+            .env_remove("TEMET_WORK_DAEMON")
+            .env_remove("TEMET_WORK_AGENT")
+            .env_remove(SECRET_VAR)
+            .output()
+            .expect("runs")
+    });
+    let (mut host, _) = host();
+    host.tick(0).expect("tick");
+    let pending = requests
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("a request");
+    assert_eq!(pending.request.command, Command::View);
+    let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
+    pending.answer(reply);
+    let out = client.join().expect("client");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let view: temet_work_core::View = serde_json::from_slice(&out.stdout).expect("a view");
+    assert_eq!(
+        view,
+        temet_work_core::View::new(host.world(), host.problems())
+    );
+    assert_eq!(view.issues[0].id, "ankh#1");
+}
+
+#[test]
+fn json_on_a_command_other_than_status_is_refused_with_the_usage() {
+    for args in [
+        &["parts", "--json"][..],
+        &["help", "--json"],
+        &["mcp", "--json"],
+        &["issue", "ankh#1", "--json"],
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+            .args(args)
+            .env("TEMET_WORK_SOCKET", "/nonexistent.sock")
+            .env_remove("TEMET_WORK_DAEMON")
+            .output()
+            .expect("runs");
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert!(out.stdout.is_empty(), "{args:?}: {out:?}");
+        let why = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            why.contains("temet-work status [--json]"),
+            "{args:?}: {why}"
+        );
+    }
 }
 
 #[test]
@@ -1779,6 +1859,7 @@ areas = ["guild"]
         match reply {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     }
 
@@ -2030,6 +2111,7 @@ projects = ["ankh"]
         match answer(host, 1, &request, &Peer::Unchecked).expect("answer") {
             Reply::Done { text } => text,
             Reply::Refused { why } => panic!("refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
         }
     };
     host.tick(0).expect("sync");

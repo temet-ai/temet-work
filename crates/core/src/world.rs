@@ -800,6 +800,16 @@ impl World {
         repos
     }
 
+    /// An issue's pull requests by repository, in the order they merge; one for a
+    /// repository it no longer names comes after those.
+    pub(crate) fn pulls_of<'a>(&self, issue: &'a Issue) -> Vec<(&'a ProjectId, &'a String)> {
+        let repos = self.repos_of(issue);
+        let mut pulls: Vec<_> = issue.pulls.iter().collect();
+        // The sort keeps the order of those that come after.
+        pulls.sort_by_key(|(r, _)| repos.iter().position(|x| x == *r).unwrap_or(repos.len()));
+        pulls
+    }
+
     /// The repository an issue is worked in: its first.
     pub fn repo_of(&self, issue: &Issue) -> Option<&Project> {
         self.repos_of(issue)
