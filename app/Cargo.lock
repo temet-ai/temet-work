@@ -4975,6 +4975,7 @@ checksum = "c1bbb9f3c5c463a01705937a24fdabc5047929ac764b2d5b9cf681c1f5041ed5"
 name = "temet-work-app"
 version = "0.0.1"
 dependencies = [
+ "futures-channel",
  "gpui-base",
  "gpui-component",
  "gpui-pre",

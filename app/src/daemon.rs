@@ -2,9 +2,13 @@
 //! observes. It draws nothing.
 //!
 //! An ask is the CLI's `send` with a deadline: one `Request { by: None, command: View }` line
-//! to the socket, one `Reply` line back. The next ask starts [`VIEW_PERIOD`] after the last one
-//! ended, so asks never overlap. A failed ask keeps the last view and marks it stale; the next
-//! good one clears the mark.
+//! to the socket, one `Reply` line back, within [`VIEW_DEADLINE`] on the executor's clock. The
+//! next ask starts [`VIEW_PERIOD`] after the last one ended, so asks never overlap. A failed ask
+//! keeps the last view and marks it stale; the next good one clears the mark.
+//!
+//! The `Reply` match has no wildcard arm: a reply the core adds stops this file compiling until
+//! the app says what it does with it. A reply line of a kind this build's core lacks, as a newer
+//! daemon sends, is [`Problem::Unreadable`] with the parser's message.
 
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
@@ -12,7 +16,8 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use gpui::{Context, Task};
+use futures_channel::oneshot;
+use gpui::{BackgroundExecutor, Context, FutureExt, Task, Timeout};
 use temet_work_core::command::{VIEW_DEADLINE, VIEW_PERIOD};
 use temet_work_core::{Command, Reply, Request, View};
 
@@ -30,8 +35,9 @@ pub enum Problem {
         /// The daemon's reason, word for word.
         why: String,
     },
-    /// The answer is not a view: a line that is not a reply, a reply of another kind, or a
-    /// socket that failed or closed before it sent a line.
+    /// The answer is not a view: a line that is not a reply (a reply of a kind this build does
+    /// not know among them), a reply of another kind, a socket that failed or closed before it
+    /// sent a line, or no thread to read the socket on.
     Unreadable {
         /// The parser's or the socket's message.
         why: String,
@@ -77,20 +83,17 @@ impl Daemon {
             var("XDG_RUNTIME_DIR"),
             var("HOME"),
         );
-        Self::at(path, VIEW_DEADLINE, cx)
+        Self::at(path, cx)
     }
 
     /// Asks the daemon at `path` now and then [`VIEW_PERIOD`] after each ask ends. An ask with
-    /// no answer within `deadline` fails.
-    pub fn at(path: PathBuf, deadline: Duration, cx: &mut Context<Self>) -> Self {
+    /// no answer within [`VIEW_DEADLINE`] on the executor's clock fails.
+    pub fn at(path: PathBuf, cx: &mut Context<Self>) -> Self {
         let socket = path.clone();
         let asks = cx.spawn(async move |this, cx| {
             loop {
-                let socket = socket.clone();
-                let answer = cx
-                    .background_executor()
-                    .spawn(async move { ask(&socket, deadline) })
-                    .await;
+                let executor = cx.background_executor().clone();
+                let answer = ask(socket.clone(), &executor).await;
                 if this
                     .update(cx, |daemon, cx| daemon.take(answer, cx))
                     .is_err()
@@ -148,26 +151,70 @@ impl Daemon {
     }
 }
 
-/// One ask: a `View` request to the socket at `path` and the view it answers, waiting at most
-/// `deadline` on each write and read.
-fn ask(path: &Path, deadline: Duration) -> Result<View, Problem> {
-    let stream = UnixStream::connect(path).map_err(|_| Problem::NoSocket {
-        path: path.to_path_buf(),
-    })?;
-    let failed = |e: io::Error| match e.kind() {
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
-            Problem::NoAnswer { within: deadline }
+/// One ask: a `View` request to the socket at `path` and the view it answers, or
+/// [`Problem::NoAnswer`] once [`VIEW_DEADLINE`] has passed on `executor`'s clock.
+///
+/// A socket read blocks, so it runs on a thread of its own, raced against a timer on the
+/// executor. The timer decides the deadline, so under gpui's test executor the fake clock does.
+/// The read's own timeout is the same deadline in real time: it gives the same answer and ends
+/// the thread, which under a fake clock is all it does.
+async fn ask(path: PathBuf, executor: &BackgroundExecutor) -> Result<View, Problem> {
+    let (answer, answered) = oneshot::channel();
+    let reader = std::thread::Builder::new()
+        .name("temet-work-view".into())
+        .spawn(move || read(&path, answer));
+    if let Err(e) = reader {
+        return Err(Problem::Unreadable { why: e.to_string() });
+    }
+    match answered.with_timeout(VIEW_DEADLINE, executor).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(oneshot::Canceled)) => Err(Problem::Unreadable {
+            why: "the thread reading the socket stopped without an answer".into(),
+        }),
+        Err(Timeout) => Err(Problem::NoAnswer {
+            within: VIEW_DEADLINE,
+        }),
+    }
+}
+
+/// The reading thread: connects to the socket at `path`, hands the answer over, and only then
+/// closes the connection, so whoever waits for the connection to end (the app's tests do) finds
+/// the answer already handed over.
+fn read(path: &Path, answer: oneshot::Sender<Result<View, Problem>>) {
+    match UnixStream::connect(path) {
+        Ok(stream) => {
+            let _ = answer.send(exchange(&stream));
+            drop(stream);
         }
+        Err(_) => {
+            let _ = answer.send(Err(Problem::NoSocket {
+                path: path.to_path_buf(),
+            }));
+        }
+    }
+}
+
+/// Writes the `View` request to `stream` and reads the reply, waiting at most [`VIEW_DEADLINE`]
+/// on each write and read.
+fn exchange(stream: &UnixStream) -> Result<View, Problem> {
+    let failed = |e: io::Error| match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => Problem::NoAnswer {
+            within: VIEW_DEADLINE,
+        },
         _ => Problem::Unreadable { why: e.to_string() },
     };
-    stream.set_write_timeout(Some(deadline)).map_err(failed)?;
-    stream.set_read_timeout(Some(deadline)).map_err(failed)?;
+    stream
+        .set_write_timeout(Some(VIEW_DEADLINE))
+        .map_err(failed)?;
+    stream
+        .set_read_timeout(Some(VIEW_DEADLINE))
+        .map_err(failed)?;
     let request = Request::new(None, Command::View);
     let line =
         serde_json::to_string(&request).map_err(|e| Problem::Unreadable { why: e.to_string() })?;
-    writeln!(&stream, "{line}").map_err(failed)?;
+    writeln!(&*stream, "{line}").map_err(failed)?;
     let mut reply = String::new();
-    let read = BufReader::new(&stream)
+    let read = BufReader::new(stream)
         .read_line(&mut reply)
         .map_err(failed)?;
     if read == 0 {
