@@ -172,6 +172,14 @@ pub enum Event {
         /// Its new state.
         state: AgentState,
     },
+    /// The daemon typed `continue` into an agent whose turn ended on a limit,
+    /// once that limit had reset; the agent is working again.
+    Continued {
+        /// The agent.
+        agent: AgentId,
+        /// When the limit it waited on reset, in milliseconds since 1970.
+        resets_ms: u64,
+    },
     /// The refiner wrote an issue's plan.
     PlanWritten {
         /// The issue.

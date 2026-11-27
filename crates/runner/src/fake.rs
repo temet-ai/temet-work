@@ -111,6 +111,31 @@ impl FakeRunner {
             self.update(terminal, None);
         }
     }
+
+    /// Ends a terminal's turn in an error that shows `line` on its screen, as a
+    /// session at its usage limit does. The status carries no message, so the
+    /// line is read from the screen. Text sent after it starts a new turn.
+    pub fn end_in_error(&mut self, terminal: &TerminalId, line: &str) {
+        if let Some(t) = self.terms.get_mut(terminal) {
+            t.screen.push(line.to_string());
+            t.status = Status::Error { message: None };
+            self.update(terminal, None);
+        }
+    }
+
+    /// Reports every terminal that has not ended once more, with its labels and
+    /// status, as a runner does when it connects again after a restart.
+    pub fn reconnect(&mut self) {
+        let live: Vec<TerminalId> = self
+            .terms
+            .iter()
+            .filter(|(_, t)| t.status != Status::Gone)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in live {
+            self.update(&id, None);
+        }
+    }
 }
 
 impl Runner for FakeRunner {

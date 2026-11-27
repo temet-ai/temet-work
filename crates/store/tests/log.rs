@@ -261,3 +261,59 @@ fn an_agent_started_before_secrets_reads_with_no_digest_and_a_digest_survives_th
         Some(digest)
     );
 }
+
+#[test]
+fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after() {
+    use temet_work_core::ids::AgentId;
+    use temet_work_core::model::{AgentState, Role};
+    let p = path("agent-limit");
+    let author = AgentId::new("author-1");
+    let limited = Event::AgentChanged {
+        agent: author.clone(),
+        state: AgentState::Errored {
+            line: "You've hit your 5-hour limit · resets 5:40pm".into(),
+            resets_ms: Some(1_796_060_400_000),
+        },
+    };
+    let mut events = events();
+    events.extend([
+        Event::AgentStarted {
+            agent: author.clone(),
+            group: GroupId::new("watch"),
+            role: Role::Author,
+            issue: Some(IssueId::new("ankh", "1")),
+            machine: MachineId::new("morpork"),
+            folder: Some(FolderId::new("f1")),
+            secret_digest: None,
+        },
+        limited.clone(),
+    ]);
+    let (mut log, _) = Log::open(&p).expect("open");
+    for e in &events {
+        log.append(0, e).expect("append");
+    }
+    drop(log);
+    // A daemon restarted while the agent waits on its limit still knows when it resets.
+    let (mut log, entries) = Log::open(&p).expect("reopen");
+    let world = replay(&entries);
+    assert_eq!(world, World::replay(&events).0);
+    assert_eq!(world.agents[&author].limit_reset(), Some(1_796_060_400_000));
+
+    // Continued, then the same limit again: it is not waited on a second time.
+    let more = [
+        Event::Continued {
+            agent: author.clone(),
+            resets_ms: 1_796_060_400_000,
+        },
+        limited,
+    ];
+    for e in &more {
+        log.append(1, e).expect("append");
+    }
+    events.extend(more);
+    drop(log);
+    let world = replay(&Log::read(&p).expect("read"));
+    assert_eq!(world, World::replay(&events).0);
+    assert_eq!(world.agents[&author].continued, Some(1_796_060_400_000));
+    assert_eq!(world.agents[&author].limit_reset(), None);
+}

@@ -3,6 +3,7 @@ session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
   - 26cd49d9-7565-4506-b988-a9b64ed0fa45
   - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
+  - c27ea5f8-79a8-4f76-ae9d-52bda3729faa
 ---
 
 # temet-work architecture
@@ -75,7 +76,7 @@ What exists today:
 | Crate | State |
 |---|---|
 | `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, and the state as text |
-| `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, and holds text for an agent until its turn ends |
+| `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, holds text for an agent until its turn ends, and types `continue` into an agent whose usage limit has reset |
 | `temet-work-runner-herdr` | the herdr-core socket client; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
 | `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |
 | `temet-work-tracker` | the contract (issues, milestones, comment, close), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes, and closes verified issues |
@@ -113,7 +114,15 @@ also asks again for a merge, deploy or verify that was lost; the parts that do t
 repeat work already done or running; a deploy that restarts the daemon is recorded by
 the new daemon, which finds the build in the handoff file (`docs/configuration.md`). An agent its
 issue waits on that sits idle is reminded after ten minutes and again after twenty, and its session
-is stopped after thirty so a fresh one takes over. A reviewer or arbiter whose approval is in is not
+is stopped after thirty so a fresh one takes over. An agent whose turn ends in an error, such as a
+usage limit, is listed under Problems with the line its turn ended on: the terminal's status
+message, or else the line on its screen that names the error, read once. When that line gives a
+reset time the runner family can read (`resets 5pm`, `resets 5:40pm` or `resets 17:40`, in the
+daemon's time zone), the daemon types `continue` one minute after it, without starting a new agent,
+and text waiting for the agent goes after that. The reset time is kept in the event log, so a
+restart does not lose it. An error with no reset time it can read, or one that comes back with a
+reset time no later than the one already continued after, is treated as idle: reminded, then
+stopped. A reviewer or arbiter whose approval is in is not
 waited on while the checks run: it is not reminded, no other is started in its place, and it stays
 until the merge, so after a failed check a reviewer still running hears the next round. A refiner
 stops once its plan is in; the author, reviewer and arbiter stop once the issue's last pull request

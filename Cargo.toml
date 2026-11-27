@@ -17,6 +17,8 @@ serde-saphyr = "2.2"
 serde_json = "1"
 toml = "1"
 sha2 = "0.11"
+# Reads the clock time on an agent's error line in the daemon's time zone.
+jiff = { version = "1.0", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 rustix = { version = "1.1", features = ["net"] }
 temet-work-core = { path = "crates/core" }
 temet-work-tracker = { path = "crates/tracker" }

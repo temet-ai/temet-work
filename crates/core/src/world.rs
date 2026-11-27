@@ -318,6 +318,7 @@ impl World {
                         state: AgentState::Idle,
                         started: self.applied,
                         secret_digest: secret_digest.clone(),
+                        continued: None,
                     },
                 );
                 // A new agent hears what its stage needs in its brief.
@@ -344,6 +345,16 @@ impl World {
                     && a.state != AgentState::Ended
                 {
                     a.state = state.clone();
+                }
+            }
+            Event::Continued { agent, resets_ms } => {
+                if let Some(a) = self.agents.get_mut(agent)
+                    && a.state != AgentState::Ended
+                {
+                    a.state = AgentState::Working {
+                        doing: String::new(),
+                    };
+                    a.continued = Some(*resets_ms);
                 }
             }
             Event::PlanWritten { issue, plan } => {
