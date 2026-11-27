@@ -1,7 +1,8 @@
 //! A deterministic runner for tests: terminals live in memory, a send echoes its
 //! text onto the screen and runs one turn, and tests can put a terminal at a
 //! prompt, end its turn in an error, once or after every send, keep it in the
-//! turn a send starts, or end it.
+//! turn a send starts, have it report no status, lose its program to a shell,
+//! make its next stop fail, or end it.
 
 use std::collections::BTreeMap;
 
@@ -19,6 +20,9 @@ struct Term {
     turns: Turns,
     /// The turn it is in, when that turn is going to fail.
     failing: Option<Failing>,
+    /// Whether a shell holds it in place of its lost program: it is reported
+    /// gone, still listed, and takes typed text until it is stopped.
+    shell: bool,
 }
 
 /// How the turn a send starts goes.
@@ -51,6 +55,8 @@ pub struct FakeRunner {
     starts: Starts,
     calls: Calls,
     exec_error: Option<RunnerError>,
+    /// What the next stop fails with, changing nothing.
+    stop_error: Option<RunnerError>,
 }
 
 /// Every [`Start`] a fake runner was given, shared so a test can read them after
@@ -60,6 +66,9 @@ pub type Starts = std::sync::Arc<std::sync::Mutex<Vec<Start>>>;
 /// A call a fake runner was given.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Call {
+    /// A terminal stopped (its program ended and the terminal removed), or a
+    /// stop that failed.
+    Stop(TerminalId),
     /// A program run to its end on a machine (this one when `None`).
     Exec {
         /// The machine.
@@ -71,7 +80,7 @@ pub enum Call {
     Start(Start),
 }
 
-/// Every `exec` and `start` a fake runner was given, in order, shared like [`Starts`].
+/// Every `exec`, `start` and `stop` a fake runner was given, in order, shared like [`Starts`].
 pub type Calls = std::sync::Arc<std::sync::Mutex<Vec<Call>>>;
 
 impl Default for FakeRunner {
@@ -91,6 +100,7 @@ impl FakeRunner {
             starts: Starts::default(),
             calls: Calls::default(),
             exec_error: None,
+            stop_error: None,
         }
     }
 
@@ -99,7 +109,7 @@ impl FakeRunner {
         self.starts.clone()
     }
 
-    /// The `exec` and `start` calls this runner is given, in order.
+    /// The `exec`, `start` and `stop` calls this runner is given, in order.
     pub fn calls(&self) -> Calls {
         self.calls.clone()
     }
@@ -110,6 +120,13 @@ impl FakeRunner {
     pub fn exec_fails(mut self, error: RunnerError) -> Self {
         self.exec_error = Some(error);
         self
+    }
+
+    /// Makes the next `stop` fail with `error` and change nothing, as
+    /// herdr-core does when it will not remove a terminal it is still
+    /// putting a shell into. The stop after it works.
+    pub fn fail_next_stop(&mut self, error: RunnerError) {
+        self.stop_error = Some(error);
     }
 
     fn update(&mut self, terminal: &TerminalId, doing: Option<String>) {
@@ -157,6 +174,24 @@ impl FakeRunner {
         self.set(terminal, Status::Error { message: None });
     }
 
+    /// Makes a terminal report no status, as an agent does before its first
+    /// report and a plain shell always does.
+    pub fn no_status(&mut self, terminal: &TerminalId) {
+        self.set(terminal, Status::Unknown);
+    }
+
+    /// Loses a terminal's program to a shell, as herdr-core does for a kept
+    /// terminal whose program a signal or a reboot ended: the terminal is
+    /// reported gone, stays listed with its labels, and takes typed text into
+    /// the shell until it is stopped.
+    pub fn lose_to_shell(&mut self, terminal: &TerminalId) {
+        if let Some(t) = self.terms.get_mut(terminal) {
+            t.shell = true;
+            t.turns = Turns::End;
+        }
+        self.set(terminal, Status::Gone);
+    }
+
     /// Makes a terminal that ended in an error keep failing, as a session does
     /// while its API is overloaded: a send to it is working on the next call to
     /// `updates`, and only the call after that reports the error it last ended
@@ -197,12 +232,13 @@ impl FakeRunner {
     }
 
     /// Reports every terminal that has not ended once more, with its labels and
-    /// status, as a runner does when it connects again after a restart.
+    /// status, as a runner does when it connects again after a restart. A
+    /// terminal a shell holds is still there, and is reported gone.
     pub fn reconnect(&mut self) {
         let live: Vec<TerminalId> = self
             .terms
             .iter()
-            .filter(|(_, t)| t.status != Status::Gone)
+            .filter(|(_, t)| t.status != Status::Gone || t.shell)
             .map(|(id, _)| id.clone())
             .collect();
         for id in live {
@@ -249,6 +285,7 @@ impl Runner for FakeRunner {
                 error: None,
                 turns: Turns::End,
                 failing: None,
+                shell: false,
             },
         );
         self.update(&id, None);
@@ -283,6 +320,11 @@ impl Runner for FakeRunner {
             .terms
             .get_mut(terminal)
             .ok_or_else(|| RunnerError::Unknown(terminal.clone()))?;
+        if t.shell {
+            // The shell takes it as a command line; nothing reports a turn.
+            t.screen.push(text.to_string());
+            return Ok(());
+        }
         match t.status {
             Status::Gone => return Err(RunnerError::Gone),
             Status::Blocked { .. } => return Err(RunnerError::Blocked),
@@ -308,9 +350,16 @@ impl Runner for FakeRunner {
     }
 
     fn stop(&mut self, terminal: &TerminalId) -> Result<(), RunnerError> {
-        if !self.terms.contains_key(terminal) {
-            return Err(RunnerError::Unknown(terminal.clone()));
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(Call::Stop(terminal.clone()));
         }
+        let Some(t) = self.terms.get_mut(terminal) else {
+            return Err(RunnerError::Unknown(terminal.clone()));
+        };
+        if let Some(e) = self.stop_error.take() {
+            return Err(e);
+        }
+        t.shell = false;
         self.set(terminal, Status::Gone);
         Ok(())
     }

@@ -7,7 +7,9 @@
 //! and `done` both meaning a turn ended; a send refused while the terminal is at
 //! a prompt; the visible screen as the cheap read. Terminals are started with no
 //! parent, so agents outlive a restart of the daemon. An agent's terminal also
-//! gets the labels that put it on the herdr app's screens (`app_labels`).
+//! gets the labels that put it on the herdr app's screens (`app_labels`), and
+//! every terminal a `program` label, so a program herdr-core has replaced with
+//! a shell can be told from it (`lost`).
 //!
 //! While `TEMET_WORK_SANDBOX` is set to anything but empty, as it is in every
 //! test run, the client opens nothing and every call fails, unless it was given
@@ -25,6 +27,9 @@ use temet_work_runner::{Program, Runner, RunnerError, Start, Status, TerminalId,
 
 /// The label every terminal this client starts carries, and the subscription's filter.
 const OWNER: (&str, &str) = ("owner", "temet-work");
+
+/// The label holding the first word of the argv a terminal was started with.
+const PROGRAM: &str = "program";
 
 /// The socket herdr-core listens on: `HC_TERMINAL_SOCKET`, else the default
 /// under `XDG_RUNTIME_DIR`.
@@ -164,10 +169,15 @@ fn app_labels(labels: &BTreeMap<String, String>) -> Option<[(&'static str, Strin
 }
 
 /// The `terminal.run` parameters for a start: `on` names the machine, and is
-/// left out for a terminal on this one.
+/// left out for a terminal on this one. The `program` label keeps the first
+/// word of the argv, which herdr-core no longer reports once a shell has taken
+/// the program's place.
 fn run_params(start: &Start) -> Value {
     let mut labels = start.labels.clone();
     labels.insert(OWNER.0.into(), OWNER.1.into());
+    if let Some(program) = start.program.argv.first() {
+        labels.insert(PROGRAM.into(), program.clone());
+    }
     for (key, value) in app_labels(&start.labels).into_iter().flatten() {
         labels.insert(key.into(), value);
     }
@@ -353,6 +363,34 @@ fn labels_of(v: Option<&Value>) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
+/// Whether a terminal that has not finished lost its program, as to a signal
+/// or a reboot. herdr-core keeps such a terminal, with its labels, and puts a
+/// shell in the program's place. Until it has, the terminal carries the
+/// `reason` the program ended for. After, no reason remains and the terminal's
+/// `argv` is the shell's, which no longer starts with the `program` label. A
+/// terminal started before that label is lost when it is an agent's and its
+/// argv is one word: an agent is never started as one word, and a shell is. A
+/// terminal listed without its argv is not read as lost.
+fn lost(t: &Value, labels: &BTreeMap<String, String>) -> bool {
+    if t.get("reason")
+        .and_then(Value::as_str)
+        .is_some_and(|r| !r.is_empty())
+    {
+        return true;
+    }
+    let Some(argv) = t
+        .get("argv")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty())
+    else {
+        return false;
+    };
+    match labels.get(PROGRAM) {
+        Some(program) => argv[0].as_str() != Some(program.as_str()),
+        None => labels.contains_key("agent") && argv.len() == 1,
+    }
+}
+
 /// What the event reader shares with the client.
 #[derive(Default)]
 struct Shared {
@@ -396,16 +434,19 @@ fn take_snapshot(terminals: &Value, s: &mut Shared) {
         };
         let labels = labels_of(t.get("labels"));
         s.labels.insert(addr.to_string(), labels.clone());
-        // A finished terminal that was not removed is still listed; its session is over.
-        let status = if t.get("state").and_then(Value::as_str) == Some("finished") {
-            Status::Gone
-        } else {
-            status_of(
-                t.pointer("/status/state").and_then(Value::as_str),
-                t.pointer("/status/kind").and_then(Value::as_str),
-                t.pointer("/status/msg").and_then(Value::as_str),
-            )
-        };
+        // A finished terminal that was not removed is still listed; its session
+        // is over. So is the session of one whose program was lost, although
+        // herdr-core lists it live.
+        let status =
+            if t.get("state").and_then(Value::as_str) == Some("finished") || lost(t, &labels) {
+                Status::Gone
+            } else {
+                status_of(
+                    t.pointer("/status/state").and_then(Value::as_str),
+                    t.pointer("/status/kind").and_then(Value::as_str),
+                    t.pointer("/status/msg").and_then(Value::as_str),
+                )
+            };
         s.updates.push(Update {
             terminal: TerminalId(addr.to_string()),
             labels,
@@ -1092,6 +1133,144 @@ mod tests {
             .map(|u| u.terminal.0.as_str())
             .collect();
         assert_eq!(gone, ["t3", "t5", "t6"]);
+    }
+
+    /// An author's start as the runner family makes it, with the program a
+    /// Claude agent runs.
+    fn claude_start() -> Start {
+        Start {
+            program: Program {
+                argv: ["claude", "--permission-mode", "auto", "Mend the clock"]
+                    .map(String::from)
+                    .to_vec(),
+                env: Vec::new(),
+            },
+            ..start_of("watch", "ankh#1", "author-1", "author")
+        }
+    }
+
+    #[test]
+    fn run_params_give_every_terminal_a_program_label_with_its_first_word() {
+        let params = run_params(&claude_start());
+        assert_eq!(params["labels"]["program"], "claude");
+        assert_eq!(params["labels"]["agent"], "author-1");
+        let contract = Start {
+            program: Program {
+                argv: vec!["cat".into()],
+                env: Vec::new(),
+            },
+            ..Start::default()
+        };
+        assert_eq!(run_params(&contract)["labels"]["program"], "cat");
+        assert!(
+            run_params(&Start::default())["labels"]
+                .get("program")
+                .is_none(),
+            "nothing to name"
+        );
+    }
+
+    /// The labels an author's terminal carries in herdr-core, as `run_params`
+    /// gives them and the herdr app adds to them.
+    fn agent_labels(program: bool) -> Value {
+        let mut labels = run_params(&claude_start())["labels"].clone();
+        labels["log"] = json!("1a21e7fd7475c954");
+        labels["where"] = json!("watch / 1");
+        if !program {
+            labels.as_object_mut().map(|m| m.remove("program"));
+        }
+        labels
+    }
+
+    /// The status `take_snapshot` gives the one terminal `terminal` lists.
+    fn snapshot_status(terminal: Value) -> Status {
+        let mut s = Shared::default();
+        take_snapshot(&json!([terminal]), &mut s);
+        assert_eq!(s.updates.len(), 1, "{:?}", s.updates);
+        s.updates[0].status.clone()
+    }
+
+    /// The issue's first snapshot: a kept agent terminal whose program was
+    /// killed, before herdr-core has put a shell in its place.
+    fn recovering(labels: Value) -> Value {
+        json!({"address": "t7", "state": "live", "reason": "signaled", "status": null,
+               "pid": null, "keep": true, "labels": labels,
+               "argv": ["claude", "--permission-mode", "auto", "Mend the clock"]})
+    }
+
+    /// The issue's second snapshot: the same terminal once the shell is in place.
+    fn recovered(labels: Value) -> Value {
+        json!({"address": "t7", "state": "live", "reason": null, "status": null,
+               "pid": 3377947, "keep": true, "labels": labels, "argv": ["/usr/bin/zsh"]})
+    }
+
+    #[test]
+    fn a_lost_program_is_gone_while_recovering_and_once_a_shell_has_replaced_it() {
+        assert_eq!(
+            snapshot_status(recovering(agent_labels(true))),
+            Status::Gone
+        );
+        assert_eq!(snapshot_status(recovered(agent_labels(true))), Status::Gone);
+        // A shell left by the runner contract's echo program, which is one word.
+        let contract = json!({"item": "contract-1", "role": "contract", "owner": "temet-work",
+                              "program": "cat"});
+        assert_eq!(
+            snapshot_status(recovered(contract.clone())),
+            Status::Gone,
+            "the program label does not need an agent"
+        );
+        assert_eq!(
+            snapshot_status(json!({"address": "t8", "state": "live", "labels": contract,
+                                   "argv": ["cat"], "status": null})),
+            Status::Unknown,
+            "the program still runs"
+        );
+    }
+
+    #[test]
+    fn a_lost_program_without_label_is_gone_once_a_shell_has_replaced_it() {
+        // An agent terminal started by a build before the program label.
+        assert_eq!(
+            snapshot_status(recovered(agent_labels(false))),
+            Status::Gone
+        );
+        assert_eq!(
+            snapshot_status(recovering(agent_labels(false))),
+            Status::Gone
+        );
+        // Listed without its argv, a terminal is not read as lost.
+        let mut no_argv = recovered(agent_labels(false));
+        no_argv.as_object_mut().map(|m| m.remove("argv"));
+        assert_eq!(snapshot_status(no_argv), Status::Unknown);
+        // A one-word program that is no agent's is not read as a shell.
+        assert_eq!(
+            snapshot_status(json!({"address": "t8", "state": "live", "status": null,
+                                   "labels": {"item": "contract-1", "owner": "temet-work"},
+                                   "argv": ["cat"]})),
+            Status::Unknown
+        );
+    }
+
+    #[test]
+    fn a_just_started_agent_terminal_with_no_status_yet_is_unknown() {
+        let started = |labels| {
+            json!({"address": "t7", "state": "live", "reason": null, "status": null,
+                   "pid": 3369541, "keep": false, "labels": labels,
+                   "argv": ["claude", "--permission-mode", "auto", "Mend the clock"]})
+        };
+        assert_eq!(
+            snapshot_status(started(agent_labels(true))),
+            Status::Unknown
+        );
+        assert_eq!(
+            snapshot_status(started(agent_labels(false))),
+            Status::Unknown,
+            "started by a build before the program label"
+        );
+        // And once it reports, its status counts.
+        let mut working = started(agent_labels(true));
+        working["status"] = json!({"state": "working", "msg": "reading the brief"});
+        assert_eq!(snapshot_status(working), Status::Working);
     }
 
     #[test]

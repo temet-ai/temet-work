@@ -81,6 +81,7 @@ fn an_agents_terminal_run_carries_its_herdr_space_tab_and_name() {
         .into_iter()
         .chain([
             ("owner", "temet-work"),
+            ("program", "agent"),
             ("herdr.space", "sptemet-work-watch"),
             ("herdr.tab", "tbtemet-work-watch-ankh-morpork-12"),
             ("herdr.name", "author-22 ankh-morpork#12"),
