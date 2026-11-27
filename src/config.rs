@@ -973,6 +973,21 @@ starts = 1
     }
 
     #[test]
+    fn a_configuration_with_an_unknown_permission_mode_is_refused() {
+        for table in ["[settings]", "[settings.author]"] {
+            let text = format!("{table}\npermission = \"yolo\"\n{TODAY}");
+            let why = Config::parse(&text).expect_err("refused");
+            assert!(
+                why.contains(
+                    "permission takes one of default, acceptEdits, plan, auto, dontAsk, \
+                     bypassPermissions, not yolo"
+                ),
+                "{why}"
+            );
+        }
+    }
+
+    #[test]
     fn a_runtime_this_build_lacks_stops_the_start_listing_the_ones_it_has() {
         use temet_work_core::settings::Choice;
         let text = format!("[settings]\nruntime = \"nonesuch\"\n{TODAY}");

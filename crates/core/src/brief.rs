@@ -156,8 +156,10 @@ pub fn write(
              PLAN\n\
              Where the issue leaves a choice open, pick the default you would defend and say why in done_when.\n\
              For an issue that is hard, add a settings: map beside checks: with task-level values, such as model: opus; \
-             they are recorded as yours and a person can overturn them.",
+             they are recorded as yours and a person can overturn them. \
+             Only a person sets {persons}: a plan that names one is refused.",
             title = issue.title,
+            persons = only_a_persons().join(", "),
         ),
         Role::Author => format!(
             "Work on {id}: {title}. It is {source}.\n\
@@ -203,6 +205,14 @@ pub fn write(
         },
         folder,
     }
+}
+
+/// The settings no agent may set.
+fn only_a_persons() -> Vec<&'static str> {
+    crate::settings::specs()
+        .filter(|s| s.agents != crate::settings::Agents::May)
+        .map(|s| s.key)
+        .collect()
 }
 
 /// What an author is told when the review or the checks found things to fix.
