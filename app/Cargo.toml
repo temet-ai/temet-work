@@ -18,6 +18,8 @@ gpui = { package = "gpui-pre", version = "=0.3.14" }
 gpui-component = "=0.11.0"
 # Motion types (Easing, Spring) that gpui-component uses and does not re-export.
 gpui-base = "=0.11.0"
+# The one-shot channel a view ask's reading thread hands its answer over on; gpui builds on it.
+futures-channel = "0.3"
 serde_json = "1"
 temet-work-core = { path = "../crates/core" }
 temet-work-style = { path = "../crates/style" }

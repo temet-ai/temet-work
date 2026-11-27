@@ -14,9 +14,15 @@ before you change code.
 | Check the test time budget | `cargo nextest run --workspace --all-features --profile ci && scripts/test-budget` |
 | Lint | `cargo clippy --workspace --all-features --all-targets -- -D warnings` |
 | Licences and advisories | `cargo deny check` |
+| Check the desktop app, after a change to `crates/core` or `crates/style` | `(cd app && cargo clippy --all-targets -- -D warnings && cargo nextest run)` |
 
 Test the crate you changed as you work. Before you commit, run the workspace tests,
-`scripts/check-mixes` and `scripts/test-budget`.
+`scripts/check-mixes` and `scripts/test-budget`. A change to `crates/core`
+(temet-work-core) or `crates/style` (temet-work-style) also runs
+`(cd app && cargo clippy --all-targets -- -D warnings && cargo nextest run)`: the app is a
+workspace of its own that uses both crates, so the workspace tests do not build it, and CI's
+`app` job fails the pull request when the app breaks. When that run changes
+`app/Cargo.lock`, commit it, since the job builds with `--locked`.
 
 ## Rules
 
