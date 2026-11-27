@@ -70,6 +70,15 @@ picks the checkout, and the entry's own field still says where that checkout is
   holds no folder, and its author starts when one is released. A free folder on another
   machine does not start it. An issue across several repositories takes one there in each
   of them, or none.
+- An author with no machine set leaves a free folder to a ready issue pinned to that
+  folder's machine when another folder is free, and takes the first free folder in id
+  order otherwise. The other folder has to be one that no such issue could use. Free
+  folders are not counted against pinned issues: when those issues could use every one,
+  the author takes the first, even if another machine has two free for one of them. A
+  ready issue here is one whose dependencies are done and that waits only for its author.
+  Pinned issues of every group count, since a folder serves every group that works its
+  project. An unpinned issue never waits because of this: with one folder free, the
+  higher-ranked of the two takes it.
 - A refiner, reviewer or arbiter holds no checkout of its own and may share a held one on
   its machine. If the project has none there, the agent waits. It is not moved to another
   machine. An issue whose refiner cannot start stays new and takes no refining slot.

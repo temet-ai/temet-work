@@ -1,9 +1,12 @@
-//! Where an agent may run: the work folders its `machine` setting leaves it, and
-//! the issues waiting because none of them can take it (`docs/settings.md`). A set
-//! value is never passed over for a folder on another machine.
+//! Where an agent may run: the work folders its `machine` setting leaves it, the
+//! ones an author is given, and the issues waiting because none can take them
+//! (`docs/settings.md`). A set value is never passed over for a folder on another
+//! machine.
+
+use std::collections::BTreeSet;
 
 use crate::effect::Effect;
-use crate::ids::{IssueId, MachineId, ProjectId};
+use crate::ids::{FolderId, IssueId, MachineId, ProjectId};
 use crate::model::{Folder, Issue, Role, Stage};
 use crate::world::{LOCAL, World};
 
@@ -48,6 +51,45 @@ impl World {
         self.folders.values().filter(move |f| {
             f.project == project && machine.as_ref().is_none_or(|m| &f.machine == m)
         })
+    }
+
+    /// The free work folders the author of `issue` is given, one in each
+    /// repository it changes, on its `machine` when one is set. With none set it
+    /// takes folders no ready issue pinned to a machine could use, and any free
+    /// ones when that leaves it without.
+    pub(crate) fn author_folders(&self, issue: &Issue) -> Option<Vec<FolderId>> {
+        let repos = self.repos_of(issue);
+        if let Some(machine) = self.machine_for(&issue.id, Role::Author) {
+            return self.free_folders(&repos, |f| f.machine == machine);
+        }
+        let any = self.free_folders(&repos, |_| true)?;
+        let wanted = self.pinned_wants();
+        let spare = self.free_folders(&repos, |f| {
+            !wanted.contains(&(f.project.clone(), f.machine.clone()))
+        });
+        Some(spare.unwrap_or(any))
+    }
+
+    /// The repository and machine of every folder a ready issue pinned to a
+    /// machine could use, in any group: one whose author waits for a folder and
+    /// for nothing else.
+    fn pinned_wants(&self) -> BTreeSet<(ProjectId, MachineId)> {
+        self.issues
+            .values()
+            .filter(|i| self.waits_for_author(i))
+            .filter_map(|i| Some((i, self.machine_for(&i.id, Role::Author)?)))
+            .flat_map(|(i, machine)| {
+                self.repos_of(i)
+                    .into_iter()
+                    .map(move |repo| (repo, machine.clone()))
+            })
+            .collect()
+    }
+
+    /// Whether `issue` is ready for an author: refined, taken by a group, and
+    /// every issue it depends on done.
+    fn waits_for_author(&self, issue: &Issue) -> bool {
+        issue.stage == Stage::Ready && issue.group.is_some() && self.ready_to_start(issue)
     }
 
     /// Whether an agent of `role` that holds no folder of its own has somewhere to
@@ -98,7 +140,7 @@ impl World {
         let role = match i.stage {
             Stage::New if self.groups.values().any(|g| self.in_scope(g, i)) => Role::Refiner,
             Stage::Refining => Role::Refiner,
-            Stage::Ready if i.group.is_some() && self.ready_to_start(i) => Role::Author,
+            Stage::Ready if self.waits_for_author(i) => Role::Author,
             Stage::InReview { .. } if !i.review_ok => Role::Reviewer,
             Stage::Arbitration { .. } if !i.review_ok => Role::Arbiter,
             _ => return None,
@@ -108,7 +150,8 @@ impl World {
         // other agent may share one of the first.
         let (served, repos) = if role == Role::Author {
             let repos = self.repos_of(i);
-            (self.free_folders(&repos, Some(&machine)).is_some(), repos)
+            let free = self.free_folders(&repos, |f| f.machine == machine);
+            (free.is_some(), repos)
         } else {
             let served = self.running(&i.id, role).is_some() || self.has_place(i, role);
             (served, vec![self.folders_of(i)])

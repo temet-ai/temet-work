@@ -1088,35 +1088,30 @@ impl World {
                     .is_some_and(|m| group.milestones.contains(m)))
     }
 
-    /// A free work folder in each of `repos`, in their order and all on one
-    /// machine, since one author has to reach every one: the machine of the first
-    /// repository's folder, which is `on` when that names one. `None` when no such
-    /// machine has them all, so two issues cannot each hold half of what the other
-    /// needs.
+    /// A free work folder `may` allows in each of `repos`, in their order and all
+    /// on one machine, since one author has to reach every one: the machine of the
+    /// first repository's folder. `None` when no such machine has them all, so two
+    /// issues cannot each hold half of what the other needs.
     pub(crate) fn free_folders(
         &self,
         repos: &[ProjectId],
-        on: Option<&MachineId>,
+        may: impl Fn(&Folder) -> bool,
     ) -> Option<Vec<FolderId>> {
         let (first, others) = repos.split_first()?;
-        let free = |repo: &ProjectId, machine: &MachineId| {
+        let free = || {
             self.folders
                 .values()
-                .find(|f| &f.project == repo && &f.machine == machine && f.holder.is_none())
+                .filter(|f| f.holder.is_none() && may(f))
         };
-        self.folders
-            .values()
-            .filter(|f| &f.project == first && f.holder.is_none())
-            .filter(|f| on.is_none_or(|m| &f.machine == m))
-            .find_map(|start| {
-                std::iter::once(Some(start.id.clone()))
-                    .chain(
-                        others
-                            .iter()
-                            .map(|r| free(r, &start.machine).map(|f| f.id.clone())),
-                    )
-                    .collect()
-            })
+        free().filter(|f| &f.project == first).find_map(|start| {
+            std::iter::once(Some(start.id.clone()))
+                .chain(others.iter().map(|repo| {
+                    free()
+                        .find(|f| &f.project == repo && f.machine == start.machine)
+                        .map(|f| f.id.clone())
+                }))
+                .collect()
+        })
     }
 
     /// Takes new issues for refining and starts authors on ready ones.
@@ -1167,13 +1162,8 @@ impl World {
             ready.sort_by_key(|i| Self::rank(group, i));
             let ready: Vec<IssueId> = ready.iter().map(|i| i.id.clone()).collect();
             for id in ready {
-                let repos = self
-                    .issues
-                    .get(&id)
-                    .map(|i| self.repos_of(i))
-                    .unwrap_or_default();
-                let on = self.machine_for(&id, Role::Author);
-                let Some(mut picked) = self.free_folders(&repos, on.as_ref()) else {
+                let Some(mut picked) = self.issues.get(&id).and_then(|i| self.author_folders(i))
+                else {
                     continue;
                 };
                 for f in &picked {
