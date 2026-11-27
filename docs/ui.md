@@ -23,9 +23,9 @@ Its rules are in its Storybook under Start/Rules.
 | Composites | a working piece of a screen: SideNav, PageHeader, IssueTable, IssuePane | components and smaller composites | `app/src/composites/` |
 | Pages | a screen | composites and components | `app/src/pages/` |
 
-The front-end crate will be `app/`, a Cargo workspace of its own like `spikes/gpui-shell`, the
+The front-end crate is `app/`, a Cargo workspace of its own like `spikes/gpui-shell`, the
 spike it grows from, so that building the main workspace does not compile its UI library. It
-depends on `temet-work-core` and `temet-work-style` and on no other crate here, and it is the
+may depend on `temet-work-core` and `temet-work-style` and on no other crate here, and it is the
 only crate that may use a UI library (`tests/parts.rs`). Each part is one file named after it:
 StatusTag is `app/src/components/status_tag.rs`, declaring `pub struct StatusTag`. The theme
 module, `app/src/theme.rs`, is the one file that reads `temet-work-style`.
@@ -196,11 +196,15 @@ its row above takes the part's id in place of "gap".
 
 `temet-work-style`'s `review` module holds the UI review check, and its test
 `crates/style/tests/review.rs` runs it over `app/src` and this map in every workspace test run.
+The app's own tests run with `cargo test` in `app/`. CI does not build the app yet, since that
+compiles its UI library: run them after changing `app/` or the tokens.
 
 | Check | Where | State |
 |---|---|---|
 | The synced tokens keep the design system's rules: the accent, corners of 2 px at most, success in blue, no teal, cyan, brown or green | `temet-work-style` tests and a build-time assertion | built |
 | Tokens come from a pushed commit of the design system | `scripts/sync-tokens` refuses any other | built |
+| Every one of gpui-component's colour slots takes a token, and none breaks the ban list | `app/src/theme.rs` tests | built |
+| The app is a workspace of its own and depends on `temet-work-core` and `temet-work-style` only | `tests/parts.rs` | built |
 | No colour, size, corner, border, shadow, weight, opacity or duration written as a literal anywhere in `app/src`, the theme module included | `review` | built |
 | Only the theme module reads `temet-work-style` | `review` | built |
 | Each file in `app/src/components/`, `composites/` and `pages/` has a row in this map with a design-system id, in its layer's table, and declares a type with the part's name | `review` | built |

@@ -1,0 +1,32 @@
+[package]
+name = "temet-work-app"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+description = "temet-work's desktop app: draws the daemon's view data from the temet design system's parts"
+
+# The app is a workspace of its own, so building the main workspace does not compile its UI
+# library. It depends on temet-work-core and temet-work-style and on no other crate of the
+# repository (tests/parts.rs checks this). docs/ui.md says which part is built from which.
+
+[dependencies]
+# gpui-component 0.11.0 is built on `gpui-pre`, a crates.io snapshot of zed@f126950, not on
+# `gpui` 0.2.2. Pin the same snapshot under the same name (docs/findings/gpui.md).
+gpui = { package = "gpui-pre", version = "=0.3.14" }
+gpui-component = "=0.11.0"
+# Motion types (Easing, Spring) that gpui-component uses and does not re-export.
+gpui-base = "=0.11.0"
+temet-work-style = { path = "../crates/style" }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+
+[workspace]

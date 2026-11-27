@@ -291,10 +291,8 @@ fn inline_values(line: &str) -> Vec<String> {
     for (method, name, args) in calls(line) {
         let what = match name {
             "rgb" | "rgba" | "hsl" | "hsla" | "Rgba" if literal(args) => "a colour literal",
-            "black" | "white" | "red" | "green" | "blue" | "yellow" | "transparent_black"
-            | "transparent_white"
-                if !method && no_args(args) =>
-            {
+            // Transparent picks no colour, so it is not listed.
+            "black" | "white" | "red" | "green" | "blue" | "yellow" if !method && no_args(args) => {
                 "a named colour"
             }
             "px" | "rems" | "rem" | "relative" if literal(args) => "a size literal",
@@ -580,7 +578,7 @@ pub struct Tag;
 // .rounded_md() in a comment
 fn tag(t: &Theme) -> Div {
     div().w_full().h_full().size_full().flex_1().p(t.space.small).bg(rgba(t.colour.edge.0))
-        .w(px(0.)).border_0().top_0().opacity(t.motion.dim)
+        .w(px(0.)).border_0().top_0().opacity(t.motion.dim).border_color(Hsla::transparent_black())
 }";
         assert!(
             one("components/tag.rs", code).is_empty(),
