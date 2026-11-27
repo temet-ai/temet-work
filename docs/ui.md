@@ -1,6 +1,7 @@
 ---
 session_id:
   - 7d0707d6-9b74-4137-9184-72c6591eeaed
+  - fec79389-b50c-4e28-8f21-c56c628a5232
 ---
 
 # temet-work's UI parts
@@ -28,7 +29,9 @@ spike it grows from, so that building the main workspace does not compile its UI
 may depend on `temet-work-core` and `temet-work-style` and on no other crate here, and it is the
 only crate that may use a UI library (`tests/parts.rs`). Each part is one file named after it:
 StatusTag is `app/src/components/status_tag.rs`, declaring `pub struct StatusTag`. The theme
-module, `app/src/theme.rs`, is the one file that reads `temet-work-style`.
+module, `app/src/theme.rs`, is the one file that reads `temet-work-style`. Every other file
+outside the layer folders is plumbing and draws nothing: `app/src/daemon.rs` reads the
+daemon's view once a second into an entity the window observes.
 
 These rules hold the layers in place:
 
@@ -199,8 +202,9 @@ its row above takes the part's id in place of "gap".
 
 `temet-work-style`'s `review` module holds the UI review check, and its test
 `crates/style/tests/review.rs` runs it over `app/src` and this map in every workspace test run.
-The app's own tests run with `cargo test` in `app/`. CI does not build the app yet, since that
-compiles its UI library: run them after changing `app/` or the tokens.
+The CI job `app` builds `app/` and runs its `cargo fmt --check`, clippy and tests on every pull
+request, beside the main workspace's job. Run the app's tests locally with
+`cd app && cargo nextest run`.
 
 | Check | Where | State |
 |---|---|---|

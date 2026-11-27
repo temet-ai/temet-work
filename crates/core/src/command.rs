@@ -4,6 +4,8 @@
 //! before it becomes an event, so a command cannot move an issue past a step it
 //! is not at.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::effect::Effect;
@@ -138,6 +140,17 @@ pub enum Command {
         group: GroupId,
     },
 }
+
+/// How long a front end waits after one [`Command::View`] ends, answered or failed,
+/// before it sends the next. Counting from the end of an ask, not at a fixed rate,
+/// keeps asks from overlapping and a slow daemon from gathering a queue of them.
+pub const VIEW_PERIOD: Duration = Duration::from_secs(1);
+
+/// How long a front end waits for the daemon's answer to [`Command::View`] before
+/// it counts the ask as failed. A local reply takes milliseconds and the daemon
+/// answers requests one at a time, so no answer in this time means its loop is
+/// busy or stuck.
+pub const VIEW_DEADLINE: Duration = Duration::from_secs(5);
 
 impl Command {
     /// The issue the command is about; `None` for `Status`.

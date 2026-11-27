@@ -47,6 +47,40 @@ jobs:
       - name: Mixes
         run: scripts/check-mixes
 
+  # The desktop app is a workspace of its own (docs/ui.md), so the job above does not
+  # build it. No path filter: a change to the core or the style crate that breaks the
+  # app fails here, on its own pull request.
+  app:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      # cargo reads the root .cargo/config.toml from app/ too, so the app links with mold.
+      - uses: rui314/setup-mold@v1
+      # No apt step: the app has no gpui platform crate yet (it opens no window), so its
+      # build links only libc and needs no system package. The change that opens a window
+      # adds one here, a line per package naming the crate that needs it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      # The job above formats the main workspace only.
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo nextest run --locked --profile ci --config-file ../.config/nextest.toml
+      - name: Test time budget
+        run: ../scripts/test-budget target/nextest/ci/junit.xml --seconds 10
+
   # A Node package (renderer, sidecar, web UI): one job each, in its folder.
   # node:
   #   runs-on: ubuntu-22.04

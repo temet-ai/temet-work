@@ -1,0 +1,186 @@
+//! Plumbing: the daemon's view, read over its socket and kept fresh in an entity the window
+//! observes. It draws nothing.
+//!
+//! An ask is the CLI's `send` with a deadline: one `Request { by: None, command: View }` line
+//! to the socket, one `Reply` line back. The next ask starts [`VIEW_PERIOD`] after the last one
+//! ended, so asks never overlap. A failed ask keeps the last view and marks it stale; the next
+//! good one clears the mark.
+
+use std::fmt;
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use gpui::{Context, Task};
+use temet_work_core::command::{VIEW_DEADLINE, VIEW_PERIOD};
+use temet_work_core::{Command, Reply, Request, View};
+
+/// Why the entity has no view, or why the one it holds is stale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Problem {
+    /// Nothing answers at the socket's path: there is no file there, or there is a socket file
+    /// that nothing listens on, as a daemon that stopped leaves behind.
+    NoSocket {
+        /// The path the ask tried.
+        path: PathBuf,
+    },
+    /// The daemon refused the ask.
+    Refused {
+        /// The daemon's reason, word for word.
+        why: String,
+    },
+    /// The answer is not a view: a line that is not a reply, a reply of another kind, or a
+    /// socket that failed or closed before it sent a line.
+    Unreadable {
+        /// The parser's or the socket's message.
+        why: String,
+    },
+    /// The daemon took the connection and sent no answer in time.
+    NoAnswer {
+        /// How long the ask waited.
+        within: Duration,
+    },
+}
+
+impl fmt::Display for Problem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoSocket { path } => write!(f, "no socket at {}", path.display()),
+            Self::Refused { why } => write!(f, "the daemon refused: {why}"),
+            Self::Unreadable { why } => write!(f, "can't read the reply: {why}"),
+            Self::NoAnswer { within } if within.subsec_nanos() == 0 => {
+                write!(f, "no answer within {} s", within.as_secs())
+            }
+            Self::NoAnswer { within } => write!(f, "no answer within {} ms", within.as_millis()),
+        }
+    }
+}
+
+/// The daemon's view as the app last read it. Observers are notified only when what it holds
+/// changes, so an idle window is not redrawn on every ask.
+pub struct Daemon {
+    path: PathBuf,
+    view: Option<View>,
+    problem: Option<Problem>,
+    /// The loop of asks. Dropping the entity drops it, which stops the asks.
+    _asks: Task<()>,
+}
+
+impl Daemon {
+    /// Asks the daemon at the socket this process's environment names, by the core's rule
+    /// ([`temet_work_core::socket::path`]).
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let var = std::env::var_os;
+        let path = temet_work_core::socket::path(
+            var("TEMET_WORK_SOCKET"),
+            var("XDG_RUNTIME_DIR"),
+            var("HOME"),
+        );
+        Self::at(path, VIEW_DEADLINE, cx)
+    }
+
+    /// Asks the daemon at `path` now and then [`VIEW_PERIOD`] after each ask ends. An ask with
+    /// no answer within `deadline` fails.
+    pub fn at(path: PathBuf, deadline: Duration, cx: &mut Context<Self>) -> Self {
+        let socket = path.clone();
+        let asks = cx.spawn(async move |this, cx| {
+            loop {
+                let socket = socket.clone();
+                let answer = cx
+                    .background_executor()
+                    .spawn(async move { ask(&socket, deadline) })
+                    .await;
+                if this
+                    .update(cx, |daemon, cx| daemon.take(answer, cx))
+                    .is_err()
+                {
+                    return;
+                }
+                cx.background_executor().timer(VIEW_PERIOD).await;
+            }
+        });
+        Self {
+            path,
+            view: None,
+            problem: None,
+            _asks: asks,
+        }
+    }
+
+    /// The socket's path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The last view the daemon sent; `None` before the first good ask.
+    pub fn view(&self) -> Option<&View> {
+        self.view.as_ref()
+    }
+
+    /// Why the last ask failed; `None` after a good one.
+    pub fn problem(&self) -> Option<&Problem> {
+        self.problem.as_ref()
+    }
+
+    /// Whether the view is from an ask before the last, which failed.
+    pub fn stale(&self) -> bool {
+        self.view.is_some() && self.problem.is_some()
+    }
+
+    fn take(&mut self, answer: Result<View, Problem>, cx: &mut Context<Self>) {
+        let changed = match answer {
+            Ok(view) => {
+                let changed = self.problem.is_some() || self.view.as_ref() != Some(&view);
+                self.view = Some(view);
+                self.problem = None;
+                changed
+            }
+            Err(problem) => {
+                let changed = self.problem.as_ref() != Some(&problem);
+                self.problem = Some(problem);
+                changed
+            }
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+}
+
+/// One ask: a `View` request to the socket at `path` and the view it answers, waiting at most
+/// `deadline` on each write and read.
+fn ask(path: &Path, deadline: Duration) -> Result<View, Problem> {
+    let stream = UnixStream::connect(path).map_err(|_| Problem::NoSocket {
+        path: path.to_path_buf(),
+    })?;
+    let failed = |e: io::Error| match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+            Problem::NoAnswer { within: deadline }
+        }
+        _ => Problem::Unreadable { why: e.to_string() },
+    };
+    stream.set_write_timeout(Some(deadline)).map_err(failed)?;
+    stream.set_read_timeout(Some(deadline)).map_err(failed)?;
+    let request = Request::new(None, Command::View);
+    let line =
+        serde_json::to_string(&request).map_err(|e| Problem::Unreadable { why: e.to_string() })?;
+    writeln!(&stream, "{line}").map_err(failed)?;
+    let mut reply = String::new();
+    let read = BufReader::new(&stream)
+        .read_line(&mut reply)
+        .map_err(failed)?;
+    if read == 0 {
+        return Err(Problem::Unreadable {
+            why: "the socket closed without a reply".into(),
+        });
+    }
+    match serde_json::from_str(&reply) {
+        Ok(Reply::View { view }) => Ok(view),
+        Ok(Reply::Refused { why }) => Err(Problem::Refused { why }),
+        Ok(Reply::Done { text }) => Err(Problem::Unreadable {
+            why: format!("a done reply in place of a view: {text}"),
+        }),
+        Err(e) => Err(Problem::Unreadable { why: e.to_string() }),
+    }
+}
