@@ -8,6 +8,11 @@
 // token the design system documents as the page resolves it in the dark theme, and writes it as
 // a Rust constant with the token's name. It also reads the StatusTag and StageTag maps. Nothing in
 // the design system changes. Start its Storybook first (`npm run storybook` in temet-design/ui).
+//
+// The values must come from a pushed commit of the design system, so the script refuses a
+// checkout of it with uncommitted changes, or whose commit is on no remote branch. It finds the
+// checkout's ui/ folder from TEMET_DESIGN_UI, else from ~/.config/temet-design/config.json, the
+// file the design system's Storybook tools read.
 // Set CHROME to the browser to use; the default is the first of chromium, google-chrome-stable
 // and the Mac's Google Chrome that is installed.
 "use strict";
@@ -217,20 +222,36 @@ const TYPES = { colour: "Rgba", px: "Px", duration: "Duration", curve: "Curve", 
 const LISTS = { colour: "COLOURS", px: "SIZES", duration: "DURATIONS", curve: "CURVES", number: "NUMBERS", font: "FONTS" };
 const INTENTS = { none: "None", primary: "Primary", success: "Success", warning: "Warning", danger: "Danger" };
 
+/** The design system's version and pushed commit, or a refusal. */
 function source() {
-  try {
-    const config = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".config", "temet-design", "config.json"), "utf8"));
-    const version = JSON.parse(fs.readFileSync(path.join(config.ui, "package.json"), "utf8")).version;
-    const git = (...args) => execFileSync("git", ["-C", config.ui, ...args], { encoding: "utf8" }).trim();
-    const commit = git("rev-parse", "--short", "HEAD");
-    const dirty = git("status", "--porcelain", "--", ".") ? ", with uncommitted changes" : "";
-    return `@temet-ai/design ${version}, commit ${commit}${dirty}`;
-  } catch {
-    return "@temet-ai/design";
+  let ui = process.env.TEMET_DESIGN_UI;
+  if (!ui) {
+    const config = path.join(os.homedir(), ".config", "temet-design", "config.json");
+    try {
+      ui = JSON.parse(fs.readFileSync(config, "utf8")).ui;
+    } catch {
+      fail(`cannot find the design system's checkout: set TEMET_DESIGN_UI or write {"ui": "<checkout>/ui"} to ${config}`);
+    }
   }
+  const git = (...args) => execFileSync("git", ["-C", ui, ...args], { encoding: "utf8" }).trim();
+  let version, commit, dirty, remotes;
+  try {
+    version = JSON.parse(fs.readFileSync(path.join(ui, "package.json"), "utf8")).version;
+    commit = git("rev-parse", "--short", "HEAD");
+    dirty = git("status", "--porcelain", "--", ".");
+    remotes = git("branch", "-r", "--contains", "HEAD");
+  } catch (e) {
+    fail(`cannot read the design system's checkout at ${ui}: ${e.message}`);
+  }
+  if (dirty) {
+    const n = dirty.split("\n").length;
+    fail(`${ui} has ${n} uncommitted change${n === 1 ? "" : "s"}; the tokens must come from a pushed commit, so ask its maintainers to commit and push`);
+  }
+  if (!remotes) fail(`commit ${commit} of ${ui} is on no remote branch; ask its maintainers to push it`);
+  return `@temet-ai/design ${version}, commit ${commit}`;
 }
 
-function rust(data) {
+function rust(data, from) {
   const kept = Object.keys(data.values)
     .filter((n) => KEEP.some((re) => re.test(n)))
     .sort();
@@ -242,7 +263,7 @@ function rust(data) {
     else skipped.push(name);
   }
   const out = [];
-  out.push(`//! The design system's tokens, from ${source()}.`);
+  out.push(`//! The design system's tokens, from ${from}.`);
   out.push("//! Written by `scripts/sync-tokens`; do not edit, run the script again.");
   out.push("//!");
   out.push("//! Each constant has its token's name and holds its value in the dark theme. Blueprint's ramp");
@@ -287,13 +308,14 @@ function rust(data) {
 }
 
 (async () => {
+  const from = source();
   try {
     await fetch(STORYBOOK);
   } catch {
     fail(`no Storybook at ${STORYBOOK}; start it with \`npm run storybook\` in temet-design/ui`);
   }
   const data = await read();
-  const { text, count, skipped } = rust(data);
+  const { text, count, skipped } = rust(data, from);
   fs.writeFileSync(OUT, text);
   try {
     execFileSync("rustfmt", ["--edition", "2024", OUT], { stdio: "inherit" });
