@@ -157,8 +157,8 @@ pub fn write(
              Where the issue leaves a choice open, pick the default you would defend and say why in done_when.\n\
              For an issue that is hard, add a settings: map beside checks: with task-level values, such as model: opus; \
              they are recorded as yours and a person can overturn them. \
-             A model or runtime you set is the author's only: the models and runtimes of reviewers, arbiters \
-             and refiners are a person's to set. \
+             A model you set is the author's only: the models of reviewers, arbiters and refiners are \
+             a person's to set. \
              Only a person sets {persons}: a plan that names one is refused.",
             title = issue.title,
             persons = only_a_persons().join(", "),
@@ -249,4 +249,43 @@ pub fn nudge(role: Role, issue: &IssueId) -> String {
         "{issue} is still waiting on you. If your step is done, run: {command}. \
          If a choice stops you, take the default you would defend, say so, and finish."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Event;
+    use crate::world::World;
+
+    #[test]
+    fn the_refiners_brief_names_the_settings_only_a_person_sets() {
+        let id = IssueId::new("ankh", "1");
+        let mut world = World::default();
+        world.apply(&Event::IssueSynced {
+            issue: id.clone(),
+            title: "Mend the clock".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let brief = write(
+            Role::Refiner,
+            &world.issues[&id],
+            None,
+            &[],
+            Workplace::default(),
+            &[],
+            &[],
+        );
+        let (_, named) = brief
+            .task
+            .split_once("Only a person sets ")
+            .expect("the sentence");
+        let (named, _) = named.split_once(':').expect("its end");
+        let named: Vec<&str> = named.split(", ").collect();
+        for key in ["runtime", "runner", "review_rounds"] {
+            assert!(named.contains(&key), "{key} is not in {named:?}");
+        }
+    }
 }

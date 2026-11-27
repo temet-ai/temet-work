@@ -1193,22 +1193,16 @@ mod plan_settings {
     }
 
     #[test]
-    fn a_plan_records_model_and_runtime_for_the_author() {
+    fn a_plan_with_settings_records_them_as_the_refiners_task_level_events_first() {
         let mut w = refining();
-        run(
-            &mut w,
-            None,
-            &set("ankh", Some(Role::Reviewer), "runtime", "alpha"),
-        );
         let command = plan(&[
             ("model", Value::Text("opus".into())),
-            ("runtime", Value::Text("beta".into())),
-            ("review_rounds", Value::Number(5)),
+            ("starts", Value::Number(5)),
         ]);
         let events = run(&mut w, Some("refiner-1"), &command);
         assert!(matches!(events.last(), Some(Event::PlanWritten { .. })));
-        assert_eq!(events.len(), 4, "three settings, then the plan");
-        let recorded: Vec<(&str, Option<Role>)> = events[..3]
+        assert_eq!(events.len(), 3, "two settings, then the plan");
+        let recorded: Vec<(&str, Option<Role>)> = events[..2]
             .iter()
             .map(|e| match e {
                 Event::SettingSet {
@@ -1221,27 +1215,12 @@ mod plan_settings {
                 other => panic!("not the refiner's task-level setting: {other:?}"),
             })
             .collect();
-        assert_eq!(
-            recorded,
-            [
-                ("model", Some(Role::Author)),
-                ("review_rounds", None),
-                ("runtime", Some(Role::Author)),
-            ]
-        );
+        assert_eq!(recorded, [("model", Some(Role::Author)), ("starts", None)]);
         assert_eq!(
             read(&w, Role::Author, "model"),
             is("opus", "task, set by refiner-1")
         );
-        assert_eq!(
-            read(&w, Role::Author, "runtime"),
-            is("beta", "task, set by refiner-1")
-        );
-        assert_eq!(
-            read(&w, Role::Reviewer, "runtime"),
-            is("alpha", "project, set by person")
-        );
-        assert_eq!(w.setting_number(&issue(), None, "review_rounds"), 5);
+        assert_eq!(w.setting_number(&issue(), None, "starts"), 5);
     }
 
     #[test]
@@ -1267,43 +1246,37 @@ mod plan_settings {
     #[test]
     fn a_refiners_set_of_model_is_for_the_author_and_refused_for_other_roles() {
         let refiner = AgentId::new("refiner-1");
-        for key in ["model", "runtime"] {
-            for role in [None, Some(Role::Author)] {
-                let mut w = refining();
-                let events = run(&mut w, Some("refiner-1"), &set("ankh#1", role, key, "x"));
-                assert_eq!(
-                    events,
-                    [Event::SettingSet {
-                        scope: Scope::Task(issue()),
-                        role: Some(Role::Author),
-                        key: key.into(),
-                        value: Value::Text("x".into()),
-                        by: "refiner-1".into(),
-                    }]
+        for role in [None, Some(Role::Author)] {
+            let mut w = refining();
+            let command = set("ankh#1", role, "model", "x");
+            let events = run(&mut w, Some("refiner-1"), &command);
+            assert_eq!(
+                events,
+                [Event::SettingSet {
+                    scope: Scope::Task(issue()),
+                    role: Some(Role::Author),
+                    key: "model".into(),
+                    value: Value::Text("x".into()),
+                    by: "refiner-1".into(),
+                }]
+            );
+        }
+        for role in [
+            Role::Reviewer,
+            Role::Arbiter,
+            Role::Refiner,
+            Role::Investigator,
+        ] {
+            let w = refining();
+            for command in [set("ankh#1", Some(role), "model", "x"), unset(Some(role))] {
+                let why = w.events(Some(&refiner), &command).expect_err("refused");
+                assert!(
+                    why.starts_with(&format!(
+                        "only a person sets model for the {}, because ",
+                        role.name()
+                    )) && why.contains("are a person's to set"),
+                    "{why}"
                 );
-            }
-            for role in [
-                Role::Reviewer,
-                Role::Arbiter,
-                Role::Refiner,
-                Role::Investigator,
-            ] {
-                let w = refining();
-                let unset = Command::Unset {
-                    target: Target::Issue(issue()),
-                    role: Some(role),
-                    key: key.into(),
-                };
-                for command in [set("ankh#1", Some(role), key, "x"), unset] {
-                    let why = w.events(Some(&refiner), &command).expect_err("refused");
-                    assert!(
-                        why.starts_with(&format!(
-                            "only a person sets {key} for the {}, because ",
-                            role.name()
-                        )) && why.contains("are a person's to set"),
-                        "{why}"
-                    );
-                }
             }
         }
         // Its unset, with no role, removes the author's value.
@@ -1522,13 +1495,16 @@ mod plan_settings {
         let task = launch.brief.task;
         assert!(
             task.contains(
-                "A model or runtime you set is the author's only: the models and runtimes of \
-                 reviewers, arbiters and refiners are a person's to set."
+                "A model you set is the author's only: the models of reviewers, arbiters and \
+                 refiners are a person's to set."
             ),
             "{task}"
         );
         assert!(
-            task.contains("Only a person sets permission, ci, deploy, verify, run_in:"),
+            task.contains(
+                "Only a person sets runtime, runner, permission, review_rounds, ci, deploy, \
+                 verify, run_in:"
+            ),
             "{task}"
         );
     }
@@ -1575,6 +1551,36 @@ mod plan_settings {
             .launch(&GroupId::new("watch"), Role::Author, &issue(), None)
             .expect("known");
         assert_eq!(launch.brief.permission, "plan");
+    }
+
+    #[test]
+    fn an_agent_may_not_set_runtime() {
+        // Any adapter id: this world's build reports none to check it against.
+        let other = Value::Text("clacks".into());
+        only_a_person_may_set("runtime", "clacks", other);
+        let why = refining()
+            .events(
+                Some(&AgentId::new("refiner-1")),
+                &plan(&[("runtime", Value::Text("clacks".into()))]),
+            )
+            .expect_err("refused");
+        assert!(
+            why.contains(
+                "a runtime may not follow permission, so the runtime decides what an agent \
+                 may do without asking"
+            ),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn an_agent_may_not_set_runner() {
+        only_a_person_may_set("runner", "clacks", Value::Text("clacks".into()));
+    }
+
+    #[test]
+    fn an_agent_may_not_set_review_rounds() {
+        only_a_person_may_set("review_rounds", "1", Value::Number(1));
     }
 
     #[test]

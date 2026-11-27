@@ -3,6 +3,7 @@ session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
   - 30de12a8-8bb8-4310-a59b-8d5267ce0b97
   - 26cd49d9-7565-4506-b988-a9b64ed0fa45
+  - 7d9306de-2941-41bd-8a60-efad6ed38f2a
 ---
 
 # Commands
@@ -26,7 +27,7 @@ reports its step done.
 | `temet-work overturn DECISION OPTION REASON` | a person only; `DECISION` and `OPTION` are the numbers `status` lists (options count from 1), `REASON` is required | any, if the decision exists, the option is another than the one chosen, and the reason is not empty. What it changes depends on the issue: see below |
 | `temet-work proposal RULE keep` | a person only: the rule moves to kept and ends every brief written from then on | the rule is proposed |
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
-| `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `deploy`, `verify`, `run_in`, `permission` and `ci`, which only a person sets; a refiner's `model` and `runtime` are recorded for the author, and refused for another role | any for a person; refining for a refiner |
+| `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify` and `run_in`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role | any for a person; refining for a refiner |
 | `temet-work unset TARGET [--role ROLE] KEY` | the same | any for a person; refining for a refiner |
 | `temet-work settings TARGET [--role ROLE]` | anyone | any |
 
@@ -117,11 +118,12 @@ set it (`task, set by refiner-3`, `built in`); `temet-work issue` shows the same
 role at work on the issue. A value of the wrong kind, an unknown key or a runtime or
 runner the build lacks is refused with the reason, and the command exits 1.
 
-A refiner may add task-level settings to its plan, other than the five only a person sets
-(`docs/settings.md`, "Setting them"); they are recorded as set by it. Its `model` and
-`runtime`, from the plan or from its `set`, are for the author only: the models and
-runtimes of reviewers, arbiters and refiners are a person's to set, and a person's `set`
-on the issue with no role overturns the refiner's value. A plan with settings:
+A refiner may add task-level settings to its plan, other than the eight only a person
+sets: `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify` and
+`run_in` (`docs/settings.md`, "Setting them"). What it sets is recorded as set by it. Its
+`model`, from the plan or from its `set`, is for the author only: the models of reviewers,
+arbiters and refiners are a person's to set, and a person's `set` on the issue with no
+role overturns the refiner's value. A plan with settings:
 
 ```yaml
 checks:
@@ -129,7 +131,7 @@ checks:
     proven_by: ...
 settings:
   model: opus
-  review_rounds: 5
+  starts: 5
 ```
 
 A command for an issue at another step is refused, with the step the issue is at. The

@@ -2,6 +2,7 @@
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
   - 30de12a8-8bb8-4310-a59b-8d5267ce0b97
+  - 7d9306de-2941-41bd-8a60-efad6ed38f2a
 ---
 
 # Settings: defaults at every level
@@ -148,24 +149,27 @@ can set and unset the task level of the issue it is refining, and only while tha
 refining: once its plan is in, a `set` or `unset` from it is refused with the stage the
 issue is at. No other agent can set anything, and a wider level is a person's.
 
-A refiner's `model` and `runtime` are for the author. How hard the code is to write is
-what the refiner judges; how strong the review is belongs to the person, so the models of
-reviewers, arbiters and refiners are a person's to set, and so are their runtimes and the
-investigators'. A value from a plan, or from a refiner's `set` with no role or with
-`--role author`, is recorded for the author, and its `unset` removes the author's value.
-A `set` or `unset` of either key that names another role is refused. The refiner's other
-keys, such as `merge` or `review_rounds`, are recorded for every role.
+A refiner's `model` is for the author. How hard the code is to write is what the refiner
+judges; how strong the review is belongs to the person, so the models of reviewers,
+arbiters, refiners and investigators are a person's to set. A value from a plan, or from a
+refiner's `set` with no role or with `--role author`, is recorded for the author, and its
+`unset` removes the author's value. A `set` or `unset` of `model` that names another role
+is refused. The refiner's other keys, such as `merge` or `starts`, are recorded for every
+role.
 
 A person overturns the refiner's value with a `set` on the task that names no role, such
 as `temet-work set radar#44 model haiku`: it holds for every role, and the refiner's value
 for the author is dropped. A person's `unset` with no role drops it too, so the author
 takes the wider level's value. A value a person set with `--role author` stays.
 
-Five settings only a person sets, at any level and for any role. An agent's plan, `set` or
+Eight settings only a person sets, at any level and for any role. An agent's plan, `set` or
 `unset` that names one is refused with the reason, and a refused plan is not recorded:
 
 | Key | Why only a person sets it |
 |---|---|
+| `runtime` | a runtime may not follow `permission`, so the runtime decides what an agent may do without asking |
+| `runner` | it follows from the person's machines, not from the issue, and a value for one issue replaces the one a person chose for a role |
+| `review_rounds` | it decides how many rounds of review an issue gets before the arbiter rules, so fewer rounds weaken its review |
 | `deploy` | the daemon runs it as a shell command after a merge |
 | `verify` | the daemon runs it after a deploy |
 | `run_in` | it is the folder `deploy` and `verify` run in |
@@ -177,10 +181,9 @@ an agent. The daemon reads such a log and leaves that change out, so the issue t
 value of the next level, or the built-in one, and `temet-work settings` does not list the
 agent's.
 
-Likewise, a log written before a refiner's `model` and `runtime` were the author's may
-hold one set for an issue for every role, which is read as the author's, or for another
-role, which is left out. An issue refined before the upgrade is then reviewed on the
-person's model.
+Likewise, a log written before a refiner's `model` was the author's may hold one set for
+an issue for every role, which is read as the author's, or for another role, which is left
+out. An issue refined before the upgrade is then reviewed on the person's model.
 
 Every change, from the file, a command or a plan, is a `SettingSet` or `SettingUnset`
 event in the log with who made it: `file`, `person`, or the agent's id. A later event
@@ -218,8 +221,8 @@ level. `temet-work status` lists every value with the level it is set at and who
   level set it". Parts ask the world for a setting instead of reading their own fields
   or constants.
 - Each setting's `Spec` says whether an agent may set it: `May`, `ForAuthor` (a refiner
-  may, for the author only: `model` and `runtime`) or `MayNot`. The plan check, `set`,
-  `unset` and the replay of a log all read that, so a new key has to say which it is.
+  may, for the author only: `model`) or `MayNot`. The plan check, `set`, `unset` and the
+  replay of a log all read that, so a new key has to say which it is.
 - A family reports the adapters in its build and its default one; the host puts them in
   the world, which is how a value naming an adapter the build lacks is refused. The
   runtime family picks its adapter by `runtime`, the runner family by `runner`. The Codex
@@ -237,6 +240,17 @@ level. `temet-work status` lists every value with the level it is set at and who
 - Groups set no defaults. A group decides which work it takes; the chain decides how that
   work is done.
 - Within a level the role comes first; across levels the nearer level comes first.
+- Only a person sets `runtime`. The Codex adapter ignores `permission`, so an agent that
+  chose the runtime could undo what a person set there. Refusing the change only when
+  `permission` is not `auto` and the runtime named ignores it was left out: the core
+  would need each runtime to report whether it follows `permission`, a refiner's value
+  would still replace the runtime a person chose for authors, and every later change of
+  `permission` would need checking again.
+- Only a person sets `runner`. Which runner starts an issue's agents follows from the
+  person's machines, not from the issue, and a value for one issue replaces a runner a
+  person chose for a role.
+- Only a person sets `review_rounds`. How strong the review is belongs to the person, and
+  fewer rounds weaken it; the refiner judges how hard the code is to write.
 - Only a person sets `ci`. `ci = false` takes the CI gate off the code the issue's own
   author writes, in every repository the issue changes, so no agent decides it.
 - An agent may still set `merge`. It takes only `squash`, `merge` or `rebase`, is applied

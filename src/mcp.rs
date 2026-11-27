@@ -106,7 +106,7 @@ fn tools() -> Vec<Tool> {
                 "checks": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
                     "done_when": {"type": "string"}, "proven_by": {"type": "string"}}, "required": ["done_when", "proven_by"]}},
                 "repos": {"type": "array", "items": {"type": "string"}, "description": "For an issue of an area: the repositories the change needs, in the order they merge."},
-                "settings": {"type": "object", "description": "Task-level settings for this issue, such as {\"model\": \"opus\"} for a hard one. A model or runtime you set is the author's only: those of reviewers, arbiters and refiners are a person's to set. Recorded as set by you; a person can overturn them."}
+                "settings": {"type": "object", "description": "Task-level settings for this issue, such as {\"model\": \"opus\"} for a hard one. A model you set is the author's only: those of reviewers, arbiters and refiners are a person's to set. Recorded as set by you; a person can overturn them."}
             }, "required": ["issue", "checks"]}),
         },
         Tool {
@@ -160,11 +160,11 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "set",
-            description: "Gives a setting a value at one level, for one role or for every role. A refiner may set task-level values of the issue it is refining, where its model and runtime are the author's only; a wider level is a person's.",
+            description: "Gives a setting a value at one level, for one role or for every role. A refiner may set task-level values of the issue it is refining, where its model is the author's only; a wider level is a person's.",
             acts: true,
             schema: json!({"type": "object", "properties": {
                 "target": target_field(), "role": role_field(),
-                "key": {"type": "string", "description": "The setting, such as model or review_rounds."},
+                "key": {"type": "string", "description": "The setting, such as model or merge."},
                 "value": {"type": "string", "description": "The value, as typed on the command line."}
             }, "required": ["target", "key", "value"]}),
         },
@@ -668,7 +668,7 @@ mod tests {
             .as_str()
             .expect("described");
         assert!(
-            said.contains("A model or runtime you set is the author's only"),
+            said.contains("A model you set is the author's only"),
             "{said}"
         );
         assert!(
