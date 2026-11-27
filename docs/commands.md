@@ -124,10 +124,13 @@ per line.
 `TEMET_WORK_DAEMON` picks how a command reaches the daemon: unset or empty is the local
 socket above; `ssh://[USER@]HOST[:PORT][/SOCKET/PATH]` runs `ssh -o BatchMode=yes
 -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 HOST temet-work
-relay`, with `--socket SOCKET/PATH` when the address has a path. A hop gets 10 s to
+relay --build BUILD --host NAME` (the client's build and machine name), with
+`--socket SOCKET/PATH` when the address has a path. A hop gets 10 s to
 connect, about 45 s of silence on an open link, and 60 s in all; past that ssh is killed
 and the command fails with `ssh HOST: no answer within 60 s`. A host ssh cannot reach
 fails with `ssh HOST: could not connect: ...`.
 The hidden command `temet-work relay` copies one request line from standard input to the
-local socket and the reply line back; it exits 4 when no daemon answers.
+local socket and the reply line back; it exits 4 when no daemon answers. When `--build`
+is missing or is not its own build, it does not contact the daemon and replies with a
+refusal: `temet-work on NAME is build X, the daemon is build Y: update it`.
 `docs/configuration.md` says how to set up a work folder on another machine.

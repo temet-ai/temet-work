@@ -87,17 +87,24 @@ fn main() -> ExitCode {
 
 /// `temet-work relay` (hidden): the far end of an SSH transport. Copies one
 /// request line from standard input to this machine's daemon and the reply line
-/// back to standard output.
+/// back to standard output, when the caller names this build.
 fn relay(args: &[String]) -> ExitCode {
-    let path = match args {
-        [] => socket::path(),
-        [flag, path] if flag == "--socket" => std::path::PathBuf::from(path),
-        _ => {
-            eprintln!("temet-work relay [--socket PATH]");
-            return ExitCode::from(2);
+    let (mut path, mut caller) = (None, socket::Caller::default());
+    let mut args = args.iter();
+    while let Some(flag) = args.next() {
+        match (flag.as_str(), args.next()) {
+            ("--socket", Some(value)) => path = Some(std::path::PathBuf::from(value)),
+            ("--build", Some(value)) => caller.build = Some(value),
+            ("--host", Some(value)) => caller.host = Some(value),
+            _ => {
+                eprintln!("temet-work relay [--build BUILD] [--host HOST] [--socket PATH]");
+                return ExitCode::from(2);
+            }
         }
-    };
-    match socket::relay(&path, std::io::stdin().lock(), std::io::stdout().lock()) {
+    }
+    let path = path.unwrap_or_else(socket::path);
+    let (input, out) = (std::io::stdin().lock(), std::io::stdout().lock());
+    match socket::relay(&path, caller, input, out) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");
