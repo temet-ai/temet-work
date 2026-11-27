@@ -11,17 +11,76 @@ use std::sync::Arc;
 use gpui::{AppContext, Font, FontWeight, HeadlessAppContext, font, px, size};
 use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
-use temet_work_app::pages::project::Project;
+use temet_work_app::composites::issue_pane::IssueTab;
+use temet_work_app::pages::project::{Grouping, Project};
 use temet_work_app::{sample, theme};
 
-/// The shots: name, theme, width and height.
-const SHOTS: &[(&str, &str, f32, f32)] = &[
-    ("dark-1440", "dark", 1440., 900.),
-    ("light-1440", "light", 1440., 900.),
-    ("dark-1280", "dark", 1280., 800.),
-    ("light-1280", "light", 1280., 800.),
-    ("dark-1700", "dark", 1700., 1000.),
-    ("light-1700", "light", 1700., 1000.),
+/// One shot: its name, theme, window size, and the page's state.
+struct Shot {
+    name: &'static str,
+    theme: &'static str,
+    width: f32,
+    height: f32,
+    tab: IssueTab,
+    grouping: Grouping,
+    needs: bool,
+    selected: &'static str,
+}
+
+const fn shot(name: &'static str, theme: &'static str, width: f32, height: f32) -> Shot {
+    Shot {
+        name,
+        theme,
+        width,
+        height,
+        tab: IssueTab::Plan,
+        grouping: Grouping::Milestone,
+        needs: true,
+        selected: "WATCH-44",
+    }
+}
+
+/// Every shot: each theme at three widths, each tab of the pane, the issues grouped by stage
+/// and by group, nothing waiting on the person, and an issue with only its facts.
+const SHOTS: &[Shot] = &[
+    shot("dark-1440", "dark", 1440., 900.),
+    shot("light-1440", "light", 1440., 900.),
+    shot("dark-1280", "dark", 1280., 800.),
+    shot("light-1280", "light", 1280., 800.),
+    shot("dark-1700", "dark", 1700., 1000.),
+    shot("light-1700", "light", 1700., 1000.),
+    Shot {
+        tab: IssueTab::Pull,
+        ..shot("dark-1440-pull", "dark", 1440., 900.)
+    },
+    Shot {
+        tab: IssueTab::Review,
+        ..shot("dark-1440-review", "dark", 1440., 900.)
+    },
+    Shot {
+        tab: IssueTab::Decisions,
+        ..shot("dark-1440-decisions", "dark", 1440., 900.)
+    },
+    Shot {
+        tab: IssueTab::Decisions,
+        ..shot("light-1440-decisions", "light", 1440., 900.)
+    },
+    Shot {
+        grouping: Grouping::Stage,
+        ..shot("dark-1440-by-stage", "dark", 1440., 900.)
+    },
+    Shot {
+        grouping: Grouping::Group,
+        ..shot("dark-1440-by-group", "dark", 1440., 900.)
+    },
+    Shot {
+        needs: false,
+        ..shot("dark-1440-no-needs", "dark", 1440., 900.)
+    },
+    Shot {
+        selected: "WATCH-47",
+        ..shot("dark-1440-facts-only", "dark", 1440., 900.)
+    },
 ];
 
 fn main() -> gpui::Result<()> {
@@ -30,8 +89,8 @@ fn main() -> gpui::Result<()> {
         anyhow_exit("usage: shots DIR [NAME...]");
     };
     let only = &args[1..];
-    for &(name, theme_name, width, height) in SHOTS {
-        if !only.is_empty() && !only.iter().any(|o| o == name) {
+    for s in SHOTS {
+        if !only.is_empty() && !only.iter().any(|o| o == s.name) {
             continue;
         }
         let text = Arc::new(gpui_wgpu::CosmicTextSystem::new("Archivo"));
@@ -43,7 +102,7 @@ fn main() -> gpui::Result<()> {
         let faces = cx.update(|cx| -> gpui::Result<String> {
             gpui_component::init(cx);
             cx.text_system().add_fonts(assets::faces())?;
-            theme::apply(cx, theme_name).map_err(std::io::Error::other)?;
+            theme::apply(cx, s.theme).map_err(std::io::Error::other)?;
             // Each weight of Archivo resolves to a face of its own: 400, 600 and 700.
             let at = |weight: f32| {
                 cx.text_system().resolve_font(&Font {
@@ -59,8 +118,18 @@ fn main() -> gpui::Result<()> {
                 theme::text::code_family(cx)
             ))
         })?;
-        let window = cx.open_window(size(px(width), px(height)), |window, cx| {
-            let page = cx.new(|_| Project::new(sample::project_view(), sample::selected()));
+        let view = if s.needs {
+            sample::project_view()
+        } else {
+            sample::without_needs(sample::project_view())
+        };
+        let window = cx.open_window(size(px(s.width), px(s.height)), |window, cx| {
+            let page = cx.new(|_| {
+                let mut page = Project::new(view, Some(s.selected.into()));
+                page.set_grouping(s.grouping);
+                page.set_tab(s.tab);
+                page
+            });
             cx.new(|cx| Root::new(page, window, cx))
         })?;
         // At a scale of 1, so a shot's pixels match the design system's story shots.
@@ -72,7 +141,7 @@ fn main() -> gpui::Result<()> {
         }
         cx.run_until_parked();
         let image = cx.capture_screenshot(window.into())?;
-        let path = format!("{dir}/{name}.png");
+        let path = format!("{dir}/{}.png", s.name);
         write_png(&path, image.width(), image.height(), image.as_raw())?;
         println!("{path}: {}x{}; {faces}", image.width(), image.height());
     }

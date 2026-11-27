@@ -15,6 +15,7 @@ pub struct Tag {
     children: SharedString,
     intent: Intent,
     icon: Option<IconName>,
+    multiline: bool,
 }
 
 impl Tag {
@@ -23,7 +24,14 @@ impl Tag {
             children: children.into(),
             intent: Intent::None,
             icon: None,
+            multiline: false,
         }
+    }
+
+    /// Lets the text take several lines rather than end in an ellipsis.
+    pub fn multiline(mut self, multiline: bool) -> Self {
+        self.multiline = multiline;
+        self
     }
 
     pub fn intent(mut self, intent: Intent) -> Self {
@@ -40,6 +48,17 @@ impl Tag {
 
 /// A tag drawn in `look`: StatusTag and StageTag draw theirs with their own looks.
 pub(crate) fn draw(look: &Look, icon: Option<IconName>, text: SharedString, cx: &App) -> Div {
+    draw_lines(look, icon, text, false, cx)
+}
+
+/// A tag drawn in `look`, its text on as many lines as it needs when `multiline`.
+fn draw_lines(
+    look: &Look,
+    icon: Option<IconName>,
+    text: SharedString,
+    multiline: bool,
+    cx: &App,
+) -> Div {
     // The look's height is one line of the tag's word inside its padding.
     let line = look.height - look.padding.top - look.padding.bottom;
     box_of(type_of(div(), look), look)
@@ -51,14 +70,16 @@ pub(crate) fn draw(look: &Look, icon: Option<IconName>, text: SharedString, cx: 
         .min_w(look.height)
         .line_height(line)
         .children(icon.map(Icon::new))
-        .child(
+        .child(if multiline {
+            div().min_w_0().child(text)
+        } else {
             div()
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .child(text),
-        )
+                .child(text)
+        })
 }
 
 impl RenderOnce for Tag {
@@ -71,6 +92,6 @@ impl RenderOnce for Tag {
             Intent::Warning => look::get(cx, "Tag", "intent-warning minimal", rest),
             Intent::Danger => look::get(cx, "Tag", "intent-danger minimal", rest),
         };
-        draw(&look, self.icon, self.children, cx)
+        draw_lines(&look, self.icon, self.children, self.multiline, cx)
     }
 }

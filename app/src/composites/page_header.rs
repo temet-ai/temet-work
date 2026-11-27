@@ -1,7 +1,9 @@
 //! PageHeader (`temet-pageheader`): the head of a screen's main column, the page title and a
 //! wrapping line of facts about what is shown.
 
-use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
+use gpui::{
+    AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
+};
 
 use crate::components::heading::{Heading, HeadingSize};
 use crate::components::icon::{Icon, IconName};
@@ -22,6 +24,8 @@ pub struct PageFact {
 pub struct PageHeader {
     title: SharedString,
     facts: Vec<PageFact>,
+    actions: Option<AnyElement>,
+    actions_label: Option<SharedString>,
 }
 
 impl PageHeader {
@@ -29,7 +33,22 @@ impl PageHeader {
         Self {
             title: title.into(),
             facts: Vec::new(),
+            actions: None,
+            actions_label: None,
         }
+    }
+
+    /// Controls for the whole screen, at the right, such as a SegmentedControl. They move under
+    /// the title when the column is too narrow for both.
+    pub fn actions(mut self, actions: impl IntoElement) -> Self {
+        self.actions = Some(actions.into_any_element());
+        self
+    }
+
+    /// Muted text before the controls, such as "Group by".
+    pub fn actions_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.actions_label = Some(label.into());
+        self
     }
 
     pub fn facts(mut self, facts: Vec<PageFact>) -> Self {
@@ -74,5 +93,17 @@ impl RenderOnce for PageHeader {
                     .child(Heading::new(self.title).size(HeadingSize::Page))
                     .children(facts),
             )
+            .children(self.actions.map(|actions| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::s4(cx))
+                    .whitespace_nowrap()
+                    .children(
+                        self.actions_label
+                            .map(|label| classed(Class::PageheadMuted, cx).child(label)),
+                    )
+                    .child(actions)
+            }))
     }
 }

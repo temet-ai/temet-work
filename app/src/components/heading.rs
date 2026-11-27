@@ -1,7 +1,9 @@
 //! Heading (`temet-heading`): a heading at one of three sizes from the theme's type scale, with
 //! an optional muted note at the right end of its line.
 
-use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
+use gpui::{
+    AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
+};
 
 use super::{Class, apply, type_of};
 use crate::theme::look::{self, State};
@@ -19,16 +21,17 @@ pub enum HeadingSize {
 
 #[derive(IntoElement)]
 pub struct Heading {
-    children: SharedString,
+    children: AnyElement,
     size: HeadingSize,
     note: Option<SharedString>,
     class_name: Option<Class>,
 }
 
 impl Heading {
-    pub fn new(children: impl Into<SharedString>) -> Self {
+    /// A heading: its text, or an element such as AttentionText with an icon.
+    pub fn new(children: impl IntoElement) -> Self {
         Self {
-            children: children.into(),
+            children: children.into_any_element(),
             size: HeadingSize::Section,
             note: None,
             class_name: None,

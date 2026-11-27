@@ -342,7 +342,7 @@ fn size_of(token: temet_work_style::Px) -> Pixels {
 pub mod colour {
     use gpui::{App, Hsla};
 
-    use super::{Intent, active, c};
+    use super::{Active, Intent, active, c, is_light};
 
     /// The window's ground.
     pub fn page(cx: &App) -> Hsla {
@@ -391,6 +391,17 @@ pub mod colour {
     /// What asks for the person: labels, borders and buttons. A theme setting.
     pub fn attention(cx: &App) -> Hsla {
         c(active(cx).tm_attention)
+    }
+    /// A segmented control's ground: `.bp6-dark .bp6-segmented-control { background-color:
+    /// var(--bp-palette-dark-gray-2) }`, and `var(--bp-palette-light-gray-5)` in Blueprint's
+    /// light mode.
+    pub fn segmented_ground(cx: &App) -> Hsla {
+        let a = cx.global::<Active>();
+        c(if is_light(a.name) {
+            a.tokens.bp_palette_light_gray_5
+        } else {
+            a.tokens.bp_palette_dark_gray_2
+        })
     }
     /// Text in an intent's colour, as a minimal tag or a link shows it.
     pub fn intent_text(cx: &App, intent: Intent) -> Hsla {
@@ -450,6 +461,10 @@ pub mod text {
     /// The weight of every heading and of a strong row's title.
     pub fn heading_weight(cx: &App) -> FontWeight {
         FontWeight(active(cx).tm_weight_heading)
+    }
+    /// The weight of body text: a group row's count.
+    pub fn normal_weight(cx: &App) -> FontWeight {
+        FontWeight(active(cx).bp_typography_weight_default)
     }
     /// Blueprint's bold: a table's column heads, a tree's group labels.
     pub fn bold_weight(cx: &App) -> FontWeight {
@@ -567,6 +582,10 @@ pub mod size {
     pub fn meter_inline(cx: &App) -> Pixels {
         size_of(active(cx).tm_meter_inline_width)
     }
+    /// A PropertyList's label column: `--tm-label-width`, or `--tm-label-width-narrow`.
+    pub fn label_narrow(cx: &App) -> Pixels {
+        size_of(active(cx).tm_label_width_narrow)
+    }
     /// The issue table's column widths, the same in every table.
     pub fn issue_columns(cx: &App) -> IssueColumns {
         IssueColumns::of(active(cx))
@@ -587,6 +606,26 @@ pub mod size {
     /// A large icon: `IconSize.LARGE`, the 20 px grid, five spacing steps.
     pub fn icon_large(cx: &App) -> Pixels {
         steps(cx, 5.)
+    }
+    /// A segmented control's inset and the gap between its buttons: `.bp6-segmented-control {
+    /// gap: calc(var(--bp-surface-spacing) * 0.5); padding: calc(var(--bp-surface-spacing) * 0.5) }`.
+    pub fn segmented_inset(cx: &App) -> Pixels {
+        steps(cx, 0.5)
+    }
+    /// A tab's line: `.bp6-tab { line-height: 30px }`, seven and a half spacing steps.
+    pub fn tab_line(cx: &App) -> Pixels {
+        steps(cx, 7.5)
+    }
+    /// The space between tabs, and above the open tab's panel: `.bp6-tab-list { column-gap:
+    /// calc(var(--bp-surface-spacing) * 5) }`, `.bp6-tab-panel { margin-top:
+    /// calc(var(--bp-surface-spacing) * 5) }`.
+    pub fn tab_gap(cx: &App) -> Pixels {
+        steps(cx, 5.)
+    }
+    /// The open tab's line under its title: `box-shadow: inset 0 calc(var(--bp-surface-spacing)
+    /// * 0.75 * -1) 0`.
+    pub fn tab_indicator(cx: &App) -> Pixels {
+        steps(cx, 0.75)
     }
     /// The space after a tag's icon: `.bp6-tag > * { margin-right: var(--bp-surface-spacing) }`.
     pub fn tag_gap(cx: &App) -> Pixels {

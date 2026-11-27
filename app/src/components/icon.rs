@@ -30,6 +30,10 @@ pub enum IconName {
     // PageHeader's facts.
     Link,
     GitBranch,
+    // NeedsYou's title and a decision's cost to undo.
+    Notifications,
+    WarningSign,
+    InfoSign,
     // Projects in SideNav.
     Console,
     Database,
@@ -41,7 +45,7 @@ pub enum IconName {
 
 impl IconName {
     /// Every icon the app embeds.
-    pub const ALL: [IconName; 24] = [
+    pub const ALL: [IconName; 27] = [
         Self::TickCircle,
         Self::Refresh,
         Self::Time,
@@ -60,6 +64,9 @@ impl IconName {
         Self::Minus,
         Self::Link,
         Self::GitBranch,
+        Self::Notifications,
+        Self::WarningSign,
+        Self::InfoSign,
         Self::Console,
         Self::Database,
         Self::Layout,
@@ -89,6 +96,9 @@ impl IconName {
             Self::Minus => "minus",
             Self::Link => "link",
             Self::GitBranch => "git-branch",
+            Self::Notifications => "notifications",
+            Self::WarningSign => "warning-sign",
+            Self::InfoSign => "info-sign",
             Self::Console => "console",
             Self::Database => "database",
             Self::Layout => "layout",

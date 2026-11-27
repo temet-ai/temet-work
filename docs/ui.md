@@ -108,7 +108,8 @@ Some composites in the design system style their own markup with a class of thei
 GroupList's group head (`tm-groups-head`) or IssueTable's key cell (`tm-mono tm-issue-key`). A
 composite here reads no colour or type, so `app/src/components/mod.rs` holds these classes as
 `Class`, and the component layer draws them: `classed(Class::GroupsHead, cx)` for plain markup,
-or `class_name(Class::Issues)` on a component, as the design system passes `className`. Each
+or `class_name(Class::Issues)` on a component, as the design system passes `className`, or
+`spans` for a paragraph with a classed run such as `Proven by <span className="tm-mono">`. Each
 class resolves to the look the design system measured for an element with that class, such as
 GroupList `tm-groups-head`; a class with no measured look follows its rule in `temet.css` or
 `blueprint-overrides.css`.
@@ -213,4 +214,4 @@ compiles its UI library: run them after changing `app/` or the tokens.
 | A part uses no layer above its own; a composite sets no colour, type, shape or motion and uses the UI library only through components; a page and the plumbing draw nothing of their own | `review` | built |
 | Every design-system id in this map is in the design system's part list, and each component and composite has that part's name | `review`, against `tokens::PARTS` | built |
 | Every `look::get` the app makes names a look both themes measured | `app/src/theme.rs` tests | built |
-| The window as the design system draws it: each theme at 1440, 1280 and 1700 px wide, drawn offscreen with GPUI's headless renderer, with no window or compositor, beside the design system's story shots | `cargo run --example shots --features shots -- DIR` in `app/` | built; compared by eye |
+| The window as the design system draws it: each theme at 1440, 1280 and 1700 px wide, each tab of the issue pane, the issues grouped by stage and by group, and nothing waiting on the person, drawn offscreen with GPUI's headless renderer, with no window or compositor, beside the design system's story shots | `cargo run --example shots --features shots -- DIR` in `app/` | built; compared by eye |

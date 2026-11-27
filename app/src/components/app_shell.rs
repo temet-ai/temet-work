@@ -14,6 +14,7 @@ use crate::theme::{size, space, text};
 #[derive(IntoElement)]
 pub struct AppShell {
     nav: AnyElement,
+    side: Option<AnyElement>,
     children: Vec<AnyElement>,
 }
 
@@ -22,8 +23,15 @@ impl AppShell {
     pub fn new(nav: impl IntoElement) -> Self {
         Self {
             nav: nav.into_any_element(),
+            side: None,
             children: Vec::new(),
         }
+    }
+
+    /// The right column: the selected item, such as an issue.
+    pub fn side(mut self, side: impl IntoElement) -> Self {
+        self.side = Some(side.into_any_element());
+        self
     }
 }
 
@@ -49,7 +57,15 @@ impl RenderOnce for AppShell {
             "tm-shell tm-shell-col tm-shell-main tm-shell-side",
             rest,
         );
-        let left = size::col_left(cx, window.viewport_size().width);
+        let pane = look::get(
+            cx,
+            "AppShell",
+            "tm-shell tm-shell-col tm-shell-pane tm-shell-side",
+            rest,
+        );
+        let width = window.viewport_size().width;
+        let left = size::col_left(cx, width);
+        let right = size::col_right(cx, width);
         type_of(div(), &shell)
             .size_full()
             .flex()
@@ -78,5 +94,13 @@ impl RenderOnce for AppShell {
                             .children(self.children),
                     ),
             )
+            .children(self.side.map(|side| {
+                box_of(div().id("side"), &pane)
+                    .flex_none()
+                    .w(right)
+                    .h_full()
+                    .overflow_y_scroll()
+                    .child(div().flex().flex_col().gap(space::s5(cx)).child(side))
+            }))
     }
 }

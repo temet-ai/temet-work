@@ -5,7 +5,7 @@
 use gpui::{App, IntoElement, ParentElement, Pixels, RenderOnce, Styled, Window, div};
 
 use super::Class;
-use super::table_row::{Layout, TableRow, Th};
+use super::table_row::{Content, Layout, TableRow, Th};
 
 #[derive(IntoElement, Default)]
 pub struct HTMLTable {
@@ -14,7 +14,7 @@ pub struct HTMLTable {
     class_name: Option<Class>,
     colgroup: Vec<Option<Pixels>>,
     thead: Vec<Th>,
-    tbody: Vec<TableRow>,
+    tbody: Vec<Vec<TableRow>>,
 }
 
 impl HTMLTable {
@@ -52,9 +52,10 @@ impl HTMLTable {
         self
     }
 
-    /// The rows, `<tbody>`.
+    /// A body of rows, `<tbody>`; each call adds one. The first row of each body has
+    /// Blueprint's line under the heads.
     pub fn tbody(mut self, rows: impl IntoIterator<Item = TableRow>) -> Self {
-        self.tbody = rows.into_iter().collect();
+        self.tbody.push(rows.into_iter().collect());
         self
     }
 }
@@ -68,17 +69,22 @@ impl RenderOnce for HTMLTable {
             issues: self.class_name == Some(Class::Issues),
             first: false,
         };
-        let heads = self
-            .thead
-            .into_iter()
-            .enumerate()
-            .map(|(i, th)| layout.head(i, cx).child(th.text));
-        let rows = self.tbody.into_iter().enumerate().map(|(i, mut row)| {
-            row.layout = Layout {
-                first: i == 0,
-                ..layout.clone()
-            };
-            row
+        let heads = self.thead.into_iter().enumerate().map(|(i, th)| {
+            let cell = layout.head(i, false, cx);
+            match th.content {
+                Content::Text(text) => cell.child(text),
+                Content::Element(element) => cell.child(element),
+            }
+        });
+        let rows = self.tbody.into_iter().flat_map(|body| {
+            let layout = layout.clone();
+            body.into_iter().enumerate().map(move |(i, mut row)| {
+                row.layout = Layout {
+                    first: i == 0,
+                    ..layout.clone()
+                };
+                row
+            })
         });
         div()
             .w_full()

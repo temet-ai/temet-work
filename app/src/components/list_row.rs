@@ -6,7 +6,7 @@ use gpui::{
     div,
 };
 
-use super::{Class, box_of, type_of};
+use super::{Class, apply, box_of, to_baseline, type_of};
 use crate::theme::look::{self, State};
 use crate::theme::space;
 
@@ -14,7 +14,7 @@ use crate::theme::space;
 pub struct ListRow {
     title: SharedString,
     strong: bool,
-    meta: Option<SharedString>,
+    meta: Option<AnyElement>,
     meta_first: bool,
     end: Option<AnyElement>,
     compact: bool,
@@ -45,9 +45,9 @@ impl ListRow {
     }
 
     /// Muted small text: beside the title in a compact row, cut with an ellipsis; otherwise a
-    /// line of its own under the title.
-    pub fn meta(mut self, meta: impl Into<SharedString>) -> Self {
-        self.meta = Some(meta.into());
+    /// line of its own under the title, whose items wrap as a row.
+    pub fn meta(mut self, meta: impl IntoElement) -> Self {
+        self.meta = Some(meta.into_any_element());
         self
     }
 
@@ -95,13 +95,27 @@ impl RenderOnce for ListRow {
         let compact = self.compact;
         // In a group, a compact row's meta wraps under its title rather than being cut short.
         let wraps = compact && self.class_name.contains(&Class::GroupsGroup);
+        let title_look = if self.strong {
+            look::get(
+                cx,
+                "ListRow",
+                "tm-row-main tm-row-strong tm-row-title",
+                rest,
+            )
+        } else {
+            look::get(cx, "ListRow", "tm-row-main tm-row-title", rest)
+        };
+        let meta_look = look::get(cx, "ListRow", "tm-row-main tm-row-meta", rest);
+        // Beside the title, the meta sits on the title's baseline.
+        let drop = to_baseline(cx, &title_look, &meta_look);
         let meta = self.meta.map(|meta| {
-            let look = look::get(cx, "ListRow", "tm-row-main tm-row-meta", rest);
-            let line = type_of(div(), &look);
+            let line = type_of(div(), &meta_look);
             if wraps {
                 line.flex_grow(1.)
                     .flex_shrink_0()
                     .max_w_full()
+                    .mt(drop)
+                    .line_height(meta_look.height)
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
@@ -109,44 +123,38 @@ impl RenderOnce for ListRow {
             } else if compact {
                 line.flex_1()
                     .min_w_0()
+                    .mt(drop)
+                    .line_height(meta_look.height)
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .child(meta)
             } else {
-                line.flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_y(space::s1(cx))
-                    .gap_x(space::s3(cx))
-                    .child(meta)
+                // A line of its own, whose text wraps; a meta of several items, such as a
+                // decision's, lays them out as a wrapping row of its own.
+                line.child(meta)
             }
         });
         let untitled = self.class_name.contains(&Class::GroupsEmpty);
         let title = (!untitled).then(|| {
-            let look = if self.strong {
-                look::get(
-                    cx,
-                    "ListRow",
-                    "tm-row-main tm-row-strong tm-row-title",
-                    rest,
-                )
+            let title = type_of(div(), &title_look).child(self.title);
+            if compact {
+                title.flex_none().line_height(title_look.height)
             } else {
-                look::get(cx, "ListRow", "tm-row-main tm-row-title", rest)
-            };
-            let title = type_of(div(), &look).child(self.title);
-            if compact { title.flex_none() } else { title }
+                title
+            }
         });
         let mut main = div().flex_1().min_w_0();
         if wraps {
+            // A wrapped meta starts its own line, so it needs no drop to the title's baseline.
             main = main
                 .flex()
                 .flex_wrap()
-                .items_baseline()
+                .items_start()
                 .gap_x(space::s3(cx))
                 .gap_y(Pixels::ZERO);
         } else if compact {
-            main = main.flex().items_baseline().gap(space::s3(cx));
+            main = main.flex().items_start().gap(space::s3(cx));
         }
         let (before, after) = if self.meta_first {
             (meta, None)
@@ -166,6 +174,9 @@ impl RenderOnce for ListRow {
             look::get(cx, "ListRow", "tm-row", rest)
         };
         let mut row = box_of(div(), &look).flex().gap(space::s4(cx));
+        for class in &self.class_name {
+            row = apply(row, *class, cx);
+        }
         row = if compact {
             // A compact row is one line at the side column's row height, the look's height.
             row.items_center().min_h(look.height)

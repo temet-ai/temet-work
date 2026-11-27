@@ -9,18 +9,27 @@ use gpui::{
     Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
 };
 
-use super::{Class, apply, padded, type_of};
+use super::{Class, apply, baseline, padded, type_of};
 use crate::theme::look::{self, Look, State};
 use crate::theme::{size, space};
 
-/// A column head, `<th>`: bold text.
+/// A head cell, `<th>`: a column's head over the rows, or a group row's head across them.
 pub struct Th {
-    pub(crate) text: SharedString,
+    pub(crate) content: Content,
 }
 
 impl Th {
     pub fn new(text: impl Into<SharedString>) -> Self {
-        Self { text: text.into() }
+        Self {
+            content: Content::Text(text.into()),
+        }
+    }
+
+    /// A head holding an element, such as a group row's stage and count.
+    pub fn element(element: impl IntoElement) -> Self {
+        Self {
+            content: Content::Element(element.into_any_element()),
+        }
     }
 }
 
@@ -31,7 +40,7 @@ pub struct Td {
     col_span: bool,
 }
 
-enum Content {
+pub(crate) enum Content {
     Text(SharedString),
     Element(AnyElement),
 }
@@ -99,16 +108,16 @@ impl Layout {
         }
     }
 
-    /// A column head's box: the measured head's type and its padding above and below, and
-    /// the side padding of the table's cells.
-    pub(crate) fn head(&self, i: usize, cx: &App) -> Div {
+    /// A head's box: the measured head's type and its padding above and below, and the side
+    /// padding of the table's cells; across every column when `span`.
+    pub(crate) fn head(&self, i: usize, span: bool, cx: &App) -> Div {
         let rest = State::Rest;
         let head = if self.compact {
             look::get(cx, "HTMLTable", "th: compact interactive", rest)
         } else {
             look::get(cx, "HTMLTable", "th: default", rest)
         };
-        type_of(self.cell(i, false, cx), &head)
+        type_of(self.cell(i, span, cx), &head)
             .pt(head.padding.top)
             .pb(head.padding.bottom)
     }
@@ -167,6 +176,7 @@ pub struct TableRow {
     selected: bool,
     on_click: Option<OnClick>,
     cells: Vec<Td>,
+    head: Option<Th>,
     pub(crate) layout: Layout,
 }
 
@@ -178,6 +188,7 @@ impl TableRow {
             selected: false,
             on_click: None,
             cells: Vec::new(),
+            head: None,
             layout: Layout::default(),
         }
     }
@@ -201,6 +212,12 @@ impl TableRow {
         self.cells.push(cell);
         self
     }
+
+    /// A head across every column, `<th colSpan scope="colgroup">`, for a group row.
+    pub fn head(mut self, head: Th) -> Self {
+        self.head = Some(head);
+        self
+    }
 }
 
 impl RenderOnce for TableRow {
@@ -210,6 +227,13 @@ impl RenderOnce for TableRow {
         // the raise; then the text's reach below the baseline.
         let tag = look::get(cx, "IssueTable", "minimal tm-issues tm-status", State::Rest);
         let tag_line = tag.padding.top + size::icon(cx) - space::s1(cx) + below_baseline(window);
+        // The tag is raised so its word sits on the baseline of the text in the cells beside
+        // it (`.tm-issues .tm-status`); the line of the tag's word is its height less its
+        // padding.
+        let text = look::get(cx, "IssueTable", "tm-issue-title tm-issues", State::Rest);
+        let word = tag.height - tag.padding.top - tag.padding.bottom;
+        let raise = tag.padding.top + baseline(cx, tag.font_size, word)
+            - baseline(cx, text.font_size, text.height);
         let cells = self.cells.into_iter().enumerate().map(|(i, td)| {
             let mut cell = layout.cell(i, td.col_span, cx);
             for class in &td.class_name {
@@ -220,7 +244,7 @@ impl RenderOnce for TableRow {
                 Content::Element(element) if layout.issues => cell.child(
                     div()
                         .h(tag_line)
-                        .child(div().flex().mt(-space::s1(cx)).child(element)),
+                        .child(div().flex().mt(-raise).child(element)),
                 ),
                 Content::Element(element) => cell.child(element),
             }
@@ -229,17 +253,28 @@ impl RenderOnce for TableRow {
         // The row's ground and its lines (inset shadows): the selected row's accent wash with a
         // line above and below, or Blueprint's line under the column heads on the first row.
         let rest = layout.row(self.selected, State::Rest, cx);
+        let grouping = self.head.is_some();
+        let head = self.head.map(|th| {
+            let cell = layout.head(0, true, cx);
+            match th.content {
+                Content::Text(text) => cell.child(text),
+                Content::Element(element) => cell.child(element),
+            }
+        });
         let mut row = div()
             .id(self.id)
             .flex()
             .items_start()
             .w_full()
             .bg(rest.background)
+            .children(head)
             .children(cells);
         if !rest.shadow.is_empty() {
             row = row.shadow(rest.shadow);
         }
-        if layout.interactive {
+        // A group row's head is a `th`, which Blueprint's interactive hover leaves alone.
+        let interactive = layout.interactive && !grouping;
+        if interactive {
             let hover = layout.row(self.selected, State::Hover, cx).background;
             row = row.cursor_pointer().hover(move |style| style.bg(hover));
         }

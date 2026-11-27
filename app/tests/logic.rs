@@ -8,9 +8,12 @@ use temet_work_app::assets::FILES;
 use temet_work_app::components::icon::{IconName, IconSize};
 use temet_work_app::components::stage_tag::Stage;
 use temet_work_app::components::status_tag::Status;
-use temet_work_app::composites::issue_table::{agent_fits, colgroup};
+use temet_work_app::composites::issue_pane::{IssueTab, tabs_shown};
+use temet_work_app::composites::issue_table::{GroupBy, agent_fits, colgroup, count, grouped};
 use temet_work_app::composites::milestone_panel::{progress, subtitle};
-use temet_work_app::pages::project::Selection;
+use temet_work_app::pages::project::{
+    Grouping, Project, Selection, all_issues_summary, issue_facts,
+};
 use temet_work_app::sample;
 use temet_work_app::theme;
 use temet_work_app::theme::size::IssueColumns;
@@ -99,7 +102,7 @@ fn the_agent_column_shows_only_when_the_title_keeps_its_room() {
     // Without the Stage column the agent fits 120 px sooner.
     assert!(agent_fits(px(560.), &c, false));
     assert_eq!(
-        colgroup(&c, true),
+        colgroup(&c, true, true),
         vec![
             Some(px(76.)),
             None,
@@ -108,7 +111,12 @@ fn the_agent_column_shows_only_when_the_title_keeps_its_room() {
             Some(px(88.))
         ]
     );
-    assert_eq!(colgroup(&c, false).len(), 4);
+    assert_eq!(colgroup(&c, true, false).len(), 4);
+    // Grouped by stage, the table has no Stage column.
+    assert_eq!(
+        colgroup(&c, false, true),
+        vec![Some(px(76.)), None, Some(px(124.)), Some(px(88.))]
+    );
 }
 
 #[test]
@@ -167,4 +175,124 @@ fn every_font_file_the_design_system_lists_is_embedded() {
         .collect();
     let listed: HashSet<&str> = theme::font_files().collect();
     assert_eq!(embedded, listed);
+}
+
+#[test]
+fn grouping_by_stage_follows_the_stages_and_by_group_their_first_appearance() {
+    let issues: Vec<_> = sample::project_view()
+        .milestones
+        .into_iter()
+        .flat_map(|m| m.issues)
+        .collect();
+    let by_stage = grouped(issues.clone(), GroupBy::Stage);
+    let stages: Vec<Stage> = by_stage.iter().filter_map(|(s, _, _)| *s).collect();
+    let mut in_order = stages.clone();
+    in_order.sort_by_key(|s| Stage::ALL.iter().position(|x| x == s));
+    assert_eq!(stages, in_order, "groups follow the order of the stages");
+    assert!(by_stage.iter().all(|(_, _, these)| !these.is_empty()));
+    assert_eq!(
+        by_stage
+            .iter()
+            .map(|(_, _, these)| these.len())
+            .sum::<usize>(),
+        issues.len()
+    );
+    let by_group = grouped(issues.clone(), GroupBy::Group);
+    let names: Vec<&str> = by_group.iter().map(|(_, n, _)| n.as_ref()).collect();
+    assert_eq!(names[0], issues[0].group.as_deref().unwrap_or("No group"));
+    assert_eq!(count(1), "1 issue");
+    assert_eq!(count(3), "3 issues");
+}
+
+#[test]
+fn the_group_by_control_maps_to_the_tables_grouping() {
+    assert_eq!(Grouping::Milestone.table(), None);
+    assert_eq!(Grouping::Stage.table(), Some(GroupBy::Stage));
+    assert_eq!(Grouping::from_value("group"), Some(Grouping::Group));
+    assert_eq!(Grouping::from_value("week"), None);
+    let view = sample::project_view();
+    assert_eq!(
+        all_issues_summary(&view.milestones),
+        "7 issues across 3 milestones"
+    );
+}
+
+#[test]
+fn the_pane_shows_a_tab_for_each_part_an_issue_has() {
+    assert_eq!(
+        tabs_shown(true, true, true, true),
+        [
+            IssueTab::Plan,
+            IssueTab::Pull,
+            IssueTab::Review,
+            IssueTab::Decisions
+        ]
+    );
+    assert_eq!(tabs_shown(false, false, true, false), [IssueTab::Review]);
+    assert!(tabs_shown(false, false, false, false).is_empty());
+    let view = sample::project_view();
+    let full = &view.details[&SharedString::from("WATCH-44")];
+    assert!(full.plan.is_some() && full.pull.is_some());
+    assert_eq!(full.rounds.as_ref().map(Vec::len), Some(2));
+    assert_eq!(full.decisions.as_ref().map(Vec::len), Some(2));
+    assert!(
+        !view.details.contains_key(&SharedString::from("WATCH-47")),
+        "facts only"
+    );
+}
+
+#[test]
+fn the_pane_states_each_issues_facts() {
+    let view = sample::project_view();
+    let m = &view.milestones[0];
+    let issue = m
+        .issues
+        .iter()
+        .find(|i| i.key.as_ref() == "WATCH-47")
+        .unwrap();
+    let facts = issue_facts(m, issue, None);
+    let labels: Vec<&str> = facts.iter().map(|(l, _)| l.as_ref()).collect();
+    assert_eq!(labels, ["Milestone", "Group", "Agent", "Round", "Updated"]);
+    assert_eq!(facts[3].1.as_ref(), "Not reviewed yet");
+}
+
+#[test]
+fn selecting_another_row_opens_it_on_its_first_tab() {
+    let mut page = Project::new(sample::project_view(), sample::selected());
+    page.set_tab(IssueTab::Review);
+    assert!(page.select(&"WATCH-51".into()));
+    assert!(!page.select(&"WATCH-51".into()));
+}
+
+#[test]
+fn needs_you_is_sorted_costliest_first_and_can_be_emptied() {
+    use temet_work_app::composites::decision_row::UndoCost;
+    let view = sample::project_view();
+    let rank = |c: Option<UndoCost>| match c {
+        Some(UndoCost::High) => 0,
+        Some(UndoCost::Medium) => 1,
+        Some(UndoCost::Low) => 2,
+        None => 3,
+    };
+    let costs: Vec<_> = view.needs.iter().map(|n| rank(n.decision.cost)).collect();
+    let mut sorted = costs.clone();
+    sorted.sort();
+    assert_eq!(costs, sorted);
+    assert_eq!(view.needs.len(), 4);
+    let none = sample::without_needs(view);
+    assert!(none.needs.is_empty());
+    assert!(
+        none.areas
+            .iter()
+            .flat_map(|a| &a.projects)
+            .all(|p| p.waiting == 0)
+    );
+}
+
+#[test]
+fn the_machines_include_a_full_one_and_three_limits() {
+    let view = sample::project_view();
+    assert_eq!(view.machines.len(), 3);
+    assert!(view.machines.iter().any(|m| m.value >= 1.));
+    assert_eq!(view.limits.len(), 3);
 }
