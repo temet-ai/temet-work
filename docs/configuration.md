@@ -1,6 +1,7 @@
 ---
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
+  - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
 ---
 
 # Configuring temet-workd
@@ -193,7 +194,7 @@ environment (`ssh://omit/PATH/TO/daemon.sock` when this daemon was started with
 after the host is the daemon's socket there, and none means its default). Every `temet-work` command the agent runs then goes over
 `ssh -o BatchMode=yes omit temet-work relay --build BUILD --host NAME [--socket PATH]`,
 which hands the request to the daemon's local socket when `BUILD`, the build of the agent's
-`temet-work`, is the build of the one on the daemon's machine. No port is opened and no new
+`temet-work`, is the build of the running daemon. No port is opened and no new
 secret is made. `BatchMode` makes a missing
 key fail with ssh's own error instead of waiting for a password. With no `daemon_host`
 the daemon starts no agent on another machine and lists a problem naming `machine` and
@@ -210,10 +211,12 @@ The other machine needs five things, and each has a command that checks it:
 | `temet-work` at the daemon's build | `ssh mac 'TEMET_WORK_DAEMON=ssh://omit temet-work status'`: at another build it is refused, naming both builds |
 | The checkout at `path`, and the agent runtime (such as `claude`) | `ssh mac 'cd /Users/me/projects/radar && git status -sb && command -v claude'` |
 
-The build is what `git describe --always --dirty` said where `temet-work` was built, and
-`temet-workd --build` prints the daemon's. `temet-work` has no flag that prints its own, so
-the check is that `temet-work relay` on the daemon's machine does not refuse it. The
-refusal is one line,
+The build is what `git describe --always --dirty` said where the program was built.
+`temet-workd --build` prints the build of the installed binary, which is the running
+daemon's only until the next install. `temet-work` has no flag that prints its own, so
+the check is that `temet-work relay` on the daemon's machine does not refuse it. The relay
+asks the running daemon its build, so the build of the `temet-work` that runs the relay
+makes no difference. The refusal is one line that names the running daemon's build,
 `refused: temet-work on mac is build X, the daemon is build Y: update it`. A `temet-work`
 too old to send its build is refused as build `unknown` on `the other machine`. Two
 clones of one commit can describe it differently (other tags, or a longer short hash),
@@ -222,6 +225,10 @@ and those count as different builds.
 So the other machine's `temet-work` must be at the daemon's build. The relay checks that
 only once an agent runs there. A `temet-work` older than the trust step below fails at
 that step, before any agent starts, so the relay's refusal is never reached.
+
+A daemon started from a `temet-work` too old to say its build gets no command from another
+machine until it is restarted. The command is refused with
+`refused: the daemon at PATH does not say its build: it was started from an older temet-work; restart it`.
 
 Before each agent starts in a folder on another machine, the daemon trusts the folder
 there: herdr-core runs `temet-work trust-folder claude PATH` on that machine, with no
