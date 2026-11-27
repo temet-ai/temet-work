@@ -7,6 +7,7 @@
 use temet_work_core::Part;
 
 pub mod ban;
+pub mod review;
 pub mod tokens;
 
 /// The style part.

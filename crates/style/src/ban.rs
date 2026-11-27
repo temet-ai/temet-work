@@ -73,7 +73,10 @@ mod tests {
 
     #[test]
     fn the_bans_catch_what_they_name() {
-        assert_eq!(banned(Rgba(0x00a396ff)).map(|b| b.name), Some("teal or cyan"));
+        assert_eq!(
+            banned(Rgba(0x00a396ff)).map(|b| b.name),
+            Some("teal or cyan")
+        );
         assert_eq!(banned(Rgba(0x77450dff)).map(|b| b.name), Some("brown"));
         assert!(banned(Rgba(0x238551ff)).is_some(), "Blueprint's green");
         assert!(banned(Rgba(0xd41b6fff)).is_none(), "the accent");
@@ -91,9 +94,17 @@ mod tests {
 
     #[test]
     fn the_accent_is_the_rules_magenta() {
-        assert_eq!(BP_INTENT_PRIMARY_REST, Rgba(0xd41b6fff), "the accent as a fill");
+        assert_eq!(
+            BP_INTENT_PRIMARY_REST,
+            Rgba(0xd41b6fff),
+            "the accent as a fill"
+        );
         assert_eq!(BP_EMPHASIS_FOCUS_COLOR, Rgba(0xf77cb3ff), "the focus ring");
-        assert_eq!(BP_TYPOGRAPHY_COLOR_PRIMARY_REST, Rgba(0xf77cb3ff), "the accent as text");
+        assert_eq!(
+            BP_TYPOGRAPHY_COLOR_PRIMARY_REST,
+            Rgba(0xf77cb3ff),
+            "the accent as text"
+        );
     }
 
     #[test]
@@ -116,7 +127,11 @@ mod tests {
         let mut by_icon: HashMap<&str, Intent> = HashMap::new();
         for s in STATUS {
             let intent = *by_icon.entry(s.icon).or_insert(s.intent);
-            assert_eq!(intent, s.intent, "{} shares its icon with another meaning", s.name);
+            assert_eq!(
+                intent, s.intent,
+                "{} shares its icon with another meaning",
+                s.name
+            );
         }
     }
 

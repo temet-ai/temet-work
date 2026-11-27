@@ -19,19 +19,24 @@ Its rules are in its Storybook under Start/Rules.
 | Layer | Holds | Built from | In temet-work |
 |---|---|---|---|
 | Base items | colour, type, spacing, sizes, shape, icons, motion | the design system's tokens | `temet-work-style`, generated |
-| Components | one control or container each: Button, Tag, StatusTag, CutPanel, AppShell | base items | the front-end crate's parts |
-| Composites | a working piece of a screen: SideNav, PageHeader, IssueTable, IssuePane | components and smaller composites | the front-end crate's parts |
-| Pages | a screen | composites and components | the front-end crate's pages |
+| Components | one control or container each: Button, Tag, StatusTag, CutPanel, AppShell | base items and smaller components | `app/src/components/` |
+| Composites | a working piece of a screen: SideNav, PageHeader, IssueTable, IssuePane | components and smaller composites | `app/src/composites/` |
+| Pages | a screen | composites and components | `app/src/pages/` |
 
-The front-end crate does not exist yet; `spikes/gpui-shell` is the spike it grows from. It is the
-only crate that may use a UI library (`tests/parts.rs`).
+The front-end crate will be `app/`, a Cargo workspace of its own like `spikes/gpui-shell`, the
+spike it grows from, so that building the main workspace does not compile its UI library. It
+depends on `temet-work-core` and `temet-work-style` and on no other crate here, and it is the
+only crate that may use a UI library (`tests/parts.rs`). Each part is one file named after it:
+StatusTag is `app/src/components/status_tag.rs`, declaring `pub struct StatusTag`. The theme
+module, `app/src/theme.rs`, is the one file that reads `temet-work-style`.
 
 These rules hold the layers in place:
 
-- A part uses only layers below its own. The one exception: a composite may hold a smaller
-  composite (NeedsYou holds DecisionRows), as long as no part holds a part that holds it.
-- Components are the only parts that read colour, type, shape and motion tokens. A composite
-  arranges components and reads only spacing and size tokens. A page sets no value at all.
+- A part uses only its own layer and the layers below it. Within a layer a part may hold a
+  smaller one (StatusTag holds a Tag, NeedsYou holds DecisionRows), never in a cycle.
+- Components are the only parts that read colour, type, shape and motion: the theme module's
+  `colour`, `text`, `shape` and `motion` values. A composite arranges components and reads only
+  its `space` and `size` values. A page sets no value at all and draws nothing of its own.
 - No colour, size or shape is written inline. Every value is a token from `temet-work-style`,
   and the front-end crate's theme module is the one place that turns tokens into GPUI values.
 - A part has the same name and the same variants as its part in the design system. In Rust the
@@ -49,10 +54,10 @@ These rules hold the layers in place:
 1. Look for the part in this map and in the design system. Use the part that does the job, or
    compose it from parts that exist.
 2. Only when nothing composes to it, define it: its name, what it is for, its props and their
-   values, the parts it is built from (in lower layers, or smaller composites) and a story with
+   values, the parts it is built from (in lower layers, or smaller parts of its own) and a story with
    temet-work's objects in it (issues, agents, machines, milestones).
-3. Send the definition to the design system as an issue in `temet-ai/temet-design`. It is
-   agreed there and lands in the design system with its story first.
+3. Send the definition to the design system's maintainers, who work in `ui/` of
+   `temet-ai/temet-design`. It is agreed with them and lands there with its story first.
 4. Build it in temet-work with the same name and variants, from the parts the definition names.
 5. Add it to this map in the same commit.
 
@@ -61,7 +66,8 @@ A new variant of an existing part goes the same way.
 ## Base items
 
 `scripts/sync-tokens` reads the design system's tokens from its running Storybook and writes
-`crates/style/src/tokens.rs`; nobody edits that file by hand. Each constant there has its token's
+`crates/style/src/tokens.rs`; nobody edits that file by hand. It refuses a design system with
+uncommitted changes or a commit that is not pushed, and the file names the commit it came from. Each constant there has its token's
 name: `--tm-edge-quiet` is `TM_EDGE_QUIET`. The front-end crate's theme module turns them into
 gpui-component's `Theme` and into the values temet's own parts read.
 
@@ -182,9 +188,15 @@ its row above takes the part's id in place of "gap".
 
 ## Checks
 
+`temet-work-style`'s `review` module holds the UI review check, and its test
+`crates/style/tests/review.rs` runs it over `app/src` and this map in every workspace test run.
+
 | Check | Where | State |
 |---|---|---|
 | The synced tokens keep the design system's rules: the accent, corners of 2 px at most, success in blue, no teal, cyan, brown or green | `temet-work-style` tests and a build-time assertion | built |
-| No colour, size or shape written inline outside the front-end crate's theme module | the UI review check in `temet-work-style` | to build |
-| Every part in the app has a design-system name and a row in this map | the UI review check in `temet-work-style` | to build |
-| A page uses only composites and components | the UI review check in `temet-work-style` | to build |
+| Tokens come from a pushed commit of the design system | `scripts/sync-tokens` refuses any other | built |
+| No colour, size, corner, border, shadow, weight, opacity or duration written as a literal anywhere in `app/src`, the theme module included | `review` | built |
+| Only the theme module reads `temet-work-style` | `review` | built |
+| Each file in `app/src/components/`, `composites/` and `pages/` has a row in this map with a design-system id, in its layer's table, and declares a type with the part's name | `review` | built |
+| A part uses no layer above its own; a composite sets no colour, type, shape or motion and uses the UI library only through components; a page and the plumbing draw nothing of their own | `review` | built |
+| Every design-system id in this map is in the design system's part list | `review`, from the list `scripts/sync-tokens` will read | to build, with the next sync |
