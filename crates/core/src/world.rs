@@ -1049,7 +1049,7 @@ impl World {
     /// with the arbiter. An issue in review or with the arbiter whose approval is in
     /// needs neither while its checks run. This brings back an agent whose session
     /// ended, or one the daemon decided on and did not start before it stopped. A
-    /// running author or reviewer that has not heard its fixes or its new round is
+    /// running author or reviewer that has not heard its fixes or its round is
     /// told again, and an arbiter that ruled in an earlier arbitration and still
     /// runs is asked again to stop. After the `starts` setting's number of agents of one role have
     /// ended while one issue waited on them it gives up, and says so. A paused
@@ -1147,12 +1147,10 @@ impl World {
                             issue: i.id.clone(),
                             points: i.fix.clone(),
                         }),
-                        Stage::InReview { round } if round > 1 => {
-                            out.start.push(Effect::StartReview {
-                                issue: i.id.clone(),
-                                round,
-                            })
-                        }
+                        Stage::InReview { round } => out.start.push(Effect::StartReview {
+                            issue: i.id.clone(),
+                            round,
+                        }),
                         _ => {}
                     }
                 }

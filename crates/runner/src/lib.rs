@@ -1136,48 +1136,52 @@ mod tests {
 
     #[test]
     fn a_running_reviewer_hears_of_the_next_round_and_none_is_not_this_parts() {
-        let next = Effect::StartReview {
-            issue: IssueId::new("ankh", "1"),
-            round: 2,
-        };
-        let mut w = world();
-        let mut part = runners();
-        assert_eq!(part.carry_out(&next, &w), Outcome::NotMine);
-        let launch = w
-            .launch(
-                &GroupId::new("watch"),
-                Role::Reviewer,
-                &IssueId::new("ankh", "1"),
-                None,
-            )
-            .expect("launch");
-        let reviewer = launch.agent.clone();
-        let run = Effect::Run {
-            launch: Box::new(launch),
-            before: None,
-            program: Program {
-                argv: vec!["cat".into()],
-                env: vec![],
-            },
-            runtime: "fake".into(),
-        };
-        let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
-            panic!("not started");
-        };
-        for e in &events {
-            w.apply(e);
-        }
-        assert_eq!(
-            part.carry_out(&next, &w),
-            Outcome::Done {
-                events: vec![Event::Told {
-                    issue: IssueId::new("ankh", "1")
-                }],
-                effects: vec![]
+        // Round 1 is repeated after a failed check, a conflict or a refused merge.
+        for round in [1, 2] {
+            let next = Effect::StartReview {
+                issue: IssueId::new("ankh", "1"),
+                round,
+            };
+            let mut w = world();
+            let mut part = runners();
+            assert_eq!(part.carry_out(&next, &w), Outcome::NotMine);
+            let launch = w
+                .launch(
+                    &GroupId::new("watch"),
+                    Role::Reviewer,
+                    &IssueId::new("ankh", "1"),
+                    None,
+                )
+                .expect("launch");
+            let reviewer = launch.agent.clone();
+            let run = Effect::Run {
+                launch: Box::new(launch),
+                before: None,
+                program: Program {
+                    argv: vec!["cat".into()],
+                    env: vec![],
+                },
+                runtime: "fake".into(),
+            };
+            let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
+                panic!("not started");
+            };
+            for e in &events {
+                w.apply(e);
             }
-        );
-        let screen = part.screen(&reviewer.0).expect("screen");
-        assert!(screen.contains("review round 2"), "{screen}");
+            assert_eq!(
+                part.carry_out(&next, &w),
+                Outcome::Done {
+                    events: vec![Event::Told {
+                        issue: IssueId::new("ankh", "1")
+                    }],
+                    effects: vec![]
+                }
+            );
+            let screen = part.screen(&reviewer.0).expect("screen");
+            let text = brief::next_round(&IssueId::new("ankh", "1"), round);
+            assert!(screen.contains(&text), "{screen}");
+        }
     }
 
     #[test]
