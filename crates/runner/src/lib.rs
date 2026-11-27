@@ -199,10 +199,14 @@ struct Message {
     tells: bool,
 }
 
-/// The count of reminders to an agent its issue waits on.
+/// The count of reminders to an agent its issue waits on. A reminder's turn
+/// that ends in an error after it was seen working for at least `remind_after`
+/// (ten minutes by default) has recovered: a new count starts at that error. A
+/// shorter one counts toward the stop, timed from the last reminder.
 #[derive(Clone, Copy)]
 struct Count {
-    /// When its clock last started: when the count began, or the last reminder.
+    /// When its clock last started: when the count began (at the error, after
+    /// a retry that recovered), or the last reminder.
     since: u64,
     /// The reminders sent.
     nudges: u32,
@@ -217,9 +221,12 @@ enum Saw {
     Idle,
     /// Stopped on an error, with no limit reset to wait for.
     Errored,
-    /// In a turn that followed a reminder and an error. The count is kept until
-    /// the turn shows how it ends.
-    Retrying,
+    /// In a turn that followed a reminder and an error, first seen working by
+    /// the poll at `from`. The count is kept until the turn shows how it ends.
+    /// It has recovered if it ends between turns, or in an error `remind_after`
+    /// or more after `from`; an earlier error counts toward the stop, timed
+    /// from the last reminder.
+    Retrying { from: u64 },
 }
 
 /// The runner part: the runners compiled into this build, in the order they were added.
@@ -328,8 +335,11 @@ impl Runners {
     /// the agent's session, so the loop starts a fresh one. An agent whose turn
     /// ended in an error is idle here, unless it waits for its limit to reset.
     /// A reminder to such an agent starts a turn that may end on the error again,
-    /// so its count is kept while it works, and starts again if that turn ends
-    /// between turns. Returns the agents it stopped, as ended.
+    /// so its count is kept while it works. The count starts again if that turn
+    /// ends between turns. It also starts again, at the error, if the turn ends
+    /// in one after it was seen working for at least `remind_after`. A shorter
+    /// turn that ends in an error counts toward the stop, timed from the last
+    /// reminder. Returns the agents it stopped, as ended.
     fn remind(
         &mut self,
         world: &World,
@@ -353,25 +363,33 @@ impl Runners {
                 }
                 AgentState::Working { .. } => {
                     if let Some(count) = before.filter(|c| c.nudges > 0 && c.saw != Saw::Idle) {
-                        let saw = Saw::Retrying;
+                        let from = match count.saw {
+                            Saw::Retrying { from } => from,
+                            _ => now_ms,
+                        };
+                        let saw = Saw::Retrying { from };
                         self.counts.insert(agent.clone(), Count { saw, ..count });
                     }
                     continue;
                 }
                 _ => continue,
             };
-            // A retry that ends between turns has left the error behind.
+            // An investigator works on no issue: its group's settings answer.
+            let scope = world.agent_scope(&a.group, issue);
+            let after_ms = world.number_at(&scope, Some(a.role), "remind_after") * 60_000;
+            // A retry that ends between turns, or that worked for `remind_after`
+            // before its error, has left the old error behind.
             let mut count = before
-                .filter(|c| !(c.saw == Saw::Retrying && saw == Saw::Idle))
+                .filter(|c| match c.saw {
+                    Saw::Retrying { from } => saw != Saw::Idle && now_ms < from + after_ms,
+                    Saw::Idle | Saw::Errored => true,
+                })
                 .unwrap_or(Count {
                     since: now_ms,
                     nudges: 0,
                     saw,
                 });
             count.saw = saw;
-            // An investigator works on no issue: its group's settings answer.
-            let scope = world.agent_scope(&a.group, issue);
-            let after_ms = world.number_at(&scope, Some(a.role), "remind_after") * 60_000;
             let reminders = world.number_at(&scope, Some(a.role), "reminders");
             if now_ms < count.since + after_ms {
                 self.counts.insert(agent.clone(), count);
@@ -2550,6 +2568,30 @@ mod tests {
     }
 
     #[test]
+    fn a_fake_terminal_that_keeps_working_stays_in_its_turn_until_ended() {
+        let t1 = TerminalId("t1".into());
+        let mut fake = FakeRunner::default();
+        fake.start(&Start::default()).expect("start");
+        fake.keep_working(&t1);
+        fake.updates();
+        let statuses = |fake: &mut FakeRunner| -> Vec<Status> {
+            fake.updates().into_iter().map(|u| u.status).collect()
+        };
+        fake.send(&t1, "once", true).expect("send");
+        assert_eq!(statuses(&mut fake), [Status::Working]);
+        assert_eq!(statuses(&mut fake), []);
+        assert_eq!(statuses(&mut fake), []);
+        assert_eq!(fake.send(&t1, "more", true), Err(RunnerError::Busy));
+        fake.end_in_error(&t1, OVERLOADED);
+        assert_eq!(statuses(&mut fake), [Status::Error { message: None }]);
+        // Unmarked, a send ends between turns at once again.
+        fake.unblock(&t1);
+        fake.updates();
+        fake.send(&t1, "again", true).expect("send");
+        assert_eq!(statuses(&mut fake), [Status::Working, Status::Between]);
+    }
+
+    #[test]
     fn an_error_that_comes_back_after_each_reminder_is_still_stopped() {
         let (mut w, mut part, handle, author) = overloaded_author(0);
         handle
@@ -2591,6 +2633,107 @@ mod tests {
             "{:?}",
             w.missing()
         );
+    }
+
+    #[test]
+    fn an_errored_agent_whose_reminder_works_an_hour_then_errors_is_reminded_afresh() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = overloaded_author(0);
+        handle.fake.lock().expect("lock").keep_failing(&t1);
+        let minute = |n: u64| n * 60_000;
+        // The first reminder's turn fails within 30 seconds.
+        step(&mut part, &mut w, minute(10));
+        assert_eq!(reminders(&handle), 1);
+        step(&mut part, &mut w, minute(10) + 2_000);
+        step(&mut part, &mut w, minute(10) + 30_000);
+        assert!(matches!(
+            w.agents[&author].state,
+            AgentState::Errored { .. }
+        ));
+        // The second one's gets through and works for an hour.
+        handle.fake.lock().expect("lock").keep_working(&t1);
+        step(&mut part, &mut w, minute(20));
+        assert_eq!(reminders(&handle), 2);
+        for at in [minute(20) + 2_000, minute(30), minute(50), minute(80) - 1] {
+            let polled = step(&mut part, &mut w, at);
+            assert!(!ended(&polled, &author), "stopped at {at} ms");
+            assert!(working(&w.agents[&author].state), "at {at} ms");
+        }
+        {
+            let mut fake = handle.fake.lock().expect("lock");
+            fake.end_in_error(&t1, OVERLOADED);
+            fake.keep_failing(&t1);
+        }
+        let polled = step(&mut part, &mut w, minute(80));
+        assert!(!ended(&polled, &author), "{polled:?}");
+        assert_eq!(reminders(&handle), 2, "no reminder on the error itself");
+        for (n, at) in [(3, minute(90)), (4, minute(100))] {
+            step(&mut part, &mut w, at - 1);
+            assert_eq!(reminders(&handle), n - 1, "not before {at}");
+            let polled = step(&mut part, &mut w, at);
+            assert!(!ended(&polled, &author), "{polled:?}");
+            assert_eq!(reminders(&handle), n);
+            step(&mut part, &mut w, at + 2_000);
+            step(&mut part, &mut w, at + 30_000);
+        }
+        let before = step(&mut part, &mut w, minute(110) - 1_000);
+        assert!(!ended(&before, &author), "{before:?}");
+        let stopped = step(&mut part, &mut w, minute(110));
+        assert!(ended(&stopped, &author), "{stopped:?}");
+        assert_eq!(reminders(&handle), 4);
+    }
+
+    #[test]
+    fn a_reminders_turn_counts_as_recovery_after_remind_after() {
+        use temet_work_core::settings::{Scope, Value};
+        let t1 = TerminalId("t1".into());
+        let minute = |n: u64| n * 60_000;
+        // The author's `remind_after` when set, how long the second reminder's
+        // turn is seen working before its error, and whether that is recovery.
+        for (set, worked, recovers) in [
+            (None, minute(10) - 1_000, false),
+            (None, minute(10), true),
+            (Some(30), minute(30) - 1_000, false),
+            (Some(30), minute(30), true),
+        ] {
+            let case = format!("remind_after {set:?}, worked {worked} ms");
+            let (mut w, mut part, handle, author) = overloaded_author(0);
+            if let Some(minutes) = set {
+                w.apply(&Event::SettingSet {
+                    scope: Scope::Task(IssueId::new("ankh", "1")),
+                    role: Some(Role::Author),
+                    key: "remind_after".into(),
+                    value: Value::Number(minutes),
+                    by: "person".into(),
+                });
+            }
+            let after = minute(set.unwrap_or(10));
+            handle.fake.lock().expect("lock").keep_failing(&t1);
+            step(&mut part, &mut w, after);
+            step(&mut part, &mut w, after + 2_000);
+            step(&mut part, &mut w, after + 30_000);
+            handle.fake.lock().expect("lock").keep_working(&t1);
+            step(&mut part, &mut w, 2 * after);
+            assert_eq!(reminders(&handle), 2, "{case}");
+            // The time runs from here, not from the reminder a second before.
+            let first_seen = 2 * after + 1_000;
+            step(&mut part, &mut w, first_seen);
+            assert!(working(&w.agents[&author].state), "{case}");
+            handle
+                .fake
+                .lock()
+                .expect("lock")
+                .end_in_error(&t1, OVERLOADED);
+            let error = first_seen + worked;
+            let polled = step(&mut part, &mut w, error);
+            assert_eq!(ended(&polled, &author), !recovers, "{case}: {polled:?}");
+            if recovers {
+                step(&mut part, &mut w, error + after - 1);
+                assert_eq!(reminders(&handle), 2, "{case}");
+                step(&mut part, &mut w, error + after);
+                assert_eq!(reminders(&handle), 3, "{case}");
+            }
+        }
     }
 
     #[test]
