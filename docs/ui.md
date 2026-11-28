@@ -117,10 +117,16 @@ class resolves to the look the design system measured for an element with that c
 GroupList `tm-groups-head`; a class with no measured look follows its rule in `temet.css` or
 `blueprint-overrides.css`.
 
+Where the radar page and a part's own stories draw a part differently, the window follows the
+radar page, because the page is the screen the window reproduces. Its Alert asks with the primary
+intent and no icon, and its Toast has the Notifications icon and no intent. The page closes the
+toast after 5000 ms; no motion token holds that duration yet, so the window's toast stays until it
+is closed.
+
 | Part | Design system id | Variants temet-work uses | GPUI basis |
 |---|---|---|---|
 | AppShell | `temet-appshell` | regions: nav bar, main area, side pane, optional top bar | |
-| Icon | `blueprint-icon` | 16, 20 px; the Alert's 40 px | `icon` |
+| Icon | `blueprint-icon` | 16, 20 px | `icon` |
 | Button | `blueprint-button` | `variant` solid, minimal, outlined; `intent` none, primary; `size` small, medium; `icon`; `loading`; `disabled` | `button` |
 | AttentionButton | `temet-attentionbutton` | `size` small | `button` |
 | AttentionText | `temet-attentionbutton` (subcomponent) | | `label` |
@@ -143,9 +149,9 @@ GroupList `tm-groups-head`; a class with no measured look follows its rule in `t
 | Navbar, NavbarGroup, NavbarHeading, NavbarDivider | `blueprint-navbar` | NavbarGroup `align` right | `title_bar` |
 | Popover | `blueprint-popover` | | `popover` |
 | ContextMenu | `blueprint-contextmenu` | | `menu` |
-| Alert | `blueprint-alert` | `intent` danger; `icon` undo; `cancelButtonText`, `confirmButtonText` | `dialog` |
+| Alert | `blueprint-alert` | `intent` primary; `cancelButtonText`, `confirmButtonText` | `dialog` |
 | Dialog | `blueprint-dialog` | | `dialog` |
-| Toast, OverlayToaster | `blueprint-toast` | `intent` primary; `icon`; `position` bottom-right; no `timeout` (no duration token) | `notification` |
+| Toast, OverlayToaster | `blueprint-toast` | `icon`; `position` bottom-right; no `timeout` (no duration token) | `notification` |
 | Callout | `blueprint-callout` | `intent`; `compact` | `alert` |
 | NonIdealState | `blueprint-nonidealstate` | | `empty` |
 | Omnibar | `blueprint-omnibar` | | `command` |

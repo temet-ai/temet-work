@@ -30,14 +30,12 @@ pub enum IconName {
     // PageHeader's facts.
     Link,
     GitBranch,
-    // NeedsYou's title and a decision's cost to undo.
+    // NeedsYou's title, a decision's cost to undo and the Overturn toast.
     Notifications,
     WarningSign,
     InfoSign,
     // A toast's close button, from Blueprint's newer icon set.
     X,
-    // Overturning a decision: its Alert and toast.
-    Undo,
     // Projects in SideNav.
     Console,
     Database,
@@ -49,7 +47,7 @@ pub enum IconName {
 
 impl IconName {
     /// Every icon the app embeds.
-    pub const ALL: [IconName; 29] = [
+    pub const ALL: [IconName; 28] = [
         Self::TickCircle,
         Self::Refresh,
         Self::Time,
@@ -72,7 +70,6 @@ impl IconName {
         Self::WarningSign,
         Self::InfoSign,
         Self::X,
-        Self::Undo,
         Self::Console,
         Self::Database,
         Self::Layout,
@@ -106,7 +103,6 @@ impl IconName {
             Self::WarningSign => "warning-sign",
             Self::InfoSign => "info-sign",
             Self::X => "x",
-            Self::Undo => "undo",
             Self::Console => "console",
             Self::Database => "database",
             Self::Layout => "layout",

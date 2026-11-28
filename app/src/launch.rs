@@ -12,9 +12,10 @@ use std::process::Command;
 /// The variable GPUI's renderer reads its text gamma from.
 pub const FONTS_GAMMA_VAR: &str = "ZED_FONTS_GAMMA";
 
-/// The text gamma the app runs with. With the contrast below, 1.0 gives each glyph the ink
-/// Chromium gives it, so the window reads like the design system's stories: measured on the
-/// same words in both themes, within 3%. GPUI's default of 1.8 draws text about 10% heavier.
+/// The text gamma the app runs with. With the contrast below, 1.0 brings each glyph's ink near
+/// what Chromium gives it in the design system's stories. Measured on the same words, light-theme
+/// text is within 2.5% of the stories and dark-theme text 4 to 6% lighter. GPUI's default of 1.8
+/// draws text about 10% heavier.
 pub const FONTS_GAMMA: &str = "1.0";
 
 /// The variable GPUI's renderer reads the extra contrast of grayscale text from.
@@ -22,7 +23,10 @@ pub const FONTS_CONTRAST_VAR: &str = "ZED_FONTS_GRAYSCALE_ENHANCED_CONTRAST";
 
 /// The extra contrast the app runs with: none. GPUI's default of 1.0 thickens text further; with
 /// gamma 1.0 alone, text measured 4 to 7% heavier than Chromium's in the dark theme and 14 to
-/// 17% in the light one.
+/// 17% in the light one. The setting cannot close the dark theme's gap on its own: the renderer
+/// reads it once, when it starts, so it cannot change with the theme, and its shader scales it
+/// to nothing for text brighter than 75% (`light_on_dark_contrast`), which the dark theme's
+/// text is.
 pub const FONTS_CONTRAST: &str = "0";
 
 /// The variables the app sets, each with its value.

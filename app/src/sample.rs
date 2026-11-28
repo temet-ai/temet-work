@@ -173,23 +173,39 @@ pub fn project_view() -> ProjectView {
             name: s("mint audit"),
             note: Some(s("mint 1.2")),
             agents: vec![
-                agent("ma-1", "author", "deus · sonnet", Status::Passed),
-                agent("ma-2", "reviewer", "deus · opus", Status::Failed),
+                agent("ma-1", "author", "mac · sonnet", Status::Passed),
+                agent("ma-2", "reviewer", "mac · opus", Status::Failed),
             ],
         },
         GroupListGroup {
             id: s("day-watch"),
             name: s("day watch"),
-            note: Some(s("watch Q1")),
+            note: Some(s("watch 0.6")),
             agents: Vec::new(),
         },
     ];
 
-    let machines = vec![
-        meter("omit", 3. / 4., "3 / 4 slots", None),
-        meter("deus", 1. / 2., "1 / 2 slots", None),
-        meter("mac", 1., "2 / 2 slots", None),
-    ];
+    // Each agent holds a slot on the machine it runs on, the first word of where it runs.
+    let machines = [("omit", 6), ("deus", 4), ("mac", 2)]
+        .into_iter()
+        .map(|(machine, slots)| {
+            let used = groups
+                .iter()
+                .flat_map(|g| &g.agents)
+                .filter(|a| {
+                    a.r#where
+                        .as_ref()
+                        .is_some_and(|w| w.split(" · ").next() == Some(machine))
+                })
+                .count();
+            meter(
+                machine,
+                used as f32 / slots as f32,
+                &format!("{used} / {slots} slots"),
+                None,
+            )
+        })
+        .collect();
     let limits = vec![
         meter("Claude 5 h", 0.62, "62%", Some("resets 14:20")),
         meter("Claude 7 d", 0.41, "41%", Some("resets Mon 09:00")),
@@ -414,7 +430,7 @@ pub fn project_view() -> ProjectView {
                 "d2",
                 "arbiter · Claude",
                 "10:52",
-                "Refuse to store when the keyring is locked, rather than fall back to a file",
+                "Refuse to store the token when the keyring is locked",
                 &["Refuse and ask", "Fall back to a file"],
                 "A plain-text fallback is the thing round 1 blocked.",
                 "round 2 closes",
@@ -475,7 +491,7 @@ pub fn project_view() -> ProjectView {
         facts: vec![
             PageFact {
                 label: s("Issues"),
-                value: s("tracker.example.com WATCH"),
+                value: s("tracker.example.com/projects/WATCH"),
                 icon: Some(IconName::Link),
             },
             PageFact {

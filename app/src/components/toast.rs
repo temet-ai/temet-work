@@ -57,13 +57,20 @@ impl Toast {
 
 impl RenderOnce for Toast {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // Every intent's toast was measured with the same box: the theme's toast surface, its
-        // edge and corner. A toast with no intent takes that box.
+        // Every intent's toast was measured with the same ground, text and corner.
         let toast = match self.intent {
             Intent::Success => look::get(cx, "Toast", "intent-success", State::Rest),
             Intent::Warning => look::get(cx, "Toast", "intent-warning", State::Rest),
             Intent::Danger => look::get(cx, "Toast", "intent-danger", State::Rest),
-            Intent::None | Intent::Primary => look::get(cx, "Toast", "intent-primary", State::Rest),
+            Intent::Primary => look::get(cx, "Toast", "intent-primary", State::Rest),
+            Intent::None => {
+                // No toast without an intent was measured. It has the intent toasts' ground and
+                // text, and the plain ring of the theme's overlays, measured on the Dialog: in
+                // the light theme an intent toast's ring takes the intent's colour.
+                let mut plain = look::get(cx, "Toast", "intent-primary", State::Rest);
+                plain.shadow = look::get(cx, "Dialog", "dialog: default", State::Rest).shadow;
+                plain
+            }
         };
         let (narrowest, widest) = size::toast_width(cx);
         let mut close = Button::new("toast-close")

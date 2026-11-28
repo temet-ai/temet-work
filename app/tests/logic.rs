@@ -96,9 +96,46 @@ fn every_agent_folder_and_decision_names_an_issue_of_its_own_group() {
         assert!(view.need_project.contains_key(&need.id), "{}", need.id);
     }
     for (need, (key, id)) in &view.same_decision {
-        assert!(view.needs.iter().any(|n| &n.id == need));
+        let need = view.needs.iter().find(|n| &n.id == need).expect("the need");
         let decisions = view.details[key].decisions.as_ref().expect("decisions");
-        assert!(decisions.iter().any(|d| &d.id == id));
+        let decision = decisions
+            .iter()
+            .find(|d| &d.id == id)
+            .expect("the decision");
+        assert_eq!(
+            need.decision.took, decision.decision.took,
+            "one decision, one wording"
+        );
+    }
+}
+
+#[test]
+fn each_group_note_names_milestones_the_window_has() {
+    let view = sample::project_view();
+    let names: HashSet<String> = view.milestones.iter().map(|m| m.name.to_string()).collect();
+    for group in &view.groups {
+        let Some(note) = &group.note else { continue };
+        let Some((project, versions)) = note.split_once(' ') else {
+            continue;
+        };
+        if project != view.project.as_ref() {
+            continue;
+        }
+        for version in versions.split(", ") {
+            assert!(names.contains(&format!("{project} {version}")), "{note}");
+        }
+    }
+}
+
+#[test]
+fn the_issues_and_code_links_are_written_alike() {
+    for fact in sample::project_view().facts {
+        let (host, path) = fact.value.split_once('/').expect("host and path");
+        assert!(
+            host.ends_with(".example.com") && !path.contains(' '),
+            "{}",
+            fact.value
+        );
     }
 }
 
@@ -128,7 +165,7 @@ fn overturning_asks_then_marks_both_copies_of_a_decision_and_says_so() {
     assert_eq!(page.needs().len(), 3);
     assert_eq!(
         page.toast().map(|t| t.to_string()),
-        Some("Overturned on WATCH-44: Refuse to store when the keyring is locked, rather than fall back to a file".into())
+        Some("Overturned on WATCH-44: Refuse to store the token when the keyring is locked".into())
     );
 }
 
@@ -364,9 +401,20 @@ fn needs_you_is_sorted_costliest_first_and_can_be_emptied() {
 }
 
 #[test]
-fn the_machines_include_a_full_one_and_three_limits() {
+fn each_machine_has_a_slot_in_use_for_each_agent_on_it_and_one_is_full() {
     let view = sample::project_view();
     assert_eq!(view.machines.len(), 3);
+    for machine in &view.machines {
+        let agents = view
+            .groups
+            .iter()
+            .flat_map(|g| &g.agents)
+            .filter_map(|a| a.r#where.as_ref())
+            .filter(|w| w.split(" · ").next() == Some(machine.label.as_ref()))
+            .count();
+        let used = machine.reading.split(" / ").next().expect("in use");
+        assert_eq!(used, agents.to_string(), "{}", machine.label);
+    }
     assert!(view.machines.iter().any(|m| m.value >= 1.));
     assert_eq!(view.limits.len(), 3);
 }

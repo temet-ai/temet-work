@@ -291,7 +291,9 @@ impl Project {
     }
 
     /// Confirms the question: the decision is overturned in Needs you and in its issue's pane,
-    /// and the toast says so. The daemon has no command for it yet.
+    /// and the toast says so. Nothing is sent to the daemon yet: its command, `temet-work
+    /// overturn DECISION OPTION REASON`, needs the option chosen in place of the decision's and a
+    /// reason, which this confirm does not ask for.
     pub fn confirm(&mut self) {
         let Some(ask) = self.asking.take() else {
             return;
@@ -550,11 +552,10 @@ impl Render for Project {
             shell = shell.side(pane);
         }
 
-        // Overturning asks first, as the Alert's story asks, then says it is done.
+        // Overturning asks first, then says it is done, as the radar page does.
         let alert = Alert::new()
             .is_open(self.asking.is_some())
-            .icon(IconName::Undo)
-            .intent(Intent::Danger)
+            .intent(Intent::Primary)
             .cancel_button_text("Cancel")
             .confirm_button_text("Overturn")
             .on_cancel(update(Project::cancel))
@@ -564,8 +565,7 @@ impl Render for Project {
         if let Some(message) = &self.toast {
             toaster = toaster.child(
                 Toast::new(message.clone())
-                    .icon(IconName::Undo)
-                    .intent(Intent::Primary)
+                    .icon(IconName::Notifications)
                     .on_dismiss(update(Project::dismiss_toast)),
             );
         }

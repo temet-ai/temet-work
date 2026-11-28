@@ -5,9 +5,9 @@ use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
 };
 
-use super::{Class, apply, to_baseline, type_of};
+use super::{Class, apply, baseline, to_baseline, type_of};
 use crate::theme::look::{self, State};
-use crate::theme::space;
+use crate::theme::{size, space};
 
 /// The heading's size: `page`, the one title of a screen; `pane`, the title of a side pane;
 /// `section`, a group of rows.
@@ -66,7 +66,8 @@ impl RenderOnce for Heading {
         };
         // The look's height is one line of the heading; NeedsYou's heading line is taller, to
         // hold its icon beside the title.
-        let line = if self.class_name == Some(Class::NeedsHeading) {
+        let needs = self.class_name == Some(Class::NeedsHeading);
+        let line = if needs {
             look::get(
                 cx,
                 "NeedsYou",
@@ -82,6 +83,10 @@ impl RenderOnce for Heading {
             .justify_between()
             .gap(space::s4(cx))
             .line_height(line.height);
+        if needs {
+            // The line keeps its height when the title in it is a shorter box of its own.
+            heading = heading.min_h(line.height);
+        }
         if self.size != HeadingSize::Page {
             heading = heading.mb(space::s3(cx));
         }
@@ -97,11 +102,26 @@ impl RenderOnce for Heading {
                     "tm-heading tm-heading-note tm-heading-section",
                     rest,
                 );
-                // The note sits on the title's baseline.
+                let drop = if needs {
+                    // NeedsYou's heading line takes its baseline from the title's first item,
+                    // the bell, which has no text: the bell's foot, centred in the title's line.
+                    // The note sits on that, below the words' baseline.
+                    let title = look::get(
+                        cx,
+                        "NeedsYou",
+                        "tm-attention-text tm-heading-text tm-needs-title",
+                        rest,
+                    );
+                    (title.height + size::icon(cx)) / 2.
+                        - baseline(cx, look.font_size, look.height).round()
+                } else {
+                    // The note sits on the title's baseline.
+                    to_baseline(cx, &line, &look)
+                };
                 type_of(div(), &look)
                     .flex_none()
                     .line_height(look.height)
-                    .mt(to_baseline(cx, &line, &look))
+                    .mt(drop)
                     .child(note)
             }))
     }

@@ -10,7 +10,7 @@
 //! reads no colour or type, so it names the class, and the class resolves to the look the
 //! design system measured for an element with that class.
 
-use gpui::{App, Div, ParentElement, Pixels, SharedString, Styled, Window, div, font};
+use gpui::{App, Div, ParentElement, Pixels, SharedString, Styled, Window, div, font, px};
 
 use crate::theme::look::{self, Look, State};
 use crate::theme::{colour, size, space, text};
@@ -52,6 +52,29 @@ pub(crate) fn baseline(cx: &App, size: Pixels, line: Pixels) -> Pixels {
     // GPUI gives the descent as a negative offset from the baseline, as fonts store it.
     let descent = system.descent(id, size).abs();
     (line - ascent - descent) / 2. + ascent
+}
+
+/// The height of a line box, no taller than `line`, that GPUI centres in a box of `line` and
+/// draws `size` text in on the pixel row a browser draws it in a line of `line`. A browser
+/// rounds the font's ascent and descent to whole pixels and gives the ascent side the floor of
+/// the half leading; GPUI centres the unrounded ascent and descent and rounds the result, which
+/// can put the text a pixel lower. The design system's stories are drawn by a browser.
+pub(crate) fn browser_line(cx: &App, size: Pixels, line: Pixels) -> Pixels {
+    let system = cx.text_system();
+    let id = system.resolve_font(&font(text::family(cx)));
+    let ascent = system.ascent(id, size);
+    let descent = system.descent(id, size).abs();
+    let browser = ascent.round() + ((line - ascent.round() - descent.round()) / 2.).floor();
+    // GPUI snaps a centred box's top edge to whole pixels, halves toward zero.
+    let top = |height: Pixels| px((f32::from((line - height) / 2.) - 0.5).ceil());
+    // GPUI rounds line heights to whole pixels: try each, tallest first.
+    let tallest = f32::from(line.round()) as i32;
+    let shortest = f32::from((ascent + descent).ceil()) as i32;
+    (shortest..=tallest)
+        .rev()
+        .map(|whole| px(whole as f32))
+        .find(|&height| top(height) + baseline(cx, size, height).round() == browser)
+        .unwrap_or(line)
 }
 
 /// How far a line box reaches below its baseline, in the text style in force: the font's
@@ -291,18 +314,24 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
             el,
             &look::get(cx, "NeedsYou", "tm-cut-body tm-needs-head", rest),
         ),
-        Class::NeedsTitle => type_of(
-            el,
-            &look::get(
+        Class::NeedsTitle => {
+            // An inline-flex box one line of its own tall, at the top of the heading's taller
+            // line, with the bell centred beside the words.
+            let title = look::get(
                 cx,
                 "NeedsYou",
                 "tm-attention-text tm-heading-text tm-needs-title",
                 rest,
-            ),
-        )
-        .flex()
-        .items_center()
-        .gap(space::s3(cx)),
+            );
+            // The words take the line a browser would draw them on; the box keeps the title's
+            // line, so the bell stays centred in it.
+            type_of(el, &title)
+                .flex()
+                .items_center()
+                .gap(space::s3(cx))
+                .h(title.height)
+                .line_height(browser_line(cx, title.font_size, title.height))
+        }
         Class::DecisionIssue => type_of(
             el,
             &look::get(cx, "DecisionRow", "tm-decision-issue tm-row-meta", rest),
