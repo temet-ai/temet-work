@@ -3,7 +3,8 @@
 //!
 //! - a reader passes a role only for a setting read per role, and no role only
 //!   for one that is the same for every role;
-//! - the table of settings says which take a role.
+//! - the table of settings says which take a role, and the levels each is read
+//!   at.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -177,6 +178,9 @@ fn readers_match_per_role() {
     assert!(unread.is_empty(), "no reader found for {unread:?}");
 }
 
+/// What the table calls "every level".
+const EVERY_LEVEL: [&str; 5] = ["task", "milestone", "project", "area", "global"];
+
 #[test]
 fn docs_settings_table_matches_specs() {
     let doc = include_str!("../docs/settings.md");
@@ -194,17 +198,26 @@ fn docs_settings_table_matches_specs() {
                 .collect::<Vec<_>>()
         });
     let head = rows.next().expect("a table");
-    let column = head
-        .iter()
-        .position(|c| *c == "Per role")
-        .expect("a Per role column");
+    let column = |name: &str| {
+        head.iter()
+            .position(|c| *c == name)
+            .unwrap_or_else(|| panic!("a {name} column"))
+    };
+    let (per_role, read_at) = (column("Per role"), column("Read at"));
     let mut listed = Vec::new();
     for row in rows.skip(1) {
         // The keys are what is between backticks in the first cell.
         for key in row[0].split('`').skip(1).step_by(2) {
             let spec = spec(key).expect("the table names settings only");
             let want = if spec.per_role { "yes" } else { "no" };
-            assert_eq!(row[column], want, "{key}");
+            assert_eq!(row[per_role], want, "{key}");
+            let levels: Vec<&str> = spec.levels.iter().map(|l| l.name()).collect();
+            let want = if levels == EVERY_LEVEL {
+                "every level".to_string()
+            } else {
+                levels.join(", ")
+            };
+            assert_eq!(row[read_at], want, "{key}");
             listed.push(spec.key);
         }
     }

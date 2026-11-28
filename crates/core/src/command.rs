@@ -703,6 +703,7 @@ impl World {
                     let role = settings::recorded_role(None, key, &who);
                     let at = self
                         .may_set(by, &task, None, key)
+                        .and_then(|()| settings::check_level(key, task.level()))
                         .and_then(|()| settings::check_value(key, value))
                         .and_then(|()| self.check_choice(key, value))
                         .and_then(|()| self.model_key(&task, role, key))
@@ -862,6 +863,7 @@ impl World {
                     settings::check_role(key, "--role")?;
                 }
                 self.may_set(by, &scope, *role, key)?;
+                settings::check_level(key, scope.level())?;
                 let value = settings::parse_value(key, value)?;
                 self.check_choice(key, &value)?;
                 let by = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());

@@ -262,7 +262,9 @@ file behaves as before. A group's `model` is bound to the file's global runtime 
 stops the start; under a project on another runtime, that project's agents run their
 runtime's default. A key the
 daemon does not know is an error naming the key, and so is a key in a role's table that
-takes no role (`docs/settings.md`, Roles). A value that names a runtime or runner the
+takes no role (`docs/settings.md`, Roles). `sync_every` or `investigate` in a
+`[[milestone]]`'s settings stops the daemon at start, naming the levels that read it
+(`docs/settings.md`, "The settings"). A value that names a runtime or runner the
 build does not have, or a model for such a runtime, stops the daemon at start, with the
 ones it has listed, and so does a build with no default runtime or runner and no global
 value for it. What a person or an agent has set since is not overwritten by the file; a

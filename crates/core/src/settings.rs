@@ -51,6 +51,19 @@ pub enum Scope {
     Task(IssueId),
 }
 
+impl Scope {
+    /// The level of the chain this scope is a place at.
+    pub fn level(&self) -> Level {
+        match self {
+            Self::Global => Level::Global,
+            Self::Area(_) => Level::Area,
+            Self::Project(_) => Level::Project,
+            Self::Milestone { .. } => Level::Milestone,
+            Self::Task(_) => Level::Task,
+        }
+    }
+}
+
 impl std::fmt::Display for Scope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -198,7 +211,23 @@ pub struct Spec {
     /// Whether it is read for the role of an agent, so that a role can have its
     /// own value. One that is not is the same for every role.
     pub per_role: bool,
+    /// The levels it is read at, nearest first. A value at another level would
+    /// have no effect.
+    pub levels: &'static [Level],
 }
+
+/// Every level a value can be set at: those of a setting read for an issue.
+const EVERY_LEVEL: &[Level] = &[
+    Level::Task,
+    Level::Milestone,
+    Level::Project,
+    Level::Area,
+    Level::Global,
+];
+
+/// The levels of a setting read for a project or an area, whose chain starts
+/// there.
+const FROM_PROJECT: &[Level] = &[Level::Project, Level::Area, Level::Global];
 
 /// The modes an agent can be started in, which `permission` takes one of.
 const PERMISSIONS: &[&str] = &[
@@ -221,6 +250,7 @@ pub const SPECS: [Spec; 17] = [
              may do without asking",
         ),
         per_role: true,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "model",
@@ -230,6 +260,7 @@ pub const SPECS: [Spec; 17] = [
                 default when none is set",
         agents: Agents::ForAuthor,
         per_role: true,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "runner",
@@ -240,6 +271,7 @@ pub const SPECS: [Spec; 17] = [
              one issue replaces the one a person chose for a role",
         ),
         per_role: true,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "machine",
@@ -247,6 +279,7 @@ pub const SPECS: [Spec; 17] = [
         about: "the machine of the work folder an agent is given; any machine when none is set",
         agents: Agents::May,
         per_role: true,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "permission",
@@ -256,6 +289,7 @@ pub const SPECS: [Spec; 17] = [
             "it decides what every later agent on the issue may do without asking",
         ),
         per_role: true,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "review_rounds",
@@ -266,6 +300,7 @@ pub const SPECS: [Spec; 17] = [
              so fewer rounds weaken its review",
         ),
         per_role: false,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "ci",
@@ -276,6 +311,7 @@ pub const SPECS: [Spec; 17] = [
              in every repository the issue changes",
         ),
         per_role: false,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "deploy",
@@ -283,6 +319,7 @@ pub const SPECS: [Spec; 17] = [
         about: "the command run after a merge",
         agents: Agents::MayNot("the daemon runs it as a shell command after a merge"),
         per_role: false,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "verify",
@@ -290,6 +327,7 @@ pub const SPECS: [Spec; 17] = [
         about: "the command run after a deploy",
         agents: Agents::MayNot("the daemon runs it after a deploy"),
         per_role: false,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "run_in",
@@ -297,6 +335,7 @@ pub const SPECS: [Spec; 17] = [
         about: "the folder deploy and verify run in",
         agents: Agents::MayNot("it is the folder deploy and verify run in"),
         per_role: false,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "merge",
@@ -304,6 +343,7 @@ pub const SPECS: [Spec; 17] = [
         about: "how the code host merges a pull request",
         agents: Agents::May,
         per_role: false,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "remind_after",
@@ -311,6 +351,7 @@ pub const SPECS: [Spec; 17] = [
         about: "minutes an agent its issue waits on may sit idle before it is reminded",
         agents: Agents::May,
         per_role: true,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "reminders",
@@ -318,6 +359,7 @@ pub const SPECS: [Spec; 17] = [
         about: "reminders before an idle agent is stopped",
         agents: Agents::May,
         per_role: true,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "starts",
@@ -325,6 +367,7 @@ pub const SPECS: [Spec; 17] = [
         about: "agents of one role that end while one issue waits on them before the loop gives up",
         agents: Agents::May,
         per_role: true,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "sync_every",
@@ -332,6 +375,7 @@ pub const SPECS: [Spec; 17] = [
         about: "seconds between syncs of a project with its tracker",
         agents: Agents::May,
         per_role: false,
+        levels: FROM_PROJECT,
     },
     Spec {
         key: "ci_every",
@@ -339,6 +383,7 @@ pub const SPECS: [Spec; 17] = [
         about: "seconds between reads of a pull request's CI",
         agents: Agents::May,
         per_role: false,
+        levels: EVERY_LEVEL,
     },
     Spec {
         key: "investigate",
@@ -347,6 +392,7 @@ pub const SPECS: [Spec; 17] = [
                 parts of the code another team owns",
         agents: Agents::MayNot("it is text written into every later investigator's brief"),
         per_role: false,
+        levels: FROM_PROJECT,
     },
 ];
 
@@ -390,6 +436,28 @@ pub fn check_role(key: &str, named: &str) -> Result<(), String> {
          take a role are: {}",
         keys.join(", ")
     ))
+}
+
+/// Refuses `key` at a level that never reads it, since such a value would have
+/// no effect.
+pub fn check_level(key: &str, level: Level) -> Result<(), String> {
+    let spec = spec(key)?;
+    if spec.levels.contains(&level) {
+        return Ok(());
+    }
+    let levels: Vec<&str> = spec.levels.iter().map(|l| l.name()).collect();
+    Err(format!(
+        "{key} is not read at the {} level, so a value there would have no effect; the \
+         levels that read it are: {}",
+        level.name(),
+        levels.join(", ")
+    ))
+}
+
+/// Whether a value of `key` at `level` is read. A key that is no setting is not
+/// held to any level.
+fn read_at(key: &str, level: Level) -> bool {
+    spec(key).map_or(true, |s| s.levels.contains(&level))
 }
 
 /// The value in the code for `key`, used when no level sets one. The runtime and
@@ -618,11 +686,13 @@ impl World {
     /// value comes before the value for every role; across levels the nearer one
     /// comes first. The build's own value is the last resort. `model` answers
     /// for the runtime that runs there ([`World::keys_read`]). A key that is not
-    /// read per role is answered as for no role.
+    /// read per role is answered as for no role, and a level that does not read
+    /// the key is passed over: an older log may hold a value there.
     pub fn resolve(&self, scope: &Scope, role: Option<Role>, key: &str) -> Option<Resolved> {
         let role = role.filter(|_| per_role(key));
         let keys = self.keys_read(scope, role, key);
-        for (level, at) in self.chain(scope) {
+        let chain = self.chain(scope).into_iter();
+        for (level, at) in chain.filter(|(level, _)| read_at(key, *level)) {
             let get = |role: Option<Role>| {
                 keys.iter()
                     .find_map(|k| self.settings.get(&(at.clone(), role, k.clone())))
