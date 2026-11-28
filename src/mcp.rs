@@ -81,7 +81,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "issue",
-            description: "One issue in full: its stage, its text from its tracker's last sync (or why that was not read), plan, pull request, what it is to fix, its dependencies and its agents.",
+            description: "One issue in full: its stage, its text from its tracker's last sync (or why that was not read), plan, pull request, what it is to fix, its review rounds with each point, the author's reply and the point's state, its dependencies and its agents.",
             acts: false,
             schema: json!({"type": "object", "properties": {"issue": issue_field()}, "required": ["issue"]}),
         },

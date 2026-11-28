@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::IssueText;
-use crate::model::{AgentState, Role, Stage};
+use crate::model::{AgentState, Issue, PointState, Role, Stage};
 use crate::world::World;
 
 /// A stage in a word or two.
@@ -26,7 +26,7 @@ pub fn stage(stage: Stage) -> String {
 }
 
 /// An issue's stage, and "out of scope" when its group no longer covers it.
-pub(crate) fn issue_stage(world: &World, issue: &crate::model::Issue) -> String {
+pub(crate) fn issue_stage(world: &World, issue: &Issue) -> String {
     let at = stage(issue.stage);
     if world.out_of_scope(issue) {
         format!("{at}, out of scope")
@@ -308,8 +308,69 @@ fn lines(
     out
 }
 
+/// `issue`'s finished review rounds, in the order they finished: each one's
+/// verdict and, for a block, each point with the author's reply to it and what
+/// the next round made of it. Empty before the first round ends. An arbiter's
+/// brief and [`issue`] both print it.
+pub(crate) fn review_rounds(issue: &Issue) -> String {
+    if issue.reviews.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("Review rounds:\n");
+    for (at, r) in issue.reviews.iter().enumerate() {
+        let verdict = if r.approve { "approved" } else { "blocked" };
+        let _ = writeln!(out, "  Round {}: {verdict}", r.round);
+        // A verdict judges the entry before it, unless it is a round 1's
+        // (`Issue::round_before`).
+        let next = issue.reviews.get(at + 1).filter(|n| n.round > 1);
+        for (n, point) in r.points.iter().enumerate() {
+            let reply = r.replies.get(n).map_or("none on record", String::as_str);
+            // A round from an older log holds no state, and one that no later
+            // round judged is recorded as open: neither was kept open.
+            let state = match (r.states.get(n), next) {
+                (None, _) => "not on record".to_string(),
+                (Some(_), None) => "not judged by a later round".into(),
+                (Some(state), Some(next)) => {
+                    let judged = match state {
+                        PointState::Open => "kept open",
+                        PointState::Resolved => "resolved",
+                    };
+                    // A failed check or a conflict keeps the round's number.
+                    let later = if next.round == r.round {
+                        "the later "
+                    } else {
+                        ""
+                    };
+                    format!("{judged} by {later}round {}", next.round)
+                }
+            };
+            let _ = writeln!(
+                out,
+                "    {}. {point}\n       The author's reply: {reply}\n       State: {state}",
+                n + 1
+            );
+        }
+    }
+    // The latest block is the one that sent an issue to its arbiter.
+    if matches!(issue.stage, Stage::Arbitration { .. })
+        && let Some(last) = issue
+            .reviews
+            .last()
+            .filter(|r| r.blocks() && r.replies.is_empty())
+    {
+        let _ = writeln!(
+            out,
+            "  No later round judged the points of round {}, the last block, and the author has not \
+             replied to it because review rounds ran out before the author's next ready.",
+            last.round
+        );
+    }
+    out
+}
+
 /// One issue in full: where it is, its own text (`read`, or why there is none to
-/// show), its plan, its pull request, what it is to fix, and its agents.
+/// show), its plan, its pull request, what it is to fix, its review rounds and
+/// its agents.
 pub fn issue(
     world: &World,
     id: &crate::ids::IssueId,
@@ -375,6 +436,7 @@ pub fn issue(
             let _ = writeln!(out, "  - {p}");
         }
     }
+    out.push_str(&review_rounds(i));
     let _ = writeln!(out, "Agents:");
     for a in world
         .agents
@@ -1064,6 +1126,267 @@ Problems
         assert!(
             all.contains("  radar, reviewer: permission = plan, set by person\n"),
             "{all}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_rounds {
+    use super::*;
+    use crate::brief;
+    use crate::event::{Event, Verdict};
+    use crate::ids::{AgentId, FolderId, GroupId, IssueId, MachineId, ProjectId};
+    use crate::model::{Check, Plan};
+
+    fn watch12() -> IssueId {
+        IssueId::new("watch", "12")
+    }
+
+    /// `watch#12` with its author at work, and no review round yet.
+    fn working() -> World {
+        let group = GroupId::new("night-watch");
+        let started = |agent: &str, role| Event::AgentStarted {
+            agent: AgentId::new(agent),
+            group: group.clone(),
+            role,
+            issue: Some(watch12()),
+            machine: MachineId::new("pseudopolis"),
+            folder: None,
+            secret_digest: None,
+            runtime: None,
+            model: None,
+        };
+        let events = [
+            Event::ProjectAdded {
+                project: ProjectId::new("watch"),
+                tracker: "fake".into(),
+                name: "ankh-morpork/watch".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::FolderAdded {
+                folder: FolderId::new("yard-1"),
+                project: ProjectId::new("watch"),
+                machine: MachineId::new("pseudopolis"),
+                path: "/srv/pseudopolis-yard/watch".into(),
+            },
+            Event::GroupCreated {
+                group: group.clone(),
+                name: "Night Watch".into(),
+                projects: vec![ProjectId::new("watch")],
+                areas: Vec::new(),
+                milestones: Vec::new(),
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+            Event::IssueSynced {
+                issue: watch12(),
+                title: "Shut the gate at dusk".into(),
+                milestone: None,
+                depends_on: Vec::new(),
+                order: 12,
+                closed: false,
+            },
+            started("refiner-1", Role::Refiner),
+            Event::PlanWritten {
+                issue: watch12(),
+                plan: Plan {
+                    checks: vec![Check::new("the gate shuts at dusk", "the dusk test")],
+                    ..Plan::default()
+                },
+            },
+            started("author-2", Role::Author),
+        ];
+        World::replay(&events).0
+    }
+
+    fn ready(w: &mut World, replies: &[&str]) {
+        w.apply(&Event::PullRequestReady {
+            issue: watch12(),
+            pull: Some("41".into()),
+            pulls: BTreeMap::new(),
+            replies: replies.iter().map(ToString::to_string).collect(),
+        });
+    }
+
+    /// The verdict on `round`: an approval with no `points`, else a block. `open`
+    /// is none in a log from before points had states.
+    fn verdict(w: &mut World, round: u8, points: &[&str], open: Option<&[usize]>) {
+        let verdict = if points.is_empty() {
+            Verdict::Approve
+        } else {
+            Verdict::Block {
+                points: points.iter().map(ToString::to_string).collect(),
+            }
+        };
+        w.apply(&Event::ReviewFinished {
+            issue: watch12(),
+            round,
+            verdict,
+            failed: None,
+            open: open.map(<[usize]>::to_vec),
+        });
+    }
+
+    fn view(w: &World) -> String {
+        let unread = Err("not read here".into());
+        issue(w, &watch12(), &unread).expect("known")
+    }
+
+    #[test]
+    fn the_issue_view_lists_every_review_round_with_each_reply_and_state() {
+        let mut w = working();
+        assert!(!view(&w).contains("Review rounds:"), "{}", view(&w));
+        ready(&mut w, &[]);
+        assert!(!view(&w).contains("Review rounds:"), "{}", view(&w));
+        verdict(
+            &mut w,
+            1,
+            &["the hinge squeaks", "the bar is bent"],
+            Some(&[]),
+        );
+        // Listed while the author fixes it, after what it is to fix.
+        let fixing = view(&w);
+        assert!(
+            fixing.contains(
+                "To fix:\n  - the hinge squeaks\n  - the bar is bent\n\
+                 Review rounds:\n  Round 1: blocked\n    \
+                 1. the hinge squeaks\n       The author's reply: none on record\n       \
+                 State: not judged by a later round\n    \
+                 2. the bar is bent\n       The author's reply: none on record\n       \
+                 State: not judged by a later round\n\
+                 Agents:\n"
+            ),
+            "{fixing}"
+        );
+        ready(&mut w, &["oiled it", "the bar holds"]);
+        // Round 2 keeps the bar open.
+        verdict(
+            &mut w,
+            2,
+            &["the lock sticks", "the bar is bent"],
+            Some(&[2]),
+        );
+        ready(&mut w, &["filed the lock", "straightened the bar"]);
+        // Round 3 keeps the lock open.
+        verdict(
+            &mut w,
+            3,
+            &["the chain is short", "the lock sticks"],
+            Some(&[1]),
+        );
+        assert_eq!(w.issues[&watch12()].stage, Stage::Arbitration { round: 3 });
+        let rounds = "Review rounds:\n  \
+             Round 1: blocked\n    \
+             1. the hinge squeaks\n       The author's reply: oiled it\n       \
+             State: resolved by round 2\n    \
+             2. the bar is bent\n       The author's reply: the bar holds\n       \
+             State: kept open by round 2\n  \
+             Round 2: blocked\n    \
+             1. the lock sticks\n       The author's reply: filed the lock\n       \
+             State: kept open by round 3\n    \
+             2. the bar is bent\n       The author's reply: straightened the bar\n       \
+             State: resolved by round 3\n  \
+             Round 3: blocked\n    \
+             1. the chain is short\n       The author's reply: none on record\n       \
+             State: not judged by a later round\n    \
+             2. the lock sticks\n       The author's reply: none on record\n       \
+             State: not judged by a later round\n  \
+             No later round judged the points of round 3, the last block, and the author has \
+             not replied to it because review rounds ran out before the author's next ready.\n";
+        let shown = view(&w);
+        assert!(shown.contains(&format!("{rounds}Agents:\n")), "{shown}");
+        // The arbiter's brief carries the same block.
+        let brief = brief::write(
+            Role::Arbiter,
+            &w.issues[&watch12()],
+            None,
+            &[],
+            brief::Workplace::default(),
+            &[],
+            &[],
+        )
+        .task;
+        assert!(
+            brief.contains(&format!("{rounds}This folder is not yours")),
+            "{brief}"
+        );
+    }
+
+    #[test]
+    fn the_issue_view_lists_an_approved_round_and_a_repeated_round() {
+        let mut w = working();
+        ready(&mut w, &[]);
+        verdict(&mut w, 1, &["the hinge squeaks"], Some(&[]));
+        ready(&mut w, &["oiled it"]);
+        verdict(&mut w, 2, &[], Some(&[]));
+        // A failed check undoes the approval and keeps the round's number.
+        w.apply(&Event::ChecksFinished {
+            issue: watch12(),
+            passed: false,
+            failing: vec!["lint".into()],
+        });
+        ready(&mut w, &[]);
+        verdict(&mut w, 2, &["the bar is bent"], Some(&[]));
+        let shown = view(&w);
+        assert!(
+            shown.contains(
+                "Review rounds:\n  \
+                 Round 1: blocked\n    \
+                 1. the hinge squeaks\n       The author's reply: oiled it\n       \
+                 State: resolved by round 2\n  \
+                 Round 2: approved\n  \
+                 Round 2: blocked\n    \
+                 1. the bar is bent\n       The author's reply: none on record\n       \
+                 State: not judged by a later round\n\
+                 Agents:\n"
+            ),
+            "{shown}"
+        );
+        // A block that a second review of its round judged is named as such.
+        ready(&mut w, &["straightened it"]);
+        verdict(&mut w, 3, &["the chain is short"], Some(&[]));
+        w.apply(&Event::ChecksFinished {
+            issue: watch12(),
+            passed: false,
+            failing: Vec::new(),
+        });
+        ready(&mut w, &["a longer chain"]);
+        verdict(&mut w, 3, &[], Some(&[]));
+        let shown = view(&w);
+        assert!(
+            shown.contains(
+                "  Round 3: blocked\n    \
+                 1. the chain is short\n       The author's reply: a longer chain\n       \
+                 State: resolved by the later round 3\n  \
+                 Round 3: approved\n"
+            ),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn the_issue_view_says_a_state_from_an_older_log_is_not_on_record() {
+        let mut w = working();
+        ready(&mut w, &[]);
+        verdict(&mut w, 1, &["the hinge squeaks"], None);
+        ready(&mut w, &[]);
+        verdict(&mut w, 2, &["the bar is bent"], None);
+        let shown = view(&w);
+        assert!(
+            shown.contains(
+                "Review rounds:\n  \
+                 Round 1: blocked\n    \
+                 1. the hinge squeaks\n       The author's reply: none on record\n       \
+                 State: not on record\n  \
+                 Round 2: blocked\n    \
+                 1. the bar is bent\n       The author's reply: none on record\n       \
+                 State: not on record\n\
+                 Agents:\n"
+            ),
+            "{shown}"
         );
     }
 }
