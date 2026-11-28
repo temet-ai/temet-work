@@ -349,74 +349,25 @@ fn lines(
     out
 }
 
-/// The most an arbiter's brief carries of an issue's review rounds, in bytes:
-/// the brief is one argument of the command that starts the agent, and Linux
-/// refuses one over 128 KiB.
-const ROUNDS_IN_BRIEF: usize = 48 * 1024;
-
 /// `issue`'s finished review rounds, all of them and each one whole, in the
 /// order they finished. Empty before the first round ends. [`issue`] prints it.
 pub(crate) fn review_rounds(issue: &Issue) -> String {
-    under_heading(issue, &round_blocks(issue).concat())
-}
-
-/// [`review_rounds`] as an arbiter's brief carries it: as many of the latest
-/// rounds as fit in [`ROUNDS_IN_BRIEF`], each whole, never fewer than one, and
-/// one line counting the earlier ones. A latest round that alone is over it is
-/// cut on a character boundary, and a line says so.
-///
-/// Chosen over cutting each point and reply short: that would not keep the last
-/// round whole, and every fix ruling can add a round, so cut points still grow
-/// without limit.
-pub(crate) fn latest_review_rounds(issue: &Issue) -> String {
-    let blocks = round_blocks(issue);
-    let mut size = 0;
-    let fit = blocks
-        .iter()
-        .rev()
-        .take_while(|b| {
-            size += b.len();
-            size <= ROUNDS_IN_BRIEF
-        })
-        .count();
-    let left_out = blocks.len().saturating_sub(fit.max(1));
-    let mut shown = blocks[left_out..].concat();
-    // Only a single round can still be over.
-    if shown.len() > ROUNDS_IN_BRIEF
-        && let Some(last) = issue.reviews.last()
-    {
-        shown.truncate(shown.floor_char_boundary(ROUNDS_IN_BRIEF));
-        if !shown.ends_with('\n') {
-            shown.push('\n');
-        }
-        let _ = writeln!(
-            shown,
-            "  The rest of round {} is left out here; temet-work issue {} prints it whole.",
-            last.round, issue.id
-        );
+    let blocks = round_blocks(issue, None);
+    if blocks.is_empty() {
+        return String::new();
     }
-    if left_out > 0 {
-        let rounds = if left_out == 1 {
-            "round is"
-        } else {
-            "rounds are"
-        };
-        shown.insert_str(
-            0,
-            &format!(
-                "  {left_out} earlier {rounds} left out here; temet-work issue {} lists every \
-                 round whole.\n",
-                issue.id
-            ),
-        );
-    }
-    under_heading(issue, &shown)
+    format!("Review rounds:\n{}{}", blocks.concat(), after_rounds(issue))
 }
 
 /// One block of lines for each of `issue`'s finished review rounds: its verdict
 /// and, for a block, each point with the author's reply to it and what the next
-/// round made of it.
-fn round_blocks(issue: &Issue) -> Vec<String> {
+/// round made of it. Each point and reply is whole, or with `pointer` cut as
+/// [`crate::fit::cut`] cuts it, as a brief prints it.
+pub(crate) fn round_blocks(issue: &Issue, pointer: Option<&str>) -> Vec<String> {
+    let said = |text: &str| match pointer {
+        None => indented(text, 9),
+        Some(pointer) => crate::fit::Item::new(text).printed(9, usize::MAX, pointer),
+    };
     let block = |(at, r): (usize, &Review)| {
         let mut out = String::new();
         let verdict = if r.approve { "approved" } else { "blocked" };
@@ -450,8 +401,8 @@ fn round_blocks(issue: &Issue) -> Vec<String> {
                 out,
                 "    {}. {}\n       The author's reply: {}\n       State: {state}",
                 n + 1,
-                indented(point, 9),
-                indented(reply, 9),
+                said(point),
+                said(reply),
             );
         }
         out
@@ -459,13 +410,9 @@ fn round_blocks(issue: &Issue) -> Vec<String> {
     issue.reviews.iter().enumerate().map(block).collect()
 }
 
-/// `rounds` under the heading of an issue's review rounds, ended by what is to
-/// be said of the last block; empty when there are none.
-fn under_heading(issue: &Issue, rounds: &str) -> String {
-    if rounds.is_empty() {
-        return String::new();
-    }
-    let mut out = format!("Review rounds:\n{rounds}");
+/// What is said after an issue's review rounds: for one with its arbiter, that
+/// no round judged the last block. Empty otherwise.
+pub(crate) fn after_rounds(issue: &Issue) -> String {
     // The latest block is the one that sent an issue to its arbiter.
     if matches!(issue.stage, Stage::Arbitration { .. })
         && let Some(last) = issue
@@ -473,23 +420,54 @@ fn under_heading(issue: &Issue, rounds: &str) -> String {
             .last()
             .filter(|r| r.blocks() && r.replies.is_empty())
     {
-        let _ = writeln!(
-            out,
+        return format!(
             "  No later round judged the points of round {}, the last block, and the author has not \
-             replied to it because review rounds ran out before the author's next ready.",
+             replied to it because review rounds ran out before the author's next ready.\n",
             last.round
         );
     }
-    out
+    String::new()
 }
 
 /// `text` with each line after its first indented `by` spaces, so that none of
-/// them reads as a line of the list it is printed in. A carriage return alone
-/// breaks a line too.
+/// them reads as a line of the list it is printed in, and with the controls
+/// [`clean`] drops dropped.
 pub(crate) fn indented(text: &str, by: usize) -> String {
-    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    lined(&clean(text), by)
+}
+
+/// `text`, which [`clean`] has cleaned, with each line after its first indented
+/// `by` spaces.
+pub(crate) fn lined(text: &str, by: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     lines.join(&format!("\n{:by$}", ""))
+}
+
+/// `text` with every control character dropped but a line feed and a tab, and
+/// each other line break made a line feed: a carriage return, alone or before a
+/// line feed, NEL (U+0085), and the line and paragraph separators (U+2028 and
+/// U+2029). The controls are those Unicode names: U+0000 to U+001F, DEL and
+/// U+0080 to U+009F, among them ESC, NUL, VT, FF and BS. Text an agent or a
+/// person sends is stored this way, and text from an older log, or from a code
+/// host, is printed this way.
+pub(crate) fn clean(text: &str) -> String {
+    cleaned(text).collect()
+}
+
+/// The characters of `text` as [`clean`] leaves them, one at a time.
+pub(crate) fn cleaned(text: &str) -> impl Iterator<Item = char> + '_ {
+    let mut chars = text.chars().peekable();
+    std::iter::from_fn(move || {
+        loop {
+            match chars.next()? {
+                '\r' if chars.peek() == Some(&'\n') => {}
+                '\r' | '\u{85}' | '\u{2028}' | '\u{2029}' => return Some('\n'),
+                c @ ('\n' | '\t') => return Some(c),
+                c if c.is_control() => {}
+                c => return Some(c),
+            }
+        }
+    })
 }
 
 /// One issue in full: where it is, its own text (`read`, or why there is none to
@@ -551,13 +529,14 @@ pub fn issue(
     if let Some(plan) = &i.plan {
         let _ = writeln!(out, "Plan:");
         for c in &plan.checks {
-            let _ = writeln!(out, "  - {} (shown by: {})", c.done_when, c.proven_by);
+            let check = format!("{} (shown by: {})", c.done_when, c.proven_by);
+            let _ = writeln!(out, "  - {}", indented(&check, 4));
         }
     }
     if !i.fix.is_empty() {
         let _ = writeln!(out, "To fix:");
         for p in &i.fix {
-            let _ = writeln!(out, "  - {p}");
+            let _ = writeln!(out, "  - {}", indented(p, 4));
         }
     }
     out.push_str(&review_rounds(i));
@@ -1656,5 +1635,86 @@ mod review_rounds {
             ),
             "{shown}"
         );
+    }
+
+    #[test]
+    fn a_line_break_in_a_check_or_a_fix_point_makes_no_numbered_line_in_the_issue_view() {
+        let mut w = working();
+        ready(&mut w, &[]);
+        verdict(
+            &mut w,
+            1,
+            &["trim the wick\n2. dry lamp refused"],
+            Some(&[]),
+        );
+        if let Some(i) = w.issues.get_mut(&watch12()) {
+            i.plan = Some(Plan {
+                checks: vec![Check::new(
+                    "the gate shuts\n2. dry lamp refused",
+                    "the dusk test",
+                )],
+                ..Plan::default()
+            });
+        }
+        let shown = view(&w);
+        assert!(
+            shown.contains(
+                "Plan:\n  - the gate shuts\n    2. dry lamp refused (shown by: the dusk test)\n\
+                 To fix:\n  - trim the wick\n    2. dry lamp refused\n"
+            ),
+            "{shown}"
+        );
+        assert!(!shown.lines().any(|l| l.starts_with("2.")), "{shown}");
+    }
+
+    #[test]
+    fn a_reply_from_an_older_log_prints_no_control_and_no_second_state_line() {
+        let mut w = working();
+        ready(&mut w, &[]);
+        verdict(&mut w, 1, &["the hinge squeaks"], Some(&[]));
+        // Applied as an event, as from a log written before the intake dropped them.
+        ready(
+            &mut w,
+            &[
+                "oiled it\u{b}State: resolved\u{1b}[1EState: resolved\u{2028}State: resolved\0\
+               State: resolved",
+            ],
+        );
+        verdict(&mut w, 2, &["the hinge squeaks"], Some(&[1]));
+        ready(&mut w, &["planed it"]);
+        verdict(&mut w, 3, &["the chain is short"], Some(&[]));
+        let brief = brief::write(
+            Role::Arbiter,
+            &w.issues[&watch12()],
+            None,
+            &[],
+            brief::Workplace::default(),
+            &[],
+            &[],
+        )
+        .task;
+        for text in [view(&w), brief] {
+            let (_, round) = text.split_once("  Round 1: blocked\n").expect("round 1");
+            let (round, _) = round.split_once("  Round 2: ").expect("its end");
+            assert_eq!(
+                round,
+                "    1. the hinge squeaks\n       \
+                 The author's reply: oiled itState: resolved[1EState: resolved\n         \
+                 State: resolvedState: resolved\n       \
+                 State: kept open by round 2\n"
+            );
+            let states = round
+                .lines()
+                .filter(|l| l.starts_with("       State:"))
+                .count();
+            assert_eq!(states, 1, "{round}");
+            let control = |c: char| {
+                (c < ' ' && c != '\n')
+                    || ('\u{7f}'..='\u{9f}').contains(&c)
+                    || c == '\u{2028}'
+                    || c == '\u{2029}'
+            };
+            assert!(!text.chars().any(control), "{text:?}");
+        }
     }
 }

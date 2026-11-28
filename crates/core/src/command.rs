@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::brief::{numbered, reply_flags};
+use crate::brief::{MOST_POINTS, numbered, reply_flags};
 use crate::effect::Effect;
 use crate::event::{Event, Verdict};
 use crate::ids::{AgentId, DecisionId, GroupId, IssueId, MilestoneId, ProjectId, RuleId};
 use crate::model::{CheckState, Decision, DecisionKind, Plan, Role, Rule, RuleState, Stage};
 use crate::settings::{self, Agents, Scope, Target};
-use crate::text::stage;
+use crate::text::{clean, stage};
 use crate::world::World;
 
 /// One command.
@@ -369,7 +369,10 @@ impl World {
     /// each of its points, none of them empty, so every point it answers has its
     /// reply on record; any other ready carries none.
     fn replies(&self, issue: &IssueId, replies: &[String]) -> Result<Vec<String>, String> {
-        let replies: Vec<String> = replies.iter().map(|r| r.trim().to_string()).collect();
+        let replies: Vec<String> = replies
+            .iter()
+            .map(|r| clean(r).trim().to_string())
+            .collect();
         let Some(block) = self.issues.get(issue).and_then(|i| i.block_to_answer()) else {
             if replies.is_empty() {
                 return Ok(replies);
@@ -714,6 +717,12 @@ impl World {
                         ));
                     }
                 }
+                // Stored with its controls dropped and its line breaks line feeds.
+                let mut plan = plan.clone();
+                for c in &mut plan.checks {
+                    c.done_when = clean(&c.done_when);
+                    c.proven_by = clean(&c.proven_by);
+                }
                 if let Some(c) = plan
                     .checks
                     .iter()
@@ -725,7 +734,6 @@ impl World {
                     ));
                 }
                 // No change has been checked yet.
-                let mut plan = plan.clone();
                 for c in &mut plan.checks {
                     c.state = Some(CheckState::Waiting);
                 }
@@ -826,9 +834,10 @@ impl World {
                     Verdict::Block { points } => {
                         let mut points: Vec<String> = points
                             .iter()
+                            .map(|p| clean(p))
                             .filter(|p| !p.trim().is_empty())
-                            .cloned()
                             .collect();
+                        let new = points.len();
                         points.extend(kept);
                         if points.is_empty() {
                             return Err(
@@ -836,6 +845,18 @@ impl World {
                                  round before kept open with --open"
                                     .into(),
                             );
+                        }
+                        // The author replies to each point, and its brief spells
+                        // out one --reply for each.
+                        if points.len() > MOST_POINTS {
+                            return Err(format!(
+                                "a block takes at most {MOST_POINTS} points, new and kept open \
+                                 together, so that the author's brief can list one reply for \
+                                 each; this one has {} ({new} new, {} kept open): put related \
+                                 points together in one",
+                                points.len(),
+                                points.len() - new
+                            ));
                         }
                         Verdict::Block { points }
                     }
@@ -973,6 +994,7 @@ impl World {
                         decision.0
                     ));
                 }
+                let reason = clean(reason);
                 if reason.trim().is_empty() {
                     return Err("an overturn needs a reason".into());
                 }
@@ -1014,6 +1036,7 @@ impl World {
                 let Stage::Arbitration { round } = at(issue)? else {
                     return refuse(issue, at(issue)?, "with the arbiter");
                 };
+                let reason = clean(reason);
                 if reason.trim().is_empty() {
                     return Err("a ruling needs a reason".into());
                 }
@@ -1028,7 +1051,7 @@ impl World {
                         question: format!("Does {issue} merge after {round} review rounds?"),
                         options: vec!["merge".into(), "fix first".into()],
                         chosen: usize::from(!approve),
-                        reason: reason.clone(),
+                        reason,
                         overturned_to: None,
                         overturn_reason: String::new(),
                         cost: Some(cost),
@@ -1611,6 +1634,169 @@ mod tests {
         let d = &w.decisions[&DecisionId(1)];
         assert_eq!((d.by.0.as_str(), d.chosen), ("arbiter-1", 1));
         assert!(matches!(w.issues[&issue()].stage, Stage::Fixing { .. }));
+    }
+
+    /// Text holding the controls the intake drops and the line breaks it makes
+    /// line feeds.
+    pub(super) const NOISY: &str =
+        "a\u{b}b\u{c}c\u{8}d\u{1b}[1Ee\0f\u{7f}g\u{85}h\u{2028}i\u{2029}j\rk\r\nl\tm";
+
+    /// [`NOISY`] as it is stored: only line feeds and tabs are left.
+    pub(super) const STORED: &str = "abcd[1Eefg\nh\ni\nj\nk\nl\tm";
+
+    /// The event `command` from its owner becomes on `w`, applied to it.
+    fn logged(w: &mut World, command: &Command) -> Event {
+        if matches!(command, Command::Review { .. }) {
+            w.apply(&Event::Told { issue: issue() });
+        }
+        let event = w
+            .check(owner(command).as_ref(), command)
+            .expect("accepted")
+            .expect("an event");
+        w.apply(&event);
+        event
+    }
+
+    fn block(points: &[&str]) -> Command {
+        Command::Review {
+            issue: issue(),
+            verdict: Verdict::Block {
+                points: points.iter().map(ToString::to_string).collect(),
+            },
+            failed: Vec::new(),
+            open: Vec::new(),
+        }
+    }
+
+    /// ankh#1 with its plan written and its first block, `points`, in.
+    fn blocked(points: &[&str]) -> World {
+        let mut w = refining();
+        logged(
+            &mut w,
+            &Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        );
+        let ready = ready_replying(&w);
+        logged(&mut w, &ready);
+        logged(&mut w, &block(points));
+        w
+    }
+
+    #[test]
+    fn a_plans_checks_are_stored_with_their_controls_dropped() {
+        let mut w = refining();
+        let mut noisy = plan();
+        noisy.checks[0] = Check::new(NOISY, NOISY);
+        let Event::PlanWritten { plan, .. } = logged(
+            &mut w,
+            &Command::Plan {
+                issue: issue(),
+                plan: noisy,
+            },
+        ) else {
+            panic!("not a plan");
+        };
+        assert_eq!(plan.checks[0].done_when, STORED);
+        assert_eq!(plan.checks[0].proven_by, STORED);
+    }
+
+    #[test]
+    fn a_blocks_points_are_stored_with_their_controls_dropped() {
+        let w = blocked(&[NOISY]);
+        assert_eq!(w.issues[&issue()].reviews[0].points, [STORED]);
+    }
+
+    #[test]
+    fn a_block_takes_at_most_the_points_the_authors_brief_can_list_replies_for() {
+        let many = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("p{i}")).collect() };
+        fn refs(points: &[String]) -> Vec<&str> {
+            points.iter().map(String::as_str).collect()
+        }
+        // One over, new: refused, naming the most.
+        let mut w = blocked(&["the clock stops"]);
+        let ready = ready_replying(&w);
+        logged(&mut w, &ready);
+        w.apply(&Event::Told { issue: issue() });
+        let over = block(&refs(&many(MOST_POINTS + 1)));
+        let why = w
+            .check(owner(&over).as_ref(), &over)
+            .expect_err("over the most");
+        assert!(
+            why.contains("a block takes at most 300 points, new and kept open together"),
+            "{why}"
+        );
+        assert!(
+            why.contains("this one has 301 (301 new, 0 kept open)"),
+            "{why}"
+        );
+
+        // The most is taken.
+        let w = blocked(&refs(&many(MOST_POINTS)));
+        assert_eq!(w.issues[&issue()].reviews[0].points.len(), MOST_POINTS);
+
+        // Kept points count with the new ones.
+        let mut w = w;
+        let ready = ready_replying(&w);
+        logged(&mut w, &ready);
+        w.apply(&Event::Told { issue: issue() });
+        let kept = Command::Review {
+            issue: issue(),
+            verdict: Verdict::Block {
+                points: vec!["the clock is slow".into()],
+            },
+            failed: Vec::new(),
+            open: (1..=MOST_POINTS).collect(),
+        };
+        let why = w
+            .check(owner(&kept).as_ref(), &kept)
+            .expect_err("over the most with kept points");
+        assert!(
+            why.contains("this one has 301 (1 new, 300 kept open)"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_ready_s_replies_are_stored_with_their_controls_dropped() {
+        let mut w = blocked(&["the clock stops"]);
+        let Event::PullRequestReady { replies, .. } = logged(
+            &mut w,
+            &Command::Ready {
+                issue: issue(),
+                pull: None,
+                pulls: Default::default(),
+                replies: vec![NOISY.into()],
+            },
+        ) else {
+            panic!("not a ready");
+        };
+        assert_eq!(replies, [STORED]);
+    }
+
+    #[test]
+    fn a_rulings_reason_is_stored_with_its_controls_dropped() {
+        let mut w = blocked(&["the clock stops"]);
+        for _ in 0..2 {
+            let ready = ready_replying(&w);
+            logged(&mut w, &ready);
+            logged(&mut w, &block(&["the clock is slow"]));
+        }
+        assert_eq!(w.issues[&issue()].stage, Stage::Arbitration { round: 3 });
+        let Event::DecisionMade { decision } = logged(
+            &mut w,
+            &Command::Rule {
+                issue: issue(),
+                approve: false,
+                reason: NOISY.into(),
+            },
+        ) else {
+            panic!("not a ruling");
+        };
+        assert_eq!(decision.reason, STORED);
+        // It is the author's point to fix.
+        assert_eq!(w.issues[&issue()].fix, [STORED]);
     }
 }
 
@@ -2691,6 +2877,17 @@ mod plan_settings {
                 "dropped: {role:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_overturns_reason_is_stored_with_its_controls_dropped() {
+        let events = decided()
+            .events(None, &overturn(1, 1, super::tests::NOISY))
+            .expect("a person may");
+        let Some(Event::DecisionOverturned { reason, .. }) = events.first() else {
+            panic!("not an overturn: {events:?}");
+        };
+        assert_eq!(reason, super::tests::STORED);
     }
 }
 

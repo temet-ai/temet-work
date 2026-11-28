@@ -2,12 +2,14 @@
 //! do, what done means, and the one command that reports it done. Agents use the
 //! same `temet-work` commands a person does.
 
+use std::ops::Range;
 use std::path::PathBuf;
 
+use crate::fit::{self, Entry, Item, Part, Rank};
 use crate::ids::IssueId;
 use crate::ids::ProjectId;
 use crate::launch::Brief;
-use crate::model::{Issue, Role};
+use crate::model::{Check, Issue, Role};
 use crate::text::indented;
 
 /// A work folder an author holds: the project it is a checkout of, the code
@@ -370,7 +372,10 @@ decision.";
 /// `rules` are the kept rules from overturned decisions; each brief ends with them.
 /// `source` is the tracker's name for where the issue comes from, and `repos`
 /// the repositories of its area when it comes from an area's tracker. `pulls`
-/// are the issue's pull requests, in the order they merge.
+/// are the issue's pull requests, in the order they merge. The brief is held to
+/// [`fit::LIMIT`] bytes: each check, point, reply and rule is cut to
+/// [`fit::ITEM_CHARS`] characters, or shorter where the room needs it, with a
+/// pointer to the command that prints it whole.
 pub fn write(
     role: Role,
     issue: &Issue,
@@ -403,111 +408,131 @@ pub fn write(
         " Do this for each of the area's repositories the change may touch, at the head of its \
          own default branch; clone one you have no checkout of, outside this folder."
     };
-    let checks = issue.plan.as_ref().map_or_else(String::new, |plan| {
-        plan.checks
-            .iter()
-            .map(|c| format!("- {} (shown by: {})\n", c.done_when, c.proven_by))
-            .collect()
-    });
+    let pointer = cut_pointer(id);
     // An author started on an issue that came back hears what to fix first, and
     // the points its ready replies to.
-    let fixes = if issue.fix.is_empty() {
-        String::new()
-    } else {
-        let list: String = issue.fix.iter().map(|p| format!("- {p}\n")).collect();
-        let reply = issue.block_to_answer().map_or_else(String::new, |block| {
-            format!(
+    let mut fixes = Vec::new();
+    if !issue.fix.is_empty() {
+        fixes.push(Part::Whole(
+            "Earlier work on it came back with these to fix first:\n".into(),
+        ));
+        fixes.push(list(id, &issue.fix, false, TO_FIX, &pointer));
+        if let Some(block) = issue.block_to_answer() {
+            fixes.push(Part::Whole(format!(
                 "Your ready answers review round {}, so it takes one reply for each of that \
-                 round's points, in this order, {SAYING}:\n{}",
+                 round's points, in this order, {SAYING}:\n",
                 block.round,
-                numbered(&block.points)
-            )
-        });
-        format!("Earlier work on it came back with these to fix first:\n{list}{reply}")
-    };
+            )));
+            fixes.push(list(id, &block.points, true, POINTS, &pointer));
+        }
+    }
     let replies = issue.block_to_answer().map_or_else(String::new, |block| {
         format!(" {}", reply_flags(block.points.len()))
     });
     let (work, ready) = authors_work(id, &held, pulls);
     let to_review = to_review(pulls);
-    let task = match role {
-        Role::Refiner => format!(
-            "Refine {id}: {title}. It is {source}.\n\
-             {LEAVE_THE_FOLDER}\n{area_note}Read the issue. {code}{area_read} Change no file here.\n\
-             Then send the plan, one entry per check, as YAML on standard input:\n\
-             temet-work plan {id} - <<'PLAN'\n\
-             checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\
-             PLAN\n\
-             Each point the issue states needs a check that meets it as written. \
-             Use a chosen default only where the issue leaves the choice open (it says \"or\", \"pick\" or \
-             \"record which\"): pick one of the options it names, the one you would defend, and say why \
-             in done_when. \
-             Where the issue says nothing about a choice, take the default you would defend and say \
-             why in done_when; a default never replaces a point the issue states. \
-             When a point cannot be done as written, say why in that point's check and fix any \
-             failure the issue describes some other way: the plan may not leave one in place.\n\
-             For an issue that is hard, add a settings: map beside checks: with task-level values, such as model: opus; \
-             they are recorded as yours and a person can overturn them. \
-             A model you set is the author's only: the models of reviewers, arbiters and refiners are \
-             a person's to set. \
-             {PLAIN_MODEL} \
-             Only a person sets {persons}: a plan that names one is refused.",
-            title = issue.title,
-            code = at_the_default_branch(
-                "Read the code it touches at the current head of the repository's default branch",
-                "this folder",
-                "outside this folder",
-            ),
-            persons = only_a_persons().join(", "),
-        ),
-        Role::Author => format!(
-            "Work on {id}: {title}. It is {source}.\n\
-             {read} A decision may not depart from a point the issue states or leave any failure it \
-             describes in place. Where a point cannot be met, say so in the pull request.\n\
-             This folder is yours until the change merges.{work}\
-             {fixes}The plan's checks, each to hold before you finish:\n{checks}\
-             {ready}{replies}",
-            title = issue.title,
-            read = read_the_issue(id),
-        ),
-        Role::Reviewer => format!(
-            "Review the pull request for {id}: {title}. It is {source}.\n\
-             {to_review}{judged}\
-             {LEAVE_THE_FOLDER}\n\
-             Read the whole change, not only the last commit. Run the checks yourself where you can, \
-             in that separate checkout.\n\
-             {hold}\n\
-             {BLOCK_WHAT_IS_NOT_MET}\n\
-             {verdict}",
-            title = issue.title,
-            judged = to_judge(issue, under_review(issue)),
-            hold = hold_to_the_issue(id),
-            verdict = how_to_judge(issue, under_review(issue), "<what to fix>"),
-        ),
-        Role::Arbiter => format!(
-            "Review rounds on {id} ({title}) ran out. It is {source}.\n\
-             {to_review}The plan's checks:\n{checks}\
-             {rounds}\
-             {LEAVE_THE_FOLDER}\n\
-             Read the pull request and the review rounds listed above, with the author's replies; \
-             temet-work issue {id} lists the rounds again. Decide whether it merges.\n\
-             {hold}\n\
-             {FIX_WHAT_IS_NOT_MET}\n\
-             Then run: temet-work rule {id} approve \"<why>\"\n\
-             or: temet-work rule {id} fix \"<what must change, and why>\"",
-            title = issue.title,
-            rounds = crate::text::latest_review_rounds(issue),
-            hold = hold_to_the_issue(id),
-        ),
-        Role::Investigator => format!(
+    let parts = match role {
+        Role::Refiner => vec![
+            Part::Whole(format!(
+                "Refine {id}: {title}. It is {source}.\n\
+                 {LEAVE_THE_FOLDER}\n{area_note}Read the issue. {code}{area_read} Change no file here.\n",
+                title = issue.title,
+                code = at_the_default_branch(
+                    "Read the code it touches at the current head of the repository's default branch",
+                    "this folder",
+                    "outside this folder",
+                ),
+            )),
+            Part::Command(format!(
+                "Then send the plan, one entry per check, as YAML on standard input:\n\
+                 temet-work plan {id} - <<'PLAN'\n\
+                 checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\
+                 PLAN\n\
+                 Each point the issue states needs a check that meets it as written. \
+                 Use a chosen default only where the issue leaves the choice open (it says \"or\", \"pick\" or \
+                 \"record which\"): pick one of the options it names, the one you would defend, and say why \
+                 in done_when. \
+                 Where the issue says nothing about a choice, take the default you would defend and say \
+                 why in done_when; a default never replaces a point the issue states. \
+                 When a point cannot be done as written, say why in that point's check and fix any \
+                 failure the issue describes some other way: the plan may not leave one in place.\n\
+                 For an issue that is hard, add a settings: map beside checks: with task-level values, such as model: opus; \
+                 they are recorded as yours and a person can overturn them. \
+                 A model you set is the author's only: the models of reviewers, arbiters and refiners are \
+                 a person's to set. \
+                 {PLAIN_MODEL} \
+                 Only a person sets {persons}: a plan that names one is refused.",
+                persons = only_a_persons().join(", "),
+            )),
+        ],
+        Role::Author => {
+            let mut parts = vec![Part::Whole(format!(
+                "Work on {id}: {title}. It is {source}.\n\
+                 {read} A decision may not depart from a point the issue states or leave any failure it \
+                 describes in place. Where a point cannot be met, say so in the pull request.\n\
+                 This folder is yours until the change merges.{work}",
+                title = issue.title,
+                read = read_the_issue(id),
+            ))];
+            parts.extend(fixes);
+            parts.push(Part::Whole(
+                "The plan's checks, each to hold before you finish:\n".into(),
+            ));
+            parts.push(checks(issue, false, &pointer));
+            parts.push(Part::Command(format!("{ready}{replies}")));
+            parts
+        }
+        Role::Reviewer => {
+            let round = under_review(issue);
+            let mut parts = vec![Part::Whole(format!(
+                "Review the pull request for {id}: {title}. It is {source}.\n{to_review}",
+                title = issue.title,
+            ))];
+            parts.extend(to_judge(issue, round, &pointer));
+            parts.push(Part::Whole(format!(
+                "{LEAVE_THE_FOLDER}\n\
+                 Read the whole change, not only the last commit. Run the checks yourself where you can, \
+                 in that separate checkout.\n\
+                 {hold}\n\
+                 {BLOCK_WHAT_IS_NOT_MET}\n",
+                hold = hold_to_the_issue(id),
+            )));
+            parts.push(Part::Command(how_to_judge(issue, round, "<what to fix>")));
+            parts
+        }
+        Role::Arbiter => {
+            let mut parts = vec![
+                Part::Whole(format!(
+                    "Review rounds on {id} ({title}) ran out. It is {source}.\n\
+                     {to_review}The plan's checks:\n",
+                    title = issue.title,
+                )),
+                checks(issue, false, &pointer),
+            ];
+            parts.extend(rounds(issue, &pointer));
+            parts.push(Part::Whole(format!(
+                "{LEAVE_THE_FOLDER}\n\
+                 Read the pull request and the review rounds listed above, with the author's replies; \
+                 temet-work issue {id} lists the rounds again. Decide whether it merges.\n\
+                 {hold}\n\
+                 {FIX_WHAT_IS_NOT_MET}\n",
+                hold = hold_to_the_issue(id),
+            )));
+            parts.push(Part::Command(format!(
+                "Then run: temet-work rule {id} approve \"<why>\"\n\
+                 or: temet-work rule {id} fix \"<what must change, and why>\""
+            )));
+            parts
+        }
+        Role::Investigator => vec![Part::Command(format!(
             "Answer questions about {id}: {title}. It is {source}. Change no file.",
             title = issue.title,
-        ),
+        ))],
     };
     Brief {
         role,
         issue: Some(id.clone()),
-        task: with_rules(task, rules),
+        task: with_rules(parts, rules),
         model: None,
         permission: builtin_permission(),
         folder,
@@ -522,14 +547,177 @@ fn builtin_permission() -> String {
     }
 }
 
-/// A task ended by the kept rules, when there are any.
-fn with_rules(task: String, rules: &[String]) -> String {
-    if rules.is_empty() {
-        task
-    } else {
-        let list: String = rules.iter().map(|r| format!("- {r}\n")).collect();
-        format!("{task}\n\nRules from overturned decisions:\n{list}")
+/// Said after a check, point, fix point or reply of `issue` that a brief or a
+/// message cuts short.
+fn cut_pointer(issue: &IssueId) -> String {
+    format!(" (cut here; temet-work issue {issue} prints it whole)")
+}
+
+/// Said after a kept rule that a brief cuts short. `status` lists every kept
+/// rule whole, so no command of its own is needed for them.
+const RULE_POINTER: &str = " (cut here; temet-work status prints it whole, under Rules)";
+
+/// What a list of points to fix calls one, and several.
+const TO_FIX: (&str, &str) = ("point to fix", "points to fix");
+
+/// What a list of a review round's points calls one, and several.
+const POINTS: (&str, &str) = ("point", "points");
+
+/// A brief's text from `parts`, ended by the kept `rules` when there are any,
+/// and held to [`fit::LIMIT`] bytes. Every brief is finished here.
+///
+/// The parts take the room in this order: the role's own text, its commands
+/// and the pull requests; then the checks and the points it judges or answers;
+/// for an arbiter, then its latest review round; then the latest kept rules
+/// that fit, after a line counting the others and naming `temet-work status`;
+/// last, an arbiter's earlier review rounds.
+fn with_rules(mut parts: Vec<Part>, rules: &[String]) -> String {
+    if !rules.is_empty() {
+        parts.push(Part::Whole("\n\nRules from overturned decisions:\n".into()));
+        let entries = rules
+            .iter()
+            .map(|r| entry("- ".into(), r, RULE_POINTER))
+            .collect();
+        parts.push(Part::latest(Rank::Rules, entries, |left: Range<usize>| {
+            let rules = if left.len() == 1 {
+                "rule is"
+            } else {
+                "rules are"
+            };
+            format!(
+                "{} earlier {rules} left out here; temet-work status lists every kept rule whole, \
+                 under Rules.\n",
+                left.len()
+            )
+        }));
     }
+    fit::laid_out(parts)
+}
+
+/// `text` as an entry of a list: after `mark`, cleaned and cut with `pointer`,
+/// each later line indented under the first.
+fn entry(mark: String, text: &str, pointer: &str) -> Entry {
+    let item = Item::new(text);
+    let pointer = pointer.to_string();
+    let by = mark.len();
+    Box::new(move |cap| format!("{mark}{}\n", item.printed(by, cap, &pointer)))
+}
+
+/// `items` of `issue` as a list a reader acts on: numbered from 1, or as
+/// bullets. `what` names one item and several, for the line counting those left
+/// out.
+fn list(
+    issue: &IssueId,
+    items: &[String],
+    numbered: bool,
+    what: (&'static str, &'static str),
+    pointer: &str,
+) -> Part {
+    let entries = (1..)
+        .zip(items)
+        .map(|(n, text)| entry(mark(numbered, n), text, pointer))
+        .collect();
+    Part::acted_on(entries, left_out(issue, what, numbered))
+}
+
+/// What starts entry `n` of a list: its number, or a bullet.
+fn mark(numbered: bool, n: usize) -> String {
+    if numbered {
+        format!("{n}. ")
+    } else {
+        "- ".into()
+    }
+}
+
+/// A check as a brief prints it.
+fn check_text(c: &Check) -> String {
+    format!("{} (shown by: {})", c.done_when, c.proven_by)
+}
+
+/// The plan's checks of `issue` as a list a reader acts on, cut with
+/// `pointer`: numbered as `--failed` takes them, or as bullets.
+fn checks(issue: &Issue, numbered: bool, pointer: &str) -> Part {
+    let entries = (1..)
+        .zip(issue.plan.iter().flat_map(|p| &p.checks))
+        .map(|(n, c)| entry(mark(numbered, n), &check_text(c), pointer))
+        .collect();
+    Part::acted_on(entries, left_out(&issue.id, ("check", "checks"), numbered))
+}
+
+/// The line saying which items of a list of `issue`'s are left out, by their
+/// numbers in a numbered list, and that `temet-work issue` lists them. `what`
+/// names one and several.
+fn left_out(
+    issue: &IssueId,
+    what: (&'static str, &'static str),
+    numbered: bool,
+) -> impl Fn(Range<usize>) -> String + 'static {
+    let issue = issue.clone();
+    move |left: Range<usize>| {
+        let (one, several) = what;
+        let rest = format!("left out here; temet-work issue {issue} lists every one whole.\n");
+        match (numbered, left.len()) {
+            (true, 1) => format!("{} {} is {rest}", capital(one), left.end),
+            (true, _) => format!(
+                "{} {} to {} are {rest}",
+                capital(several),
+                left.start + 1,
+                left.end
+            ),
+            (false, 1) => format!("1 more {one} is {rest}"),
+            (false, n) => format!("{n} more {several} are {rest}"),
+        }
+    }
+}
+
+/// `word` with its first letter a capital.
+fn capital(word: &str) -> String {
+    let mut chars = word.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// An arbiter's review rounds of `issue`, each point and reply cut with
+/// `pointer`: the latest always, cut with a line saying so when it alone is too
+/// long, and the latest of the earlier ones that fit, after a line counting the
+/// others and naming `temet-work issue`. None before the first round ends.
+fn rounds(issue: &Issue, pointer: &str) -> Vec<Part> {
+    let mut blocks = crate::text::round_blocks(issue, Some(pointer));
+    let Some(latest) = blocks.pop() else {
+        return Vec::new();
+    };
+    let id = issue.id.clone();
+    let round = issue.reviews.last().map_or(0, |r| r.round);
+    let earlier: Vec<Entry> = blocks
+        .into_iter()
+        .map(|b| -> Entry { Box::new(move |_| b.clone()) })
+        .collect();
+    vec![
+        Part::Whole("Review rounds:\n".into()),
+        Part::latest(Rank::EarlierRounds, earlier, move |left: Range<usize>| {
+            let rounds = if left.len() == 1 {
+                "round is"
+            } else {
+                "rounds are"
+            };
+            format!(
+                "  {} earlier {rounds} left out here; temet-work issue {id} lists every round \
+                 whole.\n",
+                left.len()
+            )
+        }),
+        Part::Cut(
+            Rank::LatestRound,
+            latest,
+            format!(
+                "  The rest of round {round} is left out here; temet-work issue {} prints it \
+                 whole.\n",
+                issue.id
+            ),
+        ),
+        Part::Whole(crate::text::after_rounds(issue)),
+    ]
 }
 
 /// One place an investigator files issues in: a project, or an area whose tracker
@@ -662,39 +850,46 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
             ),
         )
     };
-    let task = format!(
-        "Investigate for group {name} ({id}): its work queue is short. Find the work that should \
-         come next and file an issue for each item.\n\
-         {folder_note}It takes issues from:\n{covered}{milestone}\
-         {docs_and_code}\n\
-         Read, in this order:\n\
-         1. Each project's docs at that head, for work they plan that is not built yet.\n\
-         2. {read_open}\n\
-         3. The pull requests merged {since}, for defects you can show in that work.\n\
-         Then file one issue for each planned item no open issue covers, and one for each defect \
-         you can show in merged work:\n\
-         temet-work file PROJECT \"<title>\" - <<'BODY'\n\
-         <what to change, and what done means>\n\
-         BODY\n\
-         PROJECT is one of the ids above. The reply names the new issue and the Depends on line \
-         an issue that waits for it carries: file the issue another waits for first, and end the \
-         waiting one's body with that line.\n\
-         {never} Change no file.\n\
-         {closed}{notes}\
-         When you have filed every issue you found, run: temet-work investigated {id}",
-        name = g.name,
-        id = g.id,
-        docs_and_code = at_the_default_branch(
-            "Read each repository's docs and code at the current head of that repository's \
-             default branch",
-            "a checkout",
-            "outside the checkouts named above and outside the folder you run in",
-        ),
-    );
+    let id = &g.id;
+    let parts = vec![
+        Part::Whole(format!(
+            "Investigate for group {name} ({id}): its work queue is short. Find the work that should \
+             come next and file an issue for each item.\n\
+             {folder_note}It takes issues from:\n{covered}{milestone}\
+             {docs_and_code}\n\
+             Read, in this order:\n\
+             1. Each project's docs at that head, for work they plan that is not built yet.\n\
+             2. {read_open}\n\
+             3. The pull requests merged {since}, for defects you can show in that work.\n\
+             Then file one issue for each planned item no open issue covers, and one for each defect \
+             you can show in merged work:\n",
+            name = g.name,
+            docs_and_code = at_the_default_branch(
+                "Read each repository's docs and code at the current head of that repository's \
+                 default branch",
+                "a checkout",
+                "outside the checkouts named above and outside the folder you run in",
+            ),
+        )),
+        Part::Command(format!(
+            "temet-work file PROJECT \"<title>\" - <<'BODY'\n\
+             <what to change, and what done means>\n\
+             BODY\n\
+             PROJECT is one of the ids above. The reply names the new issue and the Depends on line \
+             an issue that waits for it carries: file the issue another waits for first, and end the \
+             waiting one's body with that line.\n\
+             {never} Change no file.\n"
+        )),
+        Part::Whole(closed),
+        Part::Whole(notes),
+        Part::Command(format!(
+            "When you have filed every issue you found, run: temet-work investigated {id}"
+        )),
+    ];
     Brief {
         role: Role::Investigator,
         issue: None,
-        task: with_rules(task, rules),
+        task: with_rules(parts, rules),
         model: None,
         permission: builtin_permission(),
         folder: place.folder,
@@ -721,29 +916,47 @@ fn only_a_persons() -> Vec<&'static str> {
 /// How an author is to reply to each point of a block.
 const SAYING: &str = "saying what you did about it or why you did not";
 
-/// `items` as a list numbered from 1, one to a line.
+/// `items` as a list numbered from 1, one to a line, each later line of an item
+/// indented under it.
 pub(crate) fn numbered(items: &[String]) -> String {
     (1..)
         .zip(items)
-        .map(|(n, p)| format!("{n}. {p}\n"))
+        .map(|(n, p)| {
+            let mark = format!("{n}. ");
+            format!("{mark}{}\n", indented(p, mark.len()))
+        })
         .collect()
 }
 
+/// The most points a review block takes, new and kept open together. The
+/// author's ready replies to each, and its brief and fix message spell out one
+/// `--reply` for each, which this keeps to about 9 KB of the [`fit::LIMIT`].
+pub(crate) const MOST_POINTS: usize = 300;
+
 /// One `--reply` for each of `count` points, as `temet-work ready` takes them.
+/// Past [`MOST_POINTS`], which only a block from an older log can be, the first
+/// and the last stand for the rest, so a brief still fits.
 pub(crate) fn reply_flags(count: usize) -> String {
-    (1..=count)
-        .map(|n| format!("--reply \"<reply to point {n}>\""))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let flag = |n: usize| format!("--reply \"<reply to point {n}>\"");
+    if count > MOST_POINTS {
+        return format!(
+            "{} ... {} (one --reply for each of the {count} points, in their order)",
+            flag(1),
+            flag(count)
+        );
+    }
+    (1..=count).map(flag).collect::<Vec<_>>().join(" ")
 }
 
 /// What an author is told when the review or the checks found things to fix
 /// (`points`) on `issue`, which changes `repos`. When its next ready answers a
 /// block, it is told that block's points, numbered, and to reply to each. A
 /// repository with no pull request on record, as after a person closed it,
-/// needs a number in the ready.
+/// needs a number in the ready. Like a brief, it is held to [`fit::LIMIT`]
+/// bytes, each point cut with a pointer to `temet-work issue`.
 pub fn fixes(issue: &Issue, repos: &[ProjectId], points: &[String]) -> String {
     let id = &issue.id;
+    let pointer = cut_pointer(id);
     let lacking = repos.iter().filter(|r| !issue.pulls.contains_key(*r));
     let numbers: String = if repos.len() > 1 {
         lacking
@@ -754,33 +967,40 @@ pub fn fixes(issue: &Issue, repos: &[ProjectId], points: &[String]) -> String {
     } else {
         String::new()
     };
+    let fix_these = || Part::Whole("Fix these, from the review or the checks:\n".into());
     let Some(block) = issue.block_to_answer() else {
-        let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
-        return format!(
-            "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready \
-             {id}{numbers}"
-        );
+        return fit::laid_out(vec![
+            fix_these(),
+            list(id, points, false, TO_FIX, &pointer),
+            Part::Command(format!("Then push and run: temet-work ready {id}{numbers}")),
+        ]);
     };
     let run = format!(
         "temet-work ready {id}{numbers} {}\nA ready without one reply for each point is refused.",
         reply_flags(block.points.len())
     );
+    let round = block.round;
     if points == block.points.as_slice() {
-        format!(
-            "Review round {round} blocked {id}. Fix each of its points:\n{list}\
-             Then push and run this, with one reply for each point, in this order, {SAYING}:\n{run}",
-            round = block.round,
-            list = numbered(points),
-        )
+        fit::laid_out(vec![
+            Part::Whole(format!(
+                "Review round {round} blocked {id}. Fix each of its points:\n"
+            )),
+            list(id, points, true, POINTS, &pointer),
+            Part::Command(format!(
+                "Then push and run this, with one reply for each point, in this order, {SAYING}:\n{run}"
+            )),
+        ])
     } else {
-        let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
-        format!(
-            "Fix these, from the review or the checks:\n{list}\
-             Then push and run this, with one reply for each point of review round {round}, in this \
-             order, {SAYING}:\n{points}{run}",
-            round = block.round,
-            points = numbered(&block.points),
-        )
+        fit::laid_out(vec![
+            fix_these(),
+            list(id, points, false, TO_FIX, &pointer),
+            Part::Whole(format!(
+                "Then push and run this, with one reply for each point of review round {round}, in \
+                 this order, {SAYING}:\n"
+            )),
+            list(id, &block.points, true, POINTS, &pointer),
+            Part::Command(run),
+        ])
     }
 }
 
@@ -795,37 +1015,40 @@ fn under_review(issue: &Issue) -> u8 {
 /// What a reviewer of round `round` of `issue` judges besides the change: the
 /// plan's checks, numbered as `--failed` takes them, and the points of the round
 /// before with the author's reply to each, numbered as `--open` takes them. A
-/// later line of a point or reply is indented, so none reads as a numbered one.
-fn to_judge(issue: &Issue, round: u8) -> String {
-    let checks: String = issue
-        .plan
-        .iter()
-        .flat_map(|p| &p.checks)
-        .zip(1..)
-        .map(|(c, n)| format!("{n}. {} (shown by: {})\n", c.done_when, c.proven_by))
-        .collect();
-    let checks = format!("The plan's checks, numbered as --failed takes them:\n{checks}");
+/// later line of a check, point or reply is indented, so none reads as a
+/// numbered one, and each is cut with `pointer`.
+fn to_judge(issue: &Issue, round: u8, pointer: &str) -> Vec<Part> {
+    let mut parts = vec![
+        Part::Whole("The plan's checks, numbered as --failed takes them:\n".into()),
+        checks(issue, true, pointer),
+    ];
     let Some(before) = issue.round_before(round).filter(|r| r.blocks()) else {
-        return checks;
+        return parts;
     };
-    let points: String = (1..)
+    let entries = (1..)
         .zip(&before.points)
-        .map(|(n, p)| {
-            let reply = before
-                .replies
-                .get(n - 1)
-                .map_or("none on record", String::as_str);
-            format!(
-                "{n}. {}\n   The author's reply: {}\n",
-                indented(p, 5),
-                indented(reply, 5)
-            )
+        .map(|(n, p)| -> Entry {
+            let point = Item::new(p);
+            let reply = before.replies.get(n - 1).map(|r| Item::new(r));
+            let pointer = pointer.to_string();
+            Box::new(move |cap| {
+                let reply = reply.as_ref().map_or_else(
+                    || "none on record".to_string(),
+                    |r| r.printed(5, cap, &pointer),
+                );
+                format!(
+                    "{n}. {}\n   The author's reply: {reply}\n",
+                    point.printed(5, cap, &pointer)
+                )
+            })
         })
         .collect();
-    format!(
-        "{checks}Review round {} blocked on these points, numbered as --open takes them:\n{points}",
+    parts.push(Part::Whole(format!(
+        "Review round {} blocked on these points, numbered as --open takes them:\n",
         before.round
-    )
+    )));
+    parts.push(Part::acted_on(entries, left_out(&issue.id, POINTS, true)));
+    parts
 }
 
 /// How a reviewer of round `round` of `issue` gives its verdict, with
@@ -859,22 +1082,30 @@ fn how_to_judge(issue: &Issue, round: u8, what: &str) -> String {
 
 /// What a running reviewer is told when the author is ready again for round
 /// `round` of `issue`. `pulls` are the issue's pull requests as they are now, in
-/// the order they merge: one may have replaced the one it reviewed before.
+/// the order they merge: one may have replaced the one it reviewed before. Like
+/// a brief, it is held to [`fit::LIMIT`] bytes, each check, point and reply cut
+/// with a pointer to `temet-work issue`.
 pub fn next_round(issue: &Issue, round: u8, pulls: &[Pulled]) -> String {
     let id = &issue.id;
-    format!(
+    let mut parts = vec![Part::Whole(format!(
         "The author pushed fixes for {id}; this is review round {round}. Review the whole change again, \
          not only the new commits. The issue's text may have changed since the last round, so read it again.\n\
-         {to_review}{judged}\
-         {LEAVE_THE_FOLDER}\n\
-         {hold}\n\
-         {BLOCK_WHAT_IS_NOT_MET}\n\
-         {verdict}",
+         {to_review}",
         to_review = to_review(pulls),
-        judged = to_judge(issue, round),
+    ))];
+    parts.extend(to_judge(issue, round, &cut_pointer(id)));
+    parts.push(Part::Whole(format!(
+        "{LEAVE_THE_FOLDER}\n\
+         {hold}\n\
+         {BLOCK_WHAT_IS_NOT_MET}\n",
         hold = hold_to_the_issue(id),
-        verdict = how_to_judge(issue, round, "<what is still wrong>"),
-    )
+    )));
+    parts.push(Part::Command(how_to_judge(
+        issue,
+        round,
+        "<what is still wrong>",
+    )));
+    fit::laid_out(parts)
 }
 
 /// What an agent its issue is waiting on hears when it has been idle a while.
@@ -1279,49 +1510,137 @@ mod tests {
         (brief, view)
     }
 
-    #[test]
-    fn an_arbiters_brief_holds_the_latest_rounds_and_counts_the_earlier_ones() {
-        // 2 KB each, and no two alike.
-        let said = |what: &str, round: u8, n: u8| {
-            let head = format!("{what} {n} of round {round}: ");
-            format!("{head}{}", "x".repeat(2048 - head.len()))
-        };
-        let reviews: Vec<crate::model::Review> = (1..=10)
+    /// `n` texts of 2 KB each, no two alike, each starting with `what` and its
+    /// number.
+    fn two_kb(what: &str, n: usize) -> Vec<String> {
+        (1..=n)
+            .map(|i| {
+                let head = format!("{what} {i}: ");
+                format!("{head}{}", "x".repeat(2048 - head.len()))
+            })
+            .collect()
+    }
+
+    /// Ten blocks of six points of 2 KB, each but the last with a 2 KB reply to
+    /// each point.
+    fn ten_rounds() -> Vec<crate::model::Review> {
+        (1..=10)
             .map(|round| {
-                let mut r = block_of(round, (1..=6).map(|n| said("point", round, n)).collect());
+                let mut r = block_of(round, two_kb(&format!("point of round {round}"), 6));
                 if round < 10 {
-                    r.replies = (1..=6).map(|n| said("reply", round, n)).collect();
+                    r.replies = two_kb(&format!("reply of round {round}"), 6);
                 }
                 r
             })
-            .collect();
-        let (brief, view) = arbiters_brief_and_view(&gate_in_arbitration(reviews.clone()));
+            .collect()
+    }
 
-        assert!(brief.len() < 65_536, "{} bytes", brief.len());
-        // Rounds 9 and 10 fit in 48 KiB; round 8 would not.
+    /// A plan with a check for each of `done`.
+    fn plan_of(done: Vec<String>) -> Plan {
+        Plan {
+            checks: done
+                .into_iter()
+                .map(|d| Check::new(d, "the gate test"))
+                .collect(),
+            ..Plan::default()
+        }
+    }
+
+    /// What a brief or message cuts short of `watch#n` points to.
+    fn pointer(n: u8) -> String {
+        format!(" (cut here; temet-work issue watch#{n} prints it whole)")
+    }
+
+    /// The review rounds an arbiter's brief lists, and how many it lists.
+    fn rounds_listed(brief: &str) -> (&str, usize) {
+        let (_, rounds) = brief.split_once("Review rounds:\n").expect("rounds");
+        let (rounds, _) = rounds
+            .split_once("  No later round judged")
+            .expect("their end");
+        let listed = rounds.lines().filter(|l| l.starts_with("  Round ")).count();
+        (rounds, listed)
+    }
+
+    #[test]
+    fn an_arbiters_rounds_take_the_room_the_rest_of_its_brief_leaves() {
+        let id = IssueId::new("watch", "12");
+        let reviews = ten_rounds();
+        let world = gate_in_arbitration(reviews.clone());
+        let mut issue = world.issues[&id].clone();
+        issue.plan = Some(plan_of(vec!["the gate shuts at dusk".into()]));
+        let alone = lamp_task(Role::Arbiter, &issue);
+        assert!(alone.len() <= fit::LIMIT, "{} bytes", alone.len());
+        let (rounds, many) = rounds_listed(&alone);
+        // More than #188's 48 KiB, so more rounds than the two it listed.
+        assert!(rounds.len() > 49_152, "{} bytes", rounds.len());
+        assert!(many > 2, "{many} rounds");
         assert!(
-            brief.contains(
-                "Review rounds:\n  8 earlier rounds are left out here; temet-work issue watch#12 \
-                 lists every round whole.\n  Round 9: blocked\n"
-            ),
-            "{brief}"
+            rounds.starts_with(&format!(
+                "  {} earlier rounds are left out here; temet-work issue watch#12 lists every \
+                 round whole.\n  Round {}: blocked\n",
+                10 - many,
+                11 - many
+            )),
+            "{rounds:.300}"
         );
-        assert!(!brief.contains("Round 8: blocked"), "{brief}");
-        for text in reviews[8..]
+        // Each point and reply listed is its first 1,000 characters and the pointer.
+        let cut = |text: &str| format!("{}{}", &text[..fit::ITEM_CHARS], pointer(12));
+        for text in reviews[10 - many..]
             .iter()
             .flat_map(|r| r.points.iter().chain(&r.replies))
         {
-            assert!(brief.contains(text.as_str()), "missing {text:.40}");
+            assert!(alone.contains(&cut(text)), "missing {text:.40}");
         }
+        assert!(!alone.contains(&reviews[9 - many].points[0][..40]));
+
+        // With 40 checks and 40 rules beside them, fewer rounds are listed.
+        issue.plan = Some(plan_of(two_kb("check", 40)));
+        let rules = two_kb("rule", 40);
+        let crowded = write(
+            Role::Arbiter,
+            &issue,
+            None,
+            &[],
+            Workplace::default(),
+            &[],
+            &rules,
+        )
+        .task;
+        assert!(crowded.len() <= fit::LIMIT, "{} bytes", crowded.len());
+        let (rounds, few) = rounds_listed(&crowded);
+        assert!(few < many, "{few} of {many}");
         assert!(
-            brief.contains(
-                "No later round judged the points of round 10, the last block, and the author has \
-                 not replied to it because review rounds ran out before the author's next ready.\n\
-                 This folder is not yours"
-            ),
+            rounds.starts_with(&format!(
+                "  {} earlier rounds are left out here; temet-work issue watch#12 lists every \
+                 round whole.\n",
+                10 - few
+            )),
+            "{rounds:.300}"
+        );
+        // The latest round is always there, and every rule fits before the earlier rounds.
+        assert!(rounds.contains("  Round 10: blocked\n"), "{rounds:.300}");
+        assert!(!crowded.contains("rules are left out"), "{crowded}");
+
+        // One round left out is counted as one.
+        let mut two = gate_in_arbitration(reviews[8..].to_vec()).issues[&id].clone();
+        two.plan = issue.plan.clone();
+        let brief = write(
+            Role::Arbiter,
+            &two,
+            None,
+            &[],
+            Workplace::default(),
+            &[],
+            &rules,
+        )
+        .task;
+        assert!(
+            brief.contains("  1 earlier round is left out here; temet-work issue watch#12 "),
             "{brief}"
         );
 
+        // temet-work issue still lists every round whole.
+        let (_, view) = arbiters_brief_and_view(&world);
         assert!(view.len() > 131_072, "{} bytes", view.len());
         assert!(!view.contains("left out"), "{view:.200}");
         for r in &reviews {
@@ -1330,20 +1649,11 @@ mod tests {
                 assert!(view.contains(text.as_str()), "missing {text:.40}");
             }
         }
-
-        // One round left out is counted as one.
-        let three = reviews[7..].to_vec();
-        let (brief, _) = arbiters_brief_and_view(&gate_in_arbitration(three));
-        assert!(
-            brief.contains("  1 earlier round is left out here; temet-work issue watch#12 "),
-            "{brief}"
-        );
     }
 
     #[test]
     fn a_last_round_too_long_for_an_arbiters_brief_is_cut_between_characters() {
-        let limit = 48 * 1024;
-        let mut cuts = Vec::new();
+        let mut sizes = Vec::new();
         // Padding the first point moves the cut through each byte of a character.
         for pad in ["", "a", "ab"] {
             let mut points: Vec<String> = (0..100)
@@ -1356,7 +1666,13 @@ mod tests {
             ]);
             let (brief, view) = arbiters_brief_and_view(&world);
 
-            assert!(brief.len() < 65_536, "{} bytes", brief.len());
+            // Filled to the limit, less what keeps a character whole.
+            assert!(
+                (fit::LIMIT - 3..=fit::LIMIT).contains(&brief.len()),
+                "{} bytes",
+                brief.len()
+            );
+            sizes.push(brief.len());
             let (_, rounds) = brief.split_once("Review rounds:\n").expect("rounds");
             let (rounds, rest) = rounds
                 .split_once(
@@ -1370,13 +1686,6 @@ mod tests {
                 "{count}"
             );
             assert!(round.starts_with("  Round 2: blocked\n"), "{round:.80}");
-            // Cut at the limit, or just under it to keep a character whole.
-            assert!(
-                (limit - 2..=limit).contains(&round.len()),
-                "{}",
-                round.len()
-            );
-            cuts.push(round.len());
             assert!(brief.contains(&points[0]));
             assert!(
                 rest.starts_with("  No later round judged the points of round 2"),
@@ -1387,8 +1696,8 @@ mod tests {
             }
         }
         assert!(
-            cuts.iter().any(|&c| c < limit),
-            "no cut fell inside a character: {cuts:?}"
+            sizes.iter().any(|&s| s < fit::LIMIT),
+            "no cut fell inside a character: {sizes:?}"
         );
     }
 
@@ -2168,5 +2477,449 @@ mod tests {
             "{t}"
         );
         assert!(!t.contains("since"), "{t}");
+    }
+
+    /// What `temet-work status` names on the line counting the rules a brief
+    /// leaves out.
+    const RULES_LEFT_OUT: &str = "earlier rules are left out here; temet-work status lists every \
+                                  kept rule whole, under Rules.\n";
+
+    #[test]
+    fn no_brief_is_over_the_limit_whatever_the_size_of_its_parts() {
+        let rules = two_kb("rule", 300);
+        let points = two_kb("point", 300);
+        let mut answered = block_of(1, points.clone());
+        answered.replies = two_kb("reply", 300);
+        let pulls: Vec<Pulled> = (1..=20)
+            .map(|n| Pulled {
+                branch: Some(format!("watch-31-lamp-{n}")),
+                ..pulled(&format!("watch-{n}"), &n.to_string(), None)
+            })
+            .collect();
+        let held: Vec<Held> = pulls
+            .iter()
+            .map(|p| Held {
+                project: p.project.clone(),
+                repo: p.repo.clone(),
+                path: format!("/srv/{}", p.project),
+            })
+            .collect();
+        let mut issue = lamp_issue();
+        issue.plan = Some(plan_of(two_kb("check", 300)));
+        let brief = |role, issue: &Issue| {
+            let place = Workplace {
+                held: held.clone(),
+                ..Workplace::default()
+            };
+            write(role, issue, None, &[], place, &pulls, &rules).task
+        };
+        let refiner = brief(Role::Refiner, &issue);
+        let mut fixing = issue.clone();
+        fixing.stage = Stage::Fixing { round: 1 };
+        fixing.reviews = vec![block_of(1, points.clone())];
+        fixing.fix.clone_from(&points);
+        let author = brief(Role::Author, &fixing);
+        let mut reviewed = issue.clone();
+        reviewed.stage = Stage::InReview { round: 2 };
+        reviewed.reviews = vec![answered.clone()];
+        let reviewer = brief(Role::Reviewer, &reviewed);
+        issue.stage = Stage::Arbitration { round: 2 };
+        issue.reviews = vec![answered, block_of(2, points)];
+        let arbiter = brief(Role::Arbiter, &issue);
+        let world = investigating(None);
+        let looking = Investigating {
+            group: &world.groups[&GroupId::new("watch")],
+            covered: Vec::new(),
+            closed: Vec::new(),
+            notes: Vec::new(),
+            milestone: None,
+            since: None,
+        };
+        let investigator = investigate(&looking, Workplace::default(), &rules).task;
+
+        for (role, text, command) in [
+            (
+                "refiner",
+                &refiner,
+                "\ntemet-work plan watch#31 - <<'PLAN'\n".to_string(),
+            ),
+            (
+                "author",
+                &author,
+                format!("run: temet-work ready watch#31 {}", reply_flags(300)),
+            ),
+            (
+                "reviewer",
+                &reviewer,
+                how_to_judge(&reviewed, 2, "<what to fix>"),
+            ),
+            (
+                "arbiter",
+                &arbiter,
+                "Then run: temet-work rule watch#31 approve \"<why>\"\n\
+                 or: temet-work rule watch#31 fix \"<what must change, and why>\""
+                    .into(),
+            ),
+            (
+                "investigator",
+                &investigator,
+                "run: temet-work investigated watch".into(),
+            ),
+        ] {
+            assert!(text.len() <= fit::LIMIT, "{role}: {} bytes", text.len());
+            assert!(text.contains(&command), "{role}: no {command:.80}");
+            assert!(text.contains(RULES_LEFT_OUT), "{role}");
+        }
+        // With the room theirs, the latest rules fit.
+        for text in [&refiner, &investigator] {
+            assert!(text.contains(&rules[299][..40]));
+            assert!(!text.contains(&rules[200][..40]));
+        }
+        for (role, text) in [
+            ("author", &author),
+            ("reviewer", &reviewer),
+            ("arbiter", &arbiter),
+        ] {
+            assert!(
+                text.contains("left out here; temet-work issue watch#31 lists every"),
+                "{role}"
+            );
+        }
+
+        // A block of thousands of short points, as only an older log can hold:
+        // the reply form shortens, and the author's brief and fix message fit.
+        for count in [3_000, 4_500] {
+            let short: Vec<String> = (1..=count).map(|n| format!("p{n}")).collect();
+            let mut issue = lamp_issue();
+            issue.plan = Some(plan_of(vec!["a dry lamp is refused".into()]));
+            issue.stage = Stage::Fixing { round: 1 };
+            issue.reviews = vec![block_of(1, short.clone())];
+            issue.fix.clone_from(&short);
+            let form = format!(
+                "--reply \"<reply to point 1>\" ... --reply \"<reply to point {count}>\" (one \
+                 --reply for each of the {count} points, in their order)"
+            );
+            let author = lamp_task(Role::Author, &issue);
+            let fixed = fixes(&issue, &[ProjectId::new("watch")], &short);
+            for (name, text) in [("author", &author), ("fixes", &fixed)] {
+                assert!(
+                    text.len() <= fit::LIMIT,
+                    "{count} {name}: {} bytes",
+                    text.len()
+                );
+                assert!(text.contains(&form), "{count} {name}");
+            }
+        }
+        // Up to the most a block takes, every --reply is spelled out.
+        assert_eq!(
+            reply_flags(MOST_POINTS).matches("--reply").count(),
+            MOST_POINTS
+        );
+    }
+
+    #[test]
+    fn an_item_over_a_thousand_characters_is_cut_between_characters_with_its_pointer() {
+        // 2 KB of text of one-byte and three-byte characters.
+        let long = |what: &str| {
+            let mut text = format!("{what}: ");
+            while text.len() < 2048 {
+                text.push_str("Ankh-Morpork ✓");
+            }
+            text
+        };
+        let first = |text: &str| -> String { text.chars().take(fit::ITEM_CHARS).collect() };
+        let cut = |text: &str| format!("{}{}", first(text), pointer(31));
+        let (point, reply, fix, rule) = (long("point"), long("reply"), long("fix"), long("rule"));
+        let check = format!("{} (shown by: the lamp test)", long("check"));
+        // One of exactly 1,000 characters is printed whole.
+        let exact_done = "✓".repeat(fit::ITEM_CHARS - " (shown by: the lamp test)".len());
+        let exact = format!("{exact_done} (shown by: the lamp test)");
+        assert_eq!(exact.chars().count(), fit::ITEM_CHARS);
+        let rules = vec![rule.clone()];
+        let ruled = format!("- {}{RULE_POINTER}\n", first(&rule));
+
+        let id = IssueId::new("watch", "31");
+        let mut world = World::default();
+        world.apply(&Event::IssueSynced {
+            issue: id.clone(),
+            title: "Light the lamps".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let mut issue = world.issues[&id].clone();
+        issue.plan = Some(Plan {
+            checks: vec![
+                Check::new(long("check"), "the lamp test"),
+                Check::new(exact_done, "the lamp test"),
+            ],
+            ..Plan::default()
+        });
+        let mut answered = block_of(1, vec![point.clone()]);
+        answered.replies = vec![reply.clone()];
+        let brief = |role, issue: &Issue| {
+            write(role, issue, None, &[], Workplace::default(), &[], &rules).task
+        };
+
+        // An author answering a block, with a ruling's point to fix.
+        issue.stage = Stage::Fixing { round: 2 };
+        issue.reviews = vec![answered.clone(), block_of(2, vec![point.clone()])];
+        issue.fix = vec![fix.clone()];
+        let author = brief(Role::Author, &issue);
+        let fixed = fixes(&issue, &[ProjectId::new("watch")], &issue.fix);
+        for (text, held) in [
+            (
+                &author,
+                vec![
+                    format!("- {}\n", cut(&fix)),
+                    format!("1. {}\n", cut(&point)),
+                    format!("- {}\n", cut(&check)),
+                    format!("- {exact}\n"),
+                    ruled.clone(),
+                ],
+            ),
+            (
+                &fixed,
+                vec![
+                    format!("- {}\n", cut(&fix)),
+                    format!("1. {}\n", cut(&point)),
+                ],
+            ),
+        ] {
+            for item in held {
+                assert!(text.contains(&item), "no {item:.60} in:\n{text:.300}");
+            }
+        }
+
+        // A reviewer of the round after, and an arbiter.
+        issue.reviews = vec![answered];
+        issue.stage = Stage::InReview { round: 2 };
+        let judged = [
+            format!("1. {}\n", cut(&check)),
+            format!("2. {exact}\n"),
+            format!(
+                "1. {}\n   The author's reply: {}\n",
+                cut(&point),
+                cut(&reply)
+            ),
+        ];
+        let reviewer = brief(Role::Reviewer, &issue);
+        let again = next_round(&issue, 2, &[]);
+        for text in [&reviewer, &again] {
+            for item in &judged {
+                assert!(text.contains(item), "no {item:.60} in:\n{text:.300}");
+            }
+        }
+        assert!(reviewer.contains(&ruled), "{reviewer}");
+        issue.stage = Stage::Arbitration { round: 1 };
+        let arbiter = brief(Role::Arbiter, &issue);
+        for item in [
+            format!("- {}\n", cut(&check)),
+            format!("- {exact}\n"),
+            format!(
+                "    1. {}\n       The author's reply: {}\n",
+                cut(&point),
+                cut(&reply)
+            ),
+            ruled.clone(),
+        ] {
+            assert!(arbiter.contains(&item), "no {item:.60} in:\n{arbiter:.300}");
+        }
+        let looking = investigating(None);
+        let what = Investigating {
+            group: &looking.groups[&GroupId::new("watch")],
+            covered: Vec::new(),
+            closed: Vec::new(),
+            notes: Vec::new(),
+            milestone: None,
+            since: None,
+        };
+        for text in [
+            brief(Role::Refiner, &issue),
+            investigate(&what, Workplace::default(), &rules).task,
+        ] {
+            assert!(text.ends_with(&ruled), "{text}");
+        }
+
+        // temet-work issue and temet-work status print each whole.
+        issue.fix = vec![fix.clone()];
+        world.issues.insert(id.clone(), issue);
+        world.rules.insert(
+            crate::ids::RuleId(1),
+            crate::model::Rule {
+                id: crate::ids::RuleId(1),
+                text: rule.clone(),
+                decision: crate::ids::DecisionId(1),
+                issue: id.clone(),
+                decided_by: AgentId::new("refiner-1"),
+                overturned_by: "person".into(),
+                state: crate::model::RuleState::Kept,
+            },
+        );
+        let view = crate::text::issue(&world, &id, &Err("not read here".into())).expect("known");
+        for item in [
+            format!("  - {check}\n"),
+            format!("  - {fix}\n"),
+            format!("    1. {point}\n       The author's reply: {reply}\n"),
+        ] {
+            assert!(view.contains(&item), "no {item:.60} in:\n{view:.300}");
+        }
+        assert!(!view.contains("cut here"), "{view}");
+        let status = crate::text::text(&world, &std::collections::BTreeMap::new());
+        assert!(
+            status.contains(&format!(" kept: {rule} (from decision 1")),
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn a_block_of_80_long_points_keeps_all_80_numbers_in_four_texts_under_the_limit() {
+        let points = two_kb("point", 80);
+        let mut issue = lamp_issue();
+        issue.plan = Some(plan_of(vec!["a dry lamp is refused".into()]));
+        issue.stage = Stage::Fixing { round: 1 };
+        issue.reviews = vec![block_of(1, points.clone())];
+        issue.fix.clone_from(&points);
+        let author = lamp_task(Role::Author, &issue);
+        let fixed = fixes(&issue, &[ProjectId::new("watch")], &points);
+        issue.stage = Stage::InReview { round: 2 };
+        issue.reviews[0].replies = two_kb("reply", 80);
+        let reviewer = lamp_task(Role::Reviewer, &issue);
+        let again = next_round(&issue, 2, &[]);
+        for (name, text) in [
+            ("author", &author),
+            ("fixes", &fixed),
+            ("reviewer", &reviewer),
+            ("next round", &again),
+        ] {
+            assert!(text.len() <= fit::LIMIT, "{name}: {} bytes", text.len());
+            assert!(text.contains(&pointer(31)), "{name}");
+            for n in 1..=80 {
+                let start = format!("{n}. point {n}: ");
+                assert!(
+                    text.lines().any(|l| l.starts_with(&start)),
+                    "{name}: no {start:?}"
+                );
+            }
+        }
+        // To fit all 80, each is cut shorter than 1,000 characters where the
+        // room needs it.
+        for text in [&author, &reviewer, &again] {
+            let line = text
+                .lines()
+                .find(|l| l.starts_with("80. point 80: "))
+                .expect("point 80");
+            assert!(line.ends_with(&pointer(31)), "{line}");
+            assert!(line.len() < fit::ITEM_CHARS, "{} bytes", line.len());
+        }
+        assert!(author.contains(&reply_flags(80)), "{author}");
+        assert!(fixed.contains(&reply_flags(80)), "{fixed}");
+    }
+
+    #[test]
+    fn ten_rounds_forty_checks_and_forty_rules_keep_three_briefs_under_128_kib() {
+        let id = IssueId::new("watch", "12");
+        let rules = two_kb("rule", 40);
+        let mut reviews = ten_rounds();
+        let mut issue = gate_in_arbitration(reviews.clone()).issues[&id].clone();
+        issue.plan = Some(plan_of(two_kb("check", 40)));
+        let brief = |role, issue: &Issue| {
+            write(role, issue, None, &[], Workplace::default(), &[], &rules).task
+        };
+        let arbiter = brief(Role::Arbiter, &issue);
+        issue.stage = Stage::Fixing { round: 10 };
+        issue.fix.clone_from(&reviews[9].points);
+        let author = brief(Role::Author, &issue);
+        reviews[9].replies = two_kb("reply of round 10", 6);
+        issue.reviews = reviews;
+        issue.stage = Stage::InReview { round: 11 };
+        issue.fix.clear();
+        let reviewer = brief(Role::Reviewer, &issue);
+        for (role, text) in [
+            ("arbiter", &arbiter),
+            ("reviewer", &reviewer),
+            ("author", &author),
+        ] {
+            assert!(text.len() < 131_072, "{role}: {} bytes", text.len());
+            assert!(text.len() <= fit::LIMIT, "{role}: {} bytes", text.len());
+            // Not the sentence every brief has: the pointer after cut text.
+            assert!(text.contains(&pointer(12)), "{role}");
+        }
+    }
+
+    #[test]
+    fn a_line_break_in_a_check_or_a_fix_point_makes_no_numbered_line() {
+        let broken = "\n2. dry lamp refused";
+        let point = format!("trim the wick{broken}");
+        let mut issue = lamp_issue();
+        issue.plan = Some(Plan {
+            checks: vec![Check::new(
+                format!("the lamp is lit{broken}"),
+                format!("the lamp test{broken}"),
+            )],
+            ..Plan::default()
+        });
+        // The author fixing a block of that one point.
+        issue.stage = Stage::Fixing { round: 1 };
+        issue.reviews = vec![block_of(1, vec![point.clone()])];
+        issue.fix = vec![point];
+        let author = lamp_task(Role::Author, &issue);
+        let fixed = fixes(&issue, &[ProjectId::new("watch")], &issue.fix);
+        // The reviewer of the round after, and an arbiter.
+        issue.reviews[0].replies = vec!["trimmed it".into()];
+        issue.stage = Stage::InReview { round: 2 };
+        let reviewer = lamp_task(Role::Reviewer, &issue);
+        let again = next_round(&issue, 2, &[]);
+        issue.stage = Stage::Arbitration { round: 1 };
+        let arbiter = lamp_task(Role::Arbiter, &issue);
+        for (name, text) in [
+            ("reviewer", &reviewer),
+            ("next round", &again),
+            ("arbiter", &arbiter),
+            ("author", &author),
+            ("fixes", &fixed),
+        ] {
+            assert!(
+                !text.lines().any(|l| l.starts_with("2.")),
+                "{name}:\n{text}"
+            );
+            assert!(
+                text.lines()
+                    .any(|l| l.starts_with("  ") && l.trim_start() == "2. dry lamp refused"),
+                "{name}:\n{text}"
+            );
+        }
+        for told in [
+            "- trim the wick\n  2. dry lamp refused\n",
+            "1. trim the wick\n   2. dry lamp refused\n",
+            "- the lamp is lit\n  2. dry lamp refused (shown by: the lamp test\n  2. dry lamp \
+             refused)\n",
+        ] {
+            assert!(author.contains(told), "no {told:?} in:\n{author}");
+        }
+        assert!(
+            reviewer.contains(
+                "1. the lamp is lit\n   2. dry lamp refused (shown by: the lamp test\n   2. dry \
+                 lamp refused)\n"
+            ),
+            "{reviewer}"
+        );
+        // A kept rule's later lines sit under its bullet, so none reads as a rule.
+        let rules = ["Which oil? Prefer: whale.\n- Why: it burns clean".to_string()];
+        let task = write(
+            Role::Refiner,
+            &issue,
+            None,
+            &[],
+            Workplace::default(),
+            &[],
+            &rules,
+        )
+        .task;
+        assert!(
+            task.ends_with("- Which oil? Prefer: whale.\n  - Why: it burns clean\n"),
+            "{task}"
+        );
     }
 }
