@@ -38,6 +38,48 @@ pub enum Command {
         /// The agent.
         agent: AgentId,
     },
+    /// Each open pull request of an issue, whole: the diff from where its branch
+    /// left the default branch to its head, or each commit with its id, message
+    /// and diff. It changes nothing.
+    Change {
+        /// The issue.
+        issue: IssueId,
+        /// The one repository to print, for an issue that changes several; every
+        /// one when none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectId>,
+        /// Each commit in order instead of the whole diff.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        by_commit: bool,
+    },
+    /// A file of a project's repository at a point, or a directory's entries.
+    /// It changes nothing.
+    Show {
+        /// The project.
+        project: ProjectId,
+        /// The path in the repository; empty for its top.
+        path: String,
+        /// Where to read; the default branch's head when none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<At>,
+    },
+    /// Each line of a project's repository at a point that matches a pattern.
+    /// It changes nothing.
+    Search {
+        /// The project.
+        project: ProjectId,
+        /// The pattern, an extended regular expression.
+        pattern: String,
+        /// Where to search; the default branch's head when none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<At>,
+    },
+    /// Each check of an issue's pull requests with its state, and the output of
+    /// each failing one. It changes nothing.
+    Ci {
+        /// The issue.
+        issue: IssueId,
+    },
     /// A refiner's plan for an issue it is refining.
     Plan {
         /// The issue.
@@ -198,6 +240,34 @@ pub enum Command {
     },
 }
 
+/// The point of a repository that [`Command::Show`] and [`Command::Search`] read
+/// at, when it is not the default branch's head.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum At {
+    /// The head of the issue's open pull request in that repository.
+    Issue(IssueId),
+    /// A commit, by its id or the start of it.
+    Commit(String),
+}
+
+impl At {
+    /// `ISSUE` or `COMMIT` as the command line takes it after `--at`: one that
+    /// reads as `project#key` is an issue, anything else a commit.
+    pub fn parse(s: &str) -> Self {
+        IssueId::parse(s).map_or_else(|| Self::Commit(s.to_string()), Self::Issue)
+    }
+}
+
+impl std::fmt::Display for At {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Issue(issue) => write!(f, "{issue}"),
+            Self::Commit(commit) => f.write_str(commit),
+        }
+    }
+}
+
 /// How long a front end waits after one [`Command::View`] ends, answered or failed,
 /// before it sends the next. Counting from the end of an ask, not at a fixed rate,
 /// keeps asks from overlapping and a slow daemon from gathering a queue of them.
@@ -216,6 +286,8 @@ impl Command {
             Self::Status
             | Self::View
             | Self::Screen { .. }
+            | Self::Show { .. }
+            | Self::Search { .. }
             | Self::Set { .. }
             | Self::Unset { .. }
             | Self::Settings { .. }
@@ -225,7 +297,7 @@ impl Command {
             | Self::Investigated { .. }
             | Self::Hold
             | Self::Resume => None,
-            Self::Issue { issue } => Some(issue),
+            Self::Issue { issue } | Self::Change { issue, .. } | Self::Ci { issue } => Some(issue),
             Self::Plan { issue, .. }
             | Self::Ready { issue, .. }
             | Self::Review { issue, .. }
@@ -865,8 +937,32 @@ impl World {
                     agent: by.cloned().unwrap_or_else(|| AgentId::new(PERSON)),
                 }
             }
-            Command::Issue { issue } => {
+            Command::Issue { issue } | Command::Change { issue, .. } | Command::Ci { issue } => {
                 at(issue)?;
+                return Ok(None);
+            }
+            Command::Show {
+                project, at: point, ..
+            }
+            | Command::Search {
+                project, at: point, ..
+            } => {
+                if !self.projects.contains_key(project) {
+                    let mut known: Vec<String> =
+                        self.projects.keys().map(ToString::to_string).collect();
+                    known.sort();
+                    return Err(format!(
+                        "there is no project {project}; the projects are: {}",
+                        if known.is_empty() {
+                            "none".to_string()
+                        } else {
+                            known.join(", ")
+                        }
+                    ));
+                }
+                if let Some(At::Issue(issue)) = point {
+                    at(issue)?;
+                }
                 return Ok(None);
             }
             Command::Plan { issue, plan } => {

@@ -276,6 +276,30 @@ impl Runtimes {
     }
 }
 
+/// The shell script [`made_then`] runs: it makes the folder its first argument
+/// names, then runs the rest as a program when there is one.
+const MAKE_THEN: &str = r#"mkdir -p -- "$1" && shift && { [ $# -eq 0 ] || exec "$@"; }"#;
+
+/// The program run on another machine before a reader starts there: it makes
+/// the readers' folder `dir`, then runs `then`, the program that trusts the
+/// folder, when the runtime has one, with that program's environment. A folder
+/// already there is left as it is, since the readers of one project share it.
+fn made_then(dir: &Path, then: Option<Program>) -> Program {
+    let then = then.unwrap_or_default();
+    let mut argv: Vec<String> = vec![
+        "sh".into(),
+        "-c".into(),
+        MAKE_THEN.into(),
+        "sh".into(),
+        dir.to_string_lossy().into_owned(),
+    ];
+    argv.extend(then.argv);
+    Program {
+        argv,
+        env: then.env,
+    }
+}
+
 fn list(ids: &[&str]) -> String {
     if ids.is_empty() {
         "none".into()
@@ -329,27 +353,41 @@ impl Part for Runtimes {
         };
         let Some(launch) = launch else {
             return Outcome::Failed(match issue {
-                Some(issue) => format!(
-                    "cannot start a {} on {issue}: it is not known, or no work folder is on the \
-                     machine its `machine` setting names",
-                    role.name()
-                ),
+                Some(issue) => {
+                    format!("cannot start a {} on {issue}: it is not known", role.name())
+                }
                 None => {
                     format!("cannot start an investigator for {group}: it runs no investigation")
                 }
             });
         };
-        // A folder on this machine is trusted here before the agent starts in it.
-        // One on another machine is trusted there, by the program the runner runs
-        // on that machine before the agent's.
+        // An agent that holds no work folder, a reader, runs in its readers'
+        // folder, which is made before it starts. An author's work folder is a
+        // checkout that is already there, and is never made.
+        let readers = launch.folder.is_none();
+        // A folder on this machine is made and trusted here before the agent
+        // starts in it. One on another machine is made and trusted there, by the
+        // program the runner runs on that machine before the agent's.
         let local = launch.machine.0 == LOCAL;
+        if let (Some(dir), true, true) = (&launch.brief.folder, readers, local)
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            return Outcome::Failed(format!("cannot make {}: {e}", dir.display()));
+        }
         if let (Some(dir), Some(home), true) = (&launch.brief.folder, &self.home, local)
             && let Err(e) = runtime.trust(dir, home)
         {
             return Outcome::Failed(format!("cannot trust {}: {e}", dir.display()));
         }
         let before = match &launch.brief.folder {
-            Some(dir) if !local => runtime.trust_program(dir),
+            Some(dir) if !local => {
+                let trust = runtime.trust_program(dir);
+                if readers {
+                    Some(made_then(dir, trust))
+                } else {
+                    trust
+                }
+            }
             _ => None,
         };
         let program = runtime.program(&launch.brief);
@@ -872,5 +910,210 @@ mod tests {
             (launch.agent.0.as_str(), launch.brief.issue.as_ref()),
             ("investigator-1", None)
         );
+    }
+
+    /// A path of its own for the test `name`, with nothing there yet, in the
+    /// build folder beside the test program: the person's own folder, not the
+    /// shared temporary one.
+    fn temporary(name: &str) -> PathBuf {
+        let build = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let path = build.join(format!("temet-work-runtime-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// ankh#1 and ankh#2 in a world whose readers' folder is `readers`.
+    fn with_readers(readers: &Path) -> World {
+        let mut world = world_with_issue();
+        world.readers = Some(readers.to_path_buf());
+        world
+    }
+
+    /// A runtime that records each folder it is asked to trust, and whether the
+    /// folder was there by then. Its program that trusts a folder on another
+    /// machine checks that the folder is there, and has a variable of its own.
+    struct Checks(std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, bool)>>>);
+
+    impl Runtime for Checks {
+        fn id(&self) -> &'static str {
+            "checks"
+        }
+        fn is_default(&self) -> bool {
+            true
+        }
+        fn program(&self, brief: &Brief) -> Program {
+            Other.program(brief)
+        }
+        fn trust(&self, folder: &Path, _home: &Path) -> Result<(), String> {
+            self.0
+                .lock()
+                .expect("lock")
+                .push((folder.to_path_buf(), folder.is_dir()));
+            Ok(())
+        }
+        fn trust_program(&self, folder: &Path) -> Option<Program> {
+            Some(Program {
+                argv: vec!["test".into(), "-d".into(), folder.display().to_string()],
+                env: vec![("CLAUDE_CONFIG_DIR".into(), "/h/.claude".into())],
+            })
+        }
+    }
+
+    /// Runs `program` here, as a runner runs it on its machine.
+    fn runs(program: &Program) -> bool {
+        std::process::Command::new(&program.argv[0])
+            .args(&program.argv[1..])
+            .envs(program.env.iter().cloned())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    #[test]
+    fn a_reviewers_readers_folder_is_made_and_empty_before_it_starts() {
+        let readers = temporary("made");
+        let world = with_readers(&readers);
+        let seen = Default::default();
+        let mut part = Runtimes::default().with_home("/h");
+        part.add(Box::new(Checks(std::sync::Arc::clone(&seen))));
+        let Outcome::Done { effects, .. } = part.carry_out(&start(Role::Reviewer, "1"), &world)
+        else {
+            panic!("not done");
+        };
+        let [
+            Effect::Run {
+                launch,
+                before: None,
+                ..
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("{effects:?}");
+        };
+        let dir = readers.join("ankh");
+        assert_eq!(launch.brief.folder.as_deref(), Some(dir.as_path()));
+        let made = std::fs::read_dir(&dir).map(Iterator::count);
+        assert_eq!(made.ok(), Some(0), "made, and empty");
+        assert_eq!(
+            *seen.lock().expect("lock"),
+            [(dir.clone(), true)],
+            "made before it is trusted"
+        );
+        // The project's next reader shares it: it is not emptied.
+        std::fs::write(dir.join("notes"), "Vimes was here").expect("write");
+        let again = part.carry_out(&start(Role::Refiner, "2"), &world);
+        assert!(matches!(again, Outcome::Done { .. }), "{again:?}");
+        assert!(dir.join("notes").exists());
+        let _ = std::fs::remove_dir_all(&readers);
+    }
+
+    #[test]
+    fn a_readers_folder_that_cannot_be_made_fails_the_start_naming_it() {
+        let readers = temporary("blocked");
+        std::fs::write(&readers, "a file, not a folder").expect("write");
+        let mut part = Runtimes::default().with_home("/h");
+        part.add(Box::new(FakeRuntime));
+        let outcome = part.carry_out(&start(Role::Reviewer, "1"), &with_readers(&readers));
+        let _ = std::fs::remove_file(&readers);
+        let Outcome::Failed(why) = outcome else {
+            panic!("started: {outcome:?}");
+        };
+        assert!(
+            why.starts_with("cannot make ") && why.contains(&readers.display().to_string()),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_reader_on_another_machine_has_its_folder_made_there_then_trusted() {
+        use temet_work_core::Event;
+        use temet_work_core::settings::{Scope, Value};
+        let readers = temporary("far");
+        let mut world = with_readers(&readers);
+        world.apply(&Event::SettingSet {
+            scope: Scope::Task(IssueId::new("ankh", "1")),
+            role: Some(Role::Reviewer),
+            key: "machine".into(),
+            value: Value::Text("far".into()),
+            by: "person".into(),
+        });
+        let seen = Default::default();
+        let mut part = Runtimes::default().with_home("/h");
+        part.add(Box::new(Checks(std::sync::Arc::clone(&seen))));
+        let Outcome::Done { effects, .. } = part.carry_out(&start(Role::Reviewer, "1"), &world)
+        else {
+            panic!("not done");
+        };
+        let [
+            Effect::Run {
+                launch,
+                before: Some(before),
+                ..
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("{effects:?}");
+        };
+        let dir = readers.join("ankh");
+        let path = dir.display().to_string();
+        assert_eq!(launch.machine.0, "far");
+        assert_eq!(
+            before.argv,
+            ["sh", "-c", MAKE_THEN, "sh", &path, "test", "-d", &path]
+        );
+        assert_eq!(
+            before.env,
+            [("CLAUDE_CONFIG_DIR".to_string(), "/h/.claude".to_string())],
+            "the variables of the program that trusts it"
+        );
+        assert!(!readers.exists(), "nothing is made on this machine");
+        assert!(seen.lock().expect("lock").is_empty(), "nor trusted here");
+        // Run as the runner runs it there: it makes the folder, then trusts it.
+        assert!(runs(before));
+        assert!(dir.is_dir());
+        // With no program to trust it, the folder is made all the same.
+        std::fs::remove_dir_all(&readers).expect("remove");
+        let made = made_then(&dir, None);
+        assert_eq!(made.argv, ["sh", "-c", MAKE_THEN, "sh", &path]);
+        assert!(runs(&made));
+        assert!(dir.is_dir());
+        let _ = std::fs::remove_dir_all(&readers);
+    }
+
+    #[test]
+    fn an_authors_work_folder_is_never_made() {
+        use temet_work_core::Event;
+        use temet_work_core::ids::{FolderId, MachineId, ProjectId};
+        let gone = temporary("author");
+        for machine in [LOCAL, "far"] {
+            let mut world = with_readers(&gone.join("readers"));
+            world.apply(&Event::FolderAdded {
+                folder: FolderId::new("f1"),
+                project: ProjectId::new("ankh"),
+                machine: MachineId::new(machine),
+                path: gone.join("w1").display().to_string(),
+            });
+            let mut part = Runtimes::default().with_home("/h");
+            part.add(Box::new(FakeRuntime));
+            let Outcome::Done { effects, .. } = part.carry_out(&start_in(Some("f1")), &world)
+            else {
+                panic!("not done");
+            };
+            let [Effect::Run { before, .. }] = effects.as_slice() else {
+                panic!("{effects:?}");
+            };
+            assert!(!gone.exists(), "nothing is made for an author on {machine}");
+            // On another machine it is only trusted there.
+            let trust = (machine != LOCAL).then(|| {
+                vec![
+                    "fake-trust".to_string(),
+                    gone.join("w1").display().to_string(),
+                ]
+            });
+            assert_eq!(before.as_ref().map(|b| b.argv.clone()), trust);
+        }
     }
 }

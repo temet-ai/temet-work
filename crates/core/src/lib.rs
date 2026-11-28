@@ -25,7 +25,7 @@ pub mod text;
 pub mod view;
 pub mod world;
 
-pub use command::{Command, Request};
+pub use command::{At, Command, Request};
 pub use effect::Effect;
 pub use event::{Event, Verdict};
 pub use host::{Host, Journal, Outcome, Polled};
@@ -42,6 +42,36 @@ pub struct IssueText {
     pub from: String,
     /// The text; empty when the issue has none there.
     pub text: String,
+}
+
+/// How a part answers a command that reads code or CI ([`Part::read`]).
+pub enum Answer {
+    /// The text, made now.
+    Now(String),
+    /// Work that makes the text, or the reason it could not, run away from the
+    /// daemon's loop: it may fetch from a code host, and the loop answers other
+    /// requests and polls its parts meanwhile. It holds no part, only what the
+    /// read needs.
+    Later(Box<dyn FnOnce() -> Result<String, String> + Send>),
+}
+
+impl Answer {
+    /// The text, making it now for [`Answer::Later`].
+    pub fn wait(self) -> Result<String, String> {
+        match self {
+            Self::Now(text) => Ok(text),
+            Self::Later(work) => work(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Answer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Now(text) => f.debug_tuple("Now").field(text).finish(),
+            Self::Later(_) => f.write_str("Later(..)"),
+        }
+    }
 }
 
 /// A part of temet-work: a family of adapters (trackers, runners, agent
@@ -81,6 +111,14 @@ pub trait Part: Send {
     /// if this part reads issue text. It asks nothing of any service.
     fn issue_text(&self, world: &World, issue: &ids::IssueId) -> Option<Result<IssueText, String>> {
         let _ = (world, issue);
+        None
+    }
+
+    /// The answer to a command that reads code or CI ([`Command::reads_code`]):
+    /// a pull request's change, a file, a search or CI's results, if this part
+    /// reads them. It changes nothing.
+    fn read(&mut self, world: &World, command: &Command) -> Option<Result<Answer, String>> {
+        let _ = (world, command);
         None
     }
 

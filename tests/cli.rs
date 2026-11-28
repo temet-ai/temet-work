@@ -71,3 +71,29 @@ fn a_full_device_is_reported_and_exits_2() {
         );
     }
 }
+
+#[test]
+fn help_lists_the_reads_and_a_read_it_cannot_send_exits_2() {
+    let out = run("help");
+    let text = String::from_utf8_lossy(&out.stdout);
+    for form in [
+        "temet-work change ISSUE [PROJECT] [--by-commit]",
+        "temet-work show PROJECT PATH [--at ISSUE|COMMIT]",
+        "temet-work search PROJECT PATTERN [--at ISSUE|COMMIT]",
+        "temet-work ci ISSUE",
+    ] {
+        assert!(
+            text.lines().any(|l| l.starts_with(form)),
+            "{form} in:\n{text}"
+        );
+    }
+    // Not understood, and understood with no daemon to answer: both exit 2.
+    for args in [
+        &["show"][..],
+        &["ci", "watch"][..],
+        &["change", "watch#12"][..],
+    ] {
+        let out = temet_work(args).output().expect("runs");
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+    }
+}

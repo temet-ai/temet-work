@@ -3,7 +3,8 @@
 //! views and runs the same commands, through the same socket as the command line.
 //!
 //! The server has two levels. At `read`, the default, it offers the views:
-//! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
+//! `status`, `issue`, `screen` and `settings`, and the reads of code and CI:
+//! `change`, `show`, `search` and `ci`. At `act` it also offers the commands
 //! that move work, record choices and change settings: `plan`, `ready`, `review`,
 //! `retry`, `rule`, `choose`, `overturn`, `proposal`, `hold`, `resume`, `move`,
 //! `file`, `investigated`, `set` and `unset`. A tool above the server's level is not
@@ -14,7 +15,7 @@ use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
 use temet_work_core::model::{Check, Plan, Role};
 use temet_work_core::settings::{Target, Value as Setting};
 use temet_work_core::view::StageWord;
-use temet_work_core::{Command, Request, Verdict};
+use temet_work_core::{At, Command, Request, Verdict};
 
 use crate::socket::Reply;
 
@@ -47,6 +48,19 @@ fn target_field() -> Value {
 
 fn role_field() -> Value {
     json!({"type": "string", "enum": ["refiner", "author", "reviewer", "arbiter", "investigator"], "description": "The role the setting is for; every role when left out."})
+}
+
+fn at_field() -> Value {
+    json!({"type": "string", "description": "Where to read: an issue as project#key for its pull request's head, or a commit id; the default branch's head when left out."})
+}
+
+/// Where `show` or `search` reads, from `at`; the default branch's head when
+/// it is left out or empty.
+fn at(args: &Value) -> Option<At> {
+    args.get("at")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| At::parse(s.trim()))
 }
 
 fn role(args: &Value) -> Result<Option<Role>, String> {
@@ -98,6 +112,42 @@ fn tools() -> Vec<Tool> {
             description: "Every setting in effect at a target, each with its value and the level that set it. The target is global, an area or project id, a milestone as project:Milestone name, or an issue.",
             acts: false,
             schema: json!({"type": "object", "properties": {"target": target_field(), "role": role_field()}, "required": ["target"]}),
+        },
+        Tool {
+            name: "change",
+            description: "Each open pull request of an issue, whole: the diff from where its branch left the default branch to its head, under a line naming its project, repository, number and the two commits. With by_commit, each commit in order with its id, message and diff instead. For an issue that changes several repositories, project picks one. Read the change here; no checkout is needed.",
+            acts: false,
+            schema: json!({"type": "object", "properties": {
+                "issue": issue_field(),
+                "project": {"type": "string", "description": "One repository of the issue's, by project id; every one when left out."},
+                "by_commit": {"type": "boolean", "description": "Each commit with its id, message and diff, instead of the whole diff."}
+            }, "required": ["issue"]}),
+        },
+        Tool {
+            name: "show",
+            description: "A file of a project's repository, or a folder's entries (a slash after each folder), at the default branch's head, at the head of an issue's pull request, or at a commit. A path, commit or pull request the repository does not have is refused with the reason.",
+            acts: false,
+            schema: json!({"type": "object", "properties": {
+                "project": {"type": "string", "description": "The project id."},
+                "path": {"type": "string", "description": "The path in the repository; empty for its top folder."},
+                "at": at_field()
+            }, "required": ["project"]}),
+        },
+        Tool {
+            name: "search",
+            description: "Each line of a project's repository that matches a pattern (a regular expression, as grep -E takes it), as path:line:text, at the default branch's head, at the head of an issue's pull request, or at a commit. At most 1000 lines, then a line counting the rest; says so when nothing matches.",
+            acts: false,
+            schema: json!({"type": "object", "properties": {
+                "project": {"type": "string", "description": "The project id."},
+                "pattern": {"type": "string", "description": "An extended regular expression."},
+                "at": at_field()
+            }, "required": ["project", "pattern"]}),
+        },
+        Tool {
+            name: "ci",
+            description: "Each check of an issue's pull requests with its state (passed, failed, running, waiting, skipped, cancelled), then the output of each failing check's failed steps, whole. A failing check the code host keeps no log of, such as one an outside app reports, gives its summary and web address. CI runs the checks on every pull request: read their results here.",
+            acts: false,
+            schema: json!({"type": "object", "properties": {"issue": issue_field()}, "required": ["issue"]}),
         },
         Tool {
             name: "plan",
@@ -279,6 +329,32 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
         },
         "screen" => Command::Screen {
             agent: AgentId::new(text(args, "agent")?),
+        },
+        "change" => Command::Change {
+            issue: issue(args)?,
+            project: args
+                .get("project")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .map(ProjectId::new),
+            by_commit: args.get("by_commit").and_then(Value::as_bool) == Some(true),
+        },
+        "show" => Command::Show {
+            project: ProjectId::new(text(args, "project")?),
+            path: args
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            at: at(args),
+        },
+        "search" => Command::Search {
+            project: ProjectId::new(text(args, "project")?),
+            pattern: text(args, "pattern")?,
+            at: at(args),
+        },
+        "ci" => Command::Ci {
+            issue: issue(args)?,
         },
         "plan" => Command::Plan {
             issue: issue(args)?,
@@ -592,12 +668,92 @@ mod tests {
     }
 
     #[test]
-    fn the_read_level_lists_only_the_views() {
+    fn the_read_level_lists_only_the_views_and_the_reads_of_code() {
+        let mut read = names(Level::Read);
+        read.sort();
         assert_eq!(
-            names(Level::Read),
-            ["status", "issue", "screen", "settings"]
+            read,
+            [
+                "change", "ci", "issue", "screen", "search", "settings", "show", "status"
+            ]
         );
-        assert_eq!(names(Level::Act).len(), 19);
+        assert_eq!(names(Level::Act).len(), 23);
+    }
+
+    #[test]
+    fn change_show_search_and_ci_become_the_command_lines_reads_at_the_read_level() {
+        let cases = [
+            (
+                "change",
+                json!({"issue": "city#12", "project": "guild", "by_commit": true}),
+                Command::Change {
+                    issue: IssueId::new("city", "12"),
+                    project: Some(ProjectId::new("guild")),
+                    by_commit: true,
+                },
+            ),
+            (
+                "change",
+                json!({"issue": "watch#12"}),
+                Command::Change {
+                    issue: IssueId::new("watch", "12"),
+                    project: None,
+                    by_commit: false,
+                },
+            ),
+            (
+                "show",
+                json!({"project": "watch", "path": "src/rota.rs", "at": "watch#12"}),
+                Command::Show {
+                    project: ProjectId::new("watch"),
+                    path: "src/rota.rs".into(),
+                    at: Some(At::Issue(IssueId::new("watch", "12"))),
+                },
+            ),
+            (
+                "show",
+                json!({"project": "watch"}),
+                Command::Show {
+                    project: ProjectId::new("watch"),
+                    path: String::new(),
+                    at: None,
+                },
+            ),
+            (
+                "search",
+                json!({"project": "watch", "pattern": "fn rota", "at": "1a2b3c4d"}),
+                Command::Search {
+                    project: ProjectId::new("watch"),
+                    pattern: "fn rota".into(),
+                    at: Some(At::Commit("1a2b3c4d".into())),
+                },
+            ),
+            (
+                "ci",
+                json!({"issue": "watch#12"}),
+                Command::Ci {
+                    issue: IssueId::new("watch", "12"),
+                },
+            ),
+        ];
+        for (name, args, want) in cases {
+            let mut sent = Vec::new();
+            let answer = call(Level::Read, name, args, &mut sent);
+            assert_eq!(answer["result"]["isError"], false, "{name}");
+            assert_eq!(answer["result"]["content"][0]["text"], "ok", "{name}");
+            assert_eq!(sent.len(), 1, "{name}");
+            assert_eq!(sent[0].command, want, "{name}");
+            assert_eq!(sent[0].by, Some(AgentId::new("reviewer-1")));
+        }
+        let mut sent = Vec::new();
+        let answer = call(
+            Level::Read,
+            "search",
+            json!({"project": "watch"}),
+            &mut sent,
+        );
+        assert_eq!(answer["result"]["isError"], true, "no pattern");
+        assert!(sent.is_empty());
     }
 
     #[test]

@@ -104,11 +104,9 @@ fn run() -> Result<(), String> {
     }
     let mut host = temet_work::start(
         &log_path,
-        // A deploy that restarts this daemon leaves its note next to the log.
-        temet_work::parts_with(
-            config.daemon_host.clone(),
-            Some(log_path.with_file_name("deploy-handoff")),
-        ),
+        // A deploy that restarts this daemon leaves its note next to the log, and
+        // the code-host family keeps its copies of the repositories there.
+        temet_work::parts_with(config.daemon_host.clone(), Some(&log_path)),
     )?;
     if host.world().log.is_none() {
         // A new log: its id labels the terminals its agents run in.
@@ -184,11 +182,26 @@ fn run() -> Result<(), String> {
         }
         match requests.recv_timeout(next_round.saturating_duration_since(Instant::now())) {
             Ok(pending) => {
-                let reply = socket::answer(&mut host, now_ms(), &pending.request, &pending.peer)?;
-                if let Some(line) = socket::request_line(&pending.request, &reply) {
-                    eprintln!("{line}");
+                match socket::answer_or_defer(&mut host, now_ms(), &pending.request, &pending.peer)?
+                {
+                    socket::Answered::Now(reply) => {
+                        if let Some(line) = socket::request_line(&pending.request, &reply) {
+                            eprintln!("{line}");
+                        }
+                        pending.answer(reply);
+                    }
+                    // A read of code that may fetch runs on a thread of its own, so
+                    // the loop answers other requests and polls meanwhile.
+                    socket::Answered::Later(work) => {
+                        std::thread::spawn(move || {
+                            let reply = work();
+                            if let Some(line) = socket::request_line(&pending.request, &reply) {
+                                eprintln!("{line}");
+                            }
+                            pending.answer(reply);
+                        });
+                    }
                 }
-                pending.answer(reply);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {

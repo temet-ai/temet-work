@@ -6,7 +6,7 @@ use temet_work_core::ids::{AgentId, DecisionId, GroupId, IssueId, ProjectId, Rul
 use temet_work_core::model::{Plan, Role};
 use temet_work_core::settings::Target;
 use temet_work_core::view::StageWord;
-use temet_work_core::{Command, Request, Verdict};
+use temet_work_core::{At, Command, Request, Verdict};
 
 pub use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 
@@ -15,6 +15,19 @@ pub const USAGE: &str = "\
 temet-work status [--json]                  the state as text, or with --json as data
 temet-work issue ISSUE                      one issue in full, with its text from the last sync
 temet-work screen AGENT                     what an agent's terminal shows now
+temet-work change ISSUE [PROJECT] [--by-commit]
+                                            each open pull request of the issue whole, from
+                                            where its branch left the default branch; with
+                                            --by-commit each commit with its id, message and diff
+temet-work show PROJECT PATH [--at ISSUE|COMMIT]
+                                            a file of the repository, or a folder's entries, at
+                                            the default branch's head, the issue's pull request
+                                            head or a commit
+temet-work search PROJECT PATTERN [--at ISSUE|COMMIT]
+                                            each line matching PATTERN (a regular expression,
+                                            as grep -E) as path:line:text, at the same points
+temet-work ci ISSUE                         each check of the issue's pull requests, and the
+                                            output of each failing one
 temet-work plan ISSUE FILE                  a refiner's plan, as YAML; FILE - reads it from standard input
 temet-work ready ISSUE PULL|REPO=PULL...     the pull request is open and the checks hold;
                                             PULL is its number, needed the first time;
@@ -57,7 +70,8 @@ temet-work set TARGET [--role ROLE] KEY VALUE
 temet-work unset TARGET [--role ROLE] KEY   remove it, so the next level answers
 temet-work settings TARGET [--role ROLE]    every setting in effect there, and the level that set it
 temet-work mcp [--allow read|act]           the same views and commands as MCP tools, for agents;
-                                            read (the default) offers status, issue and screen
+                                            read (the default) offers status, issue, screen,
+                                            settings, change, show, search and ci
 temet-work parts                            the parts in this build
 temet-work --version                        the version and the build id
 
@@ -89,7 +103,7 @@ pub fn json_refused() -> String {
 fn has_json(args: &[String]) -> bool {
     let word = |i: usize| args.get(i).map(String::as_str);
     let before_text = match word(0) {
-        Some("file" | "choose") => 2,
+        Some("file" | "choose" | "show" | "search") => 2,
         Some("set" | "rule" | "overturn") => 3,
         Some("review") if word(2) == Some("block") => 3,
         Some("ready") => args.iter().position(|a| a == REPLY).unwrap_or(args.len()),
@@ -202,6 +216,79 @@ fn choose(args: &[String]) -> Result<Command, String> {
     })
 }
 
+/// Reads `change ISSUE [PROJECT] [--by-commit]`, `ci ISSUE`, `show PROJECT
+/// [PATH] [--at ISSUE|COMMIT]` and `search PROJECT PATTERN [--at ISSUE|COMMIT]`,
+/// which read code and change nothing; `None` for any other command. A
+/// pattern's words after the project are joined with spaces, so it may be
+/// `--json` or `--role`.
+fn reads_code(args: &[String]) -> Option<Result<Command, String>> {
+    let name = args.first()?.as_str();
+    if !matches!(name, "change" | "ci" | "show" | "search") {
+        return None;
+    }
+    Some(read_code(name, args))
+}
+
+fn read_code(name: &str, args: &[String]) -> Result<Command, String> {
+    if has_json(args) {
+        return Err(json_refused());
+    }
+    let issue = |s: Option<&String>| {
+        let s = s.ok_or_else(|| format!("missing ISSUE\n\n{USAGE}"))?;
+        IssueId::parse(s)
+            .ok_or_else(|| format!("{s} is not an issue; write project#key, such as radar#44"))
+    };
+    let rest = args.get(1..).unwrap_or_default();
+    match name {
+        "change" => {
+            let by_commit = rest.iter().any(|a| a == "--by-commit");
+            let words: Vec<&String> = rest.iter().filter(|a| *a != "--by-commit").collect();
+            if words.len() > 2 {
+                return Err(format!(
+                    "change takes ISSUE and at most one PROJECT\n\n{USAGE}"
+                ));
+            }
+            Ok(Command::Change {
+                issue: issue(words.first().copied())?,
+                project: words.get(1).map(|p| ProjectId::new(p.as_str())),
+                by_commit,
+            })
+        }
+        "ci" => {
+            if rest.len() > 1 {
+                return Err(format!("ci takes one ISSUE\n\n{USAGE}"));
+            }
+            Ok(Command::Ci {
+                issue: issue(rest.first())?,
+            })
+        }
+        _ => {
+            let (rest, at) = take(rest, "--at")?;
+            let project = rest
+                .first()
+                .ok_or_else(|| format!("missing PROJECT\n\n{USAGE}"))?;
+            let project = ProjectId::new(project.as_str());
+            let text = rest.get(1..).unwrap_or_default().join(" ");
+            let at = at.as_deref().map(At::parse);
+            if name == "show" {
+                Ok(Command::Show {
+                    project,
+                    path: text,
+                    at,
+                })
+            } else if text.is_empty() {
+                Err(format!("missing PATTERN\n\n{USAGE}"))
+            } else {
+                Ok(Command::Search {
+                    project,
+                    pattern: text,
+                    at,
+                })
+            }
+        }
+    }
+}
+
 /// Reads the arguments after the program name into a request. `by` is the
 /// agent sending it; `read` reads a file. The request carries no secret: the
 /// caller adds the one in [`SECRET_VAR`].
@@ -218,6 +305,9 @@ pub fn request(
             return Err(json_refused());
         }
         return Ok(Request::new(by, choose(args)?));
+    }
+    if let Some(command) = reads_code(args) {
+        return Ok(Request::new(by, command?));
     }
     let (args, role) = take_role(args)?;
     let (args, milestone) = take(&args, "--milestone")?;
@@ -398,6 +488,78 @@ pub(crate) mod tests {
 
     fn no_files(_: &Path) -> Result<String, String> {
         Err("no files in this test".into())
+    }
+
+    #[test]
+    fn change_show_search_and_ci_read_their_issue_project_and_point() {
+        let line = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let read = |words: &[&str]| request(&line(words), None, no_files).map(|r| r.command);
+        assert_eq!(
+            read(&["change", "watch#12"]),
+            Ok(Command::Change {
+                issue: IssueId::new("watch", "12"),
+                project: None,
+                by_commit: false,
+            })
+        );
+        assert_eq!(
+            read(&["change", "city#12", "--by-commit", "guild"]),
+            Ok(Command::Change {
+                issue: IssueId::new("city", "12"),
+                project: Some(ProjectId::new("guild")),
+                by_commit: true,
+            })
+        );
+        assert_eq!(
+            read(&["ci", "watch#12"]),
+            Ok(Command::Ci {
+                issue: IssueId::new("watch", "12")
+            })
+        );
+        assert_eq!(
+            read(&["show", "watch", "src/rota.rs"]),
+            Ok(Command::Show {
+                project: ProjectId::new("watch"),
+                path: "src/rota.rs".into(),
+                at: None,
+            })
+        );
+        assert_eq!(
+            read(&["show", "watch", "src/", "--at", "watch#12"]),
+            Ok(Command::Show {
+                project: ProjectId::new("watch"),
+                path: "src/".into(),
+                at: Some(At::Issue(IssueId::new("watch", "12"))),
+            })
+        );
+        assert_eq!(
+            read(&["search", "watch", "--at", "1a2b3c4d", "fn rota", "--json"]),
+            Ok(Command::Search {
+                project: ProjectId::new("watch"),
+                pattern: "fn rota --json".into(),
+                at: Some(At::Commit("1a2b3c4d".into())),
+            })
+        );
+        for (words, refused) in [
+            (&["change"][..], "missing ISSUE"),
+            (&["change", "watch"][..], "watch is not an issue"),
+            (&["change", "watch#12", "a", "b"][..], "at most one PROJECT"),
+            (
+                &["change", "watch#12", "--json"][..],
+                "--json goes with status only",
+            ),
+            (&["ci", "watch#12", "watch#13"][..], "ci takes one ISSUE"),
+            (&["show"][..], "missing PROJECT"),
+            (&["search", "watch"][..], "missing PATTERN"),
+            (
+                &["search", "--json", "watch", "x"][..],
+                "--json goes with status only",
+            ),
+            (&["show", "watch", "x", "--at"][..], "--at needs a value"),
+        ] {
+            let why = read(words).expect_err("refused");
+            assert!(why.contains(refused), "{words:?}: {why}");
+        }
     }
 
     #[test]

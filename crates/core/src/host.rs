@@ -244,6 +244,22 @@ impl Host {
             .unwrap_or_else(|| Err("no part in this build reads issue text".into()))
     }
 
+    /// The answer to a command that reads code or CI, from the part that reads
+    /// it ([`crate::Part::read`]), or why there is none.
+    pub fn read(&mut self, command: &crate::Command) -> Result<crate::Answer, String> {
+        let world = &self.world;
+        self.parts
+            .iter_mut()
+            .find_map(|p| p.read(world, command))
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "no part in this build answers {}: it reads code and CI through the code-host \
+                     family",
+                    command.name()
+                ))
+            })
+    }
+
     /// Logs and applies `event`, then carries out everything it leads to, and
     /// ends the investigations that it ended (`World::investigation_events`).
     pub fn handle(&mut self, now_ms: u64, event: Event) -> Result<(), String> {
@@ -390,15 +406,11 @@ impl Host {
     fn report_blocked(&mut self) {
         self.problems.retain(|k, _| !of_a_stopped_agent(k));
         for agent in self.world.agents.values() {
+            // A reader's place is its readers' folder, made on its machine.
             let place = || {
-                agent
-                    .issue
-                    .as_ref()
-                    .and_then(|i| self.world.issues.get(i))
-                    .and_then(|i| self.world.folder_for(i, agent.role, agent.folder.as_ref()))
-                    // A reader's folder is not recorded: name none on another machine.
-                    .filter(|f| f.machine == agent.machine)
-                    .map_or_else(String::new, |f| format!(" in {}", f.path))
+                self.world
+                    .folder_of(agent)
+                    .map_or_else(String::new, |f| format!(" in {}", f.display()))
             };
             if let Some((key, line)) = stopped(agent, place) {
                 self.problems.insert(key, line);

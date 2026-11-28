@@ -8,11 +8,17 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use temet_work_core::ids::{IssueId, ProjectId};
 use temet_work_core::model::{Addresses, Issue, Stage};
-use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
+use temet_work_core::{Answer, At, Command, Effect, Event, Outcome, Part, Polled, World};
+
+pub mod copy;
+pub mod read;
+
+use copy::{Copies, Point};
 
 /// What a pull request's CI says about its latest commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +63,55 @@ pub struct Pull {
     pub draft: bool,
     /// The branch it merges from; empty when the code host gave none.
     pub branch: String,
+}
+
+/// What one check of a pull request's CI says now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunState {
+    /// It passed.
+    Passed,
+    /// It failed.
+    Failed,
+    /// It is queued or running.
+    Running,
+    /// It waits for a person, such as a job started by hand.
+    Waiting,
+    /// It was skipped.
+    Skipped,
+    /// It was cancelled.
+    Cancelled,
+}
+
+impl RunState {
+    /// The state in one word, as `temet-work ci` prints it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// One check of a pull request's CI, as `temet-work ci` prints it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckRun {
+    /// Its name.
+    pub name: String,
+    /// What it says now.
+    pub state: RunState,
+    /// For a failing check, the output of its failed steps, whole, as the code
+    /// host gives it; none when the code host keeps no log of it, as for a check
+    /// an outside app reports.
+    pub log: Option<String>,
+    /// What the check says of itself, such as an outside app's summary; empty
+    /// when it says nothing.
+    pub summary: String,
+    /// Its web address, when the code host gives one.
+    pub address: Option<String>,
 }
 
 /// Why a code-host call failed.
@@ -105,6 +160,20 @@ pub trait CodeHost: Send {
     /// adapter's own settings, such as the host it reaches; none when the
     /// adapter cannot say. It asks the code host nothing.
     fn address(&self, repo: &str) -> Option<String>;
+
+    /// The address git clones and fetches the repository from, for the family's
+    /// one shared copy of it; none when the adapter cannot say. It asks the code
+    /// host nothing.
+    fn clone_address(&self, repo: &str) -> Option<String>;
+
+    /// The ref the code host keeps the head of pull request `number` under, which
+    /// a fetch from [`CodeHost::clone_address`] reads, such as
+    /// `refs/pull/57/head`.
+    fn pull_ref(&self, number: &str) -> String;
+
+    /// Every check of the latest commit of pull request `number`, with the output
+    /// of each failing one's failed steps.
+    fn ci(&mut self, repo: &str, number: &str) -> Result<Vec<CheckRun>, CodeHostError>;
 }
 
 /// A code host in memory, for tests.
@@ -122,6 +191,12 @@ pub struct FakeCodeHost {
     pub merged_repos: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// The pull request number of each merge, in order.
     pub merged_numbers: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Where git clones each repository from, by repository; one not named
+    /// here has no clone address.
+    pub clones: BTreeMap<String, String>,
+    /// The checks of each pull request, as (repo, number, checks); one not
+    /// named here has none.
+    pub runs: Vec<(String, String, Vec<CheckRun>)>,
 }
 
 impl Default for FakeCodeHost {
@@ -140,6 +215,8 @@ impl FakeCodeHost {
             mains: Default::default(),
             merged_repos: Default::default(),
             merged_numbers: Default::default(),
+            clones: BTreeMap::new(),
+            runs: Vec::new(),
         }
     }
 }
@@ -199,11 +276,29 @@ impl CodeHost for FakeCodeHost {
     fn address(&self, repo: &str) -> Option<String> {
         Some(format!("https://{}.example.com/{repo}", self.id))
     }
+
+    fn clone_address(&self, repo: &str) -> Option<String> {
+        self.clones.get(repo).cloned()
+    }
+
+    fn pull_ref(&self, number: &str) -> String {
+        format!("refs/pull/{number}/head")
+    }
+
+    fn ci(&mut self, repo: &str, number: &str) -> Result<Vec<CheckRun>, CodeHostError> {
+        self.pull(repo, number)?;
+        Ok(self
+            .runs
+            .iter()
+            .find(|(r, n, _)| r == repo && n == number)
+            .map(|(_, _, runs)| runs.clone())
+            .unwrap_or_default())
+    }
 }
 
 /// The contract every code-host adapter runs.
 pub mod contract {
-    use super::{CodeHost, PullState};
+    use super::{CodeHost, PullState, RunState};
 
     /// What a code host's tests supply.
     pub trait Harness {
@@ -240,6 +335,37 @@ pub mod contract {
             "a pull request reports its own number",
         )?;
         ensure(!pull.branch.is_empty(), "a pull request reports its branch")?;
+        ensure(
+            host.clone_address(&repo)
+                .is_some_and(|a| !a.is_empty() && a.contains(&repo)),
+            "the repository has a clone address that holds its name",
+        )?;
+        let head = host.pull_ref(&number);
+        ensure(
+            head.starts_with("refs/") && head.split('/').any(|part| part == number),
+            "a pull request's head is a ref that holds its number",
+        )?;
+        let runs = host.ci(&repo, &number).map_err(|e| format!("ci: {e}"))?;
+        ensure(
+            runs.iter().all(|r| !r.name.is_empty()),
+            "every check of a pull request has a name",
+        )?;
+        ensure(
+            runs.iter()
+                .filter(|r| r.state == RunState::Failed)
+                .all(|r| r.log.is_some() || r.address.is_some() || !r.summary.is_empty()),
+            "a failing check gives its log, or else its summary or web address",
+        )?;
+        ensure(
+            runs.iter()
+                .filter(|r| r.state != RunState::Failed)
+                .all(|r| r.log.is_none()),
+            "only a failing check carries a log",
+        )?;
+        ensure(
+            host.ci(&repo, "999999999").is_err(),
+            "the checks of a pull request the code host does not have are an error",
+        )?;
         ensure(
             host.pull(&repo, "999999999").is_err(),
             "a pull request the code host does not have is an error",
@@ -282,6 +408,22 @@ pub mod contract {
     }
 }
 
+/// An issue's pull requests on record, by repository, in the order they merge;
+/// one in a repository the plan no longer names comes after those.
+fn pulls_in_order(world: &World, issue: &Issue) -> Vec<(ProjectId, String)> {
+    let mut pulls: Vec<(ProjectId, String)> = world
+        .repos_of(issue)
+        .into_iter()
+        .filter_map(|r| issue.pulls.get(&r).map(|n| (r, n.clone())))
+        .collect();
+    for (r, n) in &issue.pulls {
+        if !pulls.iter().any(|(p, _)| p == r) {
+            pulls.push((r.clone(), n.clone()));
+        }
+    }
+    pulls
+}
+
 /// How long after a failed merge it is tried again.
 pub const MERGE_RETRY_AFTER: Duration = Duration::from_secs(60);
 
@@ -312,6 +454,9 @@ pub struct CodeHosts {
     /// When the main pipeline after a merge was last read, and what it said,
     /// by issue, repository and pull request.
     main_read: BTreeMap<(IssueId, ProjectId, String), (Instant, Wait)>,
+    /// The shared copies of the repositories that `change`, `show` and `search`
+    /// read; none when no folder for them was given.
+    copies: Option<Arc<Copies>>,
 }
 
 /// Why the next repository does not merge yet.
@@ -375,6 +520,192 @@ impl CodeHosts {
     pub fn every(mut self, ms: u64) -> Self {
         self.every_ms = Some(ms);
         self
+    }
+
+    /// Keeps the shared copies of the repositories under `root`, the folder
+    /// beside the daemon's event log.
+    pub fn copies(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.copies = Some(Arc::new(Copies::new(root)));
+        self
+    }
+
+    /// The shared copies, for a test that counts what git was asked.
+    pub fn copies_kept(&self) -> Option<Arc<Copies>> {
+        self.copies.clone()
+    }
+
+    /// The repository of `project` as a read needs it: its code host's names
+    /// for it and where git clones it from.
+    fn repo_for(&mut self, world: &World, project: &ProjectId) -> Result<read::Repo, String> {
+        let (host, name) = self.host_for(world, project)?;
+        let url = host.clone_address(&name).ok_or_else(|| {
+            format!(
+                "code host \"{}\" gives no address to clone {name} from",
+                host.id()
+            )
+        })?;
+        Ok(read::Repo {
+            project: project.clone(),
+            name,
+            host: host.id().to_string(),
+            url,
+        })
+    }
+
+    /// The copies, or why there are none.
+    fn shared_copies(&self) -> Result<Arc<Copies>, String> {
+        self.copies.clone().ok_or_else(|| {
+            "this daemon keeps no copies of repositories: it was started without a folder for \
+             them"
+                .into()
+        })
+    }
+
+    /// Where `at` points in `project`, and the point in words.
+    fn point(
+        &mut self,
+        world: &World,
+        project: &ProjectId,
+        at: Option<&At>,
+    ) -> Result<(Point, String), String> {
+        Ok(match at {
+            None => (Point::Default, "the default branch's head".into()),
+            Some(At::Commit(id)) => (Point::Commit(id.clone()), format!("commit {id}")),
+            Some(At::Issue(issue)) => {
+                let i = world
+                    .issues
+                    .get(issue)
+                    .ok_or_else(|| format!("there is no issue {issue}"))?;
+                let number = i
+                    .pulls
+                    .get(project)
+                    .ok_or_else(|| format!("{issue} has no pull request in {project} on record"))?;
+                let (host, _) = self.host_for(world, project)?;
+                (
+                    Point::Pull {
+                        number: number.clone(),
+                        head: host.pull_ref(number),
+                    },
+                    format!("the head of pull request {number} ({issue})"),
+                )
+            }
+        })
+    }
+
+    /// The answer to `change`, `show`, `search` or `ci`.
+    fn answer(&mut self, world: &World, command: &Command) -> Result<Answer, String> {
+        match command {
+            Command::Change {
+                issue,
+                project,
+                by_commit,
+            } => {
+                let i = world
+                    .issues
+                    .get(issue)
+                    .ok_or_else(|| format!("there is no issue {issue}"))?;
+                let open: Vec<(ProjectId, String)> = pulls_in_order(world, i)
+                    .into_iter()
+                    .filter(|(r, _)| !i.merged.contains(r))
+                    .collect();
+                if open.is_empty() {
+                    return Err(format!(
+                        "{issue} has no open pull request on record; its author names one with \
+                         ready"
+                    ));
+                }
+                let picked: Vec<(ProjectId, String)> = match project {
+                    None => open,
+                    Some(p) => {
+                        let names: Vec<String> = open.iter().map(|(r, _)| r.to_string()).collect();
+                        let one: Vec<_> = open.into_iter().filter(|(r, _)| r == p).collect();
+                        if one.is_empty() {
+                            return Err(format!(
+                                "{issue} has no open pull request in {p}; it has one in: {}",
+                                names.join(", ")
+                            ));
+                        }
+                        one
+                    }
+                };
+                let copies = self.shared_copies()?;
+                let mut pulls = Vec::new();
+                for (project, number) in picked {
+                    let repo = self.repo_for(world, &project)?;
+                    let (host, _) = self.host_for(world, &project)?;
+                    pulls.push(read::Pull {
+                        head: host.pull_ref(&number),
+                        repo,
+                        number,
+                    });
+                }
+                let by_commit = *by_commit;
+                Ok(Answer::Later(Box::new(move || {
+                    read::change(copies, pulls, by_commit)
+                })))
+            }
+            Command::Show { project, path, at } => {
+                let repo = self.repo_for(world, project)?;
+                let (point, words) = self.point(world, project, at.as_ref())?;
+                let copies = self.shared_copies()?;
+                let path = path.clone();
+                Ok(Answer::Later(Box::new(move || {
+                    read::show(copies, repo, path, point, words)
+                })))
+            }
+            Command::Search {
+                project,
+                pattern,
+                at,
+            } => {
+                let repo = self.repo_for(world, project)?;
+                let (point, words) = self.point(world, project, at.as_ref())?;
+                let copies = self.shared_copies()?;
+                let pattern = pattern.clone();
+                Ok(Answer::Later(Box::new(move || {
+                    read::search(copies, repo, pattern, point, words)
+                })))
+            }
+            Command::Ci { issue } => {
+                let i = world
+                    .issues
+                    .get(issue)
+                    .ok_or_else(|| format!("there is no issue {issue}"))?;
+                let pulls: Vec<(ProjectId, String, bool)> = pulls_in_order(world, i)
+                    .into_iter()
+                    .map(|(r, n)| {
+                        let merged = i.merged.contains(&r);
+                        (r, n, merged)
+                    })
+                    .collect();
+                if pulls.is_empty() {
+                    return Err(format!(
+                        "{issue} has no pull request on record; its author names one with ready"
+                    ));
+                }
+                let (mut parts, mut failed) = (Vec::new(), Vec::new());
+                for (project, number, merged) in pulls {
+                    let (host, name) = self.host_for(world, &project)?;
+                    let what = format!("{project} ({name})");
+                    match host.ci(&name, &number) {
+                        Ok(runs) => parts.push(read::ci(&what, &number, merged, &runs)),
+                        Err(e) => {
+                            let why = format!("{what}: pull request {number}: {e}");
+                            parts.push(format!("{why}\n"));
+                            failed.push(why);
+                        }
+                    }
+                }
+                if failed.len() == parts.len() {
+                    return Err(failed.join("; "));
+                }
+                Ok(Answer::Now(parts.join("\n")))
+            }
+            other => Err(format!(
+                "the code-host family does not answer {}",
+                other.name()
+            )),
+        }
     }
 
     /// The adapter and the code host's name for the repository of project `repo`.
@@ -725,6 +1056,12 @@ impl Part for CodeHosts {
         self.merge_next(world, issue)
     }
 
+    /// A pull request's change, a file, a search, or CI's results. The first
+    /// three read the shared copy away from the daemon's loop.
+    fn read(&mut self, world: &World, command: &Command) -> Option<Result<Answer, String>> {
+        command.reads_code().then(|| self.answer(world, command))
+    }
+
     /// Where each project's code is, from the code host it names.
     fn addresses(&self, world: &World) -> BTreeMap<ProjectId, Addresses> {
         world
@@ -830,11 +1167,48 @@ mod tests {
         for (_, p) in &mut host.pulls {
             p.branch = format!("ankh-{}", p.number);
         }
+        host.clones
+            .insert("city/ankh".into(), "/srv/git/city/ankh.git".into());
+        host.runs.push((
+            "city/ankh".into(),
+            "58".into(),
+            vec![
+                CheckRun {
+                    name: "rust".into(),
+                    state: RunState::Failed,
+                    log: Some("test clock::strikes_thirteen ... FAILED".into()),
+                    summary: String::new(),
+                    address: None,
+                },
+                CheckRun {
+                    name: "docs".into(),
+                    state: RunState::Passed,
+                    log: None,
+                    summary: String::new(),
+                    address: None,
+                },
+            ],
+        ));
         assert_eq!(contract::check(&mut host, &Writable), Ok(()));
         // A code host that reports no branch fails it.
         assert_eq!(
             contract::check(&mut fake(), &Writable),
             Err("a pull request reports its branch".into())
+        );
+        // So does one with no clone address, and one whose failing check says
+        // nothing of why.
+        let mut no_clone = fake();
+        for (_, p) in &mut no_clone.pulls {
+            p.branch = format!("ankh-{}", p.number);
+        }
+        assert_eq!(
+            contract::check(&mut no_clone, &Writable),
+            Err("the repository has a clone address that holds its name".into())
+        );
+        host.runs[0].2[0].log = None;
+        assert_eq!(
+            contract::check(&mut host, &Writable),
+            Err("a failing check gives its log, or else its summary or web address".into())
         );
     }
 

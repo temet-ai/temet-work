@@ -28,6 +28,10 @@ reports its step done.
 | `temet-work status [--json]` | anyone; `--json` prints the state as data (below) | any |
 | `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes, review rounds and agents. The review rounds are every finished round in the order they finished: its number and whether it approved or blocked, and for a block each point with the author's reply to it, or "none on record", and whether the next round kept it open or resolved it, naming that round; a point no later round judged, or whose state an older log does not hold, says so. Each later line of a check, point to fix, point or reply is indented under it, and no control character is printed. An arbiter's brief holds the last of these rounds always, and as many of the earlier ones as fit in the room the rest of the brief leaves, with a line counting those it leaves out; a last round too long for the room is cut there, with a line saying so (see "What a brief holds"). `temet-work issue` still holds every check, point to fix, round, point and reply whole. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise). An issue that is merging, deploying, being verified or waiting to be reopened after a failed verify keeps the text of the last sync that listed it | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
+| `temet-work change ISSUE [PROJECT] [--by-commit]` | anyone: each open pull request of the issue whole, read from the code host without a checkout (see "Reading code and CI") | any |
+| `temet-work show PROJECT PATH [--at ISSUE\|COMMIT]` | anyone: a file of the project's repository, or a folder's entries, at the default branch's head, at the issue's pull request head, or at a commit | any |
+| `temet-work search PROJECT PATTERN [--at ISSUE\|COMMIT]` | anyone: each line of the repository's files at that point that matches PATTERN, as `path:line:text` | any |
+| `temet-work ci ISSUE` | anyone: each check of the issue's pull requests with its state, and the output of each failing one | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
 | `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...`, with `--reply TEXT` for each point of the block it answers | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time, and again in a repository where a person closed the pull request on record without merging, since a read in review or the merge then drops it; an issue that changes several repositories names each as `REPO=PULL`. The first ready after a block (from the review, or from an arbiter's fix ruling, where the replies answer the reviewer's last block) carries one `--reply` for each of the block's points, in their order: what the author did about it, or why not. A ready without exactly one reply for each point is refused, and the refusal lists the points and the form to use; any other ready takes no `--reply`. Each reply is kept on its point and shown with it by `temet-work issue` and `status --json`. A ready that starts a review round sets each of the plan's checks to running, since the author reports that every check holds; after a person's overturn has waived the review, the checks keep their state. A ready naming a pull request not on record, as after one is closed, ends that waiver and asks for the review again | working, or fixing |
 | `temet-work review ISSUE approve` | only the reviewer working on ISSUE. Every check of the plan is marked passed, and every point of the round before resolved; `--failed` and `--open` are refused | in review |
@@ -63,8 +67,9 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
   `review` is refused with the owning role named: those would skip the work an agent is
   there to do. To get a stuck agent moving, a person rules or changes settings with `set`
   and `unset`.
-- `status` (with or without `--json`), `issue`, `screen` and `settings` are open to
-  anyone. `set` and `unset` keep their own rule, in the table.
+- `status` (with or without `--json`), `issue`, `screen`, `change`, `show`, `search`,
+  `ci` and `settings` are open to anyone and change nothing. `set` and `unset` keep their
+  own rule, in the table.
 - `choose` is not a step: any agent working on the issue may record a choice on it. An
   agent working on another issue is refused with the issue it works on, and so is an id
   the daemon did not start. A person is refused too: a choice recorded as a person's would
@@ -215,9 +220,10 @@ like any other.
 
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
-`status`, `issue`, `screen` and `settings`; `act` adds `plan`, `ready`, `review`, `rule`,
+`status`, `issue`, `screen`, `settings`, `change`, `show`, `search` and `ci`, each
+answering with its command's text; `act` adds `plan`, `ready`, `review`, `rule`,
 `choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `move`, `file`, `investigated`,
-`set` and `unset`.
+`set` and `unset`. A tool above the server's level is not listed, and calling it is refused.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
@@ -238,6 +244,55 @@ cost as `low`, `medium` or `high`, and the point as `merge` with whether the iss
 it. It gives the point no time, since nothing in temet-work knows when a merge will
 happen. Only a ruling recorded before rulings kept them has neither, and `status` prints
 none for it.
+
+## Reading code and CI
+
+`change`, `show`, `search` and `ci` give anyone, a person, any agent or the window, the
+context of an issue without a checkout or a build: each is one request on the daemon's
+socket, and it changes nothing. As JSON, with an issue written
+`{"project":"watch","key":"12"}`:
+
+```json
+{"command":"change","issue":{"project":"watch","key":"12"},"by_commit":true}
+{"command":"show","project":"watch","path":"src/rota.rs","at":{"issue":{"project":"watch","key":"12"}}}
+{"command":"search","project":"watch","pattern":"fn rota","at":{"commit":"1a2b3c4d"}}
+{"command":"ci","issue":{"project":"watch","key":"12"}}
+```
+
+`project` on `change` and `at` on `show` and `search` may be left out. A refusal says why, and
+the command line exits 1 on it.
+
+- `change ISSUE [PROJECT]` prints each open pull request of the issue, in the order its
+  repositories merge, as the diff from where its branch left the default branch to its
+  head. Each starts with a line naming its project, repository, number, how many commits
+  it has, and the two commits. For an issue that changes several repositories, PROJECT
+  picks one. `--by-commit` prints each commit in order instead, with its id, its message
+  and its diff. An issue with no open pull request on record, or none in PROJECT, is
+  refused, and the refusal names the repositories that have one.
+- `show PROJECT PATH` prints the file at PATH as it is at the head of the repository's
+  default branch. `--at ISSUE` reads it at the head of that issue's pull request in the
+  project, and `--at COMMIT` at a commit, by its hexadecimal id or at least its first 4
+  characters. A folder, or an empty PATH for the top folder, lists its entries, one per
+  line, with a slash after each folder. A binary file is named with its size. A path,
+  commit, pull request or project the repository does not have is refused with the
+  reason.
+- `search PROJECT PATTERN` prints each line of the repository's files at the same points
+  that matches PATTERN, an extended regular expression as `grep -E` takes it, as
+  `path:line:text`. It prints at most 1,000 lines, then a line counting the rest. When
+  nothing matches it says so. The words after PROJECT make the pattern.
+- `ci ISSUE` prints each of the issue's pull requests with each of its checks and the
+  check's state: `passed`, `failed`, `running`, `waiting`, `skipped` or `cancelled`.
+  After them comes the output of each failing check's failed steps, whole: on GitHub what
+  `gh run view --job JOB --log-failed` gives, on GitLab the failed job's log. A failing
+  check the code host keeps no log of, such as one an outside app reports, prints its
+  summary and web address instead.
+
+`change`, `show` and `search` read the code-host family's one copy of the repository,
+kept beside the event log (`docs/privacy.md`), so readers of one repository share it and
+none makes a checkout. A read at a head fetches that head first, so it shows a commit
+pushed just before it. A read at a commit the copy already holds fetches nothing. These
+reads run on a thread of their own, so the daemon answers other requests while one
+fetches. `ci` asks the code host each time.
 
 ## Holding the daemon
 

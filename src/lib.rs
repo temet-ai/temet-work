@@ -8,7 +8,7 @@ pub mod mcp;
 pub mod peer;
 pub mod socket;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use temet_work_core::host::Host;
 use temet_work_core::{Journal, Part, World};
@@ -24,10 +24,15 @@ pub fn parts() -> Vec<Box<dyn Part>> {
 pub const BUILD: &str = env!("TEMET_WORK_BUILD");
 
 /// The parts, with `daemon_host`: this machine as other machines reach it over
-/// SSH; and `handoff`, the file a deploy that restarts the daemon records itself in.
+/// SSH; and `log`, the daemon's event log, beside which a deploy that restarts
+/// the daemon records itself (`deploy-handoff`) and the code-host family keeps
+/// its one copy of each repository (`copies`).
 #[cfg_attr(not(feature = "runner"), allow(unused_variables))]
-#[cfg_attr(not(feature = "deploy"), allow(unused_variables))]
-pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<Box<dyn Part>> {
+#[cfg_attr(
+    not(any(feature = "deploy", feature = "codehost")),
+    allow(unused_variables)
+)]
+pub fn parts_with(daemon_host: Option<String>, log: Option<&Path>) -> Vec<Box<dyn Part>> {
     #[allow(unused_mut)]
     let mut parts: Vec<Box<dyn Part>> = Vec::new();
     #[cfg(feature = "tracker")]
@@ -56,6 +61,9 @@ pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<
     {
         #[allow(unused_mut)]
         let mut family = temet_work_codehost::CodeHosts::default();
+        if let Some(log) = log {
+            family = family.copies(log.with_file_name("copies"));
+        }
         #[cfg(feature = "codehost-github")]
         family.add(Box::new(temet_work_codehost_github::GitHub::default()));
         #[cfg(feature = "codehost-gitlab")]
@@ -65,8 +73,8 @@ pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<
     #[cfg(feature = "deploy")]
     {
         let mut deploys = temet_work_deploy::Deploys::default();
-        if let Some(file) = handoff {
-            deploys = deploys.handoff(file, BUILD);
+        if let Some(log) = log {
+            deploys = deploys.handoff(log.with_file_name("deploy-handoff"), BUILD);
         }
         parts.push(Box::new(deploys));
     }
@@ -111,9 +119,11 @@ pub fn trust_folder(runtime: &str, folder: &Path) -> Result<(), String> {
 
 /// The daemon's host: the event log at `path` replayed onto a world that
 /// already holds what `parts` offer, so an older log's plain model is bound to
-/// the build's default runtime where the log set no global one.
+/// the build's default runtime where the log set no global one. Readers run in
+/// `readers`, beside the log.
 pub fn start(path: &Path, parts: Vec<Box<dyn Part>>) -> Result<Host, String> {
-    let (journal, world) = journal(path, temet_work_core::host::catalog(&parts))?;
+    let (journal, mut world) = journal(path, temet_work_core::host::catalog(&parts))?;
+    world.readers = Some(path.with_file_name("readers"));
     Ok(Host::new(world, parts, journal))
 }
 

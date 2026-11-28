@@ -1194,7 +1194,8 @@ impl Part for Runners {
                     (Some(_), Some(host)) => Some(host.as_str()),
                     (Some(m), None) => {
                         return Outcome::Failed(format!(
-                            "{} would run on the machine {m} (`machine` of its [[folder]]), but \
+                            "{} would run on the machine {m} (the `machine` of its work folder, or \
+                             for a reader its `machine` setting), but \
                              `daemon_host` is not set in config.toml: set it to this machine's \
                              name as {m} reaches it over SSH, so the agent can report back",
                             launch.agent

@@ -69,7 +69,7 @@ says what each crate holds today.
 | `temet-work-runtime` | core | The agent runtime contract: start a session with a brief and a model, tell working from idle. A fake and the contract tests. |
 | `temet-work-runtime-claude` | runtime only | Claude Code. |
 | `temet-work-runtime-codex` | runtime only | Codex. |
-| `temet-work-codehost` | core | The code-host contract: read a pull request and its CI, merge it, read the main pipeline after the merge. A fake and the contract tests. A project's code host can differ from its tracker. |
+| `temet-work-codehost` | core | The code-host contract: read a pull request and its CI with each failing check's log, merge it, read the main pipeline after the merge, and give a repository's clone address and the ref of a pull request's head. One shared bare copy of each repository, beside the event log, that a pull request's change, a file and a search are read from without a checkout. A fake and the contract tests. A project's code host can differ from its tracker. |
 | `temet-work-codehost-github` | codehost only | GitHub pull requests. |
 | `temet-work-codehost-gitlab` | codehost only | GitLab merge requests. |
 | `temet-work-deploy` | core | Runs a project's deploy and verify commands after a merge. |
@@ -92,9 +92,9 @@ What exists today:
 | `temet-work-tracker` | the contract (issues, milestones with due dates, the address of a project's issues, comment, close, reopen, create), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes to issues and to the open milestones and their due dates, keeps each open issue's text from the last sync in memory for `temet-work issue`, and closes verified issues. A close in the tracker is not passed to the loop while the issue merges, deploys or is verified, since its pull request may have closed it. After a failed verify the family reopens the issue in its tracker, at once and again at each sync until a sync lists it as open, and passes no close of it until then; an issue being finished or reopened keeps the text of the last sync that listed it. A later close is a person's and finishes the issue |
 | `temet-work-tracker-github` | issues and milestones through `gh`, issues filed with `gh issue create`, and closes and reopens with `gh issue close` and `gh issue reopen`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-tracker-jira` | issues, fix versions as milestones, comments, new issues, and transitions to Done and out of it through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
-| `temet-work-codehost` | the contract, a fake and contract tests. The family reads each pull request in review every 30 seconds, reports a conflict and each one a person closed, and otherwise reports CI finished once it has on all of an issue's pull requests, with the names of failing checks; a pull request in review that still shows no run at a later read, while its repository's `ci` is true, is listed as a problem until it has one; it merges them when the loop asks, in the plan's order, each after the previous repository's main pipeline passed, and sends a draft back to its author in place of merging it. A pull request a person closed without merging, found at a read in review or at the merge, is dropped from the issue and its CI no longer counts; the issue goes back to its author, or, already there, gets one more fix, and its running reviewer and arbiter are stopped, so the author reopens it if its branch still exists or opens another, and names that with `ready`. Each pull request's branch is reported the first time a read finds it and again when it changes, and an author's brief names it with how to check it out |
-| `temet-work-codehost-github` | pull requests through `gh`, with whether each is a draft and its branch, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
-| `temet-work-codehost-gitlab` | merge requests through `glab` and its sign-in, with each one's source branch, merged with `--squash`, `--rebase` or neither; a pipeline reads as failed once a job that may not fail has failed; passes the contract on recorded output and, read only, against GitLab (`--features live`) |
+| `temet-work-codehost` | the contract, a fake and contract tests. The family reads each pull request in review every 30 seconds, reports a conflict and each one a person closed, and otherwise reports CI finished once it has on all of an issue's pull requests, with the names of failing checks; a pull request in review that still shows no run at a later read, while its repository's `ci` is true, is listed as a problem until it has one; it merges them when the loop asks, in the plan's order, each after the previous repository's main pipeline passed, and sends a draft back to its author in place of merging it. A pull request a person closed without merging, found at a read in review or at the merge, is dropped from the issue and its CI no longer counts; the issue goes back to its author, or, already there, gets one more fix, and its running reviewer and arbiter are stopped, so the author reopens it if its branch still exists or opens another, and names that with `ready`. Each pull request's branch is reported the first time a read finds it and again when it changes, and an author's brief names it with how to check it out. It answers `change`, `show` and `search` from one bare copy of each repository (no working tree, no build folder), kept under `copies/` beside the event log and shared by every reader: the first read clones it from the address the adapter gives, a read at the default branch's head or a pull request's head (the ref the adapter names) fetches that head first, and a read at a commit the copy holds fetches nothing. Those reads run as work the daemon puts on a thread of its own, so the loop does not wait on a fetch. It answers `ci` from the adapter: each check's state and each failing one's log (`docs/commands.md`, "Reading code and CI") |
+| `temet-work-codehost-github` | pull requests through `gh`, with whether each is a draft and its branch, merged with `--squash`; each check from `gh pr checks` and each failing job's log from `gh run view --job JOB --log-failed`; clones from `https://HOST/REPO.git` and reads a pull request's head at `refs/pull/N/head`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
+| `temet-work-codehost-gitlab` | merge requests through `glab` and its sign-in, with each one's source branch, merged with `--squash`, `--rebase` or neither; a pipeline reads as failed once a job that may not fail has failed; each job of a merge request's pipeline, with each failed job's log; clones from `https://HOST/REPO.git` and reads a merge request's head at `refs/merge-requests/N/head`; passes the contract on recorded output and, read only, against GitLab (`--features live`) |
 | `temet-work-deploy` | runs the deploy command after a merge and the verify command after a deploy, each on its own thread, one at a time per project and `run_in` folder; a failed deploy is listed as a problem, a failed verify sends the issue back to ready and lists it as a problem until it is done; a handoff line naming a build other than the daemon's runs the deploy again, up to three times, then waits for `temet-work retry ISSUE` |
 | `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |
 | `temet-work-style` | the design system's tokens as Rust constants, written by `scripts/sync-tokens`; the ban list; tests that hold the tokens to the design system's rules. `docs/ui.md` maps the app's parts to the design system |
@@ -209,8 +209,11 @@ needs: its author or reviewer while it is in review, being fixed or merging, its
 is refining, and the investigator of a running investigation. An author holds its issue's work
 folders, one in each repository the issue changes. A merge or a close in the tracker takes them
 from the issue, and no author is placed in one while an agent that held it still runs, since that
-session may still change the folder. A reviewer, refiner, arbiter or investigator runs in a folder
-without holding it, so it keeps no folder from the next author.
+session may still change the folder. A refiner, reviewer, arbiter or investigator holds no folder.
+It runs in an empty folder of the daemon's for its project, `readers/PROJECT` beside the event log,
+which is made on the agent's machine before it starts. That folder is no checkout, and no author
+is given it. Such an agent never waits for a work folder. An author holds its issue's folders all
+through review, so a reviewer that waited for a free one would never start.
 
 A group has no coordinator agent: in the research fleet the standing seat waited 25 of its 28
 minutes, and in mike's larger runs such seats were where the token and turn costs came from
@@ -243,8 +246,9 @@ message about a paused issue until it is no longer paused. Agents at work finish
 turn, for the reason above, and an issue with a pull request merged is not paused: it
 merges, deploys and is verified, with the agents that takes.
 
-When a group's work queue runs short, the daemon starts one investigator for it, which holds
-no folder, reads the group's projects and files the next issues through `temet-work file`
+When a group's work queue runs short, the daemon starts one investigator for it. It holds no
+work folder and runs in the daemon's empty folder for the group's first repository. It reads
+the group's projects and files the next issues through `temet-work file`
 (`docs/configuration.md`). The daemon counts the queue, keeps to one investigator per group
 and waits `investigate_every` between investigations; the clock comes into the core as the
 time `Host::tick` takes, and each investigation's start and end times are on its events.
@@ -258,9 +262,11 @@ an effect leads to is handled before the next effect.
 
 Starting an agent shows the path. The loop decides to start a refiner on an issue. The
 runtime family asks the loop for the agent's id, folder and brief (`World::launch`),
-makes the program with its runtime, and asks for it to run (`Effect::Run`). For a folder
-on another machine the runtime also gives the program that trusts the folder there, and the
-runner family runs that on the machine first (`Runner::exec`). The runner family starts the
+makes the refiner's folder when it is on this machine, makes the program with its runtime,
+and asks for it to run (`Effect::Run`). For a folder on another machine the runtime also
+gives the program that trusts the folder there, which first makes the folder for an agent
+that holds no work folder, such as this refiner. The runner family runs that program on the
+machine first (`Runner::exec`). The runner family starts the
 agent's program in a terminal labelled with the agent, group, issue and role, and reports
 `AgentStarted`. From then on the runner family turns the terminal's updates into the
 agent's state. Neither family names the other.

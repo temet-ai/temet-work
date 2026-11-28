@@ -6,7 +6,7 @@
 //! test run, the real transport runs nothing.
 
 use serde_json::Value;
-use temet_work_codehost::{Checks, CodeHost, CodeHostError, Pull, PullState};
+use temet_work_codehost::{CheckRun, Checks, CodeHost, CodeHostError, Pull, PullState, RunState};
 
 /// Runs `gh` with arguments and returns what it printed.
 pub trait Transport: Send {
@@ -26,7 +26,12 @@ impl Transport for Cli {
             .args(args)
             .output()
             .map_err(|e| format!("cannot run gh: {e}"))?;
-        if out.status.success() {
+        // `gh pr checks` exits 8 while some check is failing or pending, yet
+        // prints every check on stdout; that output is the answer, not an error.
+        let checks_pending_or_failed = out.status.code() == Some(8)
+            && args.starts_with(&["pr", "checks"])
+            && !out.stdout.is_empty();
+        if out.status.success() || checks_pending_or_failed {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
         } else {
             Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
@@ -87,6 +92,16 @@ impl GitHub {
             }
         })
     }
+}
+
+/// The job number in the address of a GitHub Actions job,
+/// `https://HOST/OWNER/REPO/actions/runs/RUN/job/JOB`; none for any other.
+fn actions_job(link: &str) -> Option<&str> {
+    let (_, tail) = link.split_once("/actions/runs/")?;
+    let (run, job) = tail.split_once("/job/")?;
+    let job = job.split(['/', '?', '#']).next()?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(run) && digits(job)).then_some(job)
 }
 
 /// What a pull request's `statusCheckRollup` says. A failure is reported as soon
@@ -221,6 +236,65 @@ impl CodeHost for GitHub {
         Some(format!("https://{}/{repo}", self.host))
     }
 
+    fn clone_address(&self, repo: &str) -> Option<String> {
+        Some(format!("https://{}/{repo}.git", self.host))
+    }
+
+    fn pull_ref(&self, number: &str) -> String {
+        format!("refs/pull/{number}/head")
+    }
+
+    fn ci(&mut self, repo: &str, number: &str) -> Result<Vec<CheckRun>, CodeHostError> {
+        let out = match self.run(&[
+            "pr",
+            "checks",
+            number,
+            "-R",
+            repo,
+            "--json",
+            "name,state,bucket,link,description,workflow",
+        ]) {
+            Ok(out) => out,
+            // A pull request that has no checks is not a missing one.
+            Err(CodeHostError::Other(e)) if e.to_lowercase().contains("no checks reported") => {
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e),
+        };
+        let checks: Vec<Value> = serde_json::from_str(&out)
+            .map_err(|e| CodeHostError::Other(format!("gh pr checks: {e}")))?;
+        let mut runs = Vec::new();
+        for c in &checks {
+            let text = |k: &str| c.get(k).and_then(Value::as_str).filter(|t| !t.is_empty());
+            let state = match text("bucket") {
+                Some("pass") => RunState::Passed,
+                Some("fail") => RunState::Failed,
+                Some("skipping") => RunState::Skipped,
+                Some("cancel") => RunState::Cancelled,
+                _ => RunState::Running,
+            };
+            let link = text("link");
+            // Only a failing check that ran as an Actions job has a log to read.
+            // One an outside app reports has none, and says what it can instead.
+            // A log that cannot be read leaves the check without it, not the read
+            // of every check failed.
+            let log = match (state, link.and_then(actions_job)) {
+                (RunState::Failed, Some(job)) => self
+                    .run(&["run", "view", "--job", job, "-R", repo, "--log-failed"])
+                    .ok(),
+                _ => None,
+            };
+            runs.push(CheckRun {
+                name: text("name").unwrap_or("a check without a name").to_string(),
+                state,
+                log,
+                summary: text("description").unwrap_or_default().to_string(),
+                address: link.map(str::to_string),
+            });
+        }
+        Ok(runs)
+    }
+
     fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
         let out = self.run(&["pr", "view", number, "-R", repo, "--json", "mergeCommit"])?;
         let v: Value = serde_json::from_str(&out)
@@ -277,7 +351,40 @@ mod tests {
             ]) {
                 return Ok(include_str!("../tests/fixtures/radar-main-runs.json").into());
             }
+            if args.starts_with(&["pr", "checks", "46", "-R", "temet-ai/radar"]) {
+                return Ok(include_str!("../tests/fixtures/radar-pr-46-checks.json").into());
+            }
             Err("GraphQL: Could not resolve to a PullRequest".into())
+        }
+    }
+
+    /// Replays `gh` output recorded from temet-ai/ask-kit, pull request 20, on
+    /// 28 November 2026: two failing jobs, one whose log is recorded and one
+    /// whose log read fails.
+    struct AskKit;
+
+    impl Transport for AskKit {
+        fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            if args.starts_with(&["pr", "checks", "20", "-R", "temet-ai/ask-kit"]) {
+                return Ok(include_str!("../tests/fixtures/ask-kit-pr-20-checks.json").into());
+            }
+            if args
+                == [
+                    "run",
+                    "view",
+                    "--job",
+                    "137710259021",
+                    "-R",
+                    "temet-ai/ask-kit",
+                    "--log-failed",
+                ]
+            {
+                return Ok(include_str!(
+                    "../tests/fixtures/ask-kit-job-137710259021-log-failed.txt"
+                )
+                .into());
+            }
+            Err("failed to get run log: log not found".into())
         }
     }
 
@@ -478,6 +585,151 @@ mod tests {
             gh.merge("temet-ai/radar", "46", "fast-forward")
                 .is_err_and(|e| e.to_string().contains("squash, merge or rebase"))
         );
+    }
+
+    fn ask_kit_runs() -> Vec<CheckRun> {
+        GitHub::with(Box::new(AskKit))
+            .ci("temet-ai/ask-kit", "20")
+            .expect("recorded")
+    }
+
+    #[test]
+    fn the_recorded_checks_read_as_their_states() {
+        let runs = ask_kit_runs();
+        assert_eq!(runs.len(), 8);
+        let failed: Vec<&str> = runs
+            .iter()
+            .filter(|r| r.state == RunState::Failed)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(
+            failed,
+            ["test (macos-latest, 22.x)", "test (macos-latest, 24.x)"]
+        );
+        assert_eq!(
+            runs.iter().filter(|r| r.state == RunState::Passed).count(),
+            6
+        );
+        assert_eq!(
+            runs[4].address.as_deref(),
+            Some("https://github.com/temet-ai/ask-kit/actions/runs/45179774991/job/137710259021")
+        );
+        let radar = GitHub::with(Box::new(Recorded))
+            .ci("temet-ai/radar", "46")
+            .expect("recorded");
+        assert_eq!(radar.len(), 5);
+        assert!(
+            radar
+                .iter()
+                .all(|r| r.state == RunState::Passed && r.log.is_none())
+        );
+    }
+
+    #[test]
+    fn a_failing_job_carries_its_whole_recorded_log_and_a_passing_one_none() {
+        let runs = ask_kit_runs();
+        let log = include_str!("../tests/fixtures/ask-kit-job-137710259021-log-failed.txt");
+        assert_eq!(runs[4].log.as_deref(), Some(log));
+        assert!(log.contains("AssertionError"));
+        assert_eq!(runs.iter().filter(|r| r.log.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_read_keeps_the_check_with_its_address() {
+        let runs = ask_kit_runs();
+        assert_eq!(runs[5].state, RunState::Failed);
+        assert_eq!(runs[5].log, None);
+        assert!(
+            runs[5]
+                .address
+                .as_deref()
+                .is_some_and(|a| a.ends_with("/job/137710258908"))
+        );
+    }
+
+    /// Answers every call with `reply` and remembers what it was asked.
+    struct Fixed(
+        Result<String, String>,
+        std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    );
+
+    impl Transport for Fixed {
+        fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            self.1
+                .lock()
+                .expect("lock")
+                .push(args.iter().map(ToString::to_string).collect());
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn a_failing_status_an_outside_app_reports_has_no_log_but_its_summary_and_address() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let json = r#"[{"bucket":"fail","state":"FAILURE","name":"deploy/preview","workflow":"","description":"Preview build broke","link":"https://ci.example.com/builds/12"}]"#;
+        let runs = GitHub::with(Box::new(Fixed(Ok(json.into()), seen.clone())))
+            .ci("ankh-morpork/watch", "12")
+            .expect("reads");
+        assert_eq!(
+            runs,
+            vec![CheckRun {
+                name: "deploy/preview".into(),
+                state: RunState::Failed,
+                log: None,
+                summary: "Preview build broke".into(),
+                address: Some("https://ci.example.com/builds/12".into()),
+            }]
+        );
+        // It asked for the checks only, not for a log.
+        assert_eq!(seen.lock().expect("lock").len(), 1);
+    }
+
+    #[test]
+    fn every_bucket_has_a_state() {
+        let one = |bucket: &str| {
+            let json =
+                format!(r#"[{{"bucket":"{bucket}","name":"x","link":"","description":""}}]"#);
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            GitHub::with(Box::new(Fixed(Ok(json), seen)))
+                .ci("a/b", "1")
+                .expect("reads")[0]
+                .state
+        };
+        assert_eq!(one("pass"), RunState::Passed);
+        assert_eq!(one("fail"), RunState::Failed);
+        assert_eq!(one("pending"), RunState::Running);
+        assert_eq!(one("skipping"), RunState::Skipped);
+        assert_eq!(one("cancel"), RunState::Cancelled);
+        assert_eq!(one("something new"), RunState::Running);
+    }
+
+    #[test]
+    fn no_checks_is_an_empty_list_and_a_missing_pull_request_an_error() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let none = Fixed(
+            Err("no checks reported on the 'watch-12' branch".into()),
+            seen,
+        );
+        assert_eq!(GitHub::with(Box::new(none)).ci("a/b", "1"), Ok(Vec::new()));
+        assert!(
+            GitHub::with(Box::new(Recorded))
+                .ci("temet-ai/radar", "999999999")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn only_an_actions_job_address_names_a_job() {
+        let job = "https://github.com/temet-ai/radar/actions/runs/39757830147/job/119754241492";
+        assert_eq!(actions_job(job), Some("119754241492"));
+        assert_eq!(actions_job(&format!("{job}?pr=46")), Some("119754241492"));
+        for other in [
+            "https://ci.example.com/builds/12",
+            "https://github.com/temet-ai/radar/actions/runs/39757830147",
+            "",
+        ] {
+            assert_eq!(actions_job(other), None, "{other}");
+        }
     }
 
     #[test]
