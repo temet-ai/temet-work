@@ -141,7 +141,11 @@ picks the checkout, and the entry's own field still says where that checkout is
   switch the folder's branch or change any file in it. It reads a pull request's changes
   from its code host. To run checks it makes a separate checkout of the pull request (with
   none, of the commit it needs) outside the folder, and removes it afterwards. That way
-  each folder stays as its last author left it.
+  each folder stays as its last author left it. A folder's files may then be on another
+  issue's branch or an older one, so a refiner is told to read the code its issue touches
+  at the current head of the repository's default branch, in each of an area's repositories
+  the change may touch: it fetches, which moves no branch and changes no file an author
+  works on, then reads with `git show` or in a separate checkout outside the folder.
 - An author that already holds a folder keeps it when the setting changes. The new value
   applies the next time a folder is picked.
 - A name no folder uses is accepted, because a folder may be listed later. An empty value
