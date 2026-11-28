@@ -12,6 +12,7 @@ pub use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 
 /// How to call `temet-work`.
 pub const USAGE: &str = "\
+temet-work                                  a person at a desktop: opens the app's window
 temet-work status [--json]                  the state as text, or with --json as data
 temet-work issue ISSUE                      one issue in full, with its text from the last sync
 temet-work closed GROUP                     every issue a person closed where GROUP takes issues from
