@@ -29,11 +29,24 @@ use crate::text;
 use crate::world::World;
 
 /// The state, with what is wrong now. Done issues are counted, not listed.
+///
+/// A front end may be built from a newer or an older core than the daemon it
+/// asks, so a change to the view, or to a type it holds, keeps both reading:
+///
+/// - A field added from now on is an `Option` or carries `#[serde(default)]`,
+///   so a view from a daemon that does not send it still parses.
+/// - An enum of words has an `#[serde(other)]` `Unknown` variant, so a word a
+///   newer daemon adds does not cost the whole view.
+/// - A field whose form changes still reads the old form, as [`Review`] does.
+///
+/// The tests parse views older daemons sent (`tests/fixtures/view-*.json`).
+/// Those files are never written again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct View {
     /// The projects, by id.
     pub projects: Vec<Project>,
     /// The milestones of each project and area, by project or area and name.
+    #[serde(default)]
     pub milestones: Vec<Milestone>,
     /// The groups, by id.
     pub groups: Vec<Group>,
@@ -144,8 +157,10 @@ pub struct Issue {
     /// with a time has changed it since the daemon's log began holding them.
     pub updated_ms: Option<u64>,
     /// Its plan's checks, in the plan's order; none before it has a plan.
+    #[serde(default)]
     pub checks: Vec<Check>,
     /// Its review rounds, in the order they finished.
+    #[serde(default)]
     pub reviews: Vec<Review>,
 }
 
@@ -161,8 +176,10 @@ pub struct Check {
     pub state: Option<CheckState>,
 }
 
-/// One finished review round.
+/// One finished review round. It also reads the form of a daemon whose points
+/// were bare strings, with the author's replies in a list beside them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SentReview")]
 pub struct Review {
     /// The round, from 1.
     pub round: u8,
@@ -172,6 +189,54 @@ pub struct Review {
     pub verdict: VerdictWord,
     /// What a block asked to change, in its order; empty for an approval.
     pub points: Vec<ReviewPoint>,
+}
+
+/// A [`Review`] as any daemon has sent it: what is read before it becomes one.
+/// The view's rule for an added field holds here.
+#[derive(Deserialize)]
+struct SentReview {
+    round: u8,
+    reviewer: Option<AgentId>,
+    verdict: VerdictWord,
+    points: Vec<SentPoint>,
+    /// The replies to the points, in their order, from a daemon whose points
+    /// were bare strings; a point of today's form holds its own.
+    #[serde(default)]
+    replies: Vec<String>,
+}
+
+/// A review point in either form a daemon has sent.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SentPoint {
+    Text(String),
+    Point(ReviewPoint),
+}
+
+impl From<SentReview> for Review {
+    fn from(sent: SentReview) -> Self {
+        let mut replies = sent.replies.into_iter();
+        Self {
+            round: sent.round,
+            reviewer: sent.reviewer,
+            verdict: sent.verdict,
+            points: sent
+                .points
+                .into_iter()
+                .map(|point| {
+                    let reply = replies.next();
+                    match point {
+                        SentPoint::Text(text) => ReviewPoint {
+                            text,
+                            reply,
+                            state: None,
+                        },
+                        SentPoint::Point(point) => point,
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 /// One thing a block asked to change.
@@ -196,6 +261,9 @@ pub enum VerdictWord {
     Approve,
     /// The change needs work.
     Block,
+    /// A word this build lacks, from a newer daemon.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One repository's pull request for an issue.
@@ -235,6 +303,9 @@ pub enum StageWord {
     Verifying,
     /// [`Stage::Done`].
     Done,
+    /// A word this build lacks, from a newer daemon. It sorts after the others.
+    #[serde(other)]
+    Unknown,
 }
 
 impl From<Stage> for StageWord {
@@ -297,6 +368,9 @@ pub enum StateWord {
     Errored,
     /// [`AgentState::Ended`].
     Ended,
+    /// A word this build lacks, from a newer daemon. It sorts after the others.
+    #[serde(other)]
+    Unknown,
 }
 
 impl From<&AgentState> for StateWord {
@@ -1050,6 +1124,133 @@ mod tests {
             .iter()
             .find(|a| a.id.0 == id)
             .unwrap_or_else(|| panic!("{id} is not in the view"))
+    }
+
+    /// Views older daemons sent, each kept as it was then: from before
+    /// milestones, checks and reviews (#130), from before each review point held
+    /// its reply (#161), and from when the view took the rule for added fields
+    /// (#156).
+    const BEFORE_130: &str = include_str!("../tests/fixtures/view-before-130.json");
+    const BEFORE_161: &str = include_str!("../tests/fixtures/view-before-161.json");
+    const AT_156: &str = include_str!("../tests/fixtures/view-156.json");
+
+    /// `json` as the current view.
+    fn parsed(json: impl ToString) -> View {
+        serde_json::from_str(&json.to_string()).expect("a view")
+    }
+
+    #[test]
+    fn every_older_daemons_view_parses() {
+        for old in [BEFORE_130, BEFORE_161, AT_156] {
+            let view = parsed(old);
+            assert!(!view.issues.is_empty(), "{old}");
+        }
+    }
+
+    #[test]
+    fn a_view_from_before_130_parses() {
+        let view = parsed(BEFORE_130);
+        assert_eq!(view.milestones, []);
+        assert!(
+            view.issues
+                .iter()
+                .all(|i| i.checks.is_empty() && i.reviews.is_empty())
+        );
+    }
+
+    #[test]
+    fn a_view_from_before_161_keeps_each_points_text_and_reply() {
+        let view = parsed(BEFORE_161);
+        let points: Vec<_> = issue_of(&view, "watch#4")
+            .reviews
+            .iter()
+            .flat_map(|r| &r.points)
+            .map(|p| (p.text.as_str(), p.reply.as_deref(), p.state))
+            .collect();
+        assert_eq!(
+            points,
+            [
+                ("the bell is cracked", Some("recast the bell"), None),
+                (
+                    "the rope is frayed",
+                    Some("the rope stays: it was checked"),
+                    None
+                ),
+            ]
+        );
+    }
+
+    /// Takes `key` out of every object in `json` that has it, and counts them.
+    fn remove(json: &mut serde_json::Value, key: &str) -> usize {
+        match json {
+            serde_json::Value::Object(map) => {
+                usize::from(map.remove(key).is_some())
+                    + map.values_mut().map(|v| remove(v, key)).sum::<usize>()
+            }
+            serde_json::Value::Array(all) => all.iter_mut().map(|v| remove(v, key)).sum(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn a_view_without_one_of_130s_lists_parses_with_it_empty() {
+        let without = |view: &str, key: &str| {
+            let mut json = serde_json::from_str(view).expect("json");
+            assert!(remove(&mut json, key) > 0, "no {key}");
+            parsed(json)
+        };
+        // Only the view's own `milestones`: a group's has been sent since #119.
+        let mut json: serde_json::Value = serde_json::from_str(SNAPSHOT).expect("json");
+        json.as_object_mut()
+            .and_then(|view| view.remove("milestones"))
+            .expect("milestones");
+        assert_eq!(parsed(json).milestones, []);
+        let view = without(SNAPSHOT, "checks");
+        assert!(view.issues.iter().all(|i| i.checks.is_empty()));
+        let view = without(SNAPSHOT, "reviews");
+        assert!(view.issues.iter().all(|i| i.reviews.is_empty()));
+        // Only a daemon from before #161 sends `replies`.
+        let view = without(BEFORE_161, "replies");
+        let mut points = view
+            .issues
+            .iter()
+            .flat_map(|i| &i.reviews)
+            .flat_map(|r| &r.points)
+            .peekable();
+        assert!(points.peek().is_some());
+        assert!(points.all(|p| p.reply.is_none()));
+    }
+
+    #[test]
+    fn a_word_this_build_lacks_parses_as_unknown() {
+        fn word<T: serde::de::DeserializeOwned>() -> T {
+            serde_json::from_str(r#""polishing""#).expect("a word")
+        }
+        assert_eq!(word::<StageWord>(), StageWord::Unknown);
+        assert_eq!(word::<StateWord>(), StateWord::Unknown);
+        assert_eq!(word::<VerdictWord>(), VerdictWord::Unknown);
+        assert_eq!(word::<Cost>(), Cost::Unknown);
+        assert_eq!(word::<Point>(), Point::Unknown);
+        assert_eq!(word::<CheckState>(), CheckState::Unknown);
+        assert_eq!(word::<PointState>(), PointState::Unknown);
+    }
+
+    #[test]
+    fn a_view_with_an_unknown_stage_word_parses_with_unknown() {
+        let mut json: serde_json::Value = serde_json::from_str(SNAPSHOT).expect("json");
+        assert_eq!(json["issues"][0]["id"], "unseen#1");
+        json["issues"][0]["stage"] = "polishing".into();
+        let mut want = parsed(SNAPSHOT);
+        want.issues[0].stage = StageWord::Unknown;
+        assert_eq!(parsed(json), want);
+    }
+
+    #[test]
+    fn no_issue_is_past_a_point_this_build_lacks() {
+        let w = world();
+        let done = &w.issues[&IssueId::new("watch", "6")];
+        assert!(Point::Merge.passed(done));
+        assert!(!Point::Unknown.passed(done));
     }
 
     #[test]

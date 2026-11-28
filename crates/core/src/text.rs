@@ -435,6 +435,7 @@ fn round_blocks(issue: &Issue) -> Vec<String> {
                     let judged = match state {
                         PointState::Open => "kept open",
                         PointState::Resolved => "resolved",
+                        PointState::Unknown => "marked with a word this build lacks",
                     };
                     // A failed check or a conflict keeps the round's number.
                     let later = if next.round == r.round {

@@ -79,6 +79,9 @@ pub enum CheckState {
     Waiting,
     /// The reviewer found that it does not hold on the current change.
     Failed,
+    /// A word this build lacks, from a newer one.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Whether the next review round counts a review point as dealt with.
@@ -89,6 +92,9 @@ pub enum PointState {
     Open,
     /// The next round counts it as dealt with.
     Resolved,
+    /// A word this build lacks, from a newer one.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The refiner's plan for an issue.
@@ -616,6 +622,9 @@ pub enum Cost {
     Medium,
     /// What it led to cannot be taken back by the loop.
     High,
+    /// A word this build lacks, from a newer one.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The point after which overturning a decision costs more.
@@ -625,16 +634,21 @@ pub enum Point {
     /// Its issue's merge. Once the issue is deploying, verifying or done, the
     /// loop no longer acts on an overturn.
     Merge,
+    /// A word this build lacks, from a newer one.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Point {
-    /// Whether `issue` is past this point.
+    /// Whether `issue` is past this point. This build cannot place a point it
+    /// does not know, so no issue is past one.
     pub fn passed(self, issue: &Issue) -> bool {
         match self {
             Self::Merge => matches!(
                 issue.stage,
                 Stage::Deploying | Stage::Verifying | Stage::Done
             ),
+            Self::Unknown => false,
         }
     }
 }

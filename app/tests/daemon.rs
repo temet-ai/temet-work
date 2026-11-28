@@ -241,6 +241,23 @@ fn holds_the_view_the_socket_sends(cx: &mut TestAppContext) {
     assert_eq!(seen.rest, "", "the ask sent more than one line");
 }
 
+/// The view a daemon from before milestones, checks and reviews (#130) sends, as the core's
+/// tests keep it.
+const OLDER_VIEW: &str = include_str!("../../crates/core/tests/fixtures/view-before-130.json");
+
+#[gpui::test]
+fn holds_the_view_an_older_daemon_sends(cx: &mut TestAppContext) {
+    let sent: serde_json::Value = serde_json::from_str(OLDER_VIEW).expect("json");
+    assert_eq!(sent.get("milestones"), None, "not an older view");
+    let reply = serde_json::json!({"reply": "view", "view": sent});
+    let socket = Socket::serve(vec![Answer::Line(reply.to_string())]);
+    let daemon = start(cx, socket.path.clone());
+
+    answered(cx, &socket);
+    let want: View = serde_json::from_str(OLDER_VIEW).expect("a view");
+    assert_eq!(state(cx, &daemon), (Some(want), None, false));
+}
+
 #[gpui::test]
 fn no_socket(cx: &mut TestAppContext) {
     let folder = Folder::new();
