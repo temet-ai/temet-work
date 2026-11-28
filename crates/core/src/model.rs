@@ -399,6 +399,12 @@ pub struct Agent {
     pub machine: MachineId,
     /// The work folder it runs in, if any.
     pub folder: Option<FolderId>,
+    /// The work folders it held when it started: an author's are its issue's,
+    /// one in each repository the issue changes, the first first. A reader
+    /// holds none. No author is given one of them while this agent runs, even
+    /// once its issue has let them go, since it may still change them.
+    #[serde(default)]
+    pub held: Vec<FolderId>,
     /// What it is doing.
     pub state: AgentState,
     /// When it started: how many events the loop had applied by then. A later

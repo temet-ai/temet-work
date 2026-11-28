@@ -144,6 +144,19 @@ fn a_refining_issue_moved_out_finishes_its_plan_and_then_waits() {
     );
     assert_eq!(stage(&w, "1"), Stage::Ready);
     assert_eq!(holder(&w, "f1"), None);
+    // Its plan is in, so a refiner still running is asked again to stop, on a
+    // paused issue too.
+    assert_eq!(
+        w.missing().start,
+        [Effect::StopAgent {
+            agent: AgentId::new("refiner-1")
+        }]
+    );
+    w.apply(&Event::AgentChanged {
+        agent: AgentId::new("refiner-1"),
+        state: crate::model::AgentState::Ended,
+        lost: false,
+    });
     assert_eq!(w.missing(), Missing::default());
 }
 

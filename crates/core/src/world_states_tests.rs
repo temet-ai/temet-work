@@ -310,6 +310,12 @@ fn an_overturn_that_waives_the_review_mid_round_puts_the_running_checks_back_to_
     }
     assert_eq!(w.issues[&watch4()].stage, Stage::Deploying);
     assert_eq!(checks(&w), [Some(Waiting), Some(Waiting)]);
+    // The stop the merge asked for ends the author, so its folder is free.
+    w.apply(&Event::AgentChanged {
+        agent: AgentId::new("author-2"),
+        state: AgentState::Ended,
+        lost: false,
+    });
     // A failed verify sends it back to work, and the checks still wait.
     w.apply(&Event::Deployed { issue: watch4() });
     w.apply(&Event::Verified {

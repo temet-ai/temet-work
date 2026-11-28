@@ -339,7 +339,26 @@ impl Host {
             }
         }
         self.report_verify_failed();
+        self.drop_stops_of_ended();
         Ok(())
+    }
+
+    /// Drops the problem of each failed stop whose agent has ended, whatever
+    /// ended it: the runner's later try, or its terminal found gone or unknown.
+    /// The line otherwise goes only when the same stop is carried out, which
+    /// no one asks for once the agent has ended.
+    fn drop_stops_of_ended(&mut self) {
+        let agents = &self.world.agents;
+        // A key names the agent last; the description is checked whole.
+        let of_ended = |key: &str| {
+            let id = key.rsplit(' ').next()?;
+            let a = agents.get(&crate::ids::AgentId::new(id))?;
+            let stop = Effect::StopAgent {
+                agent: a.id.clone(),
+            };
+            Some(a.state == AgentState::Ended && stop.describe() == key)
+        };
+        self.problems.retain(|key, _| of_ended(key) != Some(true));
     }
 
     /// Asks each part what it has seen and handles the events it reports, then

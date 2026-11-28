@@ -79,7 +79,8 @@ Stage 2: an issue that changes several repositories.
   pull request in review that still shows no run at a later read, while its repository's
   `ci` is true, is listed as a problem until it has one.
 - Deploy and verify run once, after the last merge. The folders are released together,
-  then or when the issue is closed.
+  then or when the issue is closed. None goes to another issue's author until the issue's
+  author has ended, since it held every one of them.
 - Merged pull requests are recorded per repository, so a restart or a refused merge
   part-way never merges one twice. Nothing is reverted: the author hears what merged and
   what cannot, and fixes forward. To change a repository that already merged, the author

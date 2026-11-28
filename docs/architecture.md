@@ -84,7 +84,7 @@ What exists today:
 | Crate | State |
 |---|---|
 | `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, the state as text and, beside it, as view data (`view.rs`) that the `view` command answers with, the daemon's reply, and the rule for where its socket is. The host applies each event at the time it logs it with, so the world knows when each issue last changed, and puts in the world each round the web addresses the tracker and code-host families give |
-| `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, holds text for an agent until its turn ends, and types `continue` into an agent whose usage limit has reset. A terminal reported gone (its program ended by itself, or it was stopped or removed) or lost (its program was lost, as to a signal or a reboot) ends its agent in that poll, and the end records whether the program was lost. The daemon kills and removes the terminal, so nothing stays under the agent's labels, such as the shell herdr-core puts in place of a lost program; a stop that fails is tried again once a minute until it works or the runner says the terminal is gone or unknown, and a gone or lost terminal of an agent that has already ended, as after a restart that lost a stop, is stopped once |
+| `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, holds text for an agent until its turn ends, and types `continue` into an agent whose usage limit has reset. A terminal reported gone (its program ended by itself, or it was stopped or removed) or lost (its program was lost, as to a signal or a reboot) ends its agent in that poll, and the end records whether the program was lost. The daemon kills and removes the terminal, so nothing stays under the agent's labels, such as the shell herdr-core puts in place of a lost program. Any stop that fails is tried again a minute after the last try, until it works or the runner answers that the terminal is gone or unknown: a stop the loop asked for, the stop of an ended agent's terminal, and the stop after an agent's last reminder while the agent stays idle and its issue still waits on it. When the agent had not ended, the stop that works, or that answer, reports it ended. A gone or lost terminal of an agent that has already ended, as after a restart that lost a stop, is stopped once |
 | `temet-work-runner-herdr` | the herdr-core socket client; puts each agent's terminal on the herdr app's screens by starting it with `herdr.space`, `herdr.tab` and `herdr.name`, one space per group, one tab per issue and one for the group's investigator; labels every terminal with `program`, the first word of its argv. An agent whose program was lost has ended even when herdr-core has put a shell in its place, as it does in a terminal the herdr app keeps: a listed terminal reads as lost while it is live with a `reason` (the shell is coming), or once its argv no longer starts with its `program` label (the shell is there). A terminal started before that label reads as lost when it is an agent's and its argv is one word, since no agent is started as one word. herdr-core's `lost` event reads as lost too; a `finished` terminal and a `finished` or `removed` event read as gone. A terminal missing from the first list after the client subscribes again, which follows a lost connection after which herdr-core may have restarted, reads as lost with the labels it had, so its agent ends as lost, not gone; one missing from a newer list on the same connection (after `missed`) was removed, and reads as gone. A call that sent nothing, because the event subscription or the control connection could not be opened or the request could not be written, fails as unreached, so a stop that never reached herdr-core is told apart from one whose kill may have landed (`rm` timing out or refusing, the connection closing after the kill). A request whose line cannot be written on a connection kept from before, as after herdr-core restarted, is sent once more on a new connection, so a stop after a restart reaches the new core. A terminal's latest status, which the runner family reads before the stop after an agent's last reminder, comes from the updates herdr-core has sent that the family has not taken yet, and reading it leaves them for the next poll; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
 | `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |
 | `temet-work-tracker` | the contract (issues, milestones with due dates, the address of a project's issues, comment, close, reopen, create), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes to issues and to the open milestones and their due dates, keeps each open issue's text from the last sync in memory for `temet-work issue`, and closes verified issues. A close in the tracker is not passed to the loop while the issue merges, deploys or is verified, since its pull request may have closed it. After a failed verify the family reopens the issue in its tracker, at once and again at each sync until a sync lists it as open, and passes no close of it until then; an issue being finished or reopened keeps the text of the last sync that listed it. A later close is a person's and finishes the issue |
@@ -175,9 +175,40 @@ replaces it; that reviewer ends while the issue is being fixed, so it does not c
 `starts`.
 No second arbiter starts as long as one whose stop failed still runs. The daemon asks again each
 round to stop one that has ruled, since nothing reminds it, and starts a fresh one once it has
-ended. An approval by ruling is not replaced while the checks run. The author and reviewer stop once the issue's last pull request merges. A group has no
-coordinator agent: in the research fleet the standing seat waited 25 of its 28 minutes, and in
-mike's larger runs such seats were where the token and turn costs came from
+ended. An approval by ruling is not replaced while the checks run. The author and reviewer stop once the issue's last pull request merges.
+
+Any stop the loop asks for that fails, such as the author's and reviewer's after the merge, an
+agent's on an issue closed in its tracker or a refiner's once its plan is in, is tried again by the
+runner family a minute after the last try. It is tried until it works or the runner answers that
+the terminal is gone or unknown, and the agent is then reported ended. As at the stop after a last
+reminder, a loss reported once a refused try may have reached the runner is an ordinary end. The
+tries stop when the agent's issue waits on it again, as on a reviewer whose stop failed after a
+pull request was closed and that has since heard the next round: the loop has put it back to work.
+When the loop asks for the same stop before that minute is up, the answer is the last try's reason
+and nothing is tried. While the stop fails, Problems lists `stop AGENT`, with the reason the runner
+family gave the last time the loop asked for that stop. The loop asks again each round for an agent
+whose step is over for good (below), so for such an agent the reason is the latest try's. For any
+other, such as a reviewer stopped for a closed pull request while its issue is being fixed, it
+stays the reason of the first try while the runner family keeps trying once a minute. The line goes
+once the agent has ended, whatever ended it.
+
+A replay at start drops effects, so a stop that failed or was lost to a restart is asked for again:
+each round the daemon asks to stop every running agent whose step is over for good. That is any
+agent on an issue that is done, deploying or verifying, or back to new or ready after a reopen in
+the tracker or a failed verify; any but the refiner on an issue being refined; a refiner whose
+issue's plan is in; an author whose issue holds other folders than the ones it held, as after a
+failed verify while that author's stop kept failing; and an investigator whose investigation has
+ended. It asks on a paused issue too, since a stop starts no work. Nothing waits on such an agent:
+it is not reminded, and its end does not count against `starts`. It asks for none an issue still
+needs: its author or reviewer while it is in review, being fixed or merging, its refiner while it
+is refining, and the investigator of a running investigation. An author holds its issue's work
+folders, one in each repository the issue changes. A merge or a close in the tracker takes them
+from the issue, and no author is placed in one while an agent that held it still runs, since that
+session may still change the folder. A reviewer, refiner, arbiter or investigator runs in a folder
+without holding it, so it keeps no folder from the next author.
+
+A group has no coordinator agent: in the research fleet the standing seat waited 25 of its 28
+minutes, and in mike's larger runs such seats were where the token and turn costs came from
 (`docs/findings/fleet-run.md`, `docs/findings/mike-fleets.md`).
 
 A group takes for refining, and starts authors on, only issues its milestones, projects and

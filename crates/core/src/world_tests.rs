@@ -1971,7 +1971,7 @@ fn the_newest_running_agent_is_the_one_that_hears() {
 }
 
 #[test]
-fn closing_an_issue_mid_work_stops_its_agents_before_freeing_its_folder() {
+fn closing_an_issue_mid_work_stops_its_agents_and_frees_its_folder_once_they_end() {
     let mut w = working_on_one();
     w.apply(&started("author-1", Role::Author, "1"));
     w.apply(&sync("2", "m1", 2, &[]));
@@ -1997,9 +1997,11 @@ fn closing_an_issue_mid_work_stops_its_agents_before_freeing_its_folder() {
             }
         ]
     );
+    assert_eq!(effects.len(), 2, "{effects:?}");
+    assert_eq!(stage(&w, "2"), Stage::Ready, "author-1 may still change f1");
     assert_eq!(
-        effects[2],
-        author("2", "f1"),
+        w.apply(&ended("author-1")),
+        [author("2", "f1")],
         "then the next issue takes the folder"
     );
 }
@@ -2638,15 +2640,28 @@ fn arbiters_stopped_by_a_send_back_do_not_count_toward_the_starts_limit() {
 #[test]
 fn a_lost_merge_deploy_or_verify_is_asked_for_again() {
     let mut w = in_review();
-    for (s, want) in [
-        (Stage::Merging, Effect::Merge { issue: issue("1") }),
-        (Stage::Deploying, Effect::Deploy { issue: issue("1") }),
-        (Stage::Verifying, Effect::Verify { issue: issue("1") }),
+    // Past the merge, the author and reviewer still running are asked to stop
+    // first.
+    let stops = [stop("author-1"), stop("reviewer-1")];
+    for (s, want, stops) in [
+        (Stage::Merging, Effect::Merge { issue: issue("1") }, &[][..]),
+        (
+            Stage::Deploying,
+            Effect::Deploy { issue: issue("1") },
+            &stops,
+        ),
+        (
+            Stage::Verifying,
+            Effect::Verify { issue: issue("1") },
+            &stops,
+        ),
     ] {
         if let Some(i) = w.issues.get_mut(&issue("1")) {
             i.stage = s;
         }
-        assert_eq!(w.missing().start, vec![want]);
+        let mut all = stops.to_vec();
+        all.push(want);
+        assert_eq!(w.missing().start, all);
     }
 }
 
