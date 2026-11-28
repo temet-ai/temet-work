@@ -230,9 +230,10 @@ function rust(data, from) {
   out.push("//! the script again.");
   out.push("//!");
   out.push("//! A theme is one [`Tokens`] value with a field per token, named after it: `--tm-edge-quiet` is");
-  out.push("//! `tm_edge_quiet`. Blueprint's ramp names hold other hues in the temet theme: blue holds magenta");
-  out.push("//! (the accent), green holds blue (success) and orange holds yellow (warning). Each value is the");
-  out.push("//! theme's default; the user's settings win over it, for the tokens in [`SETTINGS`].");
+  out.push("//! `tm_edge_quiet`. Blueprint's ramp names hold other hues in the temet theme: blue holds the");
+  out.push("//! accent (`--tm-accent-1` to `-6`), green holds blue (success) and orange holds yellow (warning).");
+  out.push("//! Each value is the theme's default; the user's settings win over it, for the tokens in");
+  out.push("//! [`SETTINGS`].");
   out.push("//!");
   out.push("//! A theme's `looks` are its parts as the design system's stories draw them, measured per");
   out.push("//! component, variant and state. A variant is named by the classes of the element and of its");
@@ -334,7 +335,14 @@ function staticFonts(data) {
 /** Copies the static faces, their licences and source notes into app/assets/fonts/. */
 function copyFonts(ui, data) {
   const dist = path.join(ui, "dist", "fonts");
+  // NOTICE is temet-work's own account of the faces, not the design system's: keep it.
+  const notice = path.join(FONTS_OUT, "NOTICE");
+  const kept = fs.existsSync(notice) ? fs.readFileSync(notice) : null;
   fs.rmSync(FONTS_OUT, { recursive: true, force: true });
+  if (kept) {
+    fs.mkdirSync(FONTS_OUT, { recursive: true });
+    fs.writeFileSync(notice, kept);
+  }
   const dirs = new Set();
   for (const f of staticFonts(data)) {
     for (const p of [f.file, f.licence]) {

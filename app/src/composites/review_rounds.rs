@@ -48,7 +48,7 @@ impl RenderOnce for ReviewRounds {
             .is_empty()
             .then(|| ListRow::new("Not reviewed yet"));
         let rounds = self.rounds.into_iter().map(|r| {
-            let head = ListRow::new(format!("Round {}", r.round))
+            let head = ListRow::new(SharedString::from(format!("Round {}", r.round)))
                 .compact(true)
                 .strong(true)
                 .class_name(Class::RoundHead)

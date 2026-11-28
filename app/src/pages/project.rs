@@ -621,6 +621,7 @@ impl Render for Project {
         if let Some((milestone, issue)) = found {
             let detail = view.details.get(&issue.key).cloned().unwrap_or_default();
             let pane = IssuePane::new(issue.key.clone(), issue.title.clone(), issue.stage)
+                .round(Some(detail.round))
                 .facts(issue_facts(milestone, issue, Some(&detail)))
                 .plan(detail.plan)
                 .pull(detail.pull)

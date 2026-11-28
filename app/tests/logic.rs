@@ -6,8 +6,9 @@ use std::collections::HashSet;
 use gpui::{SharedString, px};
 use temet_work_app::assets::FILES;
 use temet_work_app::components::icon::{IconName, IconSize};
-use temet_work_app::components::stage_tag::Stage;
+use temet_work_app::components::stage_tag::{Stage, StageTag};
 use temet_work_app::components::status_tag::Status;
+use temet_work_app::composites::check_list::{PlanCheck, count_line};
 use temet_work_app::composites::issue_pane::{IssueTab, tabs_shown};
 use temet_work_app::composites::issue_table::{GroupBy, agent_fits, colgroup, count, grouped};
 use temet_work_app::composites::milestone_panel::{progress, subtitle};
@@ -58,15 +59,11 @@ fn the_sample_has_every_state_the_screen_must_draw() {
 }
 
 #[test]
-fn each_milestone_counts_its_issues_and_the_deployed_ones_as_done() {
+fn each_milestone_counts_its_issues_and_the_done_ones_as_done() {
     for m in sample::project_view().milestones {
         assert_eq!(m.issues.len(), m.total, "{}", m.name);
-        let deployed = m
-            .issues
-            .iter()
-            .filter(|i| i.stage == Stage::Deployed)
-            .count();
-        assert_eq!(m.done, deployed, "{}", m.name);
+        let done = m.issues.iter().filter(|i| i.stage == Stage::Done).count();
+        assert_eq!(m.done, done, "{}", m.name);
     }
 }
 
@@ -417,4 +414,51 @@ fn each_machine_has_a_slot_in_use_for_each_agent_on_it_and_one_is_full() {
     }
     assert!(view.machines.iter().any(|m| m.value >= 1.));
     assert_eq!(view.limits.len(), 3);
+}
+
+#[test]
+fn a_tag_shows_the_round_only_on_the_stages_that_count_rounds() {
+    let text = |stage, round| StageTag::new(stage).round(round).text().to_string();
+    assert_eq!(text(Stage::Fixing, Some(1)), "fixing, round 1");
+    assert_eq!(text(Stage::InReview, Some(2)), "in review, round 2");
+    assert_eq!(text(Stage::WithArbiter, Some(3)), "with arbiter, round 3");
+    assert_eq!(
+        text(Stage::InReview, Some(0)),
+        "in review",
+        "before the first round"
+    );
+    assert_eq!(text(Stage::InReview, None), "in review");
+    assert_eq!(
+        text(Stage::Working, Some(2)),
+        "working",
+        "working counts no rounds"
+    );
+}
+
+#[test]
+fn the_count_line_counts_the_checks_by_status_in_order() {
+    let check = |status| PlanCheck {
+        done_when: "The clacks tower answers".into(),
+        proven_by: "cargo nextest run -p clacks".into(),
+        status,
+        status_text: None,
+    };
+    assert_eq!(count_line(&[]), None);
+    assert_eq!(
+        count_line(&[check(Some(Status::Failed))]).as_deref(),
+        Some("1 check: 1 failed")
+    );
+    assert_eq!(
+        count_line(&[
+            check(Some(Status::Passed)),
+            check(Some(Status::Running)),
+            check(Some(Status::Passed)),
+        ])
+        .as_deref(),
+        Some("3 checks: 2 passed, 1 running")
+    );
+    assert_eq!(
+        count_line(&[check(None), check(None)]).as_deref(),
+        Some("2 checks: 2 not run yet")
+    );
 }

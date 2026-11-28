@@ -1,7 +1,8 @@
 //! StageTag (`temet-stagetag`): an issue's stage as its icon and name, in the default colour. A
-//! stage has no status colour; a status uses StatusTag.
+//! stage has no status colour; a status uses StatusTag. The eleven stages and their order are the
+//! daemon's.
 
-use gpui::{App, IntoElement, ParentElement, RenderOnce, Styled, Window, div};
+use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
 
 use super::icon::IconName;
 use super::tag::draw;
@@ -11,40 +12,58 @@ use crate::theme::{
     look::{self, State},
 };
 
-/// The stages an issue goes through, in order, as the design system names them.
+/// The stages an issue goes through, in the daemon's order, as the design system names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stage {
+    New,
     Refining,
+    Ready,
     Working,
     InReview,
+    Fixing,
     WithArbiter,
-    Checks,
     Merging,
-    Deployed,
+    Deploying,
+    Verifying,
+    Done,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 7] = [
+    pub const ALL: [Stage; 11] = [
+        Self::New,
         Self::Refining,
+        Self::Ready,
         Self::Working,
         Self::InReview,
+        Self::Fixing,
         Self::WithArbiter,
-        Self::Checks,
         Self::Merging,
-        Self::Deployed,
+        Self::Deploying,
+        Self::Verifying,
+        Self::Done,
     ];
 
     /// The stage's name, such as `in review`; the tag shows it as it is.
     pub fn name(self) -> &'static str {
         match self {
+            Self::New => "new",
             Self::Refining => "refining",
+            Self::Ready => "ready",
             Self::Working => "working",
             Self::InReview => "in review",
+            Self::Fixing => "fixing",
             Self::WithArbiter => "with arbiter",
-            Self::Checks => "checks",
             Self::Merging => "merging",
-            Self::Deployed => "deployed",
+            Self::Deploying => "deploying",
+            Self::Verifying => "verifying",
+            Self::Done => "done",
         }
+    }
+
+    /// Whether the stage counts review rounds, so the tag shows the round with it: in review,
+    /// fixing and with arbiter (the design system's `ROUND_STAGES`).
+    pub fn has_round(self) -> bool {
+        matches!(self, Self::InReview | Self::Fixing | Self::WithArbiter)
     }
 
     /// The stage's icon, from the design system's map.
@@ -54,10 +73,12 @@ impl Stage {
     }
 }
 
-/// A minimal tag with the stage's icon and name.
+/// A minimal tag with the stage's icon and name, and the review round after it on the stages
+/// that have one.
 #[derive(IntoElement)]
 pub struct StageTag {
     stage: Stage,
+    round: Option<usize>,
     class_name: Option<Class>,
 }
 
@@ -65,23 +86,40 @@ impl StageTag {
     pub fn new(stage: Stage) -> Self {
         Self {
             stage,
+            round: None,
             class_name: None,
         }
     }
-}
 
-impl StageTag {
+    /// The review round, shown after the stage as the daemon writes it ("in review, round 2").
+    /// Only in review, fixing and with arbiter show it, and only from round 1. Leave it out in a
+    /// table column, where the tag must stay short.
+    pub fn round(mut self, round: Option<usize>) -> Self {
+        self.round = round;
+        self
+    }
+
     /// A class of the design system's own, such as `IssuesStatus` in a group row.
     pub fn class_name(mut self, class: Class) -> Self {
         self.class_name = Some(class);
         self
+    }
+
+    /// The tag's words: the stage, with its round where it has one.
+    pub fn text(&self) -> SharedString {
+        match self.round {
+            Some(round) if round > 0 && self.stage.has_round() => {
+                format!("{}, round {round}", self.stage.name()).into()
+            }
+            _ => self.stage.name().into(),
+        }
     }
 }
 
 impl RenderOnce for StageTag {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let look = look::get(cx, "StageTag", "minimal", State::Rest);
-        let mut tag = draw(&look, Some(self.stage.icon()), self.stage.name().into(), cx);
+        let mut tag = draw(&look, Some(self.stage.icon()), self.text(), cx);
         if let Some(class) = self.class_name {
             tag = apply(tag, class, cx);
         }

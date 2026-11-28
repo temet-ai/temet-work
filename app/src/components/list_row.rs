@@ -2,8 +2,7 @@
 //! what the row is, `meta` adds muted detail, `end` holds its status or its one action.
 
 use gpui::{
-    AnyElement, App, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled, Window,
-    div, px,
+    AnyElement, App, IntoElement, ParentElement, Pixels, RenderOnce, Styled, Window, div, px,
 };
 
 use super::{Class, apply, baseline, box_of, to_baseline, type_of};
@@ -12,7 +11,7 @@ use crate::theme::space;
 
 #[derive(IntoElement)]
 pub struct ListRow {
-    title: SharedString,
+    title: AnyElement,
     strong: bool,
     meta: Option<AnyElement>,
     meta_first: bool,
@@ -24,9 +23,10 @@ pub struct ListRow {
 }
 
 impl ListRow {
-    pub fn new(title: impl Into<SharedString>) -> Self {
+    /// A row. The title is text, or an element such as a check's clamped done-when.
+    pub fn new(title: impl IntoElement) -> Self {
         Self {
-            title: title.into(),
+            title: title.into_any_element(),
             strong: false,
             meta: None,
             meta_first: false,
