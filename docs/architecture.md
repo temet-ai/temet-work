@@ -239,6 +239,18 @@ message about a paused issue until it is no longer paused. Agents at work finish
 turn, for the reason above, and an issue with a pull request merged is not paused: it
 merges, deploys and is verified, with the agents that takes.
 
+A person can also stop one agent (`temet-work stop AGENT`) and let its issue go on
+(`temet-work start ISSUE`; `docs/commands.md`, "Stopping one agent"). Each is an event, so a
+restart keeps it. The stop asks the runner family to stop the agent's terminal, which it
+tries again a minute after a try that fails, as it does the loop's own stops; the loop asks
+again each round until the agent ends, after the start too. Nothing waits on the agent
+(`World::waiting_on`), so its end uses no start, and nothing is typed into it. Until a person
+starts its issue, `World::apply` drops any effect that would start an agent on the issue, and
+`World::missing` and `World::place` start none, whatever the role; an effect that would tell
+a stopped agent something is dropped too. The issue's other agents carry on, and its merge,
+deploy and verify go ahead, for the reason above. A stopped investigator's investigation ends
+with its session, as any does.
+
 When a group's work queue runs short, the daemon starts one investigator for it, which holds
 no folder, reads the group's projects and files the next issues through `temet-work file`
 (`docs/configuration.md`). The daemon counts the queue, keeps to one investigator per group

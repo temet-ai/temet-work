@@ -40,6 +40,8 @@ reports its step done.
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
 | `temet-work hold` | a person only: until a person resumes the daemon, no issue is taken, no investigation starts, and an issue with nothing merged gets no new agent, fix, review round or merge; agents at work finish their turn (see "Holding the daemon") | no issue: while the daemon is not held |
 | `temet-work resume` | a person only: work starts again | no issue: while the daemon is held |
+| `temet-work stop AGENT` | a person only: the agent's terminal is stopped, and no agent starts on its issue until a person runs `temet-work start ISSUE` (see "Stopping one agent") | no issue: while the agent runs, if this daemon started it and no person has stopped it |
+| `temet-work start ISSUE` | a person only: agents start on the issue again; the agent a person stopped stays stopped | any, while a person has stopped an agent of it and not started it since |
 | `temet-work file PROJECT TITLE BODY [--milestone M]` | only the investigator of a group whose investigation is running, for a project or area its group takes issues from; `BODY` `-` reads it from standard input. The reply names the new issue and how a "Depends on" line names it | no issue: while the group's investigation runs. The milestone is the last in the group's list when none is named; one the group does not take is refused, and a group with no milestones files with none. A title an open issue of that project already has is refused, and so is the title of an issue a person closed in that project (one the loop did not close after verifying it, with none of its pull requests merged); the reply names the issue |
 | `temet-work investigated GROUP` | only the investigator of GROUP whose investigation is running: the investigation ends and the investigator's session is stopped | no issue: while GROUP's investigation runs |
 | `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`, `run_in` and `investigate`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role. `--role` is for the settings that take a role (`docs/settings.md`, Roles) | any for a person; refining for a refiner |
@@ -70,8 +72,9 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
 - `file` and `investigated` belong to a group's running investigator, which works for its
   group and on no issue. A person, another agent, or an investigator whose investigation
   has ended is refused with the reason; a person files issues in the tracker itself.
-- `hold` and `resume` are a person's alone, as `retry`, `overturn` and `proposal` are. An
-  agent is refused: it finishes its step.
+- `hold`, `resume`, `stop` and `start` are a person's alone, as `retry`, `overturn` and
+  `proposal` are. An agent is refused, even with its own secret: it finishes its step, and
+  a person stops agents from a shell outside any agent's terminal.
 
 ## How the daemon knows who sent a command
 
@@ -103,8 +106,8 @@ itself is in no log, reply, status or issue text.
   `settings` still answer it. An agent's own `temet-work` stays alive and readable while
   it waits for the reply.
 - A command that names no agent is a person's. It may read from anywhere. A command that
-  changes something (`rule`, `overturn`, `retry`, `proposal`, `hold`, `resume`, `set` and
-  `unset`) is
+  changes something (`rule`, `overturn`, `retry`, `proposal`, `hold`, `resume`, `stop`,
+  `start`, `set` and `unset`) is
   refused when it carries an agent's secret; when, on Linux, the sending process or one of
   its parents holds a secret this daemon issued, which still holds after the agent unsets
   both variables with `env -u`; when the sending process cannot be read; or when it came
@@ -207,8 +210,8 @@ like any other.
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
 `status`, `issue`, `screen` and `settings`; `act` adds `plan`, `ready`, `review`, `rule`,
-`choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `file`, `investigated`, `set`
-and `unset`.
+`choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `stop`, `start`, `file`,
+`investigated`, `set` and `unset`.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
@@ -258,6 +261,48 @@ lifts it; `status --json` gives `held`, true or false, and `held_since`, the tim
 or `null`. A `hold` while the daemon is held, and a `resume` while it is not, are refused
 with the reason. On `resume` the loop takes issues and places authors at once, and the
 next round starts what each issue's stage needs.
+
+## Stopping one agent
+
+`temet-work stop AGENT` stops one agent, as `status` names it (`author-3`). The daemon
+stops and removes the agent's terminal at once. A stop that fails, as when the terminal
+service cannot be reached, is tried again a minute after the last try, and Problems lists
+`stop AGENT` with the reason until it works; a stop answered with the terminal gone or
+unknown ends the agent. The reply says the terminal is being stopped and what the stop holds
+back, and names the first try's failure when there was one.
+
+From then on:
+
+- Nothing waits on the agent: it is not reminded, not stopped for sitting idle, and gets no
+  fix, review round or `continue`. A message queued for it is dropped. Its end does not
+  count toward `starts`, since it did not give up its step. A command it still sends while
+  its stop keeps failing is refused, apart from `status`, `issue`, `screen` and `settings`.
+- No agent starts on its issue, whatever the role: no fresh refiner, author, reviewer or
+  arbiter, and no author is placed on it if it becomes ready again, as after a failed
+  verify. The issue keeps its stage, work folders, plan and review rounds.
+- The issue's other agents carry on. A reviewer still running gives its verdict, and an
+  author still running hears its fixes and sends `ready`. The step after that waits when it
+  needs an agent that is not running. The merge, deploy and verify still run, since stopping
+  between repositories would leave main branches that do not match.
+
+`temet-work start ISSUE` lets agents start on the issue again: the next round starts what
+its stage needs, such as a fresh author in the issue's work folders. The agent a person
+stopped stays stopped. If its stop is still failing, the daemon keeps asking for it each
+round, and the fresh agent of its role starts once it has ended. A `start` on an
+issue no person stopped is refused with the reason, and so is a `stop` of an agent this
+daemon did not start, of one whose session has ended, and of one a person already stopped.
+
+Stopping an investigator, which works on no issue, ends its investigation as the end of its
+session does, and the group's next investigation waits `investigate_every`. There is nothing
+to start again.
+
+Both are events in the log, so a restart keeps them. `status` shows `stopped by a person` and
+when on the agent's line, whatever state it is in, and the issue's line says it is stopped by
+a person, names the agent and since when, and that `temet-work start ISSUE` lets it go on.
+`temet-work issue ISSUE` says the same under `Stopped:`. `status --json` gives each agent
+`stopped_by_person`, true or false, and `stopped_at`, the time or `null`, and each issue
+`stopped`, the first agent a person stopped on it since it last started, or `null`, and
+`stopped_since`. A view from a daemon older than this reads as nothing stopped.
 
 ## What a brief holds
 
