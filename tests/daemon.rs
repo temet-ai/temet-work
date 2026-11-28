@@ -3760,7 +3760,7 @@ fn a_persons_refine_writes_the_title_to_the_tracker_first_and_status_and_the_vie
     use temet_work::socket::{Reply, answer};
 
     let (mut host, starts, kept, titled) = titled();
-    let mut ask = |host: &mut Host, by: Option<&str>, command| {
+    let ask = |host: &mut Host, by: Option<&str>, command| {
         answer(host, 1, &from(&starts, by, command), &Peer::Unchecked).expect("answer")
     };
     let reply = ask(

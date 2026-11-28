@@ -3245,7 +3245,7 @@ mod tests {
             let task = lamp_task(role, &lamp_held_to(&persons, stage));
             assert!(task.len() <= fit::LIMIT, "{role:?}: {} bytes", task.len());
             assert!(
-                task.contains(&format!("- person's check 1: xxx")) && task.contains(&pointer(31)),
+                task.contains("- person's check 1: xxx") && task.contains(&pointer(31)),
                 "{role:?}"
             );
             // Those that do not fit are counted on a line naming temet-work issue.
