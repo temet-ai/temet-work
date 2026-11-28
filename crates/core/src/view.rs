@@ -173,6 +173,10 @@ pub struct Issue {
     /// Its review rounds, in the order they finished.
     #[serde(default)]
     pub reviews: Vec<Review>,
+    /// The agents a person may assign to it now, by the rule `assign` checks
+    /// ([`World::assignment`]); empty from a daemon that does not send it.
+    #[serde(default)]
+    pub assignable: Vec<AgentId>,
 }
 
 /// One of a plan's checks.
@@ -363,6 +367,13 @@ pub struct Agent {
     /// The model it was started with; none when its settings named none, or for
     /// an agent from an older log.
     pub model: Option<String>,
+    /// Whether a person put it on its issue (`temet-work assign`).
+    #[serde(default)]
+    pub assigned: bool,
+    /// Whether a person took it off `issue` (`temet-work unassign`) and it has
+    /// not ended yet: it no longer works on the issue and is being stopped.
+    #[serde(default)]
+    pub unassigned: bool,
 }
 
 /// What an agent is doing, as one word.
@@ -607,6 +618,7 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
             .map(|a| a.id.clone())
             .collect(),
         updated_ms: world.updated.at(&i.id),
+        assignable: world.assignable(&i.id),
         checks: i
             .plan
             .iter()
@@ -656,6 +668,8 @@ fn agent(world: &World, a: &model::Agent) -> Agent {
         started: a.started,
         runtime: a.runtime.clone(),
         model: a.model.clone(),
+        assigned: a.assigned(),
+        unassigned: a.unassigned && a.state != AgentState::Ended,
     }
 }
 

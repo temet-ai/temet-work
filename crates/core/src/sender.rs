@@ -215,6 +215,8 @@ impl Command {
             Self::Investigated { .. } => "investigated",
             Self::Hold => "hold",
             Self::Resume => "resume",
+            Self::Assign { .. } => "assign",
+            Self::Unassign { .. } => "unassign",
         }
     }
 

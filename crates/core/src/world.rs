@@ -545,6 +545,9 @@ impl World {
                         lost_waited_on: false,
                         runtime: runtime.clone(),
                         model: model.clone(),
+                        moved_from: None,
+                        briefed: false,
+                        unassigned: false,
                     },
                 );
                 // A new agent hears what its stage needs in its brief.
@@ -1076,6 +1079,17 @@ impl World {
                     out.extend(self.stop_agent(&agent));
                 }
             }
+            Event::Assigned {
+                issue,
+                agent,
+                from,
+            } => self.assign(issue, agent, from, &mut out),
+            Event::Unassigned { issue, agent } => {
+                if self.agents.get(agent).is_some_and(|a| a.works_on(issue)) {
+                    self.unassign(agent, &mut out);
+                }
+            }
+            Event::Briefed { agent, issue } => self.briefed(agent, issue),
             Event::Held => self.held = true,
             Event::Resumed => {
                 self.held = false;
@@ -1142,7 +1156,7 @@ impl World {
         out.retain(|e| !self.waits_for_scope(e));
         self.follow_scope();
         out.extend(self.place());
-        out.retain(|e| !self.waits_for_machine(e));
+        out.retain(|e| !self.waits_for_machine(e) && !self.waits_for_unassigned(e));
         out
     }
 
@@ -1231,7 +1245,7 @@ impl World {
     }
 
     /// The repositories of the area an issue comes from; empty for a project's issue.
-    fn area_repos(&self, issue: &IssueId) -> Vec<ProjectId> {
+    pub(crate) fn area_repos(&self, issue: &IssueId) -> Vec<ProjectId> {
         self.areas
             .get(&issue.project)
             .map(|a| a.projects.clone())
@@ -1261,8 +1275,12 @@ impl World {
     /// ([`Self::over_for_good`]), such as an old author whose issue works again
     /// in another folder: it is not reminded, and its stop is asked for again.
     /// While the daemon is held ([`World::held`]), nothing waits on an
-    /// investigator or on an agent of a paused issue.
+    /// investigator or on an agent of a paused issue. Nothing waits on an agent
+    /// a person took off its issue.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
+        if agent.unassigned {
+            return false;
+        }
         // A held daemon pushes no agent of a paused issue, nor an investigator:
         // one at work finishes its turn, and none is reminded into another or
         // stopped for sitting idle, since a person may be talking to it in its
@@ -1303,13 +1321,12 @@ impl World {
     }
 
     /// The agent of `role` working on `issue` whose session has not ended; the
-    /// one started last when there are several.
+    /// one started last when there are several. One a person took off the issue
+    /// no longer works on it ([`World::stopping`]).
     pub fn running(&self, issue: &IssueId, role: Role) -> Option<&Agent> {
         self.agents
             .values()
-            .filter(|a| {
-                a.issue.as_ref() == Some(issue) && a.role == role && a.state != AgentState::Ended
-            })
+            .filter(|a| a.role == role && a.works_on(issue))
             .max_by_key(|a| a.started)
     }
 
@@ -1334,6 +1351,7 @@ impl World {
             start: self.stops_again(),
             ..Missing::default()
         };
+        out.start.extend(self.briefs_again());
         out.start.extend(self.missing_investigators());
         for i in self.issues.values().filter(|i| !self.paused(i)) {
             // A merge, deploy or verify lost to a restart or a failure is asked for
@@ -1392,7 +1410,7 @@ impl World {
                 ),
                 _ => continue,
             };
-            if self.running(&i.id, role).is_some() {
+            if let Some(working) = self.running(&i.id, role) {
                 // An arbiter whose ruling is in has finished its step, so nothing
                 // reminds or stops it. One still running when the issue waits on an
                 // arbiter again is one whose stop failed, or that an older log left
@@ -1403,9 +1421,8 @@ impl World {
                         self.agents
                             .values()
                             .filter(|a| {
-                                a.issue.as_ref() == Some(&i.id)
-                                    && a.role == Role::Arbiter
-                                    && a.state != AgentState::Ended
+                                a.role == Role::Arbiter
+                                    && a.works_on(&i.id)
                                     && !self.waiting_on(a)
                             })
                             .map(|a| Effect::StopAgent {
@@ -1414,8 +1431,10 @@ impl World {
                     );
                 }
                 // Running, but not yet told what its stage needs: say it again.
-                // The part that delivers it drops a message already waiting.
-                if !i.told {
+                // The part that delivers it drops a message already waiting. One
+                // a person moved hears it in the brief it is sent
+                // ([`Self::briefs_again`]).
+                if !i.told && !working.awaits_brief() {
                     match i.stage {
                         Stage::Fixing { .. } => out.start.push(Effect::RequestFix {
                             issue: i.id.clone(),
@@ -1428,6 +1447,11 @@ impl World {
                         _ => {}
                     }
                 }
+                continue;
+            }
+            // One a person took off the issue still runs: a fresh one starts once
+            // it has ended, so two sessions never do one step.
+            if self.stopping(&i.id, role) {
                 continue;
             }
             // Only agents that ended while the issue waited on them count: not one
@@ -1489,6 +1513,10 @@ impl World {
     /// asked to stop by [`Self::missing`] once its issue waits on an arbiter
     /// again.
     fn over_for_good(&self, agent: &Agent) -> bool {
+        // A person took it off its issue: its stop is asked for until it ends.
+        if agent.unassigned {
+            return true;
+        }
         if agent.role == Role::Investigator && agent.issue.is_none() {
             return self
                 .investigating(&agent.group)
@@ -1818,7 +1846,10 @@ impl World {
         let mut moved = Vec::new();
         for i in self.issues.values().filter(|i| self.out_of_scope(i)) {
             match i.stage {
-                Stage::Refining if self.running(&i.id, Role::Refiner).is_none() => {
+                Stage::Refining
+                    if self.running(&i.id, Role::Refiner).is_none()
+                        && !self.stopping(&i.id, Role::Refiner) =>
+                {
                     back.push(i.id.clone());
                 }
                 Stage::Ready => {

@@ -186,6 +186,25 @@ pub enum Command {
     Hold,
     /// A person lifts the hold, so work starts again.
     Resume,
+    /// A person moves a running refiner, reviewer or arbiter onto an issue whose
+    /// stage needs that role now ([`World::assignment`]). The agent of that
+    /// role the issue had is unassigned and stopped, and the moved agent's old
+    /// issue gets a fresh one.
+    Assign {
+        /// The issue it is moved to.
+        issue: IssueId,
+        /// The agent.
+        agent: AgentId,
+    },
+    /// A person takes a running agent off the issue it works on and stops its
+    /// session at once; the issue's stage gets a fresh agent of that role once
+    /// it has ended, when it still needs one.
+    Unassign {
+        /// The issue it works on.
+        issue: IssueId,
+        /// The agent.
+        agent: AgentId,
+    },
 }
 
 /// How long a front end waits after one [`Command::View`] ends, answered or failed,
@@ -221,7 +240,9 @@ impl Command {
             | Self::Review { issue, .. }
             | Self::Retry { issue }
             | Self::Rule { issue, .. }
-            | Self::Choose { issue, .. } => Some(issue),
+            | Self::Choose { issue, .. }
+            | Self::Assign { issue, .. }
+            | Self::Unassign { issue, .. } => Some(issue),
         }
     }
 }
@@ -362,8 +383,7 @@ impl World {
             return Err(format!("only a person sets {key}, because {why}"));
         }
         match scope {
-            Scope::Task(issue)
-                if agent.role == Role::Refiner && agent.issue.as_ref() == Some(issue) =>
+            Scope::Task(issue) if agent.role == Role::Refiner && agent.works_on(issue) =>
             {
                 match self.issues.get(issue).map(|i| i.stage) {
                     Some(Stage::Refining) => match role {
@@ -550,13 +570,16 @@ impl World {
                 "{step} for {issue} is the {owner}'s: {by} is not an agent this daemon started"
             ));
         };
-        if agent.role == role && agent.issue.as_ref() == Some(issue) {
+        if agent.role == role && agent.works_on(issue) {
             return Ok(());
+        }
+        if let Some(why) = Self::taken_off(agent, issue) {
+            return Err(format!("{step} for {issue} is no longer {}'s: {why}", agent.id));
         }
         let working = self
             .agents
             .values()
-            .find(|a| a.role == role && a.issue.as_ref() == Some(issue))
+            .find(|a| a.role == role && a.issue.as_ref() == Some(issue) && !a.unassigned)
             .map_or_else(
                 || format!("no {owner} is working on it"),
                 |a| format!("{} is working on it", a.id),
@@ -565,6 +588,24 @@ impl World {
             "{step} for {issue} is the {owner}'s: {working}; you are {}",
             agent.id
         ))
+    }
+
+    /// Why `agent` no longer works on `issue`, when a person took it off: it was
+    /// unassigned from it, or moved from it to another issue.
+    fn taken_off(agent: &crate::model::Agent, issue: &IssueId) -> Option<String> {
+        if agent.unassigned && agent.issue.as_ref() == Some(issue) {
+            return Some(format!(
+                "a person unassigned {} from it, and its session is being stopped",
+                agent.id
+            ));
+        }
+        match (&agent.moved_from, &agent.issue) {
+            (Some(from), Some(to)) if from == issue => Some(format!(
+                "a person moved {} from it to {to}; work on {to}",
+                agent.id
+            )),
+            _ => None,
+        }
     }
 
     /// The decision a `choose` from `by` records, or why it is refused. Only an
@@ -599,6 +640,11 @@ impl World {
                  daemon started"
             ));
         };
+        if let Some(why) = Self::taken_off(agent, issue) {
+            return Err(format!(
+                "choose for {issue} is for the agents that work on it: {why}"
+            ));
+        }
         if agent.issue.as_ref() != Some(issue) {
             let holds = agent.issue.as_ref().map_or_else(
                 || "works on no issue".to_string(),
@@ -1148,6 +1194,32 @@ impl World {
                     return Err("the daemon is not held; temet-work hold holds it".into());
                 }
                 Event::Resumed
+            }
+            Command::Assign { issue, agent } => {
+                if let Some(by) = by {
+                    return Err(format!(
+                        "assign is a person's: {by} is an agent, and only a person assigns an \
+                         agent to an issue or unassigns one"
+                    ));
+                }
+                Event::Assigned {
+                    from: self.assignment(issue, agent)?,
+                    issue: issue.clone(),
+                    agent: agent.clone(),
+                }
+            }
+            Command::Unassign { issue, agent } => {
+                if let Some(by) = by {
+                    return Err(format!(
+                        "unassign is a person's: {by} is an agent, and only a person assigns an \
+                         agent to an issue or unassigns one"
+                    ));
+                }
+                self.unassignment(issue, agent)?;
+                Event::Unassigned {
+                    issue: issue.clone(),
+                    agent: agent.clone(),
+                }
             }
             // A choice moves no work: its agent carries on at once.
             Command::Choose { .. } => Event::DecisionMade {

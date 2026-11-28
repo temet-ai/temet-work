@@ -5,6 +5,7 @@
 //! tests in `tests/parts.rs` check all three. It changes only for something every
 //! part gains.
 
+mod assign;
 pub mod brief;
 pub mod command;
 pub mod effect;

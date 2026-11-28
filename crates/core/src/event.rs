@@ -341,6 +341,35 @@ pub enum Event {
     Held,
     /// A person lifted the hold with `temet-work resume`.
     Resumed,
+    /// A person moved a running refiner, reviewer or arbiter onto `issue` with
+    /// `temet-work assign`. The agent of that role `issue` had is unassigned and
+    /// stopped, `from` gets a fresh agent of that role when its stage needs one
+    /// now, and the moved agent is sent the brief for `issue`
+    /// ([`crate::World::moved_brief`]).
+    Assigned {
+        /// The issue it was moved to.
+        issue: IssueId,
+        /// The agent.
+        agent: AgentId,
+        /// The issue it worked on before.
+        from: IssueId,
+    },
+    /// A person took a running agent off `issue` with `temet-work unassign`: its
+    /// step commands for it are refused from now on and its session is stopped.
+    Unassigned {
+        /// The issue it worked on.
+        issue: IssueId,
+        /// The agent.
+        agent: AgentId,
+    },
+    /// The brief for the issue a person moved `agent` to reached it, after its
+    /// turn ended. A moved reviewer's verdict is taken from then on.
+    Briefed {
+        /// The agent.
+        agent: AgentId,
+        /// The issue the brief was for.
+        issue: IssueId,
+    },
     /// The code host reports that the pull request under review conflicts with the
     /// branch it merges into. It goes back to its author at once.
     PullConflicts {
