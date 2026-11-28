@@ -802,7 +802,10 @@ fn an_author_replacing_one_that_ended_is_given_the_pull_request_to_fix() {
         task.contains("push your own branch with `git push --force-with-lease`"),
         "{task}"
     );
-    assert!(crate::brief::before_stop(&task).ends_with("run: temet-work ready ankh#1"), "{task}");
+    assert!(
+        crate::brief::before_stop(&task).ends_with("run: temet-work ready ankh#1"),
+        "{task}"
+    );
     run_ready(&mut w, "author-3", None, &[]);
     assert_eq!(w.issues[&issue("1")].pulls[&ProjectId::new("ankh")], "57");
 }
@@ -819,7 +822,8 @@ fn an_author_replacing_one_after_a_block_replies_and_names_no_pull_request() {
     let task = replace_author(&mut w, "author-1", "author-2");
     assert!(task.contains(GIVEN_57), "{task}");
     assert!(
-        crate::brief::before_stop(&task).ends_with("run: temet-work ready ankh#1 --reply \"<reply to point 1>\""),
+        crate::brief::before_stop(&task)
+            .ends_with("run: temet-work ready ankh#1 --reply \"<reply to point 1>\""),
         "{task}"
     );
     run_ready(&mut w, "author-2", None, &["tested it"]);
@@ -1022,7 +1026,8 @@ fn a_pull_request_a_person_closed_is_dropped_and_the_next_author_opens_another()
         assert!(!task.contains(not), "{not:?} in:\n{task}");
     }
     assert!(
-        crate::brief::before_stop(&task).ends_with("temet-work ready watch#12 <pull request number>"),
+        crate::brief::before_stop(&task)
+            .ends_with("temet-work ready watch#12 <pull request number>"),
         "{task}"
     );
 
@@ -1074,7 +1079,10 @@ fn a_pull_request_a_person_closed_is_dropped_and_the_next_author_opens_another()
         "{task}"
     );
     assert!(!task.contains("57"), "{task}");
-    assert!(crate::brief::before_stop(&task).ends_with("run: temet-work ready watch#12"), "{task}");
+    assert!(
+        crate::brief::before_stop(&task).ends_with("run: temet-work ready watch#12"),
+        "{task}"
+    );
 }
 
 #[test]
@@ -1326,7 +1334,8 @@ fn a_closed_pull_request_in_one_repository_is_reopened_or_replaced_there() {
     );
     assert!(!task.contains("Push your fixes"), "{task}");
     assert!(
-        crate::brief::before_stop(&task).ends_with("run: temet-work ready guild#GLD-12 api=<pull request number>"),
+        crate::brief::before_stop(&task)
+            .ends_with("run: temet-work ready guild#GLD-12 api=<pull request number>"),
         "{task}"
     );
 

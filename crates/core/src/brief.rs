@@ -2086,7 +2086,10 @@ mod tests {
         assert!(!task.contains("open one pull request in each"), "{task}");
         assert!(!task.contains("open a pull request"), "{task}");
         assert!(!task.contains("<pull request number>"), "{task}");
-        assert!(before_stop(&task).ends_with("run: temet-work ready watch#31"), "{task}");
+        assert!(
+            before_stop(&task).ends_with("run: temet-work ready watch#31"),
+            "{task}"
+        );
 
         // Neither merged: it pushes to both and opens no other.
         let task = author_task(
@@ -2122,7 +2125,8 @@ mod tests {
         );
         assert!(!task.contains("open one pull request in each"), "{task}");
         assert!(
-            before_stop(&task).ends_with("run: temet-work ready watch#31 clacks=<pull request number>"),
+            before_stop(&task)
+                .ends_with("run: temet-work ready watch#31 clacks=<pull request number>"),
             "{task}"
         );
 
@@ -2151,7 +2155,10 @@ mod tests {
             "{task}"
         );
         assert!(!task.contains("open a pull request"), "{task}");
-        assert!(before_stop(&task).ends_with("run: temet-work ready watch#31"), "{task}");
+        assert!(
+            before_stop(&task).ends_with("run: temet-work ready watch#31"),
+            "{task}"
+        );
 
         // Being fixed with none: the first author's text, with the point to fix.
         for held in [&TWO_HELD[..1], &TWO_HELD[..]] {
@@ -2200,7 +2207,10 @@ mod tests {
             let at = |s: &str| task.find(s).unwrap_or_else(|| panic!("no {s:?} in {task}"));
             assert!(at("git fetch") < at("git switch watch-12-night-shift"));
             assert!(at("git switch watch-12-night-shift") < at("Push your fixes"));
-            assert!(before_stop(&task).ends_with("run: temet-work ready watch#31"), "{task}");
+            assert!(
+                before_stop(&task).ends_with("run: temet-work ready watch#31"),
+                "{task}"
+            );
         }
 
         // Several repositories: each branch is checked out in its own folder.
@@ -3061,7 +3071,9 @@ mod tests {
         )
         .task;
         let stop = task.find(STOP).expect("the stop paragraph");
-        let kept = task.find("Rules from overturned decisions").expect("the kept rules");
+        let kept = task
+            .find("Rules from overturned decisions")
+            .expect("the kept rules");
         assert!(stop < kept, "{task}");
     }
 }
