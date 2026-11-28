@@ -208,6 +208,7 @@ impl Command {
             Self::Settings { .. } => "settings",
             Self::Retry { .. } => "retry",
             Self::Rule { .. } => "rule",
+            Self::Choose { .. } => "choose",
             Self::Overturn { .. } => "overturn",
             Self::Proposal { .. } => "proposal",
             Self::File { .. } => "file",

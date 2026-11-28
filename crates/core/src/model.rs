@@ -580,7 +580,7 @@ pub enum DecisionKind {
         /// True to approve, false to send the change back to its author.
         approve: bool,
     },
-    /// Any other choice an agent made.
+    /// Any other choice an agent made, recorded with `choose`.
     Choice,
 }
 
@@ -608,12 +608,13 @@ pub struct Decision {
     /// Why the person overturned it.
     #[serde(default)]
     pub overturn_reason: String,
-    /// What overturning it costs; none for a choice, and for a ruling from an
-    /// older log.
+    /// What overturning it costs, as the agent gave it for a choice and as
+    /// [`Decision::ruling_cost`] sets it for a ruling; none only for a ruling
+    /// from an older log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<Cost>,
-    /// The point after which overturning it costs more; none for a choice, and
-    /// for a ruling from an older log.
+    /// The point after which overturning it costs more: the issue's merge, for
+    /// a choice and a ruling alike; none only for a ruling from an older log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub point: Option<Point>,
 }
@@ -645,7 +646,27 @@ pub enum Point {
     Unknown,
 }
 
+impl Cost {
+    /// The cost in one lower-case word, as `choose` takes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 impl Point {
+    /// The point in one lower-case word.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Unknown => "unknown",
+        }
+    }
+
     /// Whether `issue` is past this point. This build cannot place a point it
     /// does not know, so no issue is past one.
     pub fn passed(self, issue: &Issue) -> bool {

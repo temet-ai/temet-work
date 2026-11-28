@@ -12,7 +12,9 @@ use crate::brief::{MOST_POINTS, numbered, reply_flags};
 use crate::effect::Effect;
 use crate::event::{Event, Verdict};
 use crate::ids::{AgentId, DecisionId, GroupId, IssueId, MilestoneId, ProjectId, RuleId};
-use crate::model::{CheckState, Decision, DecisionKind, Plan, Role, Rule, RuleState, Stage};
+use crate::model::{
+    CheckState, Cost, Decision, DecisionKind, Plan, Point, Role, Rule, RuleState, Stage,
+};
 use crate::settings::{self, Agents, Scope, Target};
 use crate::text::{clean, stage};
 use crate::world::World;
@@ -119,6 +121,31 @@ pub enum Command {
         /// Why, or what must change.
         reason: String,
     },
+    /// An agent records a choice it made on the issue it works on, as a decision
+    /// a person can overturn later. The agent carries on at once; the reply
+    /// names the new decision. Every field may be missing here, so that the loop
+    /// refuses an incomplete choice with its reason, the same from the command
+    /// line, MCP and a raw socket request.
+    Choose {
+        /// The issue.
+        issue: IssueId,
+        /// What was decided, in a line.
+        #[serde(default)]
+        question: String,
+        /// The options weighed: at least two, each once.
+        #[serde(default)]
+        options: Vec<String>,
+        /// The option taken, as written among `options`.
+        #[serde(default)]
+        took: String,
+        /// Why it was taken.
+        #[serde(default)]
+        why: String,
+        /// What overturning it costs: `low`, `medium` or `high`; refused when
+        /// none is given.
+        #[serde(default)]
+        cost: Option<String>,
+    },
     /// A person's overturn of a decision an agent made.
     Overturn {
         /// The decision, as `status` lists it.
@@ -186,7 +213,8 @@ impl Command {
             | Self::Ready { issue, .. }
             | Self::Review { issue, .. }
             | Self::Retry { issue }
-            | Self::Rule { issue, .. } => Some(issue),
+            | Self::Rule { issue, .. }
+            | Self::Choose { issue, .. } => Some(issue),
         }
     }
 }
@@ -530,6 +558,132 @@ impl World {
             "{step} for {issue} is the {owner}'s: {working}; you are {}",
             agent.id
         ))
+    }
+
+    /// The decision a `choose` from `by` records, or why it is refused. Only an
+    /// agent this daemon started may record a choice, and only on the issue it
+    /// works on, whatever its role. A person is refused: a person decides
+    /// through settings and overturns, and a choice recorded as a person's would
+    /// have that person overturn themselves. The question, the options and the
+    /// option taken are each kept on one line, so that `status` lists the
+    /// decision on one; the reason keeps its line feeds, as a ruling's does.
+    /// The point is the issue's merge, the only point the loop has.
+    fn choice(&self, by: Option<&AgentId>, command: &Command) -> Result<Decision, String> {
+        let Command::Choose {
+            issue,
+            question,
+            options,
+            took,
+            why,
+            cost,
+        } = command
+        else {
+            return Err(format!("{} is not choose", command.name()));
+        };
+        let Some(by) = by else {
+            return Err(format!(
+                "choose for {issue} is an agent's: a person decides through settings and \
+                 overturns, and a choice recorded as yours would have you overturn yourself"
+            ));
+        };
+        let Some(agent) = self.agents.get(by) else {
+            return Err(format!(
+                "choose for {issue} is an agent's that works on it: {by} is not an agent this \
+                 daemon started"
+            ));
+        };
+        if agent.issue.as_ref() != Some(issue) {
+            let holds = agent.issue.as_ref().map_or_else(
+                || "works on no issue".to_string(),
+                |i| format!("works on {i}"),
+            );
+            return Err(format!(
+                "choose for {issue} is for the agents that work on it: {by} {holds}; record a \
+                 choice on the issue you work on"
+            ));
+        }
+        if !self.issues.contains_key(issue) {
+            return Err(format!("there is no issue {issue}"));
+        }
+        let one_line = |text: &str| clean(text).split_whitespace().collect::<Vec<_>>().join(" ");
+        let question = one_line(question);
+        if question.is_empty() {
+            return Err("a choice needs its question: what you decided, in a line".into());
+        }
+        let options: Vec<String> = options.iter().map(|o| one_line(o)).collect();
+        if options.len() < 2 {
+            return Err(format!(
+                "a choice needs at least two options, since overturning it takes another; this \
+                 one has {}",
+                options.len()
+            ));
+        }
+        for (n, option) in options.iter().enumerate() {
+            if option.is_empty() {
+                return Err(format!(
+                    "option {} is empty; give each option its text",
+                    n + 1
+                ));
+            }
+            if let Some(first) = options[..n].iter().position(|o| o == option) {
+                return Err(format!(
+                    "option {} repeats option {} ({option}); give each option once",
+                    n + 1,
+                    first + 1
+                ));
+            }
+        }
+        let took = one_line(took);
+        let Some(chosen) = options.iter().position(|o| *o == took) else {
+            let listed: Vec<String> = options
+                .iter()
+                .enumerate()
+                .map(|(n, o)| format!("{}={o}", n + 1))
+                .collect();
+            return Err(format!(
+                "the option taken, \"{took}\", is not among the options ({}); give the one you \
+                 took as written there",
+                listed.join(", ")
+            ));
+        };
+        let reason = clean(why).trim().to_string();
+        if reason.is_empty() {
+            return Err("a choice needs its reason: why you took that option".into());
+        }
+        let given = cost.as_deref().map(str::trim);
+        let cost = match given.map(str::to_ascii_lowercase).as_deref() {
+            Some("low") => Cost::Low,
+            Some("medium") => Cost::Medium,
+            Some("high") => Cost::High,
+            None | Some("") => {
+                return Err(
+                    "a choice needs its cost to undo: low, medium or high, so that every \
+                     decision a person reads can be ordered by what overturning it costs"
+                        .into(),
+                );
+            }
+            Some(_) => {
+                return Err(format!(
+                    "{} is not a cost to undo; give low, medium or high",
+                    given.unwrap_or_default()
+                ));
+            }
+        };
+        let id = self.decisions.keys().next_back().map_or(1, |d| d.0 + 1);
+        Ok(Decision {
+            id: DecisionId(id),
+            issue: issue.clone(),
+            by: by.clone(),
+            kind: DecisionKind::Choice,
+            question,
+            options,
+            chosen,
+            reason,
+            overturned_to: None,
+            overturn_reason: String::new(),
+            cost: Some(cost),
+            point: Some(Point::Merge),
+        })
     }
 
     /// The investigator `by` names, with its group, when it runs its group's
@@ -960,6 +1114,10 @@ impl World {
                     now => return refuse(issue, now, "deploying or verifying"),
                 }
             }
+            // A choice moves no work: its agent carries on at once.
+            Command::Choose { .. } => Event::DecisionMade {
+                decision: self.choice(by, command)?,
+            },
             Command::Overturn {
                 decision,
                 option,
@@ -1682,6 +1840,246 @@ mod tests {
         logged(&mut w, &ready);
         logged(&mut w, &block(points));
         w
+    }
+
+    /// What author-1's choice on ankh#1 asks.
+    const CLACKS: &str = "Which way does the clacks message go?";
+
+    /// Why author-1 takes the option it takes.
+    const NOON: &str = "the towers are up, and it reaches Pseudopolis by noon";
+
+    /// A choice on ankh#1 between `options`, taking `took`, at `cost`.
+    fn choice(
+        question: &str,
+        options: &[&str],
+        took: &str,
+        why: &str,
+        cost: Option<&str>,
+    ) -> Command {
+        Command::Choose {
+            issue: issue(),
+            question: question.into(),
+            options: options.iter().map(ToString::to_string).collect(),
+            took: took.into(),
+            why: why.into(),
+            cost: cost.map(String::from),
+        }
+    }
+
+    /// The clacks, the pigeon or the Post Office.
+    const WAYS: [&str; 3] = ["clacks", "pigeon", "Post Office"];
+
+    /// author-1's choice of the pigeon, at `cost`.
+    fn pigeon(cost: Option<&str>) -> Command {
+        choice(CLACKS, &WAYS, "pigeon", NOON, cost)
+    }
+
+    /// ankh#1 being worked on by author-1, its plan written.
+    fn working() -> World {
+        let mut w = refining();
+        logged(
+            &mut w,
+            &Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        );
+        assert_eq!(w.issues[&issue()].stage, Stage::Working);
+        w
+    }
+
+    #[test]
+    fn an_agents_choice_is_one_decision_numbered_after_the_others() {
+        let mut w = working();
+        // Decision 4 is on record already.
+        let Event::DecisionMade { decision: before } = working()
+            .events(Some(&AgentId::new("refiner-1")), &pigeon(Some("low")))
+            .expect("a refiner may choose")
+            .remove(0)
+        else {
+            panic!("not a decision");
+        };
+        w.apply(&Event::DecisionMade {
+            decision: Decision {
+                id: DecisionId(4),
+                ..before
+            },
+        });
+        let events = w
+            .events(Some(&AgentId::new("author-1")), &pigeon(Some("medium")))
+            .expect("accepted");
+        assert_eq!(
+            events,
+            [Event::DecisionMade {
+                decision: Decision {
+                    id: DecisionId(5),
+                    issue: issue(),
+                    by: AgentId::new("author-1"),
+                    kind: DecisionKind::Choice,
+                    question: CLACKS.into(),
+                    options: WAYS.iter().map(ToString::to_string).collect(),
+                    chosen: 1,
+                    reason: NOON.into(),
+                    overturned_to: None,
+                    overturn_reason: String::new(),
+                    cost: Some(Cost::Medium),
+                    point: Some(Point::Merge),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn a_choice_moves_no_work_and_its_agent_carries_on() {
+        let mut w = working();
+        let author = AgentId::new("author-1");
+        let (issue_before, agents_before) = (w.issues[&issue()].clone(), w.agents.clone());
+        let mut effects = Vec::new();
+        for e in w
+            .events(Some(&author), &pigeon(Some("medium")))
+            .expect("accepted")
+        {
+            effects.extend(w.apply(&e));
+        }
+        // No stop, no fix, no merge: the arbiter on ankh#1 is left running too.
+        assert_eq!(effects, []);
+        assert_eq!(w.decisions.len(), 1);
+        assert_eq!(w.issues[&issue()], issue_before);
+        assert_eq!(w.issues[&issue()].stage, Stage::Working);
+        assert_eq!(w.agents, agents_before);
+        let ready = ready_replying(&w);
+        let events = w.events(Some(&author), &ready).expect("ready is accepted");
+        assert!(
+            matches!(events.as_slice(), [Event::PullRequestReady { .. }]),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_choice_is_refused_with_the_reason_and_none_is_recorded() {
+        let w = working();
+        let author = AgentId::new("author-1");
+        let mut refused = vec![
+            (
+                pigeon(None),
+                "a choice needs its cost to undo: low, medium or high",
+            ),
+            (
+                pigeon(Some(" ")),
+                "a choice needs its cost to undo: low, medium or high",
+            ),
+            (
+                pigeon(Some("huge")),
+                "huge is not a cost to undo; give low, medium or high",
+            ),
+            (
+                choice(CLACKS, &WAYS, "camel", NOON, Some("low")),
+                "the option taken, \"camel\", is not among the options (1=clacks, 2=pigeon, 3=Post \
+                 Office); give the one you took as written there",
+            ),
+            (
+                choice(" \n", &WAYS, "pigeon", NOON, Some("low")),
+                "a choice needs its question",
+            ),
+            (
+                choice(CLACKS, &WAYS, "pigeon", "  ", Some("low")),
+                "a choice needs its reason",
+            ),
+            (
+                choice(CLACKS, &["clacks"], "clacks", NOON, Some("low")),
+                "a choice needs at least two options, since overturning it takes another; this \
+                 one has 1",
+            ),
+            (
+                choice(
+                    CLACKS,
+                    &["clacks", " ", "pigeon"],
+                    "clacks",
+                    NOON,
+                    Some("low"),
+                ),
+                "option 2 is empty",
+            ),
+            (
+                choice(
+                    CLACKS,
+                    &["clacks", "pigeon", "clacks"],
+                    "clacks",
+                    NOON,
+                    Some("low"),
+                ),
+                "option 3 repeats option 1 (clacks)",
+            ),
+        ];
+        // A missing question, options, option taken or reason reads as empty.
+        refused.push((
+            serde_json::from_str(r#"{"command":"choose","issue":{"project":"ankh","key":"1"}}"#)
+                .expect("a bare choice reads"),
+            "a choice needs its question",
+        ));
+        for (command, want) in refused {
+            let why = w.events(Some(&author), &command).expect_err("refused");
+            assert!(why.contains(want), "{why}");
+        }
+        assert!(w.decisions.is_empty());
+        // The words of the cost are read in any case, and every text without
+        // its surrounding space.
+        let events = w
+            .events(
+                Some(&author),
+                &choice(
+                    " Which way?\n",
+                    &[" clacks", "pigeon "],
+                    "pigeon",
+                    " noon ",
+                    Some("HIGH"),
+                ),
+            )
+            .expect("accepted");
+        assert!(matches!(
+            events.as_slice(),
+            [Event::DecisionMade { decision }]
+                if decision.question == "Which way?"
+                    && decision.options == ["clacks", "pigeon"]
+                    && decision.chosen == 1
+                    && decision.reason == "noon"
+                    && decision.cost == Some(Cost::High)
+        ));
+    }
+
+    #[test]
+    fn only_an_agent_that_works_on_the_issue_records_a_choice_on_it() {
+        let w = working();
+        let command = pigeon(Some("medium"));
+        let why = |by: Option<&str>| {
+            w.events(by.map(AgentId::new).as_ref(), &command)
+                .expect_err("refused")
+        };
+        assert_eq!(
+            why(Some("author-2")),
+            "choose for ankh#1 is for the agents that work on it: author-2 works on ankh#2; \
+             record a choice on the issue you work on"
+        );
+        assert_eq!(
+            why(Some("author-9")),
+            "choose for ankh#1 is an agent's that works on it: author-9 is not an agent this \
+             daemon started"
+        );
+        let person = why(None);
+        assert!(
+            person.starts_with(
+                "choose for ankh#1 is an agent's: a person decides through settings \
+                                and overturns"
+            ),
+            "{person}"
+        );
+        // Any role on the issue may.
+        for agent in ["refiner-1", "author-1", "reviewer-1", "arbiter-1"] {
+            assert!(
+                w.events(Some(&AgentId::new(agent)), &command).is_ok(),
+                "{agent}"
+            );
+        }
     }
 
     #[test]

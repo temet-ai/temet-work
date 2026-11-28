@@ -407,12 +407,12 @@ pub struct Decision {
     pub overturned_to: Option<usize>,
     /// Why the person overturned it; empty until then.
     pub overturn_reason: String,
-    /// What overturning it costs, as `low`, `medium` or `high`; none for a
-    /// choice, and for a ruling from an older log.
+    /// What overturning it costs, as `low`, `medium` or `high`; none only for a
+    /// ruling from an older log.
     pub cost: Option<Cost>,
-    /// The point after which overturning it costs more; none for a choice, and
-    /// for a ruling from an older log. No time is given for it: nothing knows
-    /// when a merge will happen.
+    /// The point after which overturning it costs more; none only for a ruling
+    /// from an older log. No time is given for it: nothing knows when a merge
+    /// will happen.
     pub point: Option<DecisionPoint>,
 }
 
@@ -822,8 +822,8 @@ mod tests {
                 reason: "it is easier to undo".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
-                cost: None,
-                point: None,
+                cost: Some(Cost::Low),
+                point: Some(Point::Merge),
             },
         }
     }
@@ -1378,8 +1378,8 @@ mod tests {
         );
         // A send-back on watch#6, which is done.
         assert_eq!(of(&view, 4), (Some(Cost::Low), Some((Point::Merge, true))));
-        // A choice has neither.
-        assert_eq!(of(&view, 1), (None, None));
+        // A choice has its own, on watch#3, which is being worked on.
+        assert_eq!(of(&view, 1), (Some(Cost::Low), Some((Point::Merge, false))));
         w.issues
             .get_mut(&IssueId::new("watch", "4"))
             .expect("synced")
@@ -1394,6 +1394,62 @@ mod tests {
         w.apply(&old);
         let view = View::new(&w, &BTreeMap::new());
         assert_eq!(of(&view, 9), (None, None));
+    }
+
+    #[test]
+    fn a_recorded_choice_has_its_cost_and_its_point_passed_after_the_merge() {
+        let mut w = world();
+        let watch3 = IssueId::new("watch", "3");
+        command(
+            &mut w,
+            "author-2",
+            Command::Choose {
+                issue: watch3.clone(),
+                question: "Which key winds the clock?".into(),
+                options: vec!["brass".into(), "iron".into(), "the Librarian's".into()],
+                took: "iron".into(),
+                why: "the brass one is in the river".into(),
+                cost: Some("medium".into()),
+            },
+        );
+        let of = |w: &World| {
+            View::new(w, &BTreeMap::new())
+                .decisions
+                .into_iter()
+                .find(|d| d.id == 5)
+                .expect("listed after the four on record")
+        };
+        let d = of(&w);
+        assert_eq!(
+            (d.by.0.as_str(), d.issue.as_str(), d.chosen, &d.options),
+            (
+                "author-2",
+                "watch#3",
+                2,
+                &vec!["brass".to_string(), "iron".into(), "the Librarian's".into()]
+            )
+        );
+        assert_eq!(d.cost, Some(Cost::Medium));
+        assert_eq!(
+            d.point,
+            Some(DecisionPoint {
+                at: Point::Merge,
+                passed: false
+            })
+        );
+        let json = serde_json::to_value(&d).expect("serialises");
+        assert_eq!(json["cost"], "medium");
+        assert_eq!(
+            json["point"],
+            serde_json::json!({"at": "merge", "passed": false})
+        );
+        let mut stage = |s| w.issues.get_mut(&watch3).expect("synced").stage = s;
+        stage(Stage::Merging);
+        assert_eq!(of(&w).point.map(|p| p.passed), Some(false));
+        for s in [Stage::Deploying, Stage::Verifying, Stage::Done] {
+            w.issues.get_mut(&watch3).expect("synced").stage = s;
+            assert_eq!(of(&w).point.map(|p| p.passed), Some(true), "{s:?}");
+        }
     }
 
     #[test]
