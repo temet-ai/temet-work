@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext, Context, Font, FontWeight, HeadlessAppContext, IntoElement,
-    ParentElement, Render, Styled, Window, div, font, px, size,
+    ParentElement, Render, SharedString, Styled, Window, div, font, px, size,
 };
 use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
@@ -26,7 +26,15 @@ use temet_work_app::components::icon::IconName;
 use temet_work_app::components::stage_tag::{Stage, StageTag};
 use temet_work_app::components::status_tag::{Status, StatusTag};
 use temet_work_app::components::tag::Tag;
+use temet_work_app::components::form_group::FormGroup;
+use temet_work_app::components::input_group::{InputGroup, Size as InputSize};
+use temet_work_app::components::radio_group::{Radio, RadioGroup};
+use temet_work_app::components::text_area::TextArea;
 use temet_work_app::composites::check_list::{CheckList, PlanCheck};
+use temet_work_app::composites::decision_row::{
+    Decision, DecisionOption, DecisionRow, OverturnDraft, UndoCost,
+};
+use temet_work_app::composites::refine_dialog::{RefineCheck, RefineDialog};
 use temet_work_app::composites::issue_pane::IssueTab;
 use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{Grouping, Project};
@@ -278,7 +286,7 @@ fn main() -> gpui::Result<()> {
         })?;
         capture(&mut cx, window.into(), dir, s.name, &faces)?;
     }
-    for (id, story, height) in PARTS {
+    for (id, story, height) in PARTS.iter().chain(FORM_PARTS) {
         for theme_name in ["dark", "light"] {
             let name = format!("part-{id}-{theme_name}");
             if !only.is_empty() && !only.contains(&name) {
@@ -368,6 +376,8 @@ enum Story {
     CutPanelHere,
     CutPanelHereWithAttention,
     CutPanelMachinesWithOneHere,
+    /// One of the form parts' stories (`FORM_PARTS`).
+    Form(Form),
 }
 
 /// Each part shot: the story's id, the story, and the frame's height, the same as the story
@@ -559,6 +569,7 @@ impl Render for Gallery {
                 .max_w(theme::size::col_right(cx, window.viewport_size().width))
                 .child(CheckList::new("story", checks(self.story)))
                 .into_any_element(),
+            Story::Form(form) => form_part(form, window, cx),
             Story::CutPanelPadded => panel(false, false, cx).into_any_element(),
             Story::CutPanelAttention => panel(true, false, cx).into_any_element(),
             Story::CutPanelHere => panel(false, true, cx).into_any_element(),
@@ -671,4 +682,325 @@ fn crc32(data: &[u8]) -> u32 {
         }
     }
     !crc
+}
+
+/// A story of the form parts: the text fields, radios and dialogs, and the parts built from
+/// them.
+#[derive(Clone, Copy, PartialEq)]
+enum Form {
+    TextAreaAutoResize,
+    InputGroupLabelled,
+    InputGroupSmall,
+    InputGroupDisabled,
+    RadioGroupOptions,
+    RadioGroupInline,
+    RadioGroupDisabled,
+    RefineDialogDefault,
+    RefineDialogNoPlan,
+    DecisionShort,
+    DecisionOverturnReady,
+    DecisionNoOptions,
+    DecisionWithQuestion,
+    DecisionWithQuestionOverturning,
+    DecisionOneOtherOption,
+    DecisionSending,
+    DecisionNotSent,
+    DecisionSent,
+}
+
+/// Each form part shot: the story's id, the story, and the frame's height, the same as the
+/// story shot's.
+const FORM_PARTS: &[(&str, Story, f32)] = &[
+    (
+        "blueprint-textarea--auto-resize",
+        Story::Form(Form::TextAreaAutoResize),
+        300.,
+    ),
+    (
+        "temet-inputgroup--labelled",
+        Story::Form(Form::InputGroupLabelled),
+        300.,
+    ),
+    (
+        "temet-inputgroup--small",
+        Story::Form(Form::InputGroupSmall),
+        300.,
+    ),
+    (
+        "temet-inputgroup--disabled",
+        Story::Form(Form::InputGroupDisabled),
+        300.,
+    ),
+    (
+        "blueprint-radiogroup--options",
+        Story::Form(Form::RadioGroupOptions),
+        300.,
+    ),
+    (
+        "blueprint-radiogroup--inline",
+        Story::Form(Form::RadioGroupInline),
+        300.,
+    ),
+    (
+        "blueprint-radiogroup--disabled",
+        Story::Form(Form::RadioGroupDisabled),
+        300.,
+    ),
+    (
+        "temet-refinedialog--default",
+        Story::Form(Form::RefineDialogDefault),
+        560.,
+    ),
+    (
+        "temet-refinedialog--no-plan",
+        Story::Form(Form::RefineDialogNoPlan),
+        560.,
+    ),
+    ("temet-decisionrow--short", Story::Form(Form::DecisionShort), 420.),
+    (
+        "temet-decisionrow--overturn-ready",
+        Story::Form(Form::DecisionOverturnReady),
+        420.,
+    ),
+    (
+        "temet-decisionrow--no-options",
+        Story::Form(Form::DecisionNoOptions),
+        420.,
+    ),
+    (
+        "temet-decisionrow--with-question",
+        Story::Form(Form::DecisionWithQuestion),
+        420.,
+    ),
+    (
+        "temet-decisionrow--with-question-overturning",
+        Story::Form(Form::DecisionWithQuestionOverturning),
+        420.,
+    ),
+    (
+        "temet-decisionrow--one-other-option",
+        Story::Form(Form::DecisionOneOtherOption),
+        420.,
+    ),
+    (
+        "temet-decisionrow--sending",
+        Story::Form(Form::DecisionSending),
+        420.,
+    ),
+    (
+        "temet-decisionrow--not-sent",
+        Story::Form(Form::DecisionNotSent),
+        520.,
+    ),
+    ("temet-decisionrow--sent", Story::Form(Form::DecisionSent), 420.),
+];
+
+/// A check as the RefineDialog stories write one.
+fn refine_check(done_when: &str, proven_by: &str) -> RefineCheck {
+    RefineCheck {
+        done_when: done_when.to_string().into(),
+        proven_by: proven_by.to_string().into(),
+    }
+}
+
+/// The DecisionRow stories' decision: a short one in their default args, or the one with the
+/// agent's question.
+fn decision(question: bool) -> Decision {
+    let s = |text: &str| SharedString::from(text.to_string());
+    let option = |id: &str, label: &str| DecisionOption {
+        id: s(id),
+        label: s(label),
+    };
+    if question {
+        Decision {
+            question: Some(s("How many towers should the end-to-end test send a message through?")),
+            took: s("8"),
+            by: s("refiner-66"),
+            issue: None,
+            at: None,
+            cost: Some(UndoCost::Low),
+            weighed: Vec::new(),
+            why: Some(s(
+                "Four is the smallest count that shows the bug, but the Ankh-Morpork to Genua line \
+                 has eight towers and is the longest in use. Eight covers both without making the \
+                 test slower than the rest of the suite; twelve added forty seconds and covered no \
+                 line that exists.",
+            )),
+            options: vec![option("1", "4"), option("3", "12")],
+            overturn_before: Some(s("merge")),
+            overturned: None,
+            overturned_to: None,
+            overturn_reason: None,
+        }
+    } else {
+        Decision {
+            question: None,
+            took: s("Page the channel list 200 at a time instead of loading all"),
+            by: s("arbiter \u{b7} Claude"),
+            issue: Some(s("radar#51")),
+            at: None,
+            cost: Some(UndoCost::High),
+            weighed: Vec::new(),
+            why: None,
+            options: vec![
+                option("all", "Load every channel at once"),
+                option("page-1000", "Page the channel list 1,000 at a time"),
+            ],
+            overturn_before: Some(s("merge, in about 20 min")),
+            overturned: None,
+            overturned_to: None,
+            overturn_reason: None,
+        }
+    }
+}
+
+/// The reason the DecisionRow stories with the question type.
+const REASON: &str = "The \u{dc}berwald line has twelve towers from next month, so the test should cover it.";
+
+/// A form story's part, framed as the story frames it.
+fn form_part(form: Form, window: &mut Window, cx: &mut App) -> AnyElement {
+    let col = theme::size::col_right(cx, window.viewport_size().width);
+    let draft = |option: Option<&str>, reason: Option<&str>| {
+        Some(OverturnDraft {
+            option: option.map(|o| o.to_string().into()),
+            reason: reason.map(|r| r.to_string().into()),
+        })
+    };
+    let row = |d: Decision| DecisionRow::new("story", d).on_overturn(|_, _, _| {});
+    // The short stories are framed twice the pane's width, the question stories at its width.
+    let short = |row: DecisionRow| div().max_w(col * 2.).child(row).into_any_element();
+    let asked = |row: DecisionRow| div().max_w(col).child(row).into_any_element();
+    let radios = |names: &[&str]| names.iter().map(|n| Radio::new(*n, *n)).collect::<Vec<_>>();
+    match form {
+        Form::TextAreaAutoResize => div()
+            .w(px(400.))
+            .child(
+                TextArea::new("story")
+                    .fill(true)
+                    .auto_resize(true)
+                    .default_value(
+                        "Reproduce: sign in, restart radar, open settings.\nThe token is still there.",
+                    ),
+            )
+            .into_any_element(),
+        Form::InputGroupLabelled => div()
+            .max_w(px(320.))
+            .child(
+                FormGroup::new()
+                    .label("Branch")
+                    .child(InputGroup::new("story").default_value("radar-44-keyring-token")),
+            )
+            .into_any_element(),
+        Form::InputGroupSmall => div()
+            .max_w(px(320.))
+            .child(
+                InputGroup::new("story")
+                    .size(InputSize::Small)
+                    .left_icon(IconName::Search)
+                    .default_value("omit"),
+            )
+            .into_any_element(),
+        Form::InputGroupDisabled => div()
+            .max_w(px(320.))
+            .child(
+                InputGroup::new("story")
+                    .disabled(true)
+                    .default_value("builder-2"),
+            )
+            .into_any_element(),
+        Form::RadioGroupOptions => RadioGroup::new(
+            "story",
+            radios(&["refiner", "author", "reviewer", "arbiter"]),
+        )
+        .label("Role")
+        .into_any_element(),
+        Form::RadioGroupInline => RadioGroup::new("story", radios(&["omit", "deus", "mac"]))
+            .label("Machine")
+            .inline(true)
+            .into_any_element(),
+        Form::RadioGroupDisabled => {
+            RadioGroup::new("story", radios(&["opus", "sonnet", "gpt-5-codex"]))
+                .label("Model")
+                .disabled(true)
+                .into_any_element()
+        }
+        Form::RefineDialogDefault => RefineDialog::new(
+            "story",
+            "clacks#219",
+            "Night lamps switch on by the clock instead of the light reading at each tower",
+            vec![
+                refine_check(
+                    "Night lamps switch on when the tower's own light sensor reads below the level its operator set.",
+                    "cargo nextest run -p clacks-lamps sensor_switches_on",
+                ),
+                refine_check(
+                    "A failed sensor leaves the lamps on the clock, never on all day or off all night.",
+                    "cargo nextest run -p clacks-lamps failed_sensor_uses_clock",
+                ),
+                refine_check(
+                    "The six \u{dc}berwald towers with older controllers stay on the clock, and the plan says so.",
+                    "docs/handbook/lamps.md, read in review",
+                ),
+            ],
+        )
+        .is_open(true)
+        .into_any_element(),
+        Form::RefineDialogNoPlan => RefineDialog::new(
+            "story",
+            "clacks#228",
+            "Translate the status page into \u{dc}berwaldean",
+            Vec::new(),
+        )
+        .is_open(true)
+        .into_any_element(),
+        Form::DecisionShort => short(row(decision(false))),
+        Form::DecisionOverturnReady => short(row(decision(false)).default_draft(draft(
+            Some("page-1000"),
+            Some("200 at a time makes five requests where one would do."),
+        ))),
+        Form::DecisionNoOptions => short(row(Decision {
+            options: Vec::new(),
+            ..decision(false)
+        })),
+        Form::DecisionWithQuestion => asked(row(decision(true))),
+        Form::DecisionWithQuestionOverturning => {
+            asked(row(decision(true)).default_draft(draft(None, None)))
+        }
+        Form::DecisionOneOtherOption => asked(
+            row(Decision {
+                question: Some("Should the fix ship behind a setting so a tower can turn it off?".into()),
+                took: "No setting".into(),
+                cost: Some(UndoCost::Medium),
+                why: Some(
+                    "A setting would let one tower drop the overhead again, which is the bug.".into(),
+                ),
+                options: vec![DecisionOption {
+                    id: "1".into(),
+                    label: "Yes, on by default".into(),
+                }],
+                ..decision(true)
+            })
+            .default_draft(draft(None, None)),
+        ),
+        Form::DecisionSending => asked(
+            row(decision(true))
+                .default_draft(draft(Some("3"), Some(REASON)))
+                .pending(true),
+        ),
+        Form::DecisionNotSent => asked(
+            row(decision(true))
+                .default_draft(draft(Some("3"), Some(REASON)))
+                .error(Some(
+                    "No temet-work daemon answers at ~/.local/state/temet-work/daemon.sock. Start \
+                     the daemon, then press Overturn again."
+                        .into(),
+                )),
+        ),
+        Form::DecisionSent => asked(row(Decision {
+            overturned: Some("Overturned just now".into()),
+            overturned_to: Some("12".into()),
+            overturn_reason: Some(REASON.into()),
+            ..decision(true)
+        })),
+    }
 }

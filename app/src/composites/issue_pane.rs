@@ -300,7 +300,7 @@ impl RenderOnce for IssuePane {
                 match on_overturn.clone() {
                     Some(handler) => {
                         let id = d.id;
-                        row.on_overturn(move |window, cx| handler(&id, window, cx))
+                        row.on_overturn(move |_, window, cx| handler(&id, window, cx))
                     }
                     None => row,
                 }
