@@ -43,10 +43,6 @@ clean build and an issue list does not need them.
 
 ## Running and the screenshot
 
-- Never open a window on Dawid's desktop: no `cargo run` of a window, no `hyprctl dispatch`,
-  no `exec_cmd`. On 27 November 2026 a test window launched with
-  `hyprctl dispatch hl.dsp.exec_cmd(..., { float, size, move })` made Hyprland abort; it came
-  back in safe mode with no monitors, and his Herdr and Discord windows closed.
 - Screenshots come from gpui's offscreen renderer, with no compositor:
   `HeadlessAppContext::with_platform(CosmicTextSystem, Assets, || gpui_platform::current_headless_renderer())`
   and `capture_screenshot(window)`, from a test or an example in `app/`, with the
