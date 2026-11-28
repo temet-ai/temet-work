@@ -200,7 +200,10 @@ free folder of the group's first project, or in one an author holds when none is
 reads each project's docs for planned work that is not built, the open issues, and the pull
 requests merged since the group's last investigation started (the last 7 days for its
 first), and files an issue for each planned item no open issue covers and for each defect
-it can show (`temet-work file`, `docs/commands.md`). Each goes in the last milestone of the
+it can show (`temet-work file`, `docs/commands.md`). It reads docs and code at the current
+head of each repository's default branch, not as a checkout's files stand: it fetches, then
+reads with `git show` or in a separate checkout outside the checkouts its brief names and
+the folder it runs in. Each issue it files goes in the last milestone of the
 group's list unless it names another the group takes, and is in the loop as soon as it is
 filed. A project's `investigate` setting adds lines to the investigator's brief
 (`docs/settings.md`). Closing an issue is how a person says no to it: the brief lists the

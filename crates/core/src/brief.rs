@@ -158,6 +158,24 @@ fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, St
     )
 }
 
+/// Said beside every fetch a brief asks for: an agent told to change no file
+/// would otherwise skip it and read a stale default branch.
+const FETCHING_IS_ALLOWED: &str =
+    "Fetching is allowed: it moves no branch and changes no file an author works on.";
+
+/// Sends a reader to a default branch's head, since the files in a folder may be
+/// on another issue's branch or an older one. `read` says what to read there,
+/// `stand` whose files not to read it from, and `outside` where a separate
+/// checkout goes.
+fn at_the_default_branch(read: &str, stand: &str, outside: &str) -> String {
+    format!(
+        "{read}, not as the files in {stand} stand: fetch, then read with git show from the \
+         remote-tracking branch the fetch updated (a local branch may be behind), or in a separate \
+         checkout of that commit {outside}, which you remove when you are done. \
+         {FETCHING_IS_ALLOWED}"
+    )
+}
+
 /// What a refiner's plain `model` becomes (`docs/settings.md`, "A model belongs
 /// to a runtime").
 const PLAIN_MODEL: &str = "A plain model is recorded as the global runtime's, as \
@@ -238,6 +256,12 @@ pub fn write(
             list.join(", ")
         )
     };
+    let area_read = if repos.is_empty() {
+        ""
+    } else {
+        " Do this for each of the area's repositories the change may touch, at the head of its \
+         own default branch; clone one you have no checkout of, outside this folder."
+    };
     let checks = issue.plan.as_ref().map_or_else(String::new, |plan| {
         plan.checks
             .iter()
@@ -275,7 +299,7 @@ pub fn write(
     let task = match role {
         Role::Refiner => format!(
             "Refine {id}: {title}. It is {source}.\n\
-             {LEAVE_THE_FOLDER}\n{area_note}Read the issue and the code it touches in this folder. Change no file here.\n\
+             {LEAVE_THE_FOLDER}\n{area_note}Read the issue. {code}{area_read} Change no file here.\n\
              Then send the plan, one entry per check, as YAML on standard input:\n\
              temet-work plan {id} - <<'PLAN'\n\
              checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\
@@ -295,6 +319,11 @@ pub fn write(
              {PLAIN_MODEL} \
              Only a person sets {persons}: a plan that names one is refused.",
             title = issue.title,
+            code = at_the_default_branch(
+                "Read the code it touches at the current head of the repository's default branch",
+                "this folder",
+                "outside this folder",
+            ),
             persons = only_a_persons().join(", "),
         ),
         Role::Author => format!(
@@ -416,7 +445,7 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
                 .repos
                 .iter()
                 .map(|(r, path)| match path {
-                    Some(p) => format!("{r} (a checkout is at {p})"),
+                    Some(p) => format!("{r} (a checkout to fetch in is at {p})"),
                     None => r.to_string(),
                 })
                 .collect();
@@ -432,7 +461,9 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
                     .repos
                     .first()
                     .and_then(|(_, p)| p.as_deref())
-                    .map_or_else(String::new, |p| format!("; a checkout is at {p}"));
+                    .map_or_else(String::new, |p| {
+                        format!("; a checkout to fetch in is at {p}")
+                    });
                 format!("- {}: {} in its tracker{at}\n", c.source, c.tracker)
             }
         })
@@ -498,8 +529,9 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
         "Investigate for group {name} ({id}): its work queue is short. Find the work that should \
          come next and file an issue for each item.\n\
          {folder_note}It takes issues from:\n{covered}{milestone}\
+         {docs_and_code}\n\
          Read, in this order:\n\
-         1. Each project's docs, for work they plan that is not built yet.\n\
+         1. Each project's docs at that head, for work they plan that is not built yet.\n\
          2. {read_open}\n\
          3. The pull requests merged {since}, for defects you can show in that work.\n\
          Then file one issue for each planned item no open issue covers, and one for each defect \
@@ -515,6 +547,12 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
          When you have filed every issue you found, run: temet-work investigated {id}",
         name = g.name,
         id = g.id,
+        docs_and_code = at_the_default_branch(
+            "Read each repository's docs and code at the current head of that repository's \
+             default branch",
+            "a checkout",
+            "outside the checkouts named above and outside the folder you run in",
+        ),
     );
     Brief {
         role: Role::Investigator,
@@ -1454,6 +1492,116 @@ mod tests {
         }
     }
 
+    /// The sentences of `text` that tell its reader to read something.
+    fn reading(text: &str) -> Vec<&str> {
+        text.split('\n')
+            .flat_map(|line| line.split_inclusive(". "))
+            .map(str::trim)
+            .filter(|s| {
+                s.split(|c: char| !c.is_alphabetic())
+                    .any(|word| word.eq_ignore_ascii_case("read"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_refiner_reads_the_default_branch_not_the_files_in_its_folder() {
+        let code = "Read the code it touches at the current head of the repository's default \
+                    branch, not as the files in this folder stand: fetch, then read with git \
+                    show from the remote-tracking branch the fetch updated (a local branch may be \
+                    behind), or in a separate checkout of that commit outside this folder, which \
+                    you remove when you are done. Fetching is allowed: it moves no branch and \
+                    changes no file an author works on.";
+        let each = " Do this for each of the area's repositories the change may touch, at the head \
+                    of its own default branch; clone one you have no checkout of, outside this \
+                    folder.";
+        let area = [ProjectId::new("ui"), ProjectId::new("docs")];
+        for repos in [&area[..0], &area[..]] {
+            for shared in [false, true] {
+                let place = Workplace {
+                    shared,
+                    ..Workplace::default()
+                };
+                let task = write(Role::Refiner, &lamp_issue(), None, repos, place, &[], &[]).task;
+                let each = if repos.is_empty() { "" } else { each };
+                let told = format!("Read the issue. {code}{each} Change no file here.\n");
+                assert!(task.contains(&told), "shared {shared}:\n{task}");
+                // Nothing else in the brief sends it to read code.
+                let mut rest = reading(&task);
+                rest.retain(|s| !told.contains(s));
+                assert_eq!(
+                    rest,
+                    ["Read a pull request's changes from its code host."],
+                    "{task}"
+                );
+                assert!(!task.contains("touches in this folder"), "{task}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_investigator_reads_each_checkout_at_its_default_branch() {
+        let docs_and_code = "Read each repository's docs and code at the current head of that \
+                             repository's default branch, not as the files in a checkout stand: \
+                             fetch, then read with git show from the remote-tracking branch the \
+                             fetch updated (a local branch may be behind), or in a separate \
+                             checkout of that commit outside the checkouts named above and outside \
+                             the folder you run in, which you remove when you are done. Fetching is \
+                             allowed: it moves no branch and changes no file an author works on.";
+        for held in [false, true] {
+            let mut world = investigating(None);
+            world.apply(&Event::FolderAdded {
+                folder: FolderId::new("f2"),
+                project: ProjectId::new("ui"),
+                machine: MachineId::new("morpork"),
+                path: "/srv/ui/1".into(),
+            });
+            if held {
+                let issue = IssueId::new("ankh", "1");
+                world.apply(&Event::IssueSynced {
+                    issue: issue.clone(),
+                    title: "Mend the clock".into(),
+                    milestone: Some(MilestoneId::new("First")),
+                    depends_on: vec![],
+                    order: 1,
+                    closed: false,
+                });
+                world.apply(&Event::PlanWritten {
+                    issue,
+                    plan: Plan::default(),
+                });
+            }
+            let folder = &world.folders[&FolderId::new("f1")];
+            assert_eq!(folder.holder.is_some(), held);
+            let launch = world
+                .launch_investigator(&GroupId::new("watch"))
+                .expect("launch");
+            assert_eq!(launch.brief.folder, Some(PathBuf::from("/srv/ankh/1")));
+            let task = launch.brief.task;
+            // The lines that name a path give it as a place to fetch in.
+            let named: Vec<&str> = task.lines().filter(|l| l.contains("/srv/")).collect();
+            assert_eq!(
+                named,
+                [
+                    "- ankh: city/ankh in its tracker; a checkout to fetch in is at /srv/ankh/1",
+                    "- guild: GLD in its tracker, for the area's repositories ui (a checkout to \
+                     fetch in is at /srv/ui/1)",
+                ],
+                "held {held}:\n{task}"
+            );
+            assert!(
+                task.contains(&format!(
+                    "{docs_and_code}\nRead, in this order:\n1. Each project's docs at that head, "
+                )),
+                "held {held}:\n{task}"
+            );
+            // Nothing else in the brief sends it to read docs or code.
+            let mut rest = reading(&task);
+            rest.retain(|s| !docs_and_code.contains(s));
+            assert_eq!(rest, ["Read, in this order:"], "held {held}:\n{task}");
+        }
+    }
+
     /// A world where the group watch, over ankh and the area guild (whose tracker
     /// holds its repositories' issues), investigates; `since_ms` is when its last
     /// investigation started, if it had one.
@@ -1528,12 +1676,12 @@ mod tests {
         for line in [
             "Investigate for group Night watch (watch): its work queue is short.",
             "It takes issues from:\n\
-             - ankh: city/ankh in its tracker; a checkout is at /srv/ankh/1\n\
+             - ankh: city/ankh in its tracker; a checkout to fetch in is at /srv/ankh/1\n\
              - guild: GLD in its tracker, for the area's repositories ui\n",
             "Each issue you file goes in milestone Second, the last the group takes; to file one \
              in another the group takes, add --milestone M. The group takes, first to last: First, \
              Second.",
-            "1. Each project's docs, for work they plan that is not built yet.",
+            "1. Each project's docs at that head, for work they plan that is not built yet.",
             "2. The open issues of each project, so you know what is covered already.",
             "3. The pull requests merged since 2026-11-27 13:05 UTC, when the group's last \
              investigation started, for defects you can show in that work.",
