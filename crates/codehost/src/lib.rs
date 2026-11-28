@@ -1077,30 +1077,46 @@ mod tests {
     #[test]
     fn a_pull_requests_branch_is_reported_once() {
         let mut w = watch_12_in(Stage::InReview { round: 1 }, "57");
-        let mut host = FakeCodeHost {
-            pulls: vec![watch_pull("57", PullState::Open, "watch-12-night-shift")],
-            ..Default::default()
-        };
-        host.pulls[0].1.checks = Checks::Pending;
         let mut part = CodeHosts::default().every(0);
-        part.add(Box::new(host));
-        let first = part.poll(&w, 0).events;
-        assert_eq!(
-            first,
+        // Pull request 57 on `branch`, with CI still running so only the branch shows.
+        let on = |part: &mut CodeHosts, branch: &str| {
+            let mut host = FakeCodeHost {
+                pulls: vec![watch_pull("57", PullState::Open, branch)],
+                ..Default::default()
+            };
+            host.pulls[0].1.checks = Checks::Pending;
+            part.adapters = vec![Box::new(host)];
+        };
+        let reported = |branch: &str| {
             vec![Event::PullBranch {
                 issue: watch_12(),
                 repo: ProjectId::new("watch"),
                 number: "57".into(),
-                branch: "watch-12-night-shift".into(),
+                branch: branch.into(),
             }]
-        );
+        };
+        let held = |w: &World| w.issues[&watch_12()].branches[&ProjectId::new("watch")].clone();
+        on(&mut part, "watch-12-night-shift");
+        let first = part.poll(&w, 0).events;
+        assert_eq!(first, reported("watch-12-night-shift"));
         for e in &first {
             w.apply(e);
         }
+        assert_eq!(held(&w), "watch-12-night-shift");
         assert_eq!(part.poll(&w, 1).events, vec![], "the world holds it");
+
+        // The branch changes: it is reported again, once.
+        on(&mut part, "watch-12-night-shift-2");
+        let changed = part.poll(&w, 2).events;
+        assert_eq!(changed, reported("watch-12-night-shift-2"));
+        for e in &changed {
+            w.apply(e);
+        }
+        assert_eq!(held(&w), "watch-12-night-shift-2");
         assert_eq!(
-            w.issues[&watch_12()].branches[&ProjectId::new("watch")],
-            "watch-12-night-shift"
+            part.poll(&w, 3).events,
+            vec![],
+            "the world holds the new one"
         );
     }
 
