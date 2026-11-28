@@ -5,9 +5,9 @@
 //! The server has two levels. At `read`, the default, it offers the views:
 //! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
 //! that move work, record choices and change settings: `plan`, `ready`, `review`,
-//! `retry`, `rule`, `choose`, `overturn`, `proposal`, `hold`, `resume`, `file`,
-//! `investigated`, `set` and `unset`. A tool above the server's level is not
-//! listed, and calling it is refused.
+//! `retry`, `rule`, `choose`, `overturn`, `proposal`, `hold`, `resume`, `stop`,
+//! `start`, `file`, `investigated`, `set` and `unset`. A tool above the server's
+//! level is not listed, and calling it is refused.
 
 use serde_json::{Value, json};
 use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
@@ -185,6 +185,20 @@ fn tools() -> Vec<Tool> {
             description: "A person's: lift the hold, so work starts again. Refused from an agent.",
             acts: true,
             schema: json!({"type": "object", "properties": {}}),
+        },
+        Tool {
+            name: "stop",
+            description: "A person's: stop one agent. Its terminal is stopped, and the daemon tries again a minute after a stop that fails, listing it under Problems until it works. No agent starts on its issue, whatever the role, until a person runs start on the issue; the issue's other agents carry on, and its merge, deploy and verify still run. Stopping an investigator ends its investigation, and the group's next one waits investigate_every. The stop is in the event log, so it outlasts a restart. Refused from an agent, and for an agent that has ended or is already stopped.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "agent": {"type": "string", "description": "The agent, as status lists it, such as author-3."}
+            }, "required": ["agent"]}),
+        },
+        Tool {
+            name: "start",
+            description: "A person's: let agents start again on an issue whose agent a person stopped. The next round starts what the issue's stage needs. The stopped agent stays stopped, and a fresh one starts once it has ended. Refused from an agent, and on an issue no person stopped.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {"issue": issue_field()}, "required": ["issue"]}),
         },
         Tool {
             name: "file",
@@ -448,6 +462,12 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
         },
         "hold" => Command::Hold,
         "resume" => Command::Resume,
+        "stop" => Command::Stop {
+            agent: AgentId::new(text(args, "agent")?),
+        },
+        "start" => Command::Start {
+            issue: issue(args)?,
+        },
         other => return Err(format!("no tool {other}")),
     })
 }
@@ -583,7 +603,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 18);
+        assert_eq!(names(Level::Act).len(), 20);
     }
 
     #[test]
@@ -701,6 +721,32 @@ mod tests {
             assert!(names(Level::Act).contains(&name.to_string()));
             assert!(!names(Level::Read).contains(&name.to_string()));
         }
+    }
+
+    #[test]
+    fn stop_and_start_are_offered_at_act_only_and_become_the_command_lines() {
+        let mut sent = Vec::new();
+        call(Level::Act, "stop", json!({"agent": "author-3"}), &mut sent);
+        call(Level::Act, "start", json!({"issue": "ankh#1"}), &mut sent);
+        let commands: Vec<_> = sent.iter().map(|r| r.command.clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::Stop {
+                    agent: AgentId::new("author-3")
+                },
+                Command::Start {
+                    issue: IssueId::new("ankh", "1")
+                }
+            ]
+        );
+        for name in ["stop", "start"] {
+            assert!(names(Level::Act).contains(&name.to_string()));
+            assert!(!names(Level::Read).contains(&name.to_string()));
+        }
+        let mut refused = Vec::new();
+        call(Level::Read, "stop", json!({"agent": "author-3"}), &mut refused);
+        assert!(refused.is_empty(), "nothing is sent at read");
     }
 
     #[test]

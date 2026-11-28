@@ -3258,7 +3258,7 @@ mod tests {
         let stop = Effect::StopAgent {
             agent: author.clone(),
         };
-        assert_eq!(asked, [stop.clone()]);
+        assert_eq!(asked, std::slice::from_ref(&stop));
         assert_eq!(
             part.carry_out(&stop, &w),
             Outcome::Failed(refusals[0].to_string())
@@ -3274,7 +3274,7 @@ mod tests {
         };
         // The loop asks again each round: within the minute the answer is the
         // last try's reason, which Problems lists as `stop author-1`.
-        assert_eq!(w.missing().start, [stop.clone()]);
+        assert_eq!(w.missing().start, std::slice::from_ref(&stop));
         assert_eq!(part.carry_out(&stop, &w), Outcome::Failed(TIMED_OUT.into()));
         assert_eq!(stop.describe(), "stop author-1");
         assert!(!ended(&step(&mut part, &mut w, 59_999), &author));

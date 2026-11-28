@@ -631,6 +631,16 @@ pub fn answer(
                         text: "resumed: work starts again".into(),
                     });
                 }
+                temet_work_core::Command::Stop { agent } => {
+                    return Ok(Reply::Done {
+                        text: stopped_reply(host, agent),
+                    });
+                }
+                temet_work_core::Command::Start { issue } => {
+                    return Ok(Reply::Done {
+                        text: started_reply(host.world(), issue),
+                    });
+                }
                 temet_work_core::Command::Investigated { group } => {
                     let filed = host
                         .world()
@@ -658,6 +668,61 @@ pub fn answer(
             Ok(Reply::Done { text })
         }
     }
+}
+
+/// The reply to a person's stop of `agent`, once the daemon has asked for it:
+/// its terminal is being stopped, what that holds back, and, when the first try
+/// failed, why and that the daemon tries again.
+fn stopped_reply(host: &Host, agent: &temet_work_core::ids::AgentId) -> String {
+    let world = host.world();
+    let a = world.agents.get(agent);
+    let held_back = match a.and_then(|a| a.issue.as_ref()) {
+        Some(issue) => format!(
+            "no agent starts on {issue} until temet-work start {issue}; its other agents carry \
+             on, and its merge, deploy and verify still run"
+        ),
+        None => format!(
+            "its investigation ends with its session, and {}'s next investigation waits \
+             investigate_every",
+            a.map_or_else(String::new, |a| a.group.to_string())
+        ),
+    };
+    let stop = temet_work_core::Effect::StopAgent {
+        agent: agent.clone(),
+    };
+    let tries = match host.problems().get(&stop.describe()) {
+        Some(why) => format!(
+            ". The first try failed ({why}); the daemon tries again a minute after each try, and \
+             Problems lists it until it works"
+        ),
+        None => String::new(),
+    };
+    format!("{agent}'s terminal is being stopped: {held_back}{tries}")
+}
+
+/// The reply to a person's start of `issue`: agents start on it again, and an
+/// agent a person stopped that still runs is stopped first.
+fn started_reply(world: &temet_work_core::World, issue: &temet_work_core::ids::IssueId) -> String {
+    let running: Vec<String> = world
+        .agents
+        .values()
+        .filter(|a| {
+            a.issue.as_ref() == Some(issue)
+                && a.state != temet_work_core::model::AgentState::Ended
+                && world.person_stopped(&a.id).is_some()
+        })
+        .map(|a| a.id.to_string())
+        .collect();
+    let after = if running.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ", once {} {} ended: the daemon still stops what a person stopped",
+            running.join(" and "),
+            if running.len() == 1 { "has" } else { "have" }
+        )
+    };
+    format!("started: the next round starts what {issue} needs{after}")
 }
 
 /// The daemon's request log: who sent a command and what came of it. A command

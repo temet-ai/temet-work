@@ -269,7 +269,7 @@ fn a_person_stop_of_an_investigator_ends_its_investigation_and_the_next_waits() 
     let mut w = World::replay(&[
         Event::ProjectAdded {
             project: ProjectId::new("ankh"),
-            tracker: "github".into(),
+            tracker: "fake".into(),
             name: "city/ankh".into(),
             code_host: None,
             repo: None,
