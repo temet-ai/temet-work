@@ -729,6 +729,16 @@ impl Runner for Herdr {
         self.shared.lock().ok().and_then(|mut s| s.listed.take())
     }
 
+    /// Read from what herdr-core has sent since the last `updates`: an event,
+    /// or a snapshot after a missed stretch, that the reader has turned into
+    /// updates. They stay for the next `updates`.
+    fn latest(&self, terminal: &TerminalId) -> Option<Status> {
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|s| temet_work_runner::latest_of(&s.updates, terminal))
+    }
+
     fn problem(&self) -> Option<String> {
         self.unreachable
             .as_ref()
@@ -1273,6 +1283,63 @@ mod tests {
             [Status::Unknown, Status::Lost, Status::Gone, Status::Gone]
         );
         assert!(s.updates.iter().all(|u| u.labels["agent"] == "author-1"));
+    }
+
+    #[test]
+    fn a_loss_sent_after_the_updates_were_read_is_the_latest_status_and_stays_for_the_next_read() {
+        // Every test runs with TEMET_WORK_SANDBOX=1, so `updates` opens nothing
+        // and hands back only what the test feeds the reader's shared state.
+        if !sandboxed() {
+            return;
+        }
+        let t7 = TerminalId("t7".into());
+        let feed =
+            |h: &Herdr, event: Value| take_event(&event, &mut h.shared.lock().expect("lock"));
+        let statuses = |updates: Vec<Update>| -> Vec<(String, Status)> {
+            updates
+                .into_iter()
+                .map(|u| (u.terminal.0, u.status))
+                .collect()
+        };
+
+        // herdr-core's `lost` event.
+        let mut h = Herdr::default();
+        feed(
+            &h,
+            json!({"type": "created", "terminal": "t7", "data": {"labels": agent_labels(true)}}),
+        );
+        feed(
+            &h,
+            json!({"type": "status", "terminal": "t7", "data": {"status": {"state": "idle"}}}),
+        );
+        assert_eq!(h.updates().len(), 2, "the poll's read");
+        assert_eq!(h.latest(&t7), None, "nothing since");
+        feed(&h, json!({"type": "lost", "terminal": "t7", "data": {}}));
+        assert_eq!(h.latest(&t7), Some(Status::Lost));
+        assert_eq!(h.latest(&TerminalId("t8".into())), None, "not t8's");
+        assert_eq!(
+            statuses(h.updates()),
+            [("t7".to_string(), Status::Lost)],
+            "the next read still has it"
+        );
+
+        // A snapshot after a missed stretch that lists it recovering.
+        let mut h = Herdr::default();
+        let mut idle = recovering(agent_labels(true));
+        idle["reason"] = Value::Null;
+        idle["status"] = json!({"state": "idle"});
+        take_snapshot(&json!([idle]), &mut h.shared.lock().expect("lock"));
+        assert_eq!(statuses(h.updates()), [("t7".to_string(), Status::Between)]);
+        take_snapshot(
+            &json!([recovering(agent_labels(true))]),
+            &mut h.shared.lock().expect("lock"),
+        );
+        assert_eq!(h.latest(&t7), Some(Status::Lost));
+        assert_eq!(
+            statuses(h.updates()),
+            [("t7".to_string(), Status::Lost)],
+            "the next read still has it"
+        );
     }
 
     #[test]

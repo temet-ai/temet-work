@@ -11,6 +11,7 @@ session_id:
   - dbf1ab25-b936-427b-b27c-7106d8e0575d
   - fc025b57-8c0b-49dd-916e-cbc98c3f9cf3
   - ba3664be-ec7f-4b51-af6a-b1c20c80634d
+  - 4fdc790b-4921-4d0a-9032-f3a83dbaf0ef
 ---
 
 # temet-work architecture
@@ -84,7 +85,7 @@ What exists today:
 |---|---|
 | `temet-work-core` | the objects, the work loop, the host that routes effects to parts, agents' briefs, the state as text and, beside it, as view data (`view.rs`) that the `view` command answers with, the daemon's reply, and the rule for where its socket is. The host applies each event at the time it logs it with, so the world knows when each issue last changed, and puts in the world each round the web addresses the tracker and code-host families give |
 | `temet-work-runner`, `temet-work-runtime` | the contracts, a fake each, and contract tests that fail on a runner which types into a prompt or a runtime which drops the model. The runtime family turns a decision to start an agent into a program; the runner family starts it in a labelled terminal, reports the agent's state, holds text for an agent until its turn ends, and types `continue` into an agent whose usage limit has reset. A terminal reported gone (its program ended by itself, or it was stopped or removed) or lost (its program was lost, as to a signal or a reboot) ends its agent in that poll, and the end records whether the program was lost. The daemon kills and removes the terminal, so nothing stays under the agent's labels, such as the shell herdr-core puts in place of a lost program; a stop that fails is tried again once a minute until it works or the runner says the terminal is gone or unknown, and a gone or lost terminal of an agent that has already ended, as after a restart that lost a stop, is stopped once |
-| `temet-work-runner-herdr` | the herdr-core socket client; puts each agent's terminal on the herdr app's screens by starting it with `herdr.space`, `herdr.tab` and `herdr.name`, one space per group, one tab per issue and one for the group's investigator; labels every terminal with `program`, the first word of its argv. An agent whose program was lost has ended even when herdr-core has put a shell in its place, as it does in a terminal the herdr app keeps: a listed terminal reads as lost while it is live with a `reason` (the shell is coming), or once its argv no longer starts with its `program` label (the shell is there). A terminal started before that label reads as lost when it is an agent's and its argv is one word, since no agent is started as one word. herdr-core's `lost` event reads as lost too; a `finished` terminal, a `finished` or `removed` event and a terminal missing from a newer list read as gone; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
+| `temet-work-runner-herdr` | the herdr-core socket client; puts each agent's terminal on the herdr app's screens by starting it with `herdr.space`, `herdr.tab` and `herdr.name`, one space per group, one tab per issue and one for the group's investigator; labels every terminal with `program`, the first word of its argv. An agent whose program was lost has ended even when herdr-core has put a shell in its place, as it does in a terminal the herdr app keeps: a listed terminal reads as lost while it is live with a `reason` (the shell is coming), or once its argv no longer starts with its `program` label (the shell is there). A terminal started before that label reads as lost when it is an agent's and its argv is one word, since no agent is started as one word. herdr-core's `lost` event reads as lost too; a `finished` terminal, a `finished` or `removed` event and a terminal missing from a newer list read as gone. A terminal's latest status, which the runner family reads before the stop after an agent's last reminder, comes from the updates herdr-core has sent that the family has not taken yet, and reading it leaves them for the next poll; passes the runner contract against a live core (`TEMET_WORK_SANDBOX= cargo nextest run -p temet-work-runner-herdr --features live --run-ignored only`) and opens nothing in other test runs |
 | `temet-work-runtime-claude`, `temet-work-runtime-codex` | pass the runtime contract; the runtime family picks between them by the `runtime` setting. Claude runs `claude --permission-mode auto`, Codex `codex --approve-for-me` (workspace-write sandbox, automatic approval review); both pass on the one `PASSED_ON` list from `temet-work-runtime` |
 | `temet-work-tracker` | the contract (issues, milestones with due dates, the address of a project's issues, comment, close, reopen, create), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes to issues and to the open milestones and their due dates, keeps each open issue's text from the last sync in memory for `temet-work issue`, and closes verified issues. A close in the tracker is not passed to the loop while the issue merges, deploys or is verified, since its pull request may have closed it. After a failed verify the family reopens the issue in its tracker, at once and again at each sync until a sync lists it as open, and passes no close of it until then; an issue being finished or reopened keeps the text of the last sync that listed it. A later close is a person's and finishes the issue |
 | `temet-work-tracker-github` | issues and milestones through `gh`, issues filed with `gh issue create`, and closes and reopens with `gh issue close` and `gh issue reopen`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
@@ -119,7 +120,11 @@ rules. Every round the daemon also starts any agent an issue needs and does not 
 whose session ended, or one it decided on and did not start before it stopped. After three
 agents of one role have ended on one issue while it waited on them, it stops and lists the
 issue as a problem. An agent whose program was lost, as on a reboot, does not count toward
-those three. The daemon
+those three. Such ends count separately, up to three times `starts` (nine by default), so a
+program lost at the same point every run, as to an out-of-memory kill, is not started forever:
+after that many the daemon stops starting that role and lists the issue as a problem with a line
+of its own that says their programs were lost. Like the three, a lost end counts only while the
+issue waited on the agent. The daemon
 also asks again for a merge, deploy or verify that was lost; the parts that do them do not
 repeat work already done or running; a deploy that restarts the daemon is recorded by
 the new daemon, which finds the build in the handoff file (`docs/configuration.md`). An agent its
@@ -128,7 +133,9 @@ is stopped after thirty so a fresh one takes over. A stop that fails, as when th
 service cannot be reached or a request times out, is tried again once a minute has passed since the
 last try, with no further reminder, and is listed under Problems while it keeps failing; no fresh
 agent starts while the old one runs. A stop answered with the terminal gone or unknown ends the
-agent. While the daemon has no terminal for an agent, as before its runner has reported any after a
+agent. Before that stop the runner family reads the latest status its runner holds for the agent's
+terminal: when the runner already reports the program lost, as when the loss arrived after the
+poll read its updates, the agent ends as lost and its terminal is still stopped. While the daemon has no terminal for an agent, as before its runner has reported any after a
 restart, the agent is not ended either. Between tries an agent in a turn, at a prompt or waiting on
 a limit, or one its issue no longer waits on, is not stopped, and the rules below say whether its
 count is kept; the problem goes when the stop works or the count is dropped. An agent whose turn

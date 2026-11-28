@@ -39,6 +39,13 @@ pub struct Missing {
 /// The machine an agent runs on when its project has no work folder.
 pub const LOCAL: &str = "local";
 
+/// How many agents of one role whose programs were lost one issue may wait on,
+/// for each start the `starts` setting allows, before [`World::missing`] gives
+/// up on it. Such ends do not use up `starts`, so a reboot costs no start, but
+/// a program lost at the same point every run, as to an out-of-memory kill, is
+/// started at most three times `starts` (nine by default).
+pub const LOST_PER_START: u64 = 3;
+
 /// Everything the loop knows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct World {
@@ -509,6 +516,7 @@ impl World {
                         secret_digest: secret_digest.clone(),
                         continued: None,
                         ended_waited_on: false,
+                        lost_waited_on: false,
                         runtime: runtime.clone(),
                         model: model.clone(),
                     },
@@ -538,7 +546,9 @@ impl World {
                     && a.state != AgentState::Ended
                 {
                     a.state = state.clone();
-                    a.ended_waited_on = *state == AgentState::Ended && waited_on && !lost;
+                    let ended = *state == AgentState::Ended && waited_on;
+                    a.ended_waited_on = ended && !lost;
+                    a.lost_waited_on = ended && *lost;
                 }
             }
             Event::Continued { agent, resets_ms } => {
@@ -1167,7 +1177,9 @@ impl World {
     /// running author or reviewer that has not heard its fixes or its round is
     /// told again, and an arbiter that ruled in an earlier arbitration and still
     /// runs is asked again to stop. After the `starts` setting's number of agents of one role have
-    /// ended while one issue waited on them it gives up, and says so. A paused
+    /// ended while one issue waited on them it gives up, and says so. Agents whose programs were
+    /// lost do not count toward `starts`; after [`LOST_PER_START`] times `starts` of them it gives
+    /// up too, with a line of its own. A paused
     /// issue gets nothing until it is back in its group's scope, and then what its
     /// stage needs. A running investigation whose investigator never started gets
     /// one.
@@ -1272,17 +1284,27 @@ impl World {
                 continue;
             }
             // Only agents that ended while the issue waited on them count: not one
-            // the loop stopped because the issue went back to its author, nor one
-            // whose program was lost.
-            let tried = self
+            // the loop stopped because the issue went back to its author. One
+            // whose program was lost, as to a reboot, counts toward a limit of
+            // its own, so a program lost at the same point every run is not
+            // started forever.
+            let of_role: Vec<&Agent> = self
                 .agents
                 .values()
                 .filter(|a| a.issue.as_ref() == Some(&i.id) && a.role == role)
-                .filter(|a| a.ended_waited_on)
-                .count();
-            if tried as u64 >= self.setting_number(&i.id, Some(role), "starts") {
+                .collect();
+            let tried = of_role.iter().filter(|a| a.ended_waited_on).count();
+            let lost = of_role.iter().filter(|a| a.lost_waited_on).count();
+            let starts = self.setting_number(&i.id, Some(role), "starts");
+            if tried as u64 >= starts {
                 out.given_up.push(format!(
                     "{}: {tried} {}s ended before it moved on; no more are started",
+                    i.id,
+                    role.name()
+                ));
+            } else if lost as u64 >= starts.saturating_mul(LOST_PER_START) {
+                out.given_up.push(format!(
+                    "{}: the programs of {lost} {}s were lost before it moved on; no more are started",
                     i.id,
                     role.name()
                 ));

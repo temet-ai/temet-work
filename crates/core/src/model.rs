@@ -409,6 +409,13 @@ pub struct Agent {
     /// reboot, did not give up.
     #[serde(default)]
     pub ended_waited_on: bool,
+    /// Whether its session ended while its issue still waited on it and its
+    /// program was lost. Such ends have a limit of their own, three times
+    /// `starts` ([`crate::world::LOST_PER_START`]), so a program lost at the
+    /// same point every run, as to an out-of-memory kill, is not started
+    /// forever.
+    #[serde(default)]
+    pub lost_waited_on: bool,
     /// The runtime it was started with; none for an agent from an older log.
     #[serde(default)]
     pub runtime: Option<String>,

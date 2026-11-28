@@ -388,6 +388,10 @@ impl Runner for FakeRunner {
         self.fail_turns();
         std::mem::take(&mut self.pending)
     }
+
+    fn latest(&self, terminal: &TerminalId) -> Option<Status> {
+        crate::latest_of(&self.pending, terminal)
+    }
 }
 
 /// A program name the fake starts already stopped at a prompt.
