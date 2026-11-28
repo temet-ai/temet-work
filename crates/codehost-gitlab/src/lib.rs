@@ -231,6 +231,11 @@ impl CodeHost for GitLab {
             conflicting: v.get("has_conflicts").and_then(Value::as_bool) == Some(true),
             // Draft merge requests are not read yet.
             draft: false,
+            branch: v
+                .get("source_branch")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         })
     }
 
@@ -408,6 +413,24 @@ mod tests {
             temet_work_codehost::contract::check(&mut host, &ReadOnly),
             Ok(())
         );
+    }
+
+    #[test]
+    fn reads_a_pull_requests_branch() {
+        let mut host = GitLab::with(Box::new(Recorded));
+        assert_eq!(
+            host.pull(REPO, "7").expect("recorded").branch,
+            "night-watch"
+        );
+        let body = json!({"iid": 3, "state": "opened", "source_branch": "watch-12-night-shift"});
+        let mut host = GitLab::with(Box::new(Spy(Seen::default(), Ok(body.to_string()))));
+        assert_eq!(
+            host.pull(REPO, "3").expect("parses").branch,
+            "watch-12-night-shift"
+        );
+        let none = json!({"iid": 3, "state": "opened"});
+        let mut host = GitLab::with(Box::new(Spy(Seen::default(), Ok(none.to_string()))));
+        assert_eq!(host.pull(REPO, "3").expect("parses").branch, "");
     }
 
     #[test]

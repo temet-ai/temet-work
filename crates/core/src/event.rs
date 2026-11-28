@@ -378,6 +378,29 @@ pub enum Event {
         /// How many issues it filed.
         filed: usize,
     },
+    /// The code host read the branch of one of an issue's pull requests. Logged
+    /// the first time a read finds it, and again only when it changes.
+    PullBranch {
+        /// The issue.
+        issue: IssueId,
+        /// The repository.
+        repo: ProjectId,
+        /// The pull request's number.
+        number: String,
+        /// Its branch.
+        branch: String,
+    },
+    /// The merge found that a person closed one of an issue's pull requests
+    /// without merging it. It is dropped, and the issue goes back to its author,
+    /// who reopens it or opens another and names that with ready.
+    PullClosed {
+        /// The issue.
+        issue: IssueId,
+        /// The repository.
+        repo: ProjectId,
+        /// The closed pull request's number.
+        number: String,
+    },
     /// The code host would not merge the pull request as it stands, such as for a
     /// conflict with the target branch.
     MergeRefused {

@@ -35,7 +35,8 @@ pub struct Workplace {
 }
 
 /// One of an issue's pull requests: the project, the code host's name for its
-/// repository, the number there, and whether it has merged.
+/// repository, the number there, its branch, and whether it has merged or a
+/// person closed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pulled {
     /// The project.
@@ -46,20 +47,42 @@ pub struct Pulled {
     pub number: String,
     /// Whether it has merged.
     pub merged: bool,
+    /// Its branch, once the code host has reported it.
+    pub branch: Option<String>,
+    /// Whether a person closed it without merging, so it takes no more pushes:
+    /// the author reopens it or opens another in its repository.
+    pub closed: bool,
 }
 
-/// The pull requests of an issue that changes several repositories, one per line.
+/// An issue's pull requests, one per line, each with its branch when one is on
+/// record.
 fn pull_list(pulls: &[Pulled]) -> String {
     pulls
         .iter()
         .map(|p| {
-            let merged = if p.merged { " (merged already)" } else { "" };
+            let branch = p
+                .branch
+                .as_ref()
+                .map_or_else(String::new, |b| format!(", branch {b}"));
+            let state = if p.merged {
+                " (merged already)"
+            } else if p.closed {
+                " (closed without merging)"
+            } else {
+                ""
+            };
             format!(
-                "- {} ({}): pull request {}{merged}\n",
+                "- {} ({}): pull request {}{branch}{state}\n",
                 p.project, p.repo, p.number
             )
         })
         .collect()
+}
+
+/// How to check out `branch`: plain git, the same on every code host. A work
+/// folder is a person's own checkout, so no remote is named.
+fn switch_to(branch: &str) -> String {
+    format!("git fetch, then git switch {branch}")
 }
 
 /// What a refiner, reviewer and arbiter are told about the folder they run in.
@@ -73,7 +96,9 @@ request (with none, of the commit you need) outside this folder, and remove it w
 
 /// What an author is told about making its change, and the end of its brief: the
 /// `ready` command for `issue`. An author on an issue with pull requests is given
-/// each one, and opens one only in a repository that has none.
+/// each one with its branch and how to check it out, and opens one only in a
+/// repository that has none, or where a person closed the one on record, which
+/// it may reopen instead.
 fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, String) {
     let several = held.len() > 1;
     let folders = if several {
@@ -87,17 +112,33 @@ fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, St
     } else {
         String::new()
     };
-    // The repositories with no pull request: `ready` has to name one in each.
+    // The repositories with no pull request at all.
     let lacking: Vec<&Held> = held
         .iter()
         .filter(|h| !pulls.iter().any(|p| p.project == h.project))
         .collect();
-    let numbers = if several {
-        lacking
+    let closed: Vec<&Pulled> = pulls.iter().filter(|p| p.closed).collect();
+    // The ones still taking pushes.
+    let open: Vec<&Pulled> = pulls.iter().filter(|p| !p.merged && !p.closed).collect();
+    // `ready` has to name a number in each repository with none, and in each
+    // where a person closed the one on record.
+    let mut needs: Vec<&ProjectId> = held
+        .iter()
+        .map(|h| &h.project)
+        .filter(|h| !pulls.iter().any(|p| &p.project == *h && !p.closed))
+        .collect();
+    for p in &closed {
+        if !needs.contains(&&p.project) {
+            needs.push(&p.project);
+        }
+    }
+    let several_repos = several || pulls.len() > 1;
+    let numbers = if several_repos {
+        needs
             .iter()
-            .map(|h| format!(" {}=<pull request number>", h.project))
+            .map(|p| format!(" {p}=<pull request number>"))
             .collect()
-    } else if pulls.is_empty() || !lacking.is_empty() {
+    } else if pulls.is_empty() || !needs.is_empty() {
         " <pull request number>".to_string()
     } else {
         String::new()
@@ -121,20 +162,96 @@ fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, St
     } else {
         "a pull request"
     };
-    let none_merged = pulls.iter().all(|p| !p.merged);
-    let push = match (none_merged, pulls.len()) {
-        (true, 1) => "Push your fixes to that pull request's branch.",
-        (true, _) => "Push your fixes to each pull request's branch.",
-        (false, _) => "Push your fixes to the branch of each one not marked (merged already).",
+    // Where to check out each branch the fixes go to, before pushing to it.
+    let switches: Vec<String> = open
+        .iter()
+        .filter_map(|p| {
+            let branch = p.branch.as_ref()?;
+            Some(if several_repos {
+                format!("in the folder of {}, {}", p.project, switch_to(branch))
+            } else {
+                switch_to(branch)
+            })
+        })
+        .collect();
+    let checkout = match switches.as_slice() {
+        [] => String::new(),
+        [one] if !several_repos => format!("Check out its branch first: {one}."),
+        _ => format!("Check out each branch first: {}.", switches.join("; ")),
+    };
+    let marked: Vec<&str> = [
+        (pulls.iter().any(|p| p.merged), "(merged already)"),
+        (!closed.is_empty(), "(closed without merging)"),
+    ]
+    .into_iter()
+    .filter_map(|(any, mark)| any.then_some(mark))
+    .collect();
+    // When a closed one leaves none open, there is no branch to push to.
+    let push = match (open.len(), marked.is_empty(), pulls.len()) {
+        (0, ..) if !closed.is_empty() => String::new(),
+        (_, true, 1) => "Push your fixes to that pull request's branch.".to_string(),
+        (_, true, _) => "Push your fixes to each pull request's branch.".to_string(),
+        (_, false, _) => format!(
+            "Push your fixes to the branch of each one not marked {}.",
+            marked.join(" or ")
+        ),
     };
     // Merged or not: `ready` with no number for a repository keeps the one on
-    // record, so the loop would not follow a second one.
-    let no_other = if lacking.is_empty() {
-        "Do not open another pull request."
+    // record, so the loop would not follow a second one. One a person closed is
+    // no longer on record: its repository is named below.
+    let kept: Vec<String> = pulls
+        .iter()
+        .filter(|p| !p.closed)
+        .map(|p| p.project.to_string())
+        .collect();
+    let no_other = if !closed.is_empty() {
+        if kept.is_empty() {
+            String::new()
+        } else {
+            format!("Do not open another pull request in {}.", kept.join(", "))
+        }
+    } else if lacking.is_empty() {
+        "Do not open another pull request.".to_string()
     } else {
-        "Do not open another pull request in a repository that has one, merged or not."
+        "Do not open another pull request in a repository that has one, merged or not.".to_string()
     };
-    let open = if lacking.is_empty() {
+    let said: Vec<&str> = [checkout.as_str(), push.as_str(), no_other.as_str()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    let said = if said.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", said.join(" "))
+    };
+    // Pushing to a closed pull request does not reopen it.
+    let reopen: String = closed
+        .iter()
+        .map(|p| {
+            let there = if several_repos {
+                format!(" in {}", p.project)
+            } else {
+                String::new()
+            };
+            let start = p.branch.as_ref().map_or_else(String::new, |b| {
+                let folder = if several_repos {
+                    format!("in the folder of {}, ", p.project)
+                } else {
+                    String::new()
+                };
+                format!(
+                    " A new one can start from its branch, {b}: {folder}{}.",
+                    switch_to(b)
+                )
+            });
+            format!(
+                "Pull request {}{there} was closed without merging: reopen it, or open a new pull \
+                 request{there}.{start}\n",
+                p.number
+            )
+        })
+        .collect();
+    let open_new = if lacking.is_empty() {
         String::new()
     } else {
         let list: Vec<String> = lacking
@@ -147,14 +264,17 @@ fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, St
             list.join(", ")
         )
     };
+    let when = if open.is_empty() && !closed.is_empty() {
+        "When the pull request is open and every check holds"
+    } else {
+        "When your fixes are pushed and every check holds"
+    };
     (
         format!(
-            "\n{folders}The issue already has {has}:\n{list}{push} {no_other}\n{open}",
+            "\n{folders}The issue already has {has}:\n{list}{said}{reopen}{open_new}",
             list = pull_list(pulls)
         ),
-        format!(
-            "When your fixes are pushed and every check holds, run: temet-work ready {issue}{numbers}"
-        ),
+        format!("{when}, run: temet-work ready {issue}{numbers}"),
     )
 }
 
@@ -288,10 +408,12 @@ pub fn write(
         format!(" {}", reply_flags(block.points.len()))
     });
     let (work, ready) = authors_work(id, &held, pulls);
-    let to_review = if pulls.len() > 1 {
+    // A reader is not sent to one a person closed.
+    let reviewed: Vec<Pulled> = pulls.iter().filter(|p| !p.closed).cloned().collect();
+    let to_review = if reviewed.len() > 1 {
         format!(
             "It changes several repositories; review every one of its pull requests:\n{}",
-            pull_list(pulls)
+            pull_list(&reviewed)
         )
     } else {
         String::new()
@@ -604,18 +726,31 @@ pub(crate) fn reply_flags(count: usize) -> String {
 }
 
 /// What an author is told when the review or the checks found things to fix
-/// (`points`) on `issue`. When its next ready answers a block, it is told that
-/// block's points, numbered, and to reply to each.
-pub fn fixes(issue: &Issue, points: &[String]) -> String {
+/// (`points`) on `issue`, which changes `repos`. When its next ready answers a
+/// block, it is told that block's points, numbered, and to reply to each. A
+/// repository with no pull request on record, as after a person closed it,
+/// needs a number in the ready.
+pub fn fixes(issue: &Issue, repos: &[ProjectId], points: &[String]) -> String {
     let id = &issue.id;
+    let lacking = repos.iter().filter(|r| !issue.pulls.contains_key(*r));
+    let numbers: String = if repos.len() > 1 {
+        lacking
+            .map(|r| format!(" {r}=<pull request number>"))
+            .collect()
+    } else if lacking.count() > 0 {
+        " <pull request number>".into()
+    } else {
+        String::new()
+    };
     let Some(block) = issue.block_to_answer() else {
         let list: String = points.iter().map(|p| format!("- {p}\n")).collect();
         return format!(
-            "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready {id}"
+            "Fix these, from the review or the checks:\n{list}Then push and run: temet-work ready \
+             {id}{numbers}"
         );
     };
     let run = format!(
-        "temet-work ready {id} {}\nA ready without one reply for each point is refused.",
+        "temet-work ready {id}{numbers} {}\nA ready without one reply for each point is refused.",
         reply_flags(block.points.len())
     );
     if points == block.points.as_slice() {
@@ -1091,6 +1226,8 @@ mod tests {
         let mut issue = lamp_issue();
         issue.stage = crate::model::Stage::Fixing { round: 1 };
         issue.fix = points.clone();
+        let watch = [ProjectId::new("watch")];
+        issue.pulls.insert(watch[0].clone(), "57".into());
         issue.reviews = vec![crate::model::Review {
             round: 1,
             reviewer: Some(AgentId::new("reviewer-3")),
@@ -1100,7 +1237,7 @@ mod tests {
             states: Vec::new(),
         }];
         // The running author hears the points numbered, once, and how to reply.
-        let told = fixes(&issue, &points);
+        let told = fixes(&issue, &watch, &points);
         assert!(
             told.starts_with(
                 "Review round 1 blocked watch#31. Fix each of its points:\n\
@@ -1130,7 +1267,7 @@ mod tests {
         // After an arbiter's fix ruling, the author fixes what the ruling says and
         // replies to the reviewer's last block.
         let ruling = ["the wick must be trimmed by hand".to_string()];
-        let told = fixes(&issue, &ruling);
+        let told = fixes(&issue, &watch, &ruling);
         assert!(
             told.contains(
                 "Fix these, from the review or the checks:\n\
@@ -1146,7 +1283,7 @@ mod tests {
         issue.fix_keeps_round = true;
         let brief = lamp_task(Role::Author, &issue);
         assert!(!brief.contains("--reply"), "{brief}");
-        let told = fixes(&issue, &["CI check lint failed".into()]);
+        let told = fixes(&issue, &watch, &["CI check lint failed".into()]);
         assert_eq!(
             told,
             "Fix these, from the review or the checks:\n- CI check lint failed\n\
@@ -1187,6 +1324,22 @@ mod tests {
         held: &[(&str, &str)],
         pulls: &[(&str, &str, &str, bool)],
     ) -> String {
+        let pulls: Vec<Pulled> = pulls
+            .iter()
+            .map(|(project, repo, number, merged)| Pulled {
+                project: ProjectId::new(*project),
+                repo: (*repo).into(),
+                number: (*number).into(),
+                merged: *merged,
+                branch: None,
+                closed: false,
+            })
+            .collect();
+        author_task_of(stage, held, &pulls)
+    }
+
+    /// [`author_task_in`] with the pull requests given whole, branch and all.
+    fn author_task_of(stage: Stage, held: &[(&str, &str)], pulls: &[Pulled]) -> String {
         let mut issue = lamp_issue();
         issue.plan = Some(Plan {
             checks: vec![Check::new("a dry lamp is refused", "the dry lamp test")],
@@ -1205,15 +1358,6 @@ mod tests {
                 path: format!("/srv/{project}"),
             })
             .collect();
-        let pulls: Vec<Pulled> = pulls
-            .iter()
-            .map(|(project, repo, number, merged)| Pulled {
-                project: ProjectId::new(*project),
-                repo: (*repo).into(),
-                number: (*number).into(),
-                merged: *merged,
-            })
-            .collect();
         write(
             Role::Author,
             &issue,
@@ -1223,7 +1367,7 @@ mod tests {
                 held,
                 ..Workplace::default()
             },
-            &pulls,
+            pulls,
             &[],
         )
         .task
@@ -1397,6 +1541,111 @@ mod tests {
                      - CI check tests failed\n\
                      The plan's checks,"
                 )
+            );
+        }
+    }
+
+    /// Pull request `number` in `project` of the `TWO_HELD` repositories, open,
+    /// on `branch` when one is given.
+    fn pulled(project: &str, number: &str, branch: Option<&str>) -> Pulled {
+        Pulled {
+            project: ProjectId::new(project),
+            repo: format!("ankh-morpork/{project}"),
+            number: number.into(),
+            merged: false,
+            branch: branch.map(Into::into),
+            closed: false,
+        }
+    }
+
+    #[test]
+    fn an_author_is_told_its_pull_requests_branch_and_how_to_check_it_out() {
+        let night = Some("watch-12-night-shift");
+        let fixing = Stage::Fixing { round: 1 };
+        for held in [&TWO_HELD[..0], &TWO_HELD[..1]] {
+            let task = author_task_of(fixing, held, &[pulled("watch", "57", night)]);
+            assert!(
+                task.contains(
+                    "The issue already has a pull request:\n\
+                     - watch (ankh-morpork/watch): pull request 57, branch watch-12-night-shift\n\
+                     Check out its branch first: git fetch, then git switch watch-12-night-shift. \
+                     Push your fixes to that pull request's branch. Do not open another pull \
+                     request.\n"
+                ),
+                "{task}"
+            );
+            let at = |s: &str| task.find(s).unwrap_or_else(|| panic!("no {s:?} in {task}"));
+            assert!(at("git fetch") < at("git switch watch-12-night-shift"));
+            assert!(at("git switch watch-12-night-shift") < at("Push your fixes"));
+            assert!(task.ends_with("run: temet-work ready watch#31"), "{task}");
+        }
+
+        // Several repositories: each branch is checked out in its own folder.
+        let task = author_task_of(
+            fixing,
+            &TWO_HELD,
+            &[
+                pulled("watch", "57", night),
+                pulled("clacks", "12", Some("watch-12-semaphore")),
+            ],
+        );
+        assert!(
+            task.contains(
+                "- watch (ankh-morpork/watch): pull request 57, branch watch-12-night-shift\n\
+                 - clacks (ankh-morpork/clacks): pull request 12, branch watch-12-semaphore\n\
+                 Check out each branch first: in the folder of watch, git fetch, then git switch \
+                 watch-12-night-shift; in the folder of clacks, git fetch, then git switch \
+                 watch-12-semaphore. Push your fixes to each pull request's branch."
+            ),
+            "{task}"
+        );
+
+        // Closed: its branch is where a new pull request can start.
+        let closed = Pulled {
+            closed: true,
+            ..pulled("watch", "57", night)
+        };
+        let task = author_task_of(fixing, &TWO_HELD[..1], std::slice::from_ref(&closed));
+        assert!(
+            task.contains(
+                "- watch (ankh-morpork/watch): pull request 57, branch watch-12-night-shift (closed \
+                 without merging)\n\
+                 Pull request 57 was closed without merging: reopen it, or open a new pull request. \
+                 A new one can start from its branch, watch-12-night-shift: git fetch, then git \
+                 switch watch-12-night-shift.\n"
+            ),
+            "{task}"
+        );
+        for not in [
+            "Push your fixes",
+            "Do not open another pull request",
+            "Check out its",
+        ] {
+            assert!(!task.contains(not), "{not:?} in {task}");
+        }
+        assert!(
+            task.ends_with(
+                "When the pull request is open and every check holds, run: temet-work ready \
+                 watch#31 <pull request number>"
+            ),
+            "{task}"
+        );
+
+        // No branch on record: none is named, and no empty one is printed.
+        for pulls in [
+            vec![pulled("watch", "57", None)],
+            vec![Pulled {
+                branch: None,
+                ..closed
+            }],
+        ] {
+            let task = author_task_of(fixing, &TWO_HELD[..1], &pulls);
+            for not in ["branch ", "git switch", "branch,", "start from"] {
+                assert!(!task.contains(not), "{not:?} in {task}");
+            }
+            assert!(
+                task.contains("- watch (ankh-morpork/watch): pull request 57"),
+                "{task}"
             );
         }
     }

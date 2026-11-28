@@ -55,6 +55,8 @@ pub struct Pull {
     /// Whether it is a draft, which its code host will not merge until its author
     /// marks it ready for review.
     pub draft: bool,
+    /// The branch it merges from; empty when the code host gave none.
+    pub branch: String,
 }
 
 /// Why a code-host call failed.
@@ -118,6 +120,8 @@ pub struct FakeCodeHost {
     pub mains: std::sync::Arc<std::sync::Mutex<BTreeMap<String, Checks>>>,
     /// The repository of each merge, in order.
     pub merged_repos: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// The pull request number of each merge, in order.
+    pub merged_numbers: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Default for FakeCodeHost {
@@ -135,6 +139,7 @@ impl FakeCodeHost {
             merges: Default::default(),
             mains: Default::default(),
             merged_repos: Default::default(),
+            merged_numbers: Default::default(),
         }
     }
 }
@@ -169,6 +174,9 @@ impl CodeHost for FakeCodeHost {
         }
         if let Ok(mut repos) = self.merged_repos.lock() {
             repos.push(repo.to_string());
+        }
+        if let Ok(mut numbers) = self.merged_numbers.lock() {
+            numbers.push(number.to_string());
         }
         Ok(())
     }
@@ -231,6 +239,7 @@ pub mod contract {
             pull.number == number,
             "a pull request reports its own number",
         )?;
+        ensure(!pull.branch.is_empty(), "a pull request reports its branch")?;
         ensure(
             host.pull(&repo, "999999999").is_err(),
             "a pull request the code host does not have is an error",
@@ -328,6 +337,16 @@ impl Wait {
     }
 }
 
+/// What a try to merge one pull request found.
+enum Tried {
+    /// It merged, now or before.
+    Merged,
+    /// A person closed it without merging.
+    Closed,
+    /// The code host would not merge it, for this reason.
+    Refused(String),
+}
+
 /// The code host would not let it merge: its author has to hear why.
 fn refused(issue: &IssueId, reason: String) -> Outcome {
     Outcome::Done {
@@ -374,13 +393,16 @@ impl CodeHosts {
         Ok((host, project.repo.clone()))
     }
 
-    /// Reads every unmerged pull request of an issue, and says what to report: a
-    /// conflict in any of them first; else, while CI has not been reported, a
-    /// failure in any at once, with the repository named when the issue has several,
-    /// or a pass once every one has passed.
-    fn read_pulls(&mut self, world: &World, issue: &Issue) -> Result<Option<Event>, String> {
+    /// Reads every unmerged pull request of an issue, and says what to report:
+    /// each branch the world does not hold yet; then a conflict in any of them;
+    /// else, while CI has not been reported, a failure in any at once, with the
+    /// repository named when the issue has several, or a pass once every one has
+    /// passed. A branch is compared with the world's, so a pull request read
+    /// every `ci_every` reports its branch once, and again only when it changes.
+    fn read_pulls(&mut self, world: &World, issue: &Issue) -> Result<Vec<Event>, String> {
         let several = issue.pulls.len() > 1;
         let (mut failed, mut pending) = (Vec::new(), false);
+        let mut events = Vec::new();
         for repo in world.repos_of(issue) {
             let Some(number) = issue
                 .pulls
@@ -391,12 +413,21 @@ impl CodeHosts {
             };
             let (host, name) = self.host_for(world, &repo)?;
             let pull = host.pull(&name, number).map_err(|e| e.to_string())?;
+            if !pull.branch.is_empty() && issue.branches.get(&repo) != Some(&pull.branch) {
+                events.push(Event::PullBranch {
+                    issue: issue.id.clone(),
+                    repo: repo.clone(),
+                    number: number.clone(),
+                    branch: pull.branch.clone(),
+                });
+            }
             // A conflict is caught on every read, even after CI finished.
             if pull.state == PullState::Open && pull.conflicting {
-                return Ok(Some(Event::PullConflicts {
+                events.push(Event::PullConflicts {
                     issue: issue.id.clone(),
                     repo: Some(repo),
-                }));
+                });
+                return Ok(events);
             }
             // No checks yet usually means CI has not started on the new commit; only
             // a repository that runs no CI leaves the plan's checks to the reviewer.
@@ -423,13 +454,14 @@ impl CodeHosts {
             }
         }
         let passed = failed.is_empty();
-        Ok(
+        events.extend(
             (issue.checks_ok.is_none() && (!passed || !pending)).then(|| Event::ChecksFinished {
                 issue: issue.id.clone(),
                 passed,
                 failing: failed,
             }),
-        )
+        );
+        Ok(events)
     }
 
     /// Whether the main pipeline of `repo`, after its pull request `number` merged,
@@ -538,34 +570,35 @@ impl CodeHosts {
             .and_then(|pull| {
                 match pull.state {
                     // Merged already, by a person or an earlier try.
-                    PullState::Merged => Ok(None),
-                    PullState::Closed => Ok(Some(format!(
-                        "pull request {number} was closed without merging"
-                    ))),
-                    PullState::Open if pull.conflicting => Ok(Some(format!(
+                    PullState::Merged => Ok(Tried::Merged),
+                    // A person closed it: no merge is asked for, and the loop drops it.
+                    PullState::Closed => Ok(Tried::Closed),
+                    PullState::Open if pull.conflicting => Ok(Tried::Refused(format!(
                         "pull request {number} conflicts with the branch it merges into"
                     ))),
                     // Asking to merge it would only fail, every time. The command is
                     // `gh`'s: no other adapter reports drafts yet.
-                    PullState::Open if pull.draft => Ok(Some(format!(
+                    PullState::Open if pull.draft => Ok(Tried::Refused(format!(
                         "pull request {number} is a draft: mark it ready for review with \
                          `gh pr ready {number} -R {name}`"
                     ))),
                     PullState::Open => match host.merge(&name, &number, &how) {
-                        Ok(()) => Ok(None),
+                        Ok(()) => Ok(Tried::Merged),
                         Err(e)
                             if ["not mergeable", "merge conflict", "conflicts"]
                                 .iter()
                                 .any(|w| e.to_string().to_lowercase().contains(w)) =>
                         {
-                            Ok(Some(format!("pull request {number} is not mergeable: {e}")))
+                            Ok(Tried::Refused(format!(
+                                "pull request {number} is not mergeable: {e}"
+                            )))
                         }
                         Err(e) => Err(e.to_string()),
                     },
                 }
             });
         match tried {
-            Ok(None) => {
+            Ok(Tried::Merged) => {
                 self.merge_failed.remove(issue);
                 Outcome::Done {
                     events: vec![Event::Merged {
@@ -575,8 +608,20 @@ impl CodeHosts {
                     effects: Vec::new(),
                 }
             }
+            // Its author reopens it or opens another, and names that with ready.
+            Ok(Tried::Closed) => {
+                self.merge_failed.remove(issue);
+                Outcome::Done {
+                    events: vec![Event::PullClosed {
+                        issue: issue.clone(),
+                        repo,
+                        number,
+                    }],
+                    effects: Vec::new(),
+                }
+            }
             // Only its author can fix it: back to work.
-            Ok(Some(reason)) => refused(issue, reason),
+            Ok(Tried::Refused(reason)) => refused(issue, reason),
             Err(e) => {
                 self.merge_failed
                     .insert(issue.clone(), (e.clone(), Instant::now()));
@@ -619,9 +664,9 @@ impl Part for CodeHosts {
             }
             self.read_at.insert(issue.clone(), now_ms);
             match self.read_pulls(world, &i) {
-                Ok(event) => {
+                Ok(found) => {
                     self.errors.remove(&issue);
-                    events.extend(event);
+                    events.extend(found);
                 }
                 Err(e) => {
                     self.errors.insert(issue.clone(), format!("{issue}: {e}"));
@@ -685,6 +730,8 @@ mod tests {
             checks,
             conflicting: false,
             draft: false,
+            // None, so that only a test about branches sees them reported.
+            branch: String::new(),
         }
     }
 
@@ -751,7 +798,16 @@ mod tests {
 
     #[test]
     fn the_fake_passes_the_contract() {
-        assert_eq!(contract::check(&mut fake(), &Writable), Ok(()));
+        let mut host = fake();
+        for (_, p) in &mut host.pulls {
+            p.branch = format!("ankh-{}", p.number);
+        }
+        assert_eq!(contract::check(&mut host, &Writable), Ok(()));
+        // A code host that reports no branch fails it.
+        assert_eq!(
+            contract::check(&mut fake(), &Writable),
+            Err("a pull request reports its branch".into())
+        );
     }
 
     #[test]
@@ -877,6 +933,174 @@ mod tests {
                 && i.fix[0].contains("gh pr ready"),
             "{:?}",
             i.fix
+        );
+    }
+
+    fn watch_12() -> IssueId {
+        IssueId::new("watch", "12")
+    }
+
+    /// A world where watch#12, whose code is ankh-morpork/watch, is in `stage`
+    /// with pull request `number` on record.
+    fn watch_12_in(stage: Stage, number: &str) -> World {
+        let mut w = World::default();
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new("watch"),
+            tracker: "fake".into(),
+            name: "ankh-morpork/watch".into(),
+            code_host: None,
+            repo: None,
+        });
+        w.apply(&Event::IssueSynced {
+            issue: watch_12(),
+            title: "A night shift rota".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let i = w.issues.get_mut(&watch_12()).expect("issue");
+        i.stage = stage;
+        i.round = 1;
+        i.pulls.insert(ProjectId::new("watch"), number.into());
+        w
+    }
+
+    /// Pull request `number` of ankh-morpork/watch, passing, in `state`, on
+    /// branch `branch`.
+    fn watch_pull(number: &str, state: PullState, branch: &str) -> (String, Pull) {
+        let p = Pull {
+            state,
+            branch: branch.into(),
+            ..pull(number, Checks::Passed)
+        };
+        ("ankh-morpork/watch".into(), p)
+    }
+
+    #[test]
+    fn a_closed_pull_request_is_reported_closed_and_not_merged() {
+        let w = watch_12_in(Stage::Merging, "57");
+        let host = FakeCodeHost {
+            pulls: vec![watch_pull("57", PullState::Closed, "watch-12-night-shift")],
+            ..Default::default()
+        };
+        let merges = host.merges.clone();
+        let mut part = CodeHosts::default();
+        part.add(Box::new(host));
+        let merge = Effect::Merge { issue: watch_12() };
+        let closed = Outcome::Done {
+            events: vec![Event::PullClosed {
+                issue: watch_12(),
+                repo: ProjectId::new("watch"),
+                number: "57".into(),
+            }],
+            effects: vec![],
+        };
+        assert_eq!(part.carry_out(&merge, &w), closed);
+        assert!(
+            merges.lock().expect("lock").is_empty(),
+            "no merge asked for"
+        );
+    }
+
+    #[test]
+    fn after_a_closed_pull_request_the_merge_follows_the_one_ready_named() {
+        let mut w = watch_12_in(Stage::Merging, "57");
+        let host = FakeCodeHost {
+            pulls: vec![
+                watch_pull("57", PullState::Closed, "watch-12-night-shift"),
+                watch_pull("58", PullState::Open, "watch-12-rota"),
+            ],
+            ..Default::default()
+        };
+        let numbers = host.merged_numbers.clone();
+        let mut part = CodeHosts::default().every(0);
+        part.add(Box::new(host));
+        let merge = Effect::Merge { issue: watch_12() };
+        let apply = |w: &mut World, outcome: Outcome| -> Vec<Effect> {
+            let Outcome::Done { events, .. } = outcome else {
+                panic!("expected events, got {outcome:?}");
+            };
+            events.iter().flat_map(|e| w.apply(e)).collect()
+        };
+        let closed = part.carry_out(&merge, &w);
+        apply(&mut w, closed);
+        assert_eq!(w.issues[&watch_12()].stage, Stage::Fixing { round: 1 });
+
+        // The author names 58; review approves and its checks pass.
+        w.apply(&Event::PullRequestReady {
+            issue: watch_12(),
+            pull: None,
+            pulls: [(ProjectId::new("watch"), "58".to_string())].into(),
+            replies: Vec::new(),
+        });
+        let read = part.poll(&w, 0);
+        assert!(
+            read.events.contains(&Event::PullBranch {
+                issue: watch_12(),
+                repo: ProjectId::new("watch"),
+                number: "58".into(),
+                branch: "watch-12-rota".into(),
+            }),
+            "{:?}",
+            read.events
+        );
+        let mut effects = Vec::new();
+        for e in read.events.iter().chain([&Event::ReviewFinished {
+            issue: watch_12(),
+            round: 1,
+            verdict: temet_work_core::Verdict::Approve,
+            failed: None,
+            open: None,
+        }]) {
+            effects.extend(w.apply(e));
+        }
+        assert_eq!(effects, vec![merge.clone()]);
+
+        let merged = part.carry_out(&merge, &w);
+        assert_eq!(
+            merged,
+            Outcome::Done {
+                events: vec![Event::Merged {
+                    issue: watch_12(),
+                    repo: Some(ProjectId::new("watch")),
+                }],
+                effects: vec![],
+            }
+        );
+        let effects = apply(&mut w, merged);
+        assert!(effects.contains(&Effect::Deploy { issue: watch_12() }));
+        assert_eq!(w.issues[&watch_12()].stage, Stage::Deploying);
+        assert_eq!(*numbers.lock().expect("lock"), ["58"], "57 is never merged");
+    }
+
+    #[test]
+    fn a_pull_requests_branch_is_reported_once() {
+        let mut w = watch_12_in(Stage::InReview { round: 1 }, "57");
+        let mut host = FakeCodeHost {
+            pulls: vec![watch_pull("57", PullState::Open, "watch-12-night-shift")],
+            ..Default::default()
+        };
+        host.pulls[0].1.checks = Checks::Pending;
+        let mut part = CodeHosts::default().every(0);
+        part.add(Box::new(host));
+        let first = part.poll(&w, 0).events;
+        assert_eq!(
+            first,
+            vec![Event::PullBranch {
+                issue: watch_12(),
+                repo: ProjectId::new("watch"),
+                number: "57".into(),
+                branch: "watch-12-night-shift".into(),
+            }]
+        );
+        for e in &first {
+            w.apply(e);
+        }
+        assert_eq!(part.poll(&w, 1).events, vec![], "the world holds it");
+        assert_eq!(
+            w.issues[&watch_12()].branches[&ProjectId::new("watch")],
+            "watch-12-night-shift"
         );
     }
 

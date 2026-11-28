@@ -20,8 +20,9 @@ use crate::ids::{
 use crate::launch::Launch;
 use crate::model::Decision;
 use crate::model::{
-    Addresses, Agent, AgentState, Area, CheckState, DecisionKind, Folder, Group, INVESTIGATE_EVERY,
-    Investigation, Issue, PointState, Project, Review, Role, Rule, RuleState, Stage,
+    Addresses, Agent, AgentState, Area, CheckState, ClosedPull, DecisionKind, Folder, Group,
+    INVESTIGATE_EVERY, Investigation, Issue, PointState, Project, Review, Role, Rule, RuleState,
+    Stage,
 };
 use crate::settings::{self, FILE, Scope, Value};
 
@@ -138,6 +139,7 @@ fn mark(i: &Issue) -> u64 {
         .map(|p| (p.checks.len(), p.repos.len(), p.settings.len()))
         .hash(&mut h);
     (i.review_ok, i.checks_ok, &i.pulls, &i.merged, i.fix.len()).hash(&mut h);
+    (&i.branches, &i.closed).hash(&mut h);
     (i.told, i.fix_keeps_round, i.round, i.closed_by_loop).hash(&mut h);
     let replies: usize = i.reviews.iter().map(|r| r.replies.len()).sum();
     (i.has_merged, i.review_waived, i.reviews.len(), replies).hash(&mut h);
@@ -404,6 +406,8 @@ impl World {
                     checks_ok: None,
                     pulls: BTreeMap::new(),
                     merged: BTreeSet::new(),
+                    branches: BTreeMap::new(),
+                    closed: BTreeMap::new(),
                     fix: Vec::new(),
                     told: false,
                     fix_keeps_round: false,
@@ -428,6 +432,8 @@ impl World {
                     entry.checks_ok = None;
                     entry.pulls.clear();
                     entry.merged.clear();
+                    entry.branches.clear();
+                    entry.closed.clear();
                     entry.has_merged = false;
                     entry.fix.clear();
                     entry.review_waived = false;
@@ -579,10 +585,13 @@ impl World {
                         .chain(pulls.iter().map(|(r, n)| (r.clone(), n.clone())))
                     {
                         // A new pull request where one merged is a fix that has yet
-                        // to merge.
+                        // to merge, on a branch the code host has yet to report.
                         if i.pulls.insert(repo.clone(), number.clone()) != Some(number) {
                             i.merged.remove(&repo);
+                            i.branches.remove(&repo);
                         }
+                        // A reopened or new one takes the place of one a person closed.
+                        i.closed.remove(&repo);
                     }
                     let round = match i.stage {
                         Stage::Working => Some(1),
@@ -813,11 +822,81 @@ impl World {
                         .as_ref()
                         .filter(|_| i.pulls.len() > 1)
                         .map_or_else(String::new, |r| format!(" in {r}"));
+                    // An older log names no repository: its one pull request's.
+                    let branch = repo
+                        .as_ref()
+                        .or_else(|| i.pulls.keys().next().filter(|_| i.pulls.len() == 1))
+                        .and_then(|r| i.branches.get(r))
+                        .map_or_else(|| "your own branch".to_string(), Clone::clone);
                     let points = vec![format!(
                         "the pull request{which} conflicts with the branch it merges into: rebase \
-                         onto that branch, then push your own branch with `git push --force-with-lease`"
+                         onto that branch, then push {branch} with `git push --force-with-lease`"
                     )];
                     Self::send_back(i, round, points, true, arbiters, &mut out);
+                }
+            }
+            Event::PullBranch {
+                issue,
+                repo,
+                number,
+                branch,
+            } => {
+                // Only the branch of the pull request on record: a late read of
+                // one since closed or replaced is history.
+                if let Some(i) = self.issues.get_mut(issue)
+                    && i.pulls.get(repo) == Some(number)
+                {
+                    i.branches.insert(repo.clone(), branch.clone());
+                }
+            }
+            Event::PullClosed {
+                issue,
+                repo,
+                number,
+            } => {
+                let repos = self
+                    .issues
+                    .get(issue)
+                    .map(|i| self.repos_of(i))
+                    .unwrap_or_default();
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
+                if let Some(i) = self.issues.get_mut(issue)
+                    && i.stage == Stage::Merging
+                    && i.pulls.get(repo) == Some(number)
+                {
+                    // Dropped, so that ready asks for the number of the one the
+                    // author reopens or opens in its place.
+                    i.pulls.remove(repo);
+                    i.merged.remove(repo);
+                    let branch = i.branches.remove(repo);
+                    i.closed.insert(
+                        repo.clone(),
+                        ClosedPull {
+                            number: number.clone(),
+                            branch,
+                        },
+                    );
+                    let merged: Vec<String> = repos
+                        .iter()
+                        .filter(|r| i.merged.contains(*r))
+                        .map(ToString::to_string)
+                        .collect();
+                    let (which, there) = if repos.len() > 1 {
+                        (format!(" in {repo}"), " there".to_string())
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    let before = match merged.len() {
+                        0 => String::new(),
+                        1 => format!("{} is merged; ", merged[0]),
+                        _ => format!("{} are merged; ", merged.join(", ")),
+                    };
+                    let point = format!(
+                        "{before}pull request {number}{which} was closed without merging: reopen \
+                         it or open a new one{there}"
+                    );
+                    let round = i.round.max(1);
+                    Self::send_back(i, round, vec![point], true, arbiters, &mut out);
                 }
             }
             Event::MergeRefused { issue, reason } => {
@@ -957,6 +1036,8 @@ impl World {
                         i.checks_ok = None;
                         i.pulls.clear();
                         i.merged.clear();
+                        i.branches.clear();
+                        i.closed.clear();
                         i.review_waived = false;
                         i.verify_failed = true;
                         i.reopen_due = true;
@@ -1275,18 +1356,38 @@ impl World {
         };
         // Every pull request with where to open it, in the order they merge.
         let order = self.repos_of(i);
+        // One a person closed is given in its repository's place, as closed.
         let pulls: Vec<brief::Pulled> = order
             .iter()
             .chain(i.pulls.keys().filter(|r| !order.contains(r)))
+            .chain(
+                i.closed
+                    .keys()
+                    .filter(|r| !order.contains(r) && !i.pulls.contains_key(*r)),
+            )
             .filter_map(|r| {
+                let repo = self
+                    .projects
+                    .get(r)
+                    .map_or_else(String::new, |p| p.repo.clone());
+                if let Some(number) = i.pulls.get(r) {
+                    return Some(brief::Pulled {
+                        project: r.clone(),
+                        repo,
+                        number: number.clone(),
+                        merged: i.merged.contains(r),
+                        branch: i.branches.get(r).cloned(),
+                        closed: false,
+                    });
+                }
+                let closed = i.closed.get(r)?;
                 Some(brief::Pulled {
                     project: r.clone(),
-                    repo: self
-                        .projects
-                        .get(r)
-                        .map_or_else(String::new, |p| p.repo.clone()),
-                    number: i.pulls.get(r)?.clone(),
-                    merged: i.merged.contains(r),
+                    repo,
+                    number: closed.number.clone(),
+                    merged: false,
+                    branch: closed.branch.clone(),
+                    closed: true,
                 })
             })
             .collect();

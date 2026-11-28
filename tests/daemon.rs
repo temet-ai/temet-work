@@ -204,6 +204,7 @@ fn host_tracking(
                 checks: Checks::Passed,
                 conflicting: false,
                 draft: false,
+                branch: String::new(),
             },
         )],
         ..FakeCodeHost::default()
@@ -1820,6 +1821,7 @@ areas = ["guild"]
             checks,
             conflicting: false,
             draft: false,
+            branch: String::new(),
         }
     }
 
@@ -2093,6 +2095,7 @@ projects = ["ankh"]
                 checks: Checks::Passed,
                 conflicting: false,
                 draft: false,
+                branch: String::new(),
             },
         )
     };

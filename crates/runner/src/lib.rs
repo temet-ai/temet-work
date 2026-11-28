@@ -1034,7 +1034,7 @@ impl Part for Runners {
                     Message {
                         agent: author.id.0.clone(),
                         issue: Some(issue.clone()),
-                        text: brief::fixes(i, points),
+                        text: brief::fixes(i, &world.repos_of(i), points),
                         tells: true,
                     },
                 );
