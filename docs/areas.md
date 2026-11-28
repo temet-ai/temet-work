@@ -73,7 +73,9 @@ Stage 2: an issue that changes several repositories.
 - They merge in the plan's order, each after the previous repository's main pipeline has
   passed (with `ci = false` there, without waiting). A main branch that still shows no run
   for the merge at a later read is listed as a problem until it has one, and so is a GitLab
-  pipeline held at a manual job.
+  pipeline held at a manual job. Before the merge, a
+  pull request in review that still shows no run at a later read, while its repository's
+  `ci` is true, is listed as a problem until it has one.
 - Deploy and verify run once, after the last merge. The folders are released together,
   then or when the issue is closed.
 - Merged pull requests are recorded per repository, so a restart or a refused merge
