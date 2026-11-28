@@ -15,6 +15,7 @@ before you change code.
 | Lint | `cargo clippy --workspace --all-features --all-targets -- -D warnings` |
 | Licences and advisories | `cargo deny check` |
 | Check the desktop app, after a change to `crates/core` or `crates/style` | `(cd app && cargo clippy --all-targets -- -D warnings && cargo nextest run)` |
+| See what the desktop app draws, offscreen | `(cd app && cargo run --example shots --features shots -- target/shots)` |
 
 Test the crate you changed as you work. Before you commit, run the workspace tests,
 `scripts/check-mixes` and `scripts/test-budget`. A change to `crates/core`
@@ -44,6 +45,12 @@ workspace of its own that uses both crates, so the workspace tests do not build 
 - A real run goes on a second `temet-workd` started from your branch, with its own
   `--config`, `--log` and `TEMET_WORK_SOCKET`. Never touch the live `temet-workd` service
   or `~/.config/temet-work/config.toml`.
+- Never open the desktop app's window on this machine: no `cargo run` of the app, no
+  starting its binary, no `hyprctl dispatch`. A window an agent opened made Hyprland abort
+  and closed the person's windows. See what the app draws with the shots command above,
+  which writes PNGs with no window, and read them. A change to `app/` names in its pull
+  request which shots it changes, and its reviewer draws those shots at the pull request's
+  head and checks them against the design system's stories (`docs/ui.md`).
 - After a rebase, push your own branch with `git push --force-with-lease`.
 - A change to what temet-work stores or sends updates `docs/privacy.md` in the same
   commit.
