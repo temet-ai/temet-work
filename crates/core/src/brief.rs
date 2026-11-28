@@ -928,12 +928,24 @@ pub(crate) fn numbered(items: &[String]) -> String {
         .collect()
 }
 
+/// The most points a review block takes, new and kept open together. The
+/// author's ready replies to each, and its brief and fix message spell out one
+/// `--reply` for each, which this keeps to about 9 KB of the [`fit::LIMIT`].
+pub(crate) const MOST_POINTS: usize = 300;
+
 /// One `--reply` for each of `count` points, as `temet-work ready` takes them.
+/// Past [`MOST_POINTS`], which only a block from an older log can be, the first
+/// and the last stand for the rest, so a brief still fits.
 pub(crate) fn reply_flags(count: usize) -> String {
-    (1..=count)
-        .map(|n| format!("--reply \"<reply to point {n}>\""))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let flag = |n: usize| format!("--reply \"<reply to point {n}>\"");
+    if count > MOST_POINTS {
+        return format!(
+            "{} ... {} (one --reply for each of the {count} points, in their order)",
+            flag(1),
+            flag(count)
+        );
+    }
+    (1..=count).map(flag).collect::<Vec<_>>().join(" ")
 }
 
 /// What an author is told when the review or the checks found things to fix
@@ -2573,6 +2585,36 @@ mod tests {
                 "{role}"
             );
         }
+
+        // A block of thousands of short points, as only an older log can hold:
+        // the reply form shortens, and the author's brief and fix message fit.
+        for count in [3_000, 4_500] {
+            let short: Vec<String> = (1..=count).map(|n| format!("p{n}")).collect();
+            let mut issue = lamp_issue();
+            issue.plan = Some(plan_of(vec!["a dry lamp is refused".into()]));
+            issue.stage = Stage::Fixing { round: 1 };
+            issue.reviews = vec![block_of(1, short.clone())];
+            issue.fix.clone_from(&short);
+            let form = format!(
+                "--reply \"<reply to point 1>\" ... --reply \"<reply to point {count}>\" (one \
+                 --reply for each of the {count} points, in their order)"
+            );
+            let author = lamp_task(Role::Author, &issue);
+            let fixed = fixes(&issue, &[ProjectId::new("watch")], &short);
+            for (name, text) in [("author", &author), ("fixes", &fixed)] {
+                assert!(
+                    text.len() <= fit::LIMIT,
+                    "{count} {name}: {} bytes",
+                    text.len()
+                );
+                assert!(text.contains(&form), "{count} {name}");
+            }
+        }
+        // Up to the most a block takes, every --reply is spelled out.
+        assert_eq!(
+            reply_flags(MOST_POINTS).matches("--reply").count(),
+            MOST_POINTS
+        );
     }
 
     #[test]

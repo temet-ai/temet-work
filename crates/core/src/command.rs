@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::brief::{numbered, reply_flags};
+use crate::brief::{MOST_POINTS, numbered, reply_flags};
 use crate::effect::Effect;
 use crate::event::{Event, Verdict};
 use crate::ids::{AgentId, DecisionId, GroupId, IssueId, MilestoneId, ProjectId, RuleId};
@@ -837,6 +837,7 @@ impl World {
                             .map(|p| clean(p))
                             .filter(|p| !p.trim().is_empty())
                             .collect();
+                        let new = points.len();
                         points.extend(kept);
                         if points.is_empty() {
                             return Err(
@@ -844,6 +845,18 @@ impl World {
                                  round before kept open with --open"
                                     .into(),
                             );
+                        }
+                        // The author replies to each point, and its brief spells
+                        // out one --reply for each.
+                        if points.len() > MOST_POINTS {
+                            return Err(format!(
+                                "a block takes at most {MOST_POINTS} points, new and kept open \
+                                 together, so that the author's brief can list one reply for \
+                                 each; this one has {} ({new} new, {} kept open): put related \
+                                 points together in one",
+                                points.len(),
+                                points.len() - new
+                            ));
                         }
                         Verdict::Block { points }
                     }
@@ -1693,6 +1706,56 @@ mod tests {
     fn a_blocks_points_are_stored_with_their_controls_dropped() {
         let w = blocked(&[NOISY]);
         assert_eq!(w.issues[&issue()].reviews[0].points, [STORED]);
+    }
+
+    #[test]
+    fn a_block_takes_at_most_the_points_the_authors_brief_can_list_replies_for() {
+        let many = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("p{i}")).collect() };
+        fn refs(points: &[String]) -> Vec<&str> {
+            points.iter().map(String::as_str).collect()
+        }
+        // One over, new: refused, naming the most.
+        let mut w = blocked(&["the clock stops"]);
+        let ready = ready_replying(&w);
+        logged(&mut w, &ready);
+        w.apply(&Event::Told { issue: issue() });
+        let over = block(&refs(&many(MOST_POINTS + 1)));
+        let why = w
+            .check(owner(&over).as_ref(), &over)
+            .expect_err("over the most");
+        assert!(
+            why.contains("a block takes at most 300 points, new and kept open together"),
+            "{why}"
+        );
+        assert!(
+            why.contains("this one has 301 (301 new, 0 kept open)"),
+            "{why}"
+        );
+
+        // The most is taken.
+        let w = blocked(&refs(&many(MOST_POINTS)));
+        assert_eq!(w.issues[&issue()].reviews[0].points.len(), MOST_POINTS);
+
+        // Kept points count with the new ones.
+        let mut w = w;
+        let ready = ready_replying(&w);
+        logged(&mut w, &ready);
+        w.apply(&Event::Told { issue: issue() });
+        let kept = Command::Review {
+            issue: issue(),
+            verdict: Verdict::Block {
+                points: vec!["the clock is slow".into()],
+            },
+            failed: Vec::new(),
+            open: (1..=MOST_POINTS).collect(),
+        };
+        let why = w
+            .check(owner(&kept).as_ref(), &kept)
+            .expect_err("over the most with kept points");
+        assert!(
+            why.contains("this one has 301 (1 new, 300 kept open)"),
+            "{why}"
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ reports its step done.
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
 | `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...`, with `--reply TEXT` for each point of the block it answers | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time, and again in a repository where a person closed the pull request on record without merging, since a read in review or the merge then drops it; an issue that changes several repositories names each as `REPO=PULL`. The first ready after a block (from the review, or from an arbiter's fix ruling, where the replies answer the reviewer's last block) carries one `--reply` for each of the block's points, in their order: what the author did about it, or why not. A ready without exactly one reply for each point is refused, and the refusal lists the points and the form to use; any other ready takes no `--reply`. Each reply is kept on its point and shown with it by `temet-work issue` and `status --json`. A ready that starts a review round sets each of the plan's checks to running, since the author reports that every check holds; after a person's overturn has waived the review, the checks keep their state | working, or fixing |
 | `temet-work review ISSUE approve` | only the reviewer working on ISSUE. Every check of the plan is marked passed, and every point of the round before resolved; `--failed` and `--open` are refused | in review |
-| `temet-work review ISSUE block POINT... [--failed N ...] [--open N ...]` | only the reviewer working on ISSUE, one argument per thing to fix. `--failed N`, once for each check that does not hold, counts from 1 in the plan's order; every check left unnamed is marked passed. After round 1, `--open N`, once for each point of the round before that is still not dealt with, counts from 1 in that round's order: the point stays open and joins this block's points, so the author fixes it again and the next round judges it again. Every point left unnamed is resolved, and a block may consist of kept points alone. The reviewer's brief and each next-round message number the checks and the round before's points this way, each point with the author's reply. A number the plan or the round before does not have is refused, and so is `--open` in round 1 | in review |
+| `temet-work review ISSUE block POINT... [--failed N ...] [--open N ...]` | only the reviewer working on ISSUE, one argument per thing to fix. `--failed N`, once for each check that does not hold, counts from 1 in the plan's order; every check left unnamed is marked passed. After round 1, `--open N`, once for each point of the round before that is still not dealt with, counts from 1 in that round's order: the point stays open and joins this block's points, so the author fixes it again and the next round judges it again. Every point left unnamed is resolved, and a block may consist of kept points alone. A block takes at most 300 points, new and kept together: the author replies to each, and its brief lists one `--reply` for each. A block with more is refused. The reviewer's brief and each next-round message number the checks and the round before's points this way, each point with the author's reply. A number the plan or the round before does not have is refused, and so is `--open` in round 1 | in review |
 | `temet-work retry ISSUE` | a person only | deploying or verifying: runs the deploy (or verify) again, at once unless a deploy or verify of the same project or `run_in` folder is running, and clears its failure count, its ten-minute wait and its reruns in `deploy-handoff.stale`, so a deploy that failed three times gets three fresh tries |
 | `temet-work rule ISSUE approve REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
 | `temet-work rule ISSUE fix REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
@@ -243,10 +243,13 @@ The parts of a brief take the room in this order:
 5. For an arbiter, the latest earlier review rounds that fit, each whole, after a line
    counting the others and naming `temet-work issue`.
 
-A next-round or fix message takes its room the same way, without rules. When the plain
-parts alone would take a text over the limit, as a long list of the issues a person closed
-can in an investigator's brief, the longest is cut, with a line saying so. The command the
-agent reports with is never cut.
+A next-round or fix message takes its room the same way, without rules. The `ready` an
+author's brief and fix message end with lists one `--reply` for each point of the block,
+and a block takes at most 300 points, so that list stays under 10 KB; for a block of more
+from an older log, it gives the first and the last `--reply` and the number of points.
+When the plain parts alone would take a text over the limit, as a long list of the issues
+a person closed can in an investigator's brief, the longest is cut, with a line saying so.
+The command the agent reports with is never cut.
 
 `plan`, `review`, `ready`, `rule` and `overturn` store their text with every control
 character dropped but the line feed and the tab: ESC, NUL, VT, FF, BS, DEL and the C1
