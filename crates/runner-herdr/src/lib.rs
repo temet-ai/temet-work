@@ -9,7 +9,12 @@
 //! parent, so agents outlive a restart of the daemon. An agent's terminal also
 //! gets the labels that put it on the herdr app's screens (`app_labels`), and
 //! every terminal a `program` label, so a program herdr-core has replaced with
-//! a shell can be told from it (`lost`).
+//! a shell can be told from it (`lost`). A terminal the client knew that the
+//! first list of a new subscription leaves out reads as lost, as herdr-core may
+//! have restarted; one a `missed` list on the same subscription leaves out was
+//! removed, and reads as gone (`List`). A call that sent nothing fails with
+//! [`RunnerError::Unreached`], so the runner family can tell a stop that never
+//! reached the core from one whose kill may have landed.
 //!
 //! While `TEMET_WORK_SANDBOX` is set to anything but empty, as it is in every
 //! test run, the client opens nothing and every call fails, unless it was given
@@ -53,6 +58,19 @@ struct RpcError {
     message: String,
 }
 
+/// The kind of an [`RpcError`] for a request that never reached the core: the
+/// connection could not be opened, or the request's line could not be
+/// written. It becomes [`RunnerError::Unreached`].
+const UNSENT: &str = "unsent";
+
+/// An `UNSENT` error saying why nothing was sent.
+fn unsent(e: &RunnerError) -> RpcError {
+    RpcError {
+        kind: UNSENT.into(),
+        message: e.to_string(),
+    }
+}
+
 /// One connection to the core.
 struct Conn {
     writer: UnixStream,
@@ -62,32 +80,35 @@ struct Conn {
 
 impl Conn {
     /// Connects and says hello. A read waits at most `timeout`, so a core that
-    /// stops answering cannot hang the daemon.
+    /// stops answering cannot hang the daemon. Every failure here is
+    /// [`RunnerError::Unreached`]: no request of the caller's was sent.
     fn open(path: &PathBuf, timeout: Duration) -> Result<Self, RunnerError> {
         let stream = UnixStream::connect(path).map_err(|e| {
-            RunnerError::Other(format!(
+            RunnerError::Unreached(format!(
                 "cannot reach herdr-core at {}: {e}",
                 path.display()
             ))
         })?;
         stream
             .set_read_timeout(Some(timeout))
-            .map_err(|e| RunnerError::Other(e.to_string()))?;
+            .map_err(|e| RunnerError::Unreached(e.to_string()))?;
         let reader = BufReader::new(
             stream
                 .try_clone()
-                .map_err(|e| RunnerError::Other(e.to_string()))?,
+                .map_err(|e| RunnerError::Unreached(e.to_string()))?,
         );
         let mut conn = Self {
             writer: stream,
             reader,
             next: 0,
         };
-        conn.call("hello", json!({})).map_err(rpc)?;
+        conn.call("hello", json!({})).map_err(unreached)?;
         Ok(conn)
     }
 
-    /// Sends one request and returns its result, skipping notifications.
+    /// Sends one request and returns its result, skipping notifications. A
+    /// line that cannot be written is an [`UNSENT`] error; a failure after it
+    /// was written is `io`, as the core may have acted on it.
     fn call(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
         self.next += 1;
         let id = self.next;
@@ -96,7 +117,10 @@ impl Conn {
             kind: "io".into(),
             message: e.to_string(),
         };
-        writeln!(self.writer, "{line}").map_err(io)?;
+        writeln!(self.writer, "{line}").map_err(|e| RpcError {
+            kind: UNSENT.into(),
+            message: format!("cannot send {method} to herdr-core: {e}"),
+        })?;
         let mut buf = String::new();
         loop {
             buf.clear();
@@ -132,7 +156,19 @@ impl Conn {
 }
 
 fn rpc(e: RpcError) -> RunnerError {
+    if e.kind == UNSENT {
+        return RunnerError::Unreached(e.message);
+    }
     RunnerError::Other(format!("herdr-core: {} ({})", e.message, e.kind))
+}
+
+/// A failure while a connection was being opened, before any request of the
+/// caller's was sent.
+fn unreached(e: RpcError) -> RunnerError {
+    match rpc(e) {
+        RunnerError::Other(why) => RunnerError::Unreached(why),
+        e => e,
+    }
 }
 
 /// `text` as part of a space or tab id: `-` for every character other than A-Z,
@@ -401,11 +437,30 @@ struct Shared {
     listed: Option<Vec<Update>>,
 }
 
+/// Where a full list of terminals comes from, which says what a terminal this
+/// client knew and the list leaves out has become.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum List {
+    /// The first list of a subscription. When one was open before, it ended,
+    /// and herdr-core may have restarted since: a kept terminal's program is
+    /// lost to a restart, so a terminal left out reads as lost, with the labels
+    /// it had. A live run did not see a restart leave out a kept terminal
+    /// (`docs/findings/herdr-core.md`, "Across a core restart"); this is the
+    /// reading for one that does.
+    Subscribed,
+    /// A list sent on the same subscription after the reader fell behind
+    /// (`missed`). The core did not restart, so a terminal it leaves out was
+    /// removed, and reads as gone.
+    Missed,
+}
+
 /// Turns a snapshot of terminals (from subscribing, or after a missed stretch)
 /// into one update each, so terminals started before the daemon are known again.
-fn take_snapshot(terminals: &Value, s: &mut Shared) {
-    // A terminal this client knew that the new list lacks is gone: the core
-    // restarted, or it was removed while the client was not listening.
+fn take_snapshot(terminals: &Value, s: &mut Shared, list: List) {
+    let left_out = match list {
+        List::Subscribed => Status::Lost,
+        List::Missed => Status::Gone,
+    };
     let listed: std::collections::BTreeSet<&str> = terminals
         .as_array()
         .into_iter()
@@ -423,7 +478,7 @@ fn take_snapshot(terminals: &Value, s: &mut Shared) {
         s.updates.push(Update {
             terminal: TerminalId(addr),
             labels,
-            status: Status::Gone,
+            status: left_out.clone(),
             doing: None,
         });
     }
@@ -487,7 +542,14 @@ fn take_event(p: &Value, s: &mut Shared) {
         _ => None,
     };
     if let Some(status) = status {
-        let labels = s.labels.get(t).cloned().unwrap_or_default();
+        // A removed terminal is not known any more, so a later list that
+        // leaves it out does not report it again.
+        let labels = if kind == "removed" {
+            s.labels.remove(t)
+        } else {
+            s.labels.get(t).cloned()
+        }
+        .unwrap_or_default();
         s.updates.push(Update {
             terminal: TerminalId(t.to_string()),
             labels,
@@ -517,7 +579,7 @@ fn follow(mut conn: Conn, shared: Arc<Mutex<Shared>>) {
             Some("missed") => {
                 // The reader fell behind: the core sends a fresh snapshot of terminals.
                 if let Some(terminals) = msg.pointer("/params/terminals") {
-                    take_snapshot(terminals, &mut s);
+                    take_snapshot(terminals, &mut s, List::Missed);
                 }
             }
             _ => {}
@@ -552,13 +614,6 @@ const EXEC_TIMEOUT: Duration = Duration::from_secs(8);
 /// every 15 s, so a longer silence means the connection is dead.
 const EVENTS_TIMEOUT: Duration = Duration::from_secs(45);
 
-fn io_error(e: &RunnerError) -> RpcError {
-    RpcError {
-        kind: "io".into(),
-        message: e.to_string(),
-    }
-}
-
 impl Herdr {
     /// Names `build` as the daemon's, in the error for a program on a machine
     /// that is older than it.
@@ -581,12 +636,12 @@ impl Herdr {
             return Ok(path.clone());
         }
         if sandboxed() {
-            return Err(RunnerError::Other(
+            return Err(RunnerError::Unreached(
                 "TEMET_WORK_SANDBOX is set: herdr-core is not reached".into(),
             ));
         }
         socket_path().ok_or_else(|| {
-            RunnerError::Other(
+            RunnerError::Unreached(
                 "no herdr-core socket: set HC_TERMINAL_SOCKET or XDG_RUNTIME_DIR".into(),
             )
         })
@@ -594,7 +649,9 @@ impl Herdr {
 
     /// Opens the event subscription when it is not open. The snapshot it
     /// starts with becomes one update per terminal, so terminals started before
-    /// the daemon are known again.
+    /// the daemon are known again, and one this client knew that it leaves out
+    /// is lost ([`List::Subscribed`]). Every failure here is
+    /// [`RunnerError::Unreached`].
     fn follow(&mut self) -> Result<(), RunnerError> {
         if self.shared.lock().map(|s| s.alive).unwrap_or(false) {
             return Ok(());
@@ -602,11 +659,11 @@ impl Herdr {
         let mut events = Conn::open(&self.path()?, EVENTS_TIMEOUT)?;
         let snapshot = events
             .call("events.subscribe", json!({"labels": {OWNER.0: OWNER.1}}))
-            .map_err(rpc)?;
+            .map_err(unreached)?;
         if let Ok(mut s) = self.shared.lock() {
             s.alive = true;
             if let Some(terminals) = snapshot.get("terminals") {
-                take_snapshot(terminals, &mut s);
+                take_snapshot(terminals, &mut s, List::Subscribed);
             }
         }
         let shared = Arc::clone(&self.shared);
@@ -615,18 +672,34 @@ impl Herdr {
     }
 
     /// Sends one request on the control connection, opening it when needed. A
-    /// broken connection is dropped, so the next request opens a new one.
+    /// broken connection is dropped, so the next request opens a new one. A
+    /// connection kept from an earlier request may have closed with a core
+    /// that has since restarted: when the line cannot be written on it, nothing
+    /// was sent, so the request goes once more on a new connection. When the
+    /// event subscription or the control connection cannot be opened, or the
+    /// request's line cannot be written, the error is [`UNSENT`].
     fn request(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
-        self.follow().map_err(|e| io_error(&e))?;
+        self.follow().map_err(|e| unsent(&e))?;
+        let kept = self.control.is_some();
+        let result = self.control_call(method, &params);
+        if kept && matches!(&result, Err(e) if e.kind == UNSENT) {
+            return self.control_call(method, &params);
+        }
+        result
+    }
+
+    /// Sends one request on the control connection, opening it when needed,
+    /// and drops a connection that broke.
+    fn control_call(&mut self, method: &str, params: &Value) -> Result<Value, RpcError> {
         if self.control.is_none() {
-            let path = self.path().map_err(|e| io_error(&e))?;
-            self.control = Some(Conn::open(&path, REQUEST_TIMEOUT).map_err(|e| io_error(&e))?);
+            let path = self.path().map_err(|e| unsent(&e))?;
+            self.control = Some(Conn::open(&path, REQUEST_TIMEOUT).map_err(|e| unsent(&e))?);
         }
         let Some(conn) = self.control.as_mut() else {
-            return Err(io_error(&RunnerError::Other("no connection".into())));
+            return Err(unsent(&RunnerError::Unreached("no connection".into())));
         };
-        let result = conn.call(method, params);
-        if matches!(&result, Err(e) if e.kind == "io") {
+        let result = conn.call(method, params.clone());
+        if matches!(&result, Err(e) if e.kind == "io" || e.kind == UNSENT) {
             self.control = None;
         }
         result
@@ -640,6 +713,16 @@ fn mapped(terminal: &TerminalId, e: RpcError) -> RunnerError {
         "finished" => RunnerError::Gone,
         "not_found" => RunnerError::Unknown(terminal.clone()),
         _ => rpc(e),
+    }
+}
+
+/// `e` for a call that failed after its `terminal.kill` reached herdr-core:
+/// the kill may have ended the program, so nothing that follows is
+/// [`RunnerError::Unreached`].
+fn after_kill(e: RunnerError) -> RunnerError {
+    match e {
+        RunnerError::Unreached(why) => RunnerError::Other(why),
+        e => e,
     }
 }
 
@@ -704,6 +787,12 @@ impl Runner for Herdr {
             .to_string())
     }
 
+    /// A stop that sent nothing, because the event subscription or the
+    /// control connection could not be opened or the `terminal.kill` line
+    /// could not be written, is [`RunnerError::Unreached`]. Any later failure,
+    /// such as no answer to the kill, the connection closing, or `rm`
+    /// refusing or finding the terminal still live, may follow a kill that
+    /// ended the program, and is [`RunnerError::Other`].
     fn stop(&mut self, terminal: &TerminalId) -> Result<(), RunnerError> {
         match self.request("terminal.kill", json!({"terminal": terminal.0})) {
             Ok(_) => {}
@@ -717,7 +806,7 @@ impl Runner for Herdr {
                 Ok(_) => return Ok(()),
                 Err(e) if e.kind == "live" => std::thread::sleep(Duration::from_millis(100)),
                 Err(e) if e.kind == "not_found" => return Ok(()),
-                Err(e) => return Err(mapped(terminal, e)),
+                Err(e) => return Err(after_kill(mapped(terminal, e))),
             }
         }
         Err(RunnerError::Other(format!(
@@ -1108,6 +1197,17 @@ mod tests {
         assert_eq!(mapped(&t, e("status_mismatch")), RunnerError::Busy);
         assert_eq!(mapped(&t, e("finished")), RunnerError::Gone);
         assert_eq!(mapped(&t, e("not_found")), RunnerError::Unknown(t.clone()));
+        assert_eq!(
+            mapped(&t, e(UNSENT)),
+            RunnerError::Unreached(String::new()),
+            "nothing was sent"
+        );
+        assert_eq!(
+            after_kill(mapped(&t, e(UNSENT))),
+            RunnerError::Other(String::new()),
+            "after the kill was sent"
+        );
+        assert!(matches!(mapped(&t, e("io")), RunnerError::Other(_)));
     }
 
     #[test]
@@ -1122,7 +1222,7 @@ mod tests {
             {"address": "t6", "labels": {"agent": "author-3"}, "status": {"state": "error"}},
             {"labels": {"agent": "no-address"}}
         ]);
-        take_snapshot(&snapshot, &mut s);
+        take_snapshot(&snapshot, &mut s, List::Subscribed);
         assert_eq!(s.updates.len(), 4);
         assert_eq!(s.updates[3].labels["agent"], "author-3");
         assert_eq!(
@@ -1135,11 +1235,13 @@ mod tests {
         assert_eq!(s.updates[0].doing.as_deref(), Some("running the tests"));
         assert_eq!(s.updates[1].status, Status::Between);
         assert_eq!(s.updates[2].status, Status::Gone, "finished, not removed");
-        // A later list without t3 reports it gone.
+        // A later list on the same subscription, after the reader fell
+        // behind, without t3 reports it gone.
         s.updates.clear();
         take_snapshot(
             &json!([{"address": "t4", "labels": {"agent": "refiner-1"}}]),
             &mut s,
+            List::Missed,
         );
         let gone: Vec<&str> = s
             .updates
@@ -1148,6 +1250,54 @@ mod tests {
             .map(|u| u.terminal.0.as_str())
             .collect();
         assert_eq!(gone, ["t3", "t5", "t6"]);
+    }
+
+    #[test]
+    fn a_known_terminal_left_out_of_a_new_subscriptions_list_is_lost_and_of_a_missed_one_gone() {
+        let t7 = json!({"address": "t7", "state": "live", "labels": agent_labels(true),
+                        "argv": ["claude", "--permission-mode", "auto", "Mend the clock"],
+                        "status": {"state": "idle"}});
+        let left_out = |list| {
+            let mut s = Shared::default();
+            take_snapshot(&json!([t7.clone()]), &mut s, List::Subscribed);
+            assert_eq!(s.updates[0].status, Status::Between);
+            s.updates.clear();
+            take_snapshot(&json!([]), &mut s, list);
+            assert_eq!(s.listed.as_deref(), Some(&[][..]), "{list:?}");
+            s.updates
+        };
+        // herdr-core may have restarted between the two subscriptions.
+        let after_resubscribing = left_out(List::Subscribed);
+        assert_eq!(after_resubscribing.len(), 1);
+        assert_eq!(after_resubscribing[0].terminal, TerminalId("t7".into()));
+        assert_eq!(after_resubscribing[0].status, Status::Lost);
+        assert_eq!(after_resubscribing[0].labels["agent"], "author-1");
+        // The same core, after the reader fell behind: it was removed.
+        let after_missing = left_out(List::Missed);
+        assert_eq!(after_missing.len(), 1);
+        assert_eq!(after_missing[0].status, Status::Gone);
+        assert_eq!(after_missing[0].labels["agent"], "author-1");
+    }
+
+    #[test]
+    fn a_removed_terminal_is_not_reported_again_by_a_later_list() {
+        let mut s = Shared::default();
+        take_event(
+            &json!({"type": "created", "terminal": "t7", "data": {"labels": agent_labels(true)}}),
+            &mut s,
+        );
+        take_event(
+            &json!({"type": "removed", "terminal": "t7", "data": {}}),
+            &mut s,
+        );
+        assert_eq!(s.updates[1].status, Status::Gone);
+        assert_eq!(
+            s.updates[1].labels["agent"], "author-1",
+            "it keeps its labels"
+        );
+        s.updates.clear();
+        take_snapshot(&json!([]), &mut s, List::Subscribed);
+        assert_eq!(s.updates, []);
     }
 
     /// An author's start as the runner family makes it, with the program a
@@ -1200,7 +1350,7 @@ mod tests {
     /// The status `take_snapshot` gives the one terminal `terminal` lists.
     fn snapshot_status(terminal: Value) -> Status {
         let mut s = Shared::default();
-        take_snapshot(&json!([terminal]), &mut s);
+        take_snapshot(&json!([terminal]), &mut s, List::Subscribed);
         assert_eq!(s.updates.len(), 1, "{:?}", s.updates);
         s.updates[0].status.clone()
     }
@@ -1328,11 +1478,16 @@ mod tests {
         let mut idle = recovering(agent_labels(true));
         idle["reason"] = Value::Null;
         idle["status"] = json!({"state": "idle"});
-        take_snapshot(&json!([idle]), &mut h.shared.lock().expect("lock"));
+        take_snapshot(
+            &json!([idle]),
+            &mut h.shared.lock().expect("lock"),
+            List::Subscribed,
+        );
         assert_eq!(statuses(h.updates()), [("t7".to_string(), Status::Between)]);
         take_snapshot(
             &json!([recovering(agent_labels(true))]),
             &mut h.shared.lock().expect("lock"),
+            List::Missed,
         );
         assert_eq!(h.latest(&t7), Some(Status::Lost));
         assert_eq!(
@@ -1374,7 +1529,7 @@ mod tests {
         let mut h = Herdr::default();
         assert!(matches!(
             h.screen(&TerminalId("t1".into())),
-            Err(RunnerError::Other(_))
+            Err(RunnerError::Unreached(_))
         ));
     }
 }

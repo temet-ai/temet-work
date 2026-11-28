@@ -3,6 +3,7 @@ session_id:
   - d8b56904-12b7-4f79-b22a-277694261d14
   - e4a814a9-1735-455e-9162-778decf89d5b
   - d1ccda48-cbb5-44cc-9ea0-c03999c970e9
+  - 5f41cf37-1dfb-4f78-9ef2-71a08ce4fa61
 ---
 
 # herdr-core: what a daemon can rely on
@@ -447,6 +448,114 @@ first attempt). A finished terminal could still be read.
 So closing the window should not touch a daemon's agents. A core crash or reboot ends the agent's
 program, and the daemon would have to start the session again itself.
 
+## Across a core restart
+
+herdr-core 0.1.22 (`hc --version`) on omit, 28 November 2026, for temet-work#203. This section
+records what the core lists and sends for a kept terminal after it restarts, and how the herdr
+adapter reads it.
+
+**Setup.** The run used a private core, never the default one: `HC_SESSION=t203-5f41cf37` with
+`HC_TERMINAL_SOCKET`, `HC_TERMINAL_ID` and `HC_SCOPE` unset and scratch `XDG_STATE_HOME`,
+`XDG_DATA_HOME` and `XDG_CACHE_HOME`. Its socket was
+`/run/user/1000/herdr-core/t203-5f41cf37.sock`; the default core (pid 4634, `default.sock`) and
+the live temet-workd were not touched. A follower script subscribed with
+`labels: {owner: temet-work}`, subscribed again whenever the connection ended, and logged the
+first list of each subscription and every event except heartbeats. Kept terminals
+(`hc run --bg --keep`) carried temet-work's labels `owner=temet-work`, `agent=author-<n>` and
+`program=sleep`, with `group`, `issue`, `role` and `log`, and ran `sleep 3600` (3601, 3602 for the
+later ones). Each log line is the local time (SAST), the subscription (`sub2` is the
+second), and the message, cut to the fields shown.
+
+| Restart | First list after the reconnect | Events after it | Adapter reads |
+|---|---|---|---|
+| `hc server restart` | listed, `live`, the program's argv and pid, no reason | none | unknown: no change |
+| `hc server stop`, then `hc server start` | `lost` twice before the close; then listed, `live`, argv `/usr/bin/zsh` | `title`, `foreground` zsh | lost |
+| SIGKILL of the core's pid | listed, `live`, the program's argv and pid, no reason | none | unknown: no change |
+| SIGKILL of the core's holder (extra) | no reconnect | `lost` (`holder_lost`), then `restarted` with zsh | lost |
+| SIGKILL of core and holder, then `hc server start` (extra) | listed, `live`, `reason: stopped_by_restart`, no pid | `restarted` with zsh | lost |
+
+A kept terminal was never missing from the first list.
+
+**`hc server restart`.** The program kept running under the same pid; the new core lists it with
+no status yet:
+
+```text
+06:53:07.715 ## way 1: hc server restart
+06:53:07.793 sub1     closed by the core (EOF)
+06:53:07.844 sub2     connected
+06:53:07.845 sub2     SNAPSHOT terminal {"address": "t1", "state": "live", "argv": ["sleep", "3600"], "reason": null, "pid": 3948918, "keep": true, "status": null, "exit_code": null, "signal": null, "finished_ms": null}
+06:53:19.852 ## 12 s after
+```
+
+**`hc server stop`, then `hc server start`.** The core reported the program lost on the open
+subscription before it closed it. The next core's first list has a shell in the program's place,
+with no reason:
+
+```text
+06:53:35.258 ## way 2: hc server stop
+06:53:35.260 sub2     event lost t1 {"reason": "server_stop", "exit_code": null, "signal": 1}
+06:53:35.283 sub2     event lost t1 {"reason": "server_stop", "exit_code": null, "signal": null}
+06:53:35.285 sub2     closed by the core (EOF)
+06:53:40.375 ## way 2: hc server start
+06:53:40.451 sub3     connected
+06:53:40.452 sub3     SNAPSHOT terminal {"address": "t1", "state": "live", "argv": ["/usr/bin/zsh"], "reason": null, "pid": 3957249, "keep": true, "status": null, "exit_code": null, "signal": null, "finished_ms": null}
+06:53:40.597 sub3     event title t1 {}
+06:53:40.916 sub3     event foreground t1 {"argv": ["/usr/bin/zsh"], "pid": 3957249, "name": "zsh"}
+```
+
+**SIGKILL of the core.** The core's pid, 3957232, was read from the process listening on the
+private socket and checked against the default core's, 4634, before the kill. The terminal's
+holder, a separate `herdr-core hold` process, lived on, and a new `herdr-core serve` (pid 3962383)
+was listening about 2 s later as a new transient systemd unit with `Restart=no`; the private
+core's `core.log` was empty, so the run does not show what started it. The program kept running:
+
+```text
+06:54:23.404 ## way 3: SIGKILL of the private core, pid 3957232 (the default core is 4634)
+06:54:23.405 sub3     closed by the core (EOF)
+06:54:26.513 sub4     connected
+06:54:26.514 sub4     SNAPSHOT terminal {"address": "t1", "state": "live", "argv": ["/usr/bin/zsh"], "reason": null, "pid": 3957249, "keep": true, "status": null, "exit_code": null, "signal": null, "finished_ms": null}
+06:54:26.514 sub4     SNAPSHOT terminal {"address": "t2", "state": "live", "argv": ["sleep", "3601"], "reason": null, "pid": 3961379, "keep": true, "status": null, "exit_code": null, "signal": null, "finished_ms": null}
+06:54:29.406 ## 6 s after the kill
+```
+
+t1 here is the shell left by the stop and start; t2 was started for this case.
+
+**Two extra cases.** SIGKILL of the private core's holder (pid 3957242, checked against the
+default holder's, 4117710) left the core and the subscription up. The core reported each program
+lost and put a shell in its place 2.3 s later:
+
+```text
+06:55:09.252 sub4     event lost t2 {"reason": "holder_lost", "exit_code": null, "signal": null}
+06:55:11.601 sub4     event restarted t2 {"state": "live", "argv": ["/usr/bin/zsh"], "reason": null, "pid": 3967470, "exit_code": null, "signal": null, "status": null, "name": "author-2"}
+```
+
+SIGKILL of the core and its holder together, as near a crash as this run could get: no core came
+back in 12 s, and `sleep 3602` had ended. After `hc server start` the first list still has every
+kept terminal, with a reason and no pid, and the shells follow 2 s later:
+
+```text
+06:55:53.599 ## extra: SIGKILL of the private core 3962383 and its holder 3967422 together
+06:55:53.600 sub4     closed by the core (EOF)
+06:56:11.178 ## extra: hc server start after the core and holder were killed
+06:56:11.256 sub5     connected
+06:56:11.256 sub5     SNAPSHOT terminal {"address": "t3", "state": "live", "argv": ["sleep", "3602"], "reason": "stopped_by_restart", "pid": null, "keep": true, "status": null, "exit_code": null, "signal": null, "finished_ms": null}
+06:56:13.252 sub5     event restarted t3 {"state": "live", "argv": ["/usr/bin/zsh"], "reason": null, "pid": 3976968, "exit_code": null, "signal": null, "status": null, "name": "author-3"}
+```
+
+**How the adapter reads it.** A listed terminal whose program still runs, with no status, reads as
+unknown, and the runner family changes nothing for its agent. A `lost` event reads as lost. A
+listed terminal with a `reason`, or whose argv no longer starts with its `program` label (here
+`/usr/bin/zsh` against `sleep`), reads as lost (`lost` in `crates/runner-herdr/src/lib.rs`). The
+`restarted` event carries no status and is not read. A terminal missing from the first list after
+a reconnect, which this run did not produce, reads as lost with the labels it had, so its agent
+ends as lost and not gone; one missing from a `missed` list on the same connection reads as gone.
+
+**Cleanup.** The three terminals were killed and removed (`finished` and `removed` at 06:56:38 and
+06:56:39), the private core was stopped with `hc server stop` and the follower ended. Afterwards
+the only `herdr-core serve` and `herdr-core hold` processes were the default core (4634) and its
+holder (4117710), `ss -xlp` listed no `t203-5f41cf37` socket, and none was left in
+`/run/user/1000/herdr-core/`.
+
 ## For temet-work
 
 ### Daemon
@@ -458,6 +567,7 @@ Build on:
 - `send` then `wait` from the same `caller` for one turn (Sending).
 - `doc.set` with versions for small shared state (Documents).
 - No `caller` for agents that must outlive a daemon restart, or a parent terminal for agents that must end together (Ending). With no parent, the daemon has to find and remove its own by label.
+- A kept terminal stays listed, with its labels, after a core restart; a lost program shows as a `lost` event, a `reason`, or a shell's argv in place of its own (Across a core restart).
 
 Avoid:
 - One connection for everything: give each wait its own (Waiting).
@@ -470,7 +580,8 @@ Avoid:
 Still unknown:
 - Permission prompts and the `error` status (How agent state shows up).
 - Whether a `send` right after a launch is dropped; the probe put the first task in `argv`, as `hc --skill` advises (Starting).
-- Behaviour across a core restart or update, and on other machines (Verdict table, not exercised).
+- Behaviour across a core update, and on other machines (Verdict table, not exercised). A core
+  restart is in Across a core restart.
 - Delivery when a person is typing in the same terminal: `hc --skill` says sends wait up to 60 s (read, not run).
 
 ### App

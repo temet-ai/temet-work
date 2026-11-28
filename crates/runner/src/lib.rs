@@ -119,6 +119,12 @@ pub enum RunnerError {
     Unknown(TerminalId),
     /// This adapter does not do this yet; the text says what is missing.
     NotBuilt(String),
+    /// The runner could not be reached, so nothing was sent and the call
+    /// changed nothing; the text says why. A call that may have reached the
+    /// runner before it failed is [`RunnerError::Other`]. Callers treat it as
+    /// they treat `Other`, except the stop after an agent's last reminder
+    /// ([`Runners`]), which needs to know whether its kill may have landed.
+    Unreached(String),
     /// Anything else, as the runner reported it.
     Other(String),
 }
@@ -131,7 +137,7 @@ impl fmt::Display for RunnerError {
             Self::Gone => f.write_str("the terminal's program has ended"),
             Self::Unknown(t) => write!(f, "no terminal {t}"),
             Self::NotBuilt(what) => write!(f, "not built yet: {what}"),
-            Self::Other(e) => f.write_str(e),
+            Self::Unreached(e) | Self::Other(e) => f.write_str(e),
         }
     }
 }
@@ -252,6 +258,22 @@ struct Count {
     last_try_ms: Option<u64>,
     /// Why that try failed.
     refusal: Option<RunnerError>,
+    /// Whether a refused try of that stop may have reached the runner, which
+    /// may then have carried it out: any refusal but
+    /// [`RunnerError::Unreached`]. A loss of the agent reported after it is
+    /// the daemon's own doing, so it ends the agent as an ordinary end. Once
+    /// set it stays set, whatever later tries answer.
+    may_have_stopped: bool,
+}
+
+/// How a stop that ended an agent's session went.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// The runner stopped the terminal.
+    Stopped,
+    /// The runner answered that the terminal was gone or unknown: there was
+    /// nothing for the stop to end.
+    NotThere,
 }
 
 /// What a poll saw an agent with a [`Count`] doing.
@@ -276,7 +298,10 @@ enum Saw {
 /// agent between its turns, holding it while the agent is working. A terminal
 /// reported gone or lost ends its agent, and is stopped so nothing stays under
 /// the agent's labels, such as the shell herdr-core puts in place of a lost
-/// program. Only the end of a lost one says its program was lost.
+/// program. Only the end of a lost one says its program was lost, so that it
+/// uses up no start, and only when the daemon did not cause the loss: a loss
+/// reported after the daemon asked for the agent's stop, and the runner may
+/// have carried it out, is an ordinary end ([`Runners::remind`]).
 #[derive(Default)]
 pub struct Runners {
     adapters: Vec<Box<dyn Runner>>,
@@ -393,9 +418,7 @@ impl Runners {
     /// reminder. Returns the agents it stopped, as ended.
     ///
     /// An agent ends here only once its stop works, or its runner says the
-    /// terminal is gone or unknown. It ends as lost when, just before the stop,
-    /// its runner's latest status for the terminal ([`Runner::latest`]) says
-    /// its program was lost. After any other error it may still be
+    /// terminal is gone or unknown. After any other error it may still be
     /// running: it is not ended, so no fresh agent starts beside it, it keeps
     /// its terminal and its queued messages, and the stop is tried again, with
     /// no further reminder, once [`STOP_AGAIN_MS`] (a minute) has passed since
@@ -405,6 +428,27 @@ impl Runners {
     /// not stopped, and the rules above say whether its count is kept. An agent
     /// with no terminal here, as before its runner has reported any after a
     /// restart, is not ended either.
+    ///
+    /// Whether it ends as lost, which uses up no start, turns on whether the
+    /// daemon may have caused the loss. A refused try may have reached the
+    /// runner, which may have ended the program before the refusal (herdr-core
+    /// carries out the kill, then its `rm` times out or finds the terminal
+    /// still live): a loss reported after that, by the poll or here, is the
+    /// daemon's doing, and the agent ends as an ordinary end that uses a
+    /// start, even when a later try is refused unreached. Otherwise it ends as
+    /// lost when its runner's latest status for the terminal
+    /// ([`Runner::latest`]) says its program was lost: just before the stop,
+    /// and again just after one answered with the terminal gone or unknown,
+    /// as when herdr-core restarted and the stop's own call was the first to
+    /// see it. A stop that worked is not read again: a loss after the daemon's
+    /// own kill is the daemon's.
+    ///
+    /// Decision: a refusal that never reached the runner
+    /// ([`RunnerError::Unreached`], such as herdr-core's socket refusing the
+    /// connection) spares the start. Nothing was sent, so no kill of the
+    /// daemon's can have ended the program, and its likely cause is
+    /// herdr-core going down or a reboot, which is the restart case a lost
+    /// end is for, and which must not use up starts.
     fn remind(
         &mut self,
         world: &World,
@@ -455,6 +499,7 @@ impl Runners {
                     saw,
                     last_try_ms: None,
                     refusal: None,
+                    may_have_stopped: false,
                 });
             count.saw = saw;
             let reminders = world.number_at(&scope, Some(a.role), "reminders");
@@ -489,16 +534,27 @@ impl Runners {
                 self.counts.insert(agent.clone(), count);
                 continue;
             };
-            // A loss its runner received after this poll read the updates: the
-            // agent ends as lost, so it does not use up a start, and its
-            // terminal, where a shell may now be, is still stopped.
-            let lost = self.adapters[i].latest(&terminal) == Some(Status::Lost);
-            if let Err(e) = self.end_session(agent, i, &terminal) {
-                count.last_try_ms = Some(now_ms);
-                count.refusal = Some(e);
-                self.counts.insert(agent.clone(), count);
-                continue;
-            }
+            // A loss its runner received after this poll read the updates, which
+            // no stop of the daemon's may have caused: the agent ends as lost,
+            // so it does not use up a start, and its terminal, where a shell may
+            // now be, is still stopped.
+            let spared = !count.may_have_stopped;
+            let lost_since_read =
+                |part: &Self| part.adapters[i].latest(&terminal) == Some(Status::Lost);
+            let lost_before = spared && lost_since_read(self);
+            let lost = match self.end_session(agent, i, &terminal) {
+                Ok(Ended::Stopped) => lost_before,
+                // Nothing was there to stop: a loss the stop's own call brought
+                // in, as when it reached a restarted herdr-core, is not its doing.
+                Ok(Ended::NotThere) => lost_before || (spared && lost_since_read(self)),
+                Err(e) => {
+                    count.may_have_stopped |= !matches!(e, RunnerError::Unreached(_));
+                    count.last_try_ms = Some(now_ms);
+                    count.refusal = Some(e);
+                    self.counts.insert(agent.clone(), count);
+                    continue;
+                }
+            };
             events.push(Event::AgentChanged {
                 agent: a.id.clone(),
                 state: AgentState::Ended,
@@ -528,16 +584,16 @@ impl Runners {
         agent: &str,
         i: usize,
         terminal: &TerminalId,
-    ) -> Result<(), RunnerError> {
-        match self.adapters[i].stop(terminal) {
-            Ok(()) | Err(RunnerError::Gone | RunnerError::Unknown(_)) => {
-                self.terminals.remove(agent);
-                self.outbox.retain(|m| m.agent != agent);
-                self.stopped.insert(agent.to_string());
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
+    ) -> Result<Ended, RunnerError> {
+        let ended = match self.adapters[i].stop(terminal) {
+            Ok(()) => Ended::Stopped,
+            Err(RunnerError::Gone | RunnerError::Unknown(_)) => Ended::NotThere,
+            Err(e) => return Err(e),
+        };
+        self.terminals.remove(agent);
+        self.outbox.retain(|m| m.agent != agent);
+        self.stopped.insert(agent.to_string());
+        Ok(ended)
     }
 
     /// Stops the terminal of an ended agent: its program is ended and the
@@ -870,10 +926,13 @@ impl Part for Runners {
                     self.terminals.remove(&agent);
                     self.outbox.retain(|m| m.agent != agent);
                     seen.insert(id.clone(), AgentState::Ended);
+                    // A loss after a refused stop that may have reached the
+                    // runner is that stop's doing: an ordinary end.
+                    let killed = self.counts.get(&agent).is_some_and(|c| c.may_have_stopped);
                     events.push(Event::AgentChanged {
                         agent: id,
                         state: AgentState::Ended,
-                        lost: u.status == Status::Lost,
+                        lost: u.status == Status::Lost && !killed,
                     });
                     stops.insert(agent, (i, u.terminal.clone()));
                     continue;
@@ -1141,7 +1200,7 @@ impl Part for Runners {
                     return Outcome::Failed(format!("no terminal is known for {agent}"));
                 };
                 match self.end_session(&agent.0, i, &terminal) {
-                    Ok(()) => Outcome::Done {
+                    Ok(_) => Outcome::Done {
                         events: vec![Event::AgentChanged {
                             agent: agent.clone(),
                             state: AgentState::Ended,
@@ -1498,6 +1557,10 @@ mod tests {
         /// `updates` has handed back its updates, so the loss lands after the
         /// poll's read.
         lose_after_read: std::sync::Arc<std::sync::Mutex<Option<TerminalId>>>,
+        /// A terminal whose program is lost to a shell at the next stop, just
+        /// before the fake answers it, as when the stop's call is the first to
+        /// reach a herdr-core that restarted.
+        lose_on_stop: std::sync::Arc<std::sync::Mutex<Option<TerminalId>>>,
     }
 
     impl Runner for Shared {
@@ -1522,7 +1585,11 @@ mod tests {
             self.fake.lock().expect("fake").screen(t)
         }
         fn stop(&mut self, t: &TerminalId) -> Result<(), RunnerError> {
-            self.fake.lock().expect("fake").stop(t)
+            let mut fake = self.fake.lock().expect("fake");
+            if let Some(lost) = self.lose_on_stop.lock().expect("lose").take() {
+                fake.lose_to_shell(&lost);
+            }
+            fake.stop(t)
         }
         fn updates(&mut self) -> Vec<Update> {
             let mut fake = self.fake.lock().expect("fake");
@@ -2715,10 +2782,7 @@ mod tests {
         let mut w = world();
         at_stage(&mut w, temet_work_core::model::Stage::Working);
         let (mut part, handle) = shared();
-        let author = run(&mut part, &mut w, &["claude"]);
-        for minute in [0, 10, 20] {
-            step(&mut part, &mut w, minute * 60_000);
-        }
+        let author = run_and_remind_twice(&mut part, &mut w, 0);
         assert_eq!(reminders(&handle), 2);
         handle
             .fake
@@ -2730,9 +2794,32 @@ mod tests {
         (w, part, handle, author)
     }
 
+    /// Starts an idle author on ankh#1 and polls at `from_ms` and 10 and 20
+    /// minutes later, so it is reminded twice, its stop due at 30 minutes.
+    fn run_and_remind_twice(part: &mut Runners, w: &mut World, from_ms: u64) -> AgentId {
+        let author = run(part, w, &["claude"]);
+        for minute in [0, 10, 20] {
+            step(part, w, from_ms + minute * 60_000);
+        }
+        author
+    }
+
     /// When the stop after the last reminder comes due for the agent of
     /// [`reminded_twice_with_a_fix_waiting`].
     const STOP_DUE: u64 = 30 * 60_000;
+
+    /// What herdr-core's adapter answers when it cannot open its socket.
+    const REFUSED: &str = "cannot reach herdr-core at /run/user/1000/herdr-core/default.sock: \
+                           Connection refused (os error 111)";
+
+    /// Makes the next stop fail without reaching the runner.
+    fn refuse_stop_unreached(handle: &Shared) {
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .fail_next_stop(RunnerError::Unreached(REFUSED.into()));
+    }
 
     const TIMED_OUT: &str = "the request timed out";
     const STILL_LIVE: &str = "t1 is still live after kill";
@@ -2889,11 +2976,14 @@ mod tests {
         assert!(ended(&polled.events, &author), "{polled:?}");
         assert_eq!(polled.problem, None);
 
-        // Its program is reported lost, to a shell.
+        // Its program is reported lost, to a shell: the refused stop may have
+        // ended it, so it is an ordinary end that uses a start.
         let (mut w, mut part, handle, author) = failed();
         handle.fake.lock().expect("lock").lose_to_shell(&t1);
         let polled = poll_after_due(&mut part, &mut w, 3_000);
-        assert!(ended_lost(&polled.events, &author), "{polled:?}");
+        assert!(ended(&polled.events, &author), "{polled:?}");
+        assert!(!ended_lost(&polled.events, &author), "{polled:?}");
+        assert!(w.agents[&author].ended_waited_on, "it uses a start");
         assert_eq!(polled.problem, None);
 
         // A send is answered with the terminal gone.
@@ -2962,6 +3052,171 @@ mod tests {
         // The next poll reads the loss and the stop, and changes nothing.
         assert_eq!(step(&mut part, &mut w, STOP_DUE + 2_000), vec![]);
         assert_eq!(stops(&handle), 1, "stopped once");
+    }
+
+    /// Whether `agent` has ended as an ordinary end that uses a start: by
+    /// `events`, and as the world records it.
+    fn ended_using_a_start(w: &World, events: &[Event], agent: &AgentId) -> bool {
+        let a = &w.agents[agent];
+        ended(events, agent) && !ended_lost(events, agent) && a.ended_waited_on && !a.lost_waited_on
+    }
+
+    /// Whether `agent` has ended as lost, using no start.
+    fn ended_lost_using_no_start(w: &World, events: &[Event], agent: &AgentId) -> bool {
+        let a = &w.agents[agent];
+        ended_lost(events, agent) && !ended(events, agent) && !a.ended_waited_on && a.lost_waited_on
+    }
+
+    #[test]
+    fn an_author_lost_after_its_refused_last_reminder_stop_three_times_leaves_no_fourth_to_start() {
+        // herdr-core kills the idle author's program, then its `rm` times out
+        // or finds the terminal still live, and it puts a shell in its place:
+        // as the issue saw it every 31 minutes.
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        for n in 1..=3_u64 {
+            let at = (n - 1) * 3_600_000;
+            let author = run_and_remind_twice(&mut part, &mut w, at);
+            let terminal = TerminalId(format!("t{n}"));
+            let why = if n == 2 {
+                format!("{terminal} is still live after kill")
+            } else {
+                TIMED_OUT.to_string()
+            };
+            refuse_stop(&handle, &why);
+            let polled = part.poll(&w, at + STOP_DUE + 1_000);
+            apply(&mut w, &polled.events);
+            assert!(!ended(&polled.events, &author), "{polled:?}");
+            assert_eq!(
+                polled.problem,
+                Some(cannot_stop(&author, &terminal.0, &why))
+            );
+            handle.fake.lock().expect("lock").lose_to_shell(&terminal);
+            let polled = part.poll(&w, at + STOP_DUE + 3_000);
+            apply(&mut w, &polled.events);
+            assert!(
+                ended_using_a_start(&w, &polled.events, &author),
+                "author {n}: {polled:?}"
+            );
+            assert_eq!(polled.problem, None);
+            assert_eq!(
+                starts_an_author(&w),
+                n < 3,
+                "after author {n}: {:?}",
+                w.missing()
+            );
+        }
+        assert_eq!(
+            w.missing().given_up,
+            ["ankh#1: 3 authors ended before it moved on; no more are started"]
+        );
+    }
+
+    #[test]
+    fn a_loss_read_through_latest_at_the_retry_of_a_refused_stop_uses_a_start() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+        refuse_stop(&handle, TIMED_OUT);
+        let polled = poll_after_due(&mut part, &mut w, 1_000);
+        assert!(!ended(&polled.events, &author), "{polled:?}");
+        // The retry's poll reads the updates, and the loss comes in after.
+        *handle.lose_after_read.lock().expect("lock") = Some(t1.clone());
+        let polled = poll_after_due(&mut part, &mut w, 61_000);
+        assert!(
+            ended_using_a_start(&w, &polled.events, &author),
+            "{polled:?}"
+        );
+        assert_eq!(stops(&handle), 2);
+        assert_eq!(polled.problem, None);
+        assert_eq!(poll_after_due(&mut part, &mut w, 63_000).events, vec![]);
+        assert_eq!(stops(&handle), 2, "stopped once more, not again");
+    }
+
+    #[test]
+    fn a_loss_after_a_stop_refused_unreached_ends_the_agent_lost() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+        refuse_stop_unreached(&handle);
+        let polled = poll_after_due(&mut part, &mut w, 1_000);
+        assert!(!ended(&polled.events, &author), "{polled:?}");
+        assert_eq!(polled.problem, Some(cannot_stop(&author, "t1", REFUSED)));
+        handle.fake.lock().expect("lock").lose_to_shell(&t1);
+        let polled = poll_after_due(&mut part, &mut w, 3_000);
+        assert!(
+            ended_lost_using_no_start(&w, &polled.events, &author),
+            "nothing reached the runner, so the loss is not the daemon's: {polled:?}"
+        );
+        assert!(starts_an_author(&w), "{:?}", w.missing());
+    }
+
+    #[test]
+    fn a_stop_refusal_that_may_have_reached_the_runner_is_not_undone_by_an_unreached_retry() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+        refuse_stop(&handle, TIMED_OUT);
+        refuse_stop_unreached(&handle);
+        poll_after_due(&mut part, &mut w, 1_000);
+        let polled = poll_after_due(&mut part, &mut w, 61_000);
+        assert_eq!(stops(&handle), 2);
+        assert_eq!(polled.problem, Some(cannot_stop(&author, "t1", REFUSED)));
+        handle.fake.lock().expect("lock").lose_to_shell(&t1);
+        let polled = poll_after_due(&mut part, &mut w, 63_000);
+        assert!(
+            ended_using_a_start(&w, &polled.events, &author),
+            "{polled:?}"
+        );
+    }
+
+    #[test]
+    fn a_stop_answered_unknown_after_its_call_brought_a_loss_in_ends_the_agent_lost() {
+        let t1 = TerminalId("t1".into());
+        // herdr-core restarted: the poll's update read found nothing, the stop's
+        // call reconnects and reads the terminal lost, and the kill answers
+        // that it has no such terminal.
+        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+        *handle.lose_on_stop.lock().expect("lock") = Some(t1.clone());
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .fail_next_stop(RunnerError::Unknown(t1.clone()));
+        let polled = poll_after_due(&mut part, &mut w, 0);
+        assert!(
+            ended_lost_using_no_start(&w, &polled.events, &author),
+            "{polled:?}"
+        );
+        assert_eq!(stops(&handle), 1);
+        assert_eq!(polled.problem, None);
+        // The next poll reads the loss and changes nothing.
+        assert_eq!(poll_after_due(&mut part, &mut w, 2_000).events, vec![]);
+        assert_eq!(stops(&handle), 1, "stopped once");
+
+        // A stop that works is not read again: the loss is its own kill's.
+        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+        *handle.lose_on_stop.lock().expect("lock") = Some(t1.clone());
+        let polled = poll_after_due(&mut part, &mut w, 0);
+        assert!(
+            ended_using_a_start(&w, &polled.events, &author),
+            "{polled:?}"
+        );
+
+        // After a refusal that may have reached the runner, the loss is that
+        // stop's.
+        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+        refuse_stop(&handle, TIMED_OUT);
+        poll_after_due(&mut part, &mut w, 1_000);
+        *handle.lose_on_stop.lock().expect("lock") = Some(t1.clone());
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .fail_next_stop(RunnerError::Unknown(t1.clone()));
+        let polled = poll_after_due(&mut part, &mut w, 61_000);
+        assert!(
+            ended_using_a_start(&w, &polled.events, &author),
+            "{polled:?}"
+        );
     }
 
     #[test]
