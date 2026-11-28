@@ -196,6 +196,31 @@ pub trait Runner: Send {
     fn listed(&mut self) -> Option<Vec<Update>> {
         None
     }
+
+    /// The latest status of `terminal` among the updates the runner holds that
+    /// `updates` has not handed back yet, read without taking them: the next
+    /// call to `updates` still returns them. As [`latest_of`] picks it: the
+    /// first that ends the terminal, gone or lost, else the newest. `None` when
+    /// it holds none for the terminal, and for a runner that does not keep
+    /// updates between calls.
+    fn latest(&self, terminal: &TerminalId) -> Option<Status> {
+        let _ = terminal;
+        None
+    }
+}
+
+/// The status [`Runner::latest`] answers for `terminal` from `updates`, oldest
+/// first: the first that ends the terminal, gone or lost, as the next poll ends
+/// its agent with that one; else the newest. `None` when none is `terminal`'s.
+pub fn latest_of(updates: &[Update], terminal: &TerminalId) -> Option<Status> {
+    let mut newest = None;
+    for u in updates.iter().filter(|u| &u.terminal == terminal) {
+        if matches!(u.status, Status::Gone | Status::Lost) {
+            return Some(u.status.clone());
+        }
+        newest = Some(&u.status);
+    }
+    newest.cloned()
 }
 
 /// Text waiting for an agent to finish its turn.
@@ -368,7 +393,9 @@ impl Runners {
     /// reminder. Returns the agents it stopped, as ended.
     ///
     /// An agent ends here only once its stop works, or its runner says the
-    /// terminal is gone or unknown. After any other error it may still be
+    /// terminal is gone or unknown. It ends as lost when, just before the stop,
+    /// its runner's latest status for the terminal ([`Runner::latest`]) says
+    /// its program was lost. After any other error it may still be
     /// running: it is not ended, so no fresh agent starts beside it, it keeps
     /// its terminal and its queued messages, and the stop is tried again, with
     /// no further reminder, once [`STOP_AGAIN_MS`] (a minute) has passed since
@@ -462,6 +489,10 @@ impl Runners {
                 self.counts.insert(agent.clone(), count);
                 continue;
             };
+            // A loss its runner received after this poll read the updates: the
+            // agent ends as lost, so it does not use up a start, and its
+            // terminal, where a shell may now be, is still stopped.
+            let lost = self.adapters[i].latest(&terminal) == Some(Status::Lost);
             if let Err(e) = self.end_session(agent, i, &terminal) {
                 count.last_try_ms = Some(now_ms);
                 count.refusal = Some(e);
@@ -471,7 +502,7 @@ impl Runners {
             events.push(Event::AgentChanged {
                 agent: a.id.clone(),
                 state: AgentState::Ended,
-                lost: false,
+                lost,
             });
         }
         events
@@ -1393,6 +1424,10 @@ mod tests {
         fake: std::sync::Arc<std::sync::Mutex<FakeRunner>>,
         list: std::sync::Arc<std::sync::Mutex<Option<Vec<Update>>>>,
         problem: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        /// A terminal whose program is lost to a shell once the next call to
+        /// `updates` has handed back its updates, so the loss lands after the
+        /// poll's read.
+        lose_after_read: std::sync::Arc<std::sync::Mutex<Option<TerminalId>>>,
     }
 
     impl Runner for Shared {
@@ -1420,10 +1455,18 @@ mod tests {
             self.fake.lock().expect("fake").stop(t)
         }
         fn updates(&mut self) -> Vec<Update> {
-            self.fake.lock().expect("fake").updates()
+            let mut fake = self.fake.lock().expect("fake");
+            let updates = fake.updates();
+            if let Some(t) = self.lose_after_read.lock().expect("lose").take() {
+                fake.lose_to_shell(&t);
+            }
+            updates
         }
         fn listed(&mut self) -> Option<Vec<Update>> {
             self.list.lock().expect("list").take()
+        }
+        fn latest(&self, t: &TerminalId) -> Option<Status> {
+            self.fake.lock().expect("fake").latest(t)
         }
         fn problem(&self) -> Option<String> {
             self.problem.lock().expect("problem").clone()
@@ -2808,11 +2851,47 @@ mod tests {
             let polled = step(&mut part, &mut w, 30 * 60_000);
             assert!(ended(&polled, &author), "{answer:?}: {polled:?}");
             assert!(
+                !ended_lost(&polled, &author),
+                "{answer:?}: no loss was reported, so lost is false"
+            );
+            assert!(w.agents[&author].ended_waited_on, "{answer:?} uses a start");
+            assert!(
                 matches!(part.screen(&author.0), Err(RunnerError::Unknown(_))),
                 "{answer:?}"
             );
             assert_eq!(part.waiting(), 0, "{answer:?}");
         }
+    }
+
+    #[test]
+    fn a_loss_after_the_polls_update_read_ends_the_agent_lost_at_its_last_reminder_stop() {
+        let t1 = TerminalId("t1".into());
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let author = run(&mut part, &mut w, &["claude"]);
+        for minute in [0, 10, 20] {
+            step(&mut part, &mut w, minute * 60_000);
+        }
+        assert_eq!(reminders(&handle), 2);
+        // The poll at the stop reads the updates, and the loss comes in after.
+        *handle.lose_after_read.lock().expect("lock") = Some(t1.clone());
+        let polled = step(&mut part, &mut w, STOP_DUE);
+        assert!(ended_lost(&polled, &author), "{polled:?}");
+        let calls = handle.fake.lock().expect("fake").calls();
+        assert_eq!(
+            calls.lock().expect("calls").last(),
+            Some(&fake::Call::Stop(t1)),
+            "its terminal, the shell, is stopped"
+        );
+        assert_eq!(stops(&handle), 1);
+        let a = &w.agents[&author];
+        assert!(!a.ended_waited_on, "it does not use up a start");
+        assert!(a.lost_waited_on, "it counts toward the lost limit");
+        assert!(starts_an_author(&w), "{:?}", w.missing());
+        // The next poll reads the loss and the stop, and changes nothing.
+        assert_eq!(step(&mut part, &mut w, STOP_DUE + 2_000), vec![]);
+        assert_eq!(stops(&handle), 1, "stopped once");
     }
 
     #[test]

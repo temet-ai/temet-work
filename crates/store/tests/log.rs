@@ -337,6 +337,7 @@ fn replaying_the_log_keeps_whether_an_ended_agent_had_lost_its_program() {
         let agent = &replay(&entries).agents[&author];
         assert_eq!(agent.state, AgentState::Ended);
         assert_eq!(agent.ended_waited_on, !lost, "lost {lost}");
+        assert_eq!(agent.lost_waited_on, lost, "lost {lost}");
     }
 }
 

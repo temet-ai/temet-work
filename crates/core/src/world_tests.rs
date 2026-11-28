@@ -1377,6 +1377,100 @@ mod lost_to_a_shell {
         assert_eq!(missing.start, vec![]);
         assert_eq!(missing.given_up, [THREE_AUTHORS]);
     }
+
+    /// What `missing` says once the programs of `n` authors of issue 1 were
+    /// lost while it waited on them.
+    fn lost_authors(n: u32) -> String {
+        format!(
+            "ankh#1: the programs of {n} authors were lost before it moved on; no more are started"
+        )
+    }
+
+    /// Starts an author on issue 1 and loses its program, `ends` times, as
+    /// when an out-of-memory kill ends every run at the same point. After each
+    /// end it returns what `missing` says, in order.
+    fn lost_one_at_a_time(w: &mut World, ends: u32) -> Vec<Missing> {
+        (1..=ends)
+            .map(|n| {
+                let agent = format!("author-{n}");
+                w.apply(&started(&agent, Role::Author, "1"));
+                assert!(w.waiting_on(&w.agents[&AgentId::new(&agent)]), "{agent}");
+                w.apply(&lost(&agent));
+                w.missing()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_author_lost_on_every_start_is_given_up_after_three_times_starts() {
+        let mut w = working_on_one();
+        let after = lost_one_at_a_time(&mut w, 9);
+        for n in [3, 8] {
+            let missing = &after[n - 1];
+            assert_eq!(missing.start, vec![author("1", "f1")], "after {n} lost");
+            assert_eq!(missing.given_up, Vec::<String>::new(), "after {n} lost");
+        }
+        let missing = &after[8];
+        assert_eq!(missing.start, vec![], "after 9 lost");
+        assert_eq!(missing.given_up, [lost_authors(9)]);
+        assert!(
+            w.agents.values().all(|a| !a.ended_waited_on),
+            "none used up a start"
+        );
+    }
+
+    #[test]
+    fn the_lost_limit_follows_the_starts_the_issue_sets_for_its_role() {
+        let mut w = working_on_one();
+        w.apply(&Event::SettingSet {
+            scope: Scope::Task(issue("1")),
+            role: Some(Role::Author),
+            key: "starts".into(),
+            value: Value::Number(2),
+            by: "person".into(),
+        });
+        let after = lost_one_at_a_time(&mut w, 6);
+        let missing = &after[4];
+        assert_eq!(missing.start, vec![author("1", "f1")], "after 5 lost");
+        assert_eq!(missing.given_up, Vec::<String>::new(), "after 5 lost");
+        let missing = &after[5];
+        assert_eq!(missing.start, vec![], "after 6 lost");
+        assert_eq!(missing.given_up, [lost_authors(6)]);
+    }
+
+    #[test]
+    fn authors_lost_after_their_issue_moved_on_add_nothing_to_the_lost_limit() {
+        let mut w = working_on_one();
+        for n in 1..=9 {
+            w.apply(&started(&format!("author-{n}"), Role::Author, "1"));
+        }
+        w.apply(&Event::PullRequestReady {
+            issue: issue("1"),
+            pull: Some("57".into()),
+            pulls: Default::default(),
+            replies: Vec::new(),
+        });
+        // In review the issue waits on its reviewer, not on its authors.
+        for n in 1..=9 {
+            w.apply(&lost(&format!("author-{n}")));
+        }
+        assert!(w.agents.values().all(|a| !a.lost_waited_on));
+        // The reviewer blocks, and the issue waits on an author again.
+        w.apply(&started("reviewer-1", Role::Reviewer, "1"));
+        w.apply(&Event::ReviewFinished {
+            issue: issue("1"),
+            round: 1,
+            verdict: Verdict::Block {
+                points: vec!["no test for a stopped clock".into()],
+            },
+            failed: None,
+            open: None,
+        });
+        assert!(matches!(stage(&w, "1"), Stage::Fixing { .. }));
+        let missing = w.missing();
+        assert_eq!(missing.given_up, Vec::<String>::new());
+        assert_eq!(missing.start, vec![author("1", "f1")]);
+    }
 }
 
 #[test]
