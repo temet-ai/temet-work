@@ -193,6 +193,9 @@ it is closed. The Project page draws no Alert now, since it sends no overturn un
 | CheckList | a plan's checks: for each, what is done when, what proves it and its status, if it has run. A done-when over three lines and a proven-by over two show their first lines; a click on the row opens it whole and another closes it, and its plus or minus, for the keyboard, shows on the row under the pointer and while it is open (`.tm-reveal`). Stories: Default, Failed And Timed, No Checks, Not Run Yet, Long Checks | ListRow, StatusTag, Button | `temet-checklist` |
 | ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points and the author's reply; only a point in the other state than most of its round's says whether it is open or resolved | Disclosure, ListRow, StatusTag | `temet-reviewrounds` |
 | ProblemList | what the daemon reports wrong now, above Needs you: a row each with what it is about, in the code face, and what is wrong; nothing when there is no problem. Its Send buttons come with temet-work#256. Story: Default | CutPanel, Heading, Icon, ListRow | `temet-problemlist` |
+| StageCounts | the left column's stages: every stage in the daemon's order with how many issues are at it. A stand-in for now: the part comes with the board, from #253's board branch | | `temet-stagecounts` |
+| IssueCard | an issue as a card on a StageBoard. A stand-in for now that holds the card's props: the part comes with the board, from #253's board branch | | `temet-issuecard` |
+| StageBoard | issues as a board of stages, a lane per milestone. A stand-in for now that lists the issues' keys: the part comes from #253's board branch | | `temet-stageboard` |
 | AgentPane | the side pane for an agent: its role, state, terminal and decisions | Heading, StatusTag, TerminalView, DecisionRow | gap |
 
 ## Pages

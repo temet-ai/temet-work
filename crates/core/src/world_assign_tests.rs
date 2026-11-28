@@ -809,3 +809,32 @@ fn the_view_and_the_text_say_who_a_person_assigned_and_unassigned_and_who_may_be
         "an ended one is no longer being stopped"
     );
 }
+
+#[test]
+fn an_agent_assigned_to_an_issue_a_person_moved_before_counts_from_its_assign() {
+    let mut w = two_refining();
+    // A person sends ankh#1 back to new: refiner-1 started before that, so its step is over.
+    person(
+        &mut w,
+        &Command::Move {
+            issue: issue("1"),
+            stage: crate::view::StageWord::New,
+        },
+    );
+    assert!(w.before_move(agent(&w, "refiner-1")));
+    // refiner-2 also started before the move, but a person moves it onto ankh#1 after it.
+    apply_all(
+        &mut w,
+        &[Event::Assigned {
+            issue: issue("1"),
+            agent: by("refiner-2"),
+            from: issue("2"),
+        }],
+    );
+    assert!(!w.before_move(agent(&w, "refiner-2")));
+    assert_eq!(
+        w.running(&issue("1"), Role::Refiner).map(|a| a.id.clone()),
+        Some(by("refiner-2")),
+        "it works on ankh#1, and its step there is not over"
+    );
+}
