@@ -367,23 +367,30 @@ fn record_choices(issue: &IssueId) -> String {
 }
 
 /// What a reviewer does with a point that is not met, or that the plan or a
-/// decision departs from.
+/// decision departs from, and with a defect the change brings in.
 const BLOCK_WHAT_IS_NOT_MET: &str = "\
 Block on any point that is not met, and name that point in the block. A test that shows only part \
 of its check is a block. A plan check or a recorded decision that departs from a point the issue \
 states, or that leaves any failure the issue describes happening, is a block, even when the \
 plan sanctions it. A decision the change writes down, such as under \"Decided, open to \
-change\", is a recorded decision.";
+change\", is a recorded decision.\n\
+Block too on any defect the change brings in, even one the issue does not name, such as a case \
+it breaks or a test that asserts a bug: what review finds is fixed in this pull request, never \
+in a new issue. Something the change does not make worse, such as a wider case the issue never \
+asked for, is no block and no new issue; leave it out.";
 
 /// What an arbiter does with a point that is not met, or that the plan or a
-/// decision departs from.
+/// decision departs from, and with a defect the change brings in.
 const FIX_WHAT_IS_NOT_MET: &str = "\
 Where a point is not met, rule fix and name that point in the ruling. A test that shows only part \
 of its check is a fix. An author's answer that the plan does not list the point is no reason to \
 approve. A plan check or a recorded decision that departs from a point the issue states, or that \
 leaves any failure the issue describes happening, is a fix, even when the plan sanctions it. A \
 decision the change writes down, such as under \"Decided, open to change\", is a recorded \
-decision.";
+decision.\n\
+Rule fix too for any defect the change brings in, even one the issue does not name: what review \
+finds is fixed in this pull request, never in a new issue. Something the change does not make \
+worse is no reason to rule fix.";
 
 /// Writes the brief for an agent of `role` on `issue`, run in `place`.
 /// `rules` are the kept rules from overturned decisions; each brief ends with them.
@@ -841,22 +848,6 @@ pub struct Investigating<'a> {
     pub notes: Vec<(ProjectId, String)>,
     /// The milestone its issues get when it names none.
     pub milestone: Option<crate::ids::MilestoneId>,
-    /// Which merged pull requests it reads: those merged since the group's last
-    /// finished investigation started. While none has finished, those merged in
-    /// the 7 days before the group's first investigation started.
-    pub since: Since,
-}
-
-/// Where the window of merged pull requests an investigator reads begins.
-#[derive(Debug)]
-pub enum Since {
-    /// The group's first investigation: 7 days before its own start.
-    First,
-    /// No investigation of the group has finished: the time 7 days before its
-    /// first started, in words.
-    BeforeFirst(String),
-    /// When the group's last finished investigation started, in words.
-    Finished(String),
 }
 
 /// Writes the brief for a group's investigator, run in `place`. It names no tool
@@ -914,17 +905,6 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
         }
         (None, _) => "The group takes issues of every milestone; file them with none.\n".into(),
     };
-    let days = crate::investigation::FIRST_SINCE_DAYS;
-    let since = match &what.since {
-        Since::First => format!("in the last {days} days"),
-        Since::BeforeFirst(s) => format!(
-            "since {s}, {days} days before the group's first investigation started, as none has \
-             finished yet"
-        ),
-        Since::Finished(s) => {
-            format!("since {s}, when the group's last finished investigation started")
-        }
-    };
     let notes: String = what
         .notes
         .iter()
@@ -958,9 +938,9 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
              Read, in this order:\n\
              1. Each project's docs at that head, for work they plan that is not built yet.\n\
              2. {read_open}\n\
-             3. The pull requests merged {since}, for defects you can show in that work.\n\
-             Then file one issue for each planned item no open issue covers, and one for each defect \
-             you can show in merged work:\n",
+             File no issue for a defect in merged work: review fixes what it finds in the pull \
+             request itself.\n\
+             Then file one issue for each planned item no open issue covers:\n",
             name = g.name,
             docs_and_code = at_the_default_branch(
                 "Read each repository's docs and code at the current head of that repository's \
@@ -1407,6 +1387,11 @@ mod tests {
             "Check each of its points and its \"Done is\" line against the change, not only the \
              plan's checks.",
             "Block on any point that is not met, and name that point in the block.",
+            "Block too on any defect the change brings in, even one the issue does not name, such \
+             as a case it breaks or a test that asserts a bug: what review finds is fixed in this \
+             pull request, never in a new issue.",
+            "Something the change does not make worse, such as a wider case the issue never asked \
+             for, is no block and no new issue; leave it out.",
             "confirm that the test or evidence named under \"shown by\" shows the whole of what \
              the check states, including any failure or persistent case it names.",
             "A test that shows only part of its check is a block.",
@@ -1547,6 +1532,9 @@ mod tests {
              request. A plan that leaves it out does not excuse it.",
             "Where a point is not met, rule fix and name that point in the ruling.",
             "A test that shows only part of its check is a fix.",
+            "Rule fix too for any defect the change brings in, even one the issue does not name: \
+             what review finds is fixed in this pull request, never in a new issue.",
+            "Something the change does not make worse is no reason to rule fix.",
             "An author's answer that the plan does not list the point is no reason to approve.",
             "A plan check or a recorded decision that departs from a point the issue states, or \
              that leaves any failure the issue describes happening, is a fix, even when the plan \
@@ -1615,14 +1603,13 @@ mod tests {
         reviewed.stage = Stage::InReview { round: 1 };
         let mut ruling = issue.clone();
         ruling.stage = Stage::Arbitration { round: 3 };
-        let world = investigating(None);
+        let world = investigating();
         let looking = Investigating {
             group: &world.groups[&GroupId::new("watch")],
             covered: Vec::new(),
             closed: Vec::new(),
             notes: Vec::new(),
             milestone: None,
-            since: Since::First,
         };
         let investigator = investigate(&looking, Workplace::default(), &[]).task;
         for (role, brief) in [
@@ -2528,7 +2515,7 @@ mod tests {
                              the folder you run in, which you remove when you are done. Fetching is \
                              allowed: it moves no branch and changes no file an author works on.";
         for held in [false, true] {
-            let mut world = investigating(None);
+            let mut world = investigating();
             world.apply(&Event::FolderAdded {
                 folder: FolderId::new("f2"),
                 project: ProjectId::new("ui"),
@@ -2586,9 +2573,8 @@ mod tests {
     }
 
     /// A world where the group watch, over ankh and the area guild (whose tracker
-    /// holds its repositories' issues), investigates; `since_ms` is when its last
-    /// finished investigation started, if it had one.
-    fn investigating(since_ms: Option<u64>) -> World {
+    /// holds its repositories' issues), investigates.
+    fn investigating() -> World {
         let mut events = vec![
             Event::ProjectAdded {
                 project: ProjectId::new("ankh"),
@@ -2629,24 +2615,11 @@ mod tests {
                 investigate_every: None,
             },
         ];
-        let start = |at_ms| Event::InvestigationStarted {
+        events.push(Event::InvestigationStarted {
             group: GroupId::new("watch"),
             agent: AgentId::new("investigator-1"),
-            at_ms,
-        };
-        if let Some(at) = since_ms {
-            events.push(start(at));
-            events.push(Event::Investigated {
-                group: GroupId::new("watch"),
-                agent: AgentId::new("investigator-1"),
-            });
-            events.push(Event::InvestigationEnded {
-                group: GroupId::new("watch"),
-                at_ms: at + 1,
-                filed: 0,
-            });
-        }
-        events.push(start(1_795_784_700_000 + 7_200_000));
+            at_ms: 1_795_784_700_000,
+        });
         World::replay(&events).0
     }
 
@@ -2658,8 +2631,8 @@ mod tests {
     }
 
     #[test]
-    fn the_investigator_brief_names_projects_milestone_and_since() {
-        let t = task(&investigating(Some(1_795_784_700_000)));
+    fn the_investigator_brief_names_projects_and_milestone() {
+        let t = task(&investigating());
         for line in [
             "Investigate for group Night watch (watch): its work queue is short.",
             "It takes issues from:\n\
@@ -2670,10 +2643,10 @@ mod tests {
              Second.",
             "1. Each project's docs at that head, for work they plan that is not built yet.",
             "2. The open issues of each project, so you know what is covered already.",
-            "3. The pull requests merged since 2026-11-27 13:05 UTC, when the group's last \
-             finished investigation started, for defects you can show in that work.",
-            "Then file one issue for each planned item no open issue covers, and one for each \
-             defect you can show in merged work:\ntemet-work file PROJECT \"<title>\" - <<'BODY'\n",
+            "File no issue for a defect in merged work: review fixes what it finds in the pull \
+             request itself.",
+            "Then file one issue for each planned item no open issue covers:\ntemet-work file \
+             PROJECT \"<title>\" - <<'BODY'\n",
             "the Depends on line an issue that waits for it carries",
             "Never file an issue an open one already covers. Change no file.",
         ] {
@@ -2688,13 +2661,11 @@ mod tests {
     }
 
     #[test]
-    fn a_first_investigation_reads_the_last_seven_days() {
-        let t = task(&investigating(None));
-        assert!(
-            t.contains("3. The pull requests merged in the last 7 days, for defects"),
-            "{t}"
-        );
-        assert!(!t.contains("since"), "{t}");
+    fn an_investigator_reads_no_merged_pull_requests_for_defects() {
+        let t = task(&investigating());
+        assert!(!t.contains("3. "), "{t}");
+        assert!(!t.contains("pull requests merged"), "{t}");
+        assert!(!t.contains("one for each defect"), "{t}");
     }
 
     /// What `temet-work status` names on the line counting the rules a brief
@@ -2747,14 +2718,13 @@ mod tests {
         issue.stage = Stage::Arbitration { round: 2 };
         issue.reviews = vec![answered, block_of(2, points)];
         let arbiter = brief(Role::Arbiter, &issue);
-        let world = investigating(None);
+        let world = investigating();
         let looking = Investigating {
             group: &world.groups[&GroupId::new("watch")],
             covered: Vec::new(),
             closed: Vec::new(),
             notes: Vec::new(),
             milestone: None,
-            since: Since::First,
         };
         let investigator = investigate(&looking, Workplace::default(), &rules).task;
 
@@ -2947,14 +2917,13 @@ mod tests {
         ] {
             assert!(arbiter.contains(&item), "no {item:.60} in:\n{arbiter:.300}");
         }
-        let looking = investigating(None);
+        let looking = investigating();
         let what = Investigating {
             group: &looking.groups[&GroupId::new("watch")],
             covered: Vec::new(),
             closed: Vec::new(),
             notes: Vec::new(),
             milestone: None,
-            since: Since::First,
         };
         for text in [
             brief(Role::Refiner, &issue),
