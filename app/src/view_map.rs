@@ -465,10 +465,12 @@ pub fn project_view(view: &View, project: Option<&ProjectId>, now_ms: u64) -> Op
         if own {
             same_decision.insert(need.clone(), (s(key(&d.issue)), need.clone()));
         }
-        needs.push(NeedsYouDecision {
-            id: need,
-            decision: row_decision(d, &view.agents, Some(name)),
-        });
+        // Needs you draws DecisionRow's short form, the decision and its button. What was
+        // weighed and why are in the issue's pane, under Decisions.
+        let mut decision = row_decision(d, &view.agents, Some(name));
+        decision.weighed.clear();
+        decision.why = None;
+        needs.push(NeedsYouDecision { id: need, decision });
     }
 
     let details = view
@@ -538,6 +540,19 @@ pub fn show(
 ) {
     page.set_view(view.and_then(|v| project_view(v, None, now_ms)));
     page.set_notice(notice(view, problem, path));
+    // With nothing selected the pane would be empty: select the first issue listed.
+    if page.selected().is_none() {
+        let first = page
+            .view()
+            .milestones
+            .iter()
+            .flat_map(|m| m.issues.iter())
+            .map(|i| i.key.clone())
+            .next();
+        if let Some(key) = first {
+            page.select(&key);
+        }
+    }
 }
 
 /// [`show`] for the daemon entity's current state, at the clock's time.
