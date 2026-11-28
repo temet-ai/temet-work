@@ -241,8 +241,10 @@ ignores a close of the issue until the reopen happens. Meanwhile `temet-work iss
 text from the last sync that listed the issue. A sync that lists the issue as open counts as
 the reopen, whoever reopened it. From then on a close in the tracker is a person's: it
 finishes the issue, stops its agents and frees its work folders, and the investigator does not
-file it again. Until the issue is done, `temet-work status` and the app list it under
-Problems.
+file it again. While the fix merges, deploys or is verified, and once one of its pull
+requests has merged, the daemon ignores a close. Until the issue is done,
+`temet-work status` and the app list it under Problems with what a close does now. Where the
+daemon ignores one, the line gives the issue's stage and says that a close is not applied.
 
 The investigation ends when the investigator runs `temet-work investigated GROUP` or its
 session ends. An idle investigator is reminded and then stopped after `remind_after` and
