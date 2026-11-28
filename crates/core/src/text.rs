@@ -1911,3 +1911,106 @@ mod decisions {
         }
     }
 }
+
+#[cfg(test)]
+mod person_stops {
+    use super::*;
+    use crate::event::Event;
+    use crate::ids::{AgentId, GroupId, IssueId, MachineId};
+
+    fn started(agent: &str, role: Role) -> Event {
+        Event::AgentStarted {
+            agent: AgentId::new(agent),
+            group: GroupId::new("watch"),
+            role,
+            issue: Some(IssueId::new("ankh", "1")),
+            machine: MachineId::new("morpork"),
+            folder: None,
+            secret_digest: None,
+            runtime: None,
+            model: None,
+        }
+    }
+
+    /// ankh#1 refining, its refiner working and an author idle, with the
+    /// refiner stopped by a person at `at`.
+    fn stopped(at: u64) -> World {
+        let mut w = World::default();
+        w.apply(&Event::IssueSynced {
+            issue: IssueId::new("ankh", "1"),
+            title: "Mend the clock".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        w.issues
+            .get_mut(&IssueId::new("ankh", "1"))
+            .expect("synced")
+            .stage = Stage::Refining;
+        w.apply(&started("refiner-1", Role::Refiner));
+        w.apply(&started("author-1", Role::Author));
+        w.apply(&Event::AgentChanged {
+            agent: AgentId::new("refiner-1"),
+            state: AgentState::Working {
+                doing: "reading the clock".into(),
+            },
+            lost: false,
+        });
+        w.apply_at(
+            at,
+            &Event::AgentStoppedByPerson {
+                agent: AgentId::new("refiner-1"),
+            },
+        );
+        w
+    }
+
+    #[test]
+    fn text_status_shows_the_agent_stopped_by_a_person_whatever_its_state_and_its_issue_stopped() {
+        let at = 1_795_784_700_000;
+        let w = stopped(at);
+        let status = text(&w, &BTreeMap::new());
+        assert!(
+            status.contains(
+                "refiner-1 on ankh#1: working: reading the clock (on morpork); stopped by a \
+                 person at 2026-11-27 13:05 UTC"
+            ),
+            "{status}"
+        );
+        assert!(
+            status.contains("author-1 on ankh#1: idle (on morpork)\n"),
+            "{status}"
+        );
+        assert!(
+            status.contains(
+                "ankh#1  refining  Mend the clock; stopped by a person (refiner-1) since \
+                 2026-11-27 13:05 UTC: no agent starts on it until temet-work start ankh#1"
+            ),
+            "{status}"
+        );
+        let shown = issue(
+            &w,
+            &IssueId::new("ankh", "1"),
+            &Err("not read in this test".into()),
+        )
+        .expect("an issue");
+        assert!(
+            shown.contains("Stopped: stopped by a person (refiner-1) since 2026-11-27 13:05 UTC"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("refiner-1 (refiner): working: reading the clock; stopped by a person"),
+            "{shown}"
+        );
+
+        // Started again: the issue's line says nothing, the agent's still does.
+        let mut w = w;
+        w.apply(&Event::IssueStartedByPerson {
+            issue: IssueId::new("ankh", "1"),
+        });
+        let status = text(&w, &BTreeMap::new());
+        assert!(status.contains("ankh#1  refining  Mend the clock\n"), "{status}");
+        assert!(status.contains("; stopped by a person at "), "{status}");
+    }
+}
