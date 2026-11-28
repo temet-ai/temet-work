@@ -1076,8 +1076,8 @@ impl Part for Runners {
                     effects: Vec::new(),
                 }
             }
-            // A reviewer still running hears of the next round; with none, a new
-            // one is started elsewhere.
+            // A reviewer still running hears of the next round, with the pull
+            // requests to review now; with none, a new one is started elsewhere.
             Effect::StartReview { issue, round } => {
                 let (Some(reviewer), Some(i)) = (
                     world.running(issue, Role::Reviewer),
@@ -1085,13 +1085,18 @@ impl Part for Runners {
                 ) else {
                     return Outcome::NotMine;
                 };
+                // A next-round message still waiting may name a pull request
+                // since replaced, which the reviewer must not act on: this one
+                // takes its place. A reminder stays.
+                self.outbox
+                    .retain(|m| !(m.agent == reviewer.id.0 && m.tells));
                 let told = self.queue(
                     world,
                     &BTreeMap::new(),
                     Message {
                         agent: reviewer.id.0.clone(),
                         issue: Some(issue.clone()),
-                        text: brief::next_round(i, *round),
+                        text: brief::next_round(i, *round, &world.pulled(i)),
                         tells: true,
                     },
                 );
@@ -1308,6 +1313,14 @@ mod tests {
                 round,
             };
             let mut w = world();
+            w.apply(&Event::ProjectAdded {
+                project: ProjectId::new("ankh"),
+                tracker: "fake".into(),
+                name: "ankh-morpork/clock".into(),
+                code_host: None,
+                repo: None,
+            });
+            w.apply(&pull_ready("7"));
             let mut part = runners();
             assert_eq!(part.carry_out(&next, &w), Outcome::NotMine);
             let launch = w
@@ -1344,9 +1357,66 @@ mod tests {
                 }
             );
             let screen = part.screen(&reviewer.0).expect("screen");
-            let text = brief::next_round(&w.issues[&IssueId::new("ankh", "1")], round);
+            let i = &w.issues[&IssueId::new("ankh", "1")];
+            let text = brief::next_round(i, round, &w.pulled(i));
             assert!(screen.contains(&text), "{screen}");
+            assert!(
+                screen.contains("- ankh (ankh-morpork/clock): pull request 7\n"),
+                "{screen}"
+            );
         }
+    }
+
+    /// The author's ready on ankh#1, naming pull request `number`.
+    fn pull_ready(number: &str) -> Event {
+        Event::PullRequestReady {
+            issue: IssueId::new("ankh", "1"),
+            pull: Some(number.into()),
+            pulls: Default::default(),
+            replies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_next_round_message_still_waiting_gives_way_to_a_later_one() {
+        let next = Effect::StartReview {
+            issue: IssueId::new("ankh", "1"),
+            round: 1,
+        };
+        let mut w = world();
+        let mut part = runners();
+        let launch = w
+            .launch(
+                &GroupId::new("watch"),
+                Role::Reviewer,
+                &IssueId::new("ankh", "1"),
+                None,
+            )
+            .expect("launch");
+        // At a prompt, so nothing reaches it yet.
+        let run = Effect::Run {
+            launch: Box::new(launch),
+            before: None,
+            program: Program {
+                argv: vec![fake::PROMPT_PROGRAM.into()],
+                env: vec![],
+            },
+            runtime: "fake".into(),
+        };
+        let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
+            panic!("not started");
+        };
+        for e in &events {
+            w.apply(e);
+        }
+        for number in ["7", "8"] {
+            w.apply(&pull_ready(number));
+            part.carry_out(&next, &w);
+        }
+        let waiting: Vec<&str> = part.outbox.iter().map(|m| m.text.as_str()).collect();
+        let i = &w.issues[&IssueId::new("ankh", "1")];
+        assert_eq!(waiting, [brief::next_round(i, 1, &w.pulled(i))]);
+        assert!(waiting[0].contains("pull request 8\n"), "{}", waiting[0]);
     }
 
     #[test]
