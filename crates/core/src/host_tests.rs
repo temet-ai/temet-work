@@ -453,3 +453,94 @@ fn an_author_runs_in_its_folder_and_a_refiner_in_any_folder_of_the_project() {
             .is_none()
     );
 }
+
+#[test]
+fn an_issue_a_failed_verify_sent_back_is_a_problem_until_it_is_done() {
+    let mut h = host(vec![], Shared::default());
+    let one = IssueId::new("ankh", "1");
+    let closed = |closed: bool| Event::IssueSynced {
+        issue: IssueId::new("ankh", "1"),
+        title: "Mend clock 1".into(),
+        milestone: Some(MilestoneId::new("m1")),
+        depends_on: vec![],
+        order: 1,
+        closed,
+    };
+    for e in [
+        synced("1"),
+        Event::PlanWritten {
+            issue: one.clone(),
+            plan: Plan::default(),
+        },
+        Event::PullRequestReady {
+            issue: one.clone(),
+            pull: Some("57".into()),
+            pulls: Default::default(),
+            replies: Vec::new(),
+        },
+        Event::ReviewFinished {
+            issue: one.clone(),
+            round: 1,
+            verdict: crate::event::Verdict::Approve,
+            failed: None,
+            open: None,
+        },
+        Event::ChecksFinished {
+            issue: one.clone(),
+            passed: true,
+            failing: Vec::new(),
+        },
+        Event::Merged {
+            issue: one.clone(),
+            repo: None,
+        },
+        Event::Deployed { issue: one.clone() },
+    ] {
+        h.handle(1, e).expect("handle");
+    }
+    let key = "verify failed: ankh#1";
+    assert!(!h.problems().contains_key(key), "not before the verify");
+    h.handle(
+        2,
+        Event::Verified {
+            issue: one.clone(),
+            passed: false,
+            output: "the clock struck twelve".into(),
+        },
+    )
+    .expect("handle");
+    assert_eq!(
+        h.problems().get(key).map(String::as_str),
+        Some(
+            "the merged change of ankh#1 failed the verify check and is being fixed; once the \
+             daemon has reopened it in its tracker, closing it there finishes it"
+        )
+    );
+    let status = crate::text::text(h.world(), h.problems());
+    let problems = status.split_once("\nProblems\n").map(|(_, rest)| rest);
+    assert!(
+        problems.is_some_and(|p| p.contains(
+            "  verify failed: ankh#1: the merged change of ankh#1 failed the verify check"
+        )),
+        "{status}"
+    );
+    let view = crate::View::new(h.world(), h.problems());
+    assert_eq!(view.problems.get(key), h.problems().get(key));
+
+    // Listed as open again: the reopen happened.
+    h.handle(3, closed(false)).expect("handle");
+    assert_eq!(
+        h.problems().get(key).map(String::as_str),
+        Some(
+            "the merged change of ankh#1 failed the verify check and is being fixed; closing it \
+             in its tracker finishes it"
+        )
+    );
+    h.handle(4, closed(true)).expect("handle");
+    assert_eq!(h.world().issues[&one].stage, crate::model::Stage::Done);
+    assert!(!h.problems().contains_key(key));
+    let status = crate::text::text(h.world(), h.problems());
+    assert!(!status.contains("verify failed"), "{status}");
+    let view = crate::View::new(h.world(), h.problems());
+    assert!(!view.problems.contains_key(key));
+}

@@ -228,6 +228,14 @@ impl Tracker for GitHub {
         }
     }
 
+    fn reopen(&mut self, project: &str, key: &str) -> Result<(), TrackerError> {
+        match self.run(&["issue", "reopen", key, "-R", project]) {
+            // A person reopened it first, or no merge closed it.
+            Err(TrackerError::Other(e)) if e.to_lowercase().contains("already open") => Ok(()),
+            other => other.map(|_| ()),
+        }
+    }
+
     fn create(
         &mut self,
         project: &str,
@@ -491,6 +499,57 @@ mod tests {
         let mut none = GitHub::with(Box::new(Filing::default()));
         none.create("temet-ai/radar", "Mend the clock", "", None)
             .expect("created with no milestone");
+    }
+
+    /// The recorded output, with every `gh issue reopen` noted and answered as
+    /// gh answers: issue 12 is already open, and issue 19 may not be reopened.
+    #[derive(Clone, Default)]
+    struct Reopening {
+        sent: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl Transport for Reopening {
+        fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            if !args.starts_with(&["issue", "reopen"]) {
+                return Recorded.gh(args);
+            }
+            self.sent
+                .lock()
+                .map_err(|e| e.to_string())?
+                .push(args.iter().map(ToString::to_string).collect());
+            match args.get(2).copied() {
+                Some("12") => {
+                    Err("! Issue temet-ai/radar#12 (Mend the clock) is already open".into())
+                }
+                Some("19") => Err("HTTP 403: Resource not accessible by integration".into()),
+                _ => Ok(String::new()),
+            }
+        }
+    }
+
+    #[test]
+    fn reopens_with_gh_and_counts_an_issue_already_open_as_reopened() {
+        let reopening = Reopening::default();
+        let mut gh = GitHub::with(Box::new(reopening.clone()));
+        assert_eq!(gh.reopen("temet-ai/radar", "44"), Ok(()));
+        assert_eq!(
+            reopening
+                .sent
+                .lock()
+                .expect("lock")
+                .last()
+                .map(Vec::as_slice),
+            Some(
+                ["issue", "reopen", "44", "-R", "temet-ai/radar"]
+                    .map(String::from)
+                    .as_slice()
+            )
+        );
+        assert_eq!(gh.reopen("temet-ai/radar", "12"), Ok(()), "already open");
+        assert!(matches!(
+            gh.reopen("temet-ai/radar", "19"),
+            Err(TrackerError::Denied(_))
+        ));
     }
 
     #[test]

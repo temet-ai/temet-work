@@ -154,9 +154,19 @@ pub struct Issue {
     /// later reopened is worked again; one the loop closed stays closed.
     pub closed_by_loop: bool,
     /// Whether one of its pull requests has merged. A failed verify clears
-    /// `merged` and keeps this; reopening the issue in the tracker clears it.
+    /// `merged` and keeps this; a sync that lists the issue as open after the
+    /// failed verify clears it, and so does reopening a done issue in the tracker.
     #[serde(default)]
     pub has_merged: bool,
+    /// Whether a failed verify sent it back and it has not been done since. It
+    /// is listed under Problems while this holds.
+    #[serde(default)]
+    pub verify_failed: bool,
+    /// Whether a failed verify sent it back and no sync has listed it as open
+    /// since. The merge may have closed it in its tracker: the tracker part
+    /// reopens it there, and passes no close of it to the loop while this holds.
+    #[serde(default)]
+    pub reopen_due: bool,
     /// Whether a person's overturn of a ruling approved it: the review is not
     /// asked again, and it merges once the checks pass.
     #[serde(default)]
@@ -249,6 +259,17 @@ impl Issue {
             && !self.closed_by_loop
             && !self.has_merged
             && !self.title.is_empty()
+    }
+
+    /// Whether it is merging, deploying or verifying, or one of its pull requests
+    /// has merged and the rest have not. A pull request can close its issue as it
+    /// merges, so a close in the tracker does not finish such an issue: the loop
+    /// closes it itself once it is verified.
+    pub fn finishing(&self) -> bool {
+        matches!(
+            self.stage,
+            Stage::Merging | Stage::Deploying | Stage::Verifying
+        ) || !self.merged.is_empty()
     }
 
     /// Takes every work folder the issue holds, the first one first.

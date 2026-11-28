@@ -147,6 +147,7 @@ fn mark(i: &Issue) -> u64 {
     for r in &i.reviews {
         r.states.hash(&mut h);
     }
+    (i.verify_failed, i.reopen_due).hash(&mut h);
     h.finish()
 }
 
@@ -409,6 +410,8 @@ impl World {
                     round: 0,
                     closed_by_loop: false,
                     has_merged: false,
+                    verify_failed: false,
+                    reopen_due: false,
                     review_waived: false,
                     reviews: Vec::new(),
                 });
@@ -429,16 +432,19 @@ impl World {
                     entry.fix.clear();
                     entry.review_waived = false;
                     entry.reviews.clear();
+                } else if !*closed && entry.reopen_due {
+                    // Open in the tracker after a failed verify: the reopen has
+                    // happened, whoever made it, so a later close is a person's.
+                    entry.reopen_due = false;
+                    entry.has_merged = false;
                 }
                 // A pull request that closes its issue on merge must not skip deploy
                 // and verify: the loop closes it itself when they pass.
                 // Nor must one that closes it when only the first of several merged.
-                let finishing = matches!(
-                    entry.stage,
-                    Stage::Merging | Stage::Deploying | Stage::Verifying
-                ) || !entry.merged.is_empty();
-                if *closed && entry.stage != Stage::Done && !finishing {
+                if *closed && entry.stage != Stage::Done && !entry.finishing() {
                     entry.stage = Stage::Done;
+                    entry.verify_failed = false;
+                    entry.reopen_due = false;
                     let folders = entry.take_folders();
                     // Closed in the tracker while agents worked on it: stop them
                     // before the folder goes to the next issue.
@@ -937,17 +943,23 @@ impl World {
                     if *passed {
                         i.stage = Stage::Done;
                         i.closed_by_loop = true;
+                        i.verify_failed = false;
+                        i.reopen_due = false;
                         out.push(Effect::Close {
                             issue: issue.clone(),
                         });
                     } else {
-                        // Back to work, with what failed; the merged pull request is history.
+                        // Back to work, with what failed; the merged pull request is
+                        // history. The merge may have closed it in its tracker, where
+                        // the tracker part reopens it.
                         i.stage = Stage::Ready;
                         i.review_ok = false;
                         i.checks_ok = None;
                         i.pulls.clear();
                         i.merged.clear();
                         i.review_waived = false;
+                        i.verify_failed = true;
+                        i.reopen_due = true;
                         i.fix = vec![format!(
                             "after the last change merged and deployed, the verify check failed: {output}"
                         )];
