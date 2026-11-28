@@ -7,6 +7,7 @@
 //! numbered. Each event is applied at the time it is logged with, so the world
 //! knows when each issue last changed.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::Part;
@@ -168,19 +169,28 @@ impl Host {
     }
 
     /// Lists every issue a failed verify sent back and that is not done yet as
-    /// a problem: its change is merged and deployed, and main does not pass the
-    /// verify check until the fix merges. Rebuilt after each event, so each goes
-    /// when its issue is done.
+    /// a problem: a change of it merged and failed the verify check. The line
+    /// says what a close in its tracker does now. Rebuilt after each event, so
+    /// it follows the issue's stage and goes when the issue is done.
     fn report_verify_failed(&mut self) {
         self.problems.retain(|k, _| !k.starts_with(VERIFY_FAILED));
         for i in self.world.issues.values() {
             if !i.verify_failed || i.stage == crate::model::Stage::Done {
                 continue;
             }
-            let finish = if i.reopen_due {
+            // Finishing comes first: the close is not applied then, whether or
+            // not the reopen has happened.
+            let finish: Cow<str> = if i.finishing() {
+                format!(
+                    "it is {}, a stage where a close in its tracker is not applied",
+                    crate::text::stage(i.stage)
+                )
+                .into()
+            } else if i.reopen_due {
                 "once the daemon has reopened it in its tracker, closing it there finishes it"
+                    .into()
             } else {
-                "closing it in its tracker finishes it"
+                "closing it in its tracker finishes it".into()
             };
             self.problems.insert(
                 format!("{VERIFY_FAILED}{}", i.id),

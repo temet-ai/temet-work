@@ -545,3 +545,293 @@ fn an_issue_a_failed_verify_sent_back_is_a_problem_until_it_is_done() {
     let view = crate::View::new(h.world(), h.problems());
     assert!(!view.problems.contains_key(key));
 }
+
+fn ankh_one() -> IssueId {
+    IssueId::new("ankh", "1")
+}
+
+/// A ready that names `pulls`, by repository; an area's issue has several.
+fn ready(issue: &IssueId, pulls: &[(&str, &str)]) -> Event {
+    Event::PullRequestReady {
+        issue: issue.clone(),
+        pull: None,
+        pulls: pulls
+            .iter()
+            .map(|(repo, number)| (ProjectId::new(*repo), (*number).to_string()))
+            .collect(),
+        replies: Vec::new(),
+    }
+}
+
+fn reviewed(issue: &IssueId, round: u8, verdict: crate::event::Verdict) -> Event {
+    Event::ReviewFinished {
+        issue: issue.clone(),
+        round,
+        verdict,
+        failed: None,
+        open: None,
+    }
+}
+
+/// An approving review of `round` and passing checks.
+fn approved(issue: &IssueId, round: u8) -> [Event; 2] {
+    [
+        reviewed(issue, round, crate::event::Verdict::Approve),
+        Event::ChecksFinished {
+            issue: issue.clone(),
+            passed: true,
+            failing: Vec::new(),
+        },
+    ]
+}
+
+fn merged(issue: &IssueId, repo: &str) -> Event {
+    Event::Merged {
+        issue: issue.clone(),
+        repo: Some(ProjectId::new(repo)),
+    }
+}
+
+fn failed_verify(issue: &IssueId) -> Event {
+    Event::Verified {
+        issue: issue.clone(),
+        passed: false,
+        output: "the clock struck twelve".into(),
+    }
+}
+
+fn feed(h: &mut Host, events: impl IntoIterator<Item = Event>) {
+    for e in events {
+        h.handle(1, e).expect("handle");
+    }
+}
+
+/// Takes a planned issue of ankh to a failed verify.
+fn fail_the_verify(h: &mut Host, issue: &IssueId) {
+    feed(h, [ready(issue, &[("ankh", "57")])]);
+    feed(h, approved(issue, 1));
+    feed(
+        h,
+        [
+            merged(issue, "ankh"),
+            Event::Deployed {
+                issue: issue.clone(),
+            },
+            failed_verify(issue),
+        ],
+    );
+}
+
+fn planned(issue: &IssueId) -> Event {
+    Event::PlanWritten {
+        issue: issue.clone(),
+        plan: Plan::default(),
+    }
+}
+
+/// Asserts the whole failed-verify line of `issue`, in the host's problems, the
+/// status text and the view.
+fn assert_verify_line(h: &Host, issue: &IssueId, line: &str) {
+    let key = format!("verify failed: {issue}");
+    assert_eq!(h.problems().get(&key).map(String::as_str), Some(line));
+    let status = crate::text::text(h.world(), h.problems());
+    let listed = format!("  {key}: {line}");
+    assert!(
+        status
+            .split_once("\nProblems\n")
+            .is_some_and(|(_, rest)| rest.lines().any(|l| l == listed)),
+        "{status}"
+    );
+    let view = crate::View::new(h.world(), h.problems());
+    assert_eq!(view.problems.get(&key).map(String::as_str), Some(line));
+}
+
+#[test]
+fn a_failed_verify_offers_no_close_while_its_fix_is_finishing() {
+    use crate::model::Stage;
+    let mut h = host(vec![], Shared::default());
+    let one = ankh_one();
+    let two = IssueId::new("ankh", "2");
+    let stage = |h: &Host| h.world().issues[&ankh_one()].stage;
+    let no_close = |at: &str| {
+        format!(
+            "the merged change of ankh#1 failed the verify check and is being fixed; it is {at}, \
+             a stage where a close in its tracker is not applied"
+        )
+    };
+    let close_finishes = "the merged change of ankh#1 failed the verify check and is being fixed; \
+                          closing it in its tracker finishes it";
+
+    // The second issue takes the only folder once the first has merged, so the
+    // first waits in Ready after its verify fails.
+    feed(&mut h, [synced("1"), planned(&one)]);
+    feed(&mut h, [ready(&one, &[("ankh", "57")])]);
+    feed(&mut h, approved(&one, 1));
+    feed(
+        &mut h,
+        [
+            merged(&one, "ankh"),
+            Event::Deployed { issue: one.clone() },
+            synced("2"),
+            planned(&two),
+            failed_verify(&one),
+        ],
+    );
+    assert_eq!(stage(&h), Stage::Ready);
+    assert_verify_line(
+        &h,
+        &one,
+        "the merged change of ankh#1 failed the verify check and is being fixed; once the daemon \
+         has reopened it in its tracker, closing it there finishes it",
+    );
+
+    // Listed as open again, and the folder comes free.
+    let close = |key: &str| {
+        let mut e = synced(key);
+        if let Event::IssueSynced { closed, .. } = &mut e {
+            *closed = true;
+        }
+        e
+    };
+    feed(&mut h, [synced("1"), close("2")]);
+    assert_eq!(stage(&h), Stage::Working);
+    assert_verify_line(&h, &one, close_finishes);
+
+    let block = crate::event::Verdict::Block {
+        points: vec!["the clock still strikes twelve".into()],
+    };
+    feed(
+        &mut h,
+        [ready(&one, &[("ankh", "58")]), reviewed(&one, 1, block)],
+    );
+    assert_eq!(stage(&h), Stage::Fixing { round: 1 });
+    assert!(h.world().issues[&one].merged.is_empty());
+    assert_verify_line(&h, &one, close_finishes);
+
+    feed(&mut h, [ready(&one, &[])]);
+    feed(&mut h, approved(&one, 2));
+    assert_eq!(stage(&h), Stage::Merging);
+    assert_verify_line(&h, &one, &no_close("merging"));
+
+    feed(&mut h, [merged(&one, "ankh")]);
+    assert_eq!(stage(&h), Stage::Deploying);
+    assert_verify_line(&h, &one, &no_close("deploying"));
+    feed(&mut h, [close("1")]);
+    assert_eq!(stage(&h), Stage::Deploying);
+    assert_verify_line(&h, &one, &no_close("deploying"));
+
+    feed(&mut h, [Event::Deployed { issue: one.clone() }]);
+    assert_eq!(stage(&h), Stage::Verifying);
+    assert_verify_line(&h, &one, &no_close("verifying"));
+}
+
+#[test]
+fn a_fix_that_merges_before_the_reopen_offers_no_close() {
+    let mut h = host(vec![], Shared::default());
+    let one = ankh_one();
+    feed(&mut h, [synced("1"), planned(&one)]);
+    fail_the_verify(&mut h, &one);
+    feed(&mut h, [ready(&one, &[("ankh", "58")])]);
+    feed(&mut h, approved(&one, 1));
+    let issue = &h.world().issues[&one];
+    assert_eq!(issue.stage, crate::model::Stage::Merging);
+    assert!(issue.reopen_due);
+    assert_verify_line(
+        &h,
+        &one,
+        "the merged change of ankh#1 failed the verify check and is being fixed; it is merging, a \
+         stage where a close in its tracker is not applied",
+    );
+}
+
+#[test]
+fn a_failed_verify_offers_no_close_once_one_repository_of_the_fix_has_merged() {
+    let mut h = Host::new(World::default(), vec![], Box::new(Shared::default()));
+    let (ui, api) = (ProjectId::new("ui"), ProjectId::new("api"));
+    let issue = IssueId::new("guild", "GLD-12");
+    let mut setup = vec![Event::AreaDefined {
+        area: ProjectId::new("guild"),
+        name: "Thieves' Guild".into(),
+        projects: vec![ui.clone(), api.clone()],
+        tracker: "fake".into(),
+        tracker_name: "GLD".into(),
+    }];
+    for repo in [&ui, &api] {
+        setup.push(Event::ProjectAdded {
+            project: repo.clone(),
+            tracker: String::new(),
+            name: format!("guild/{repo}"),
+            code_host: Some("fake".into()),
+            repo: None,
+        });
+        setup.push(Event::FolderAdded {
+            folder: FolderId::new(format!("{repo}-1")),
+            project: repo.clone(),
+            machine: MachineId::new("morpork"),
+            path: format!("/srv/{repo}-1"),
+        });
+    }
+    setup.extend([
+        Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![],
+            areas: vec![ProjectId::new("guild")],
+            milestones: vec![],
+            refining_at_once: 1,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        },
+        Event::IssueSynced {
+            issue: issue.clone(),
+            title: "Mend the ledger".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        },
+        Event::PlanWritten {
+            issue: issue.clone(),
+            plan: Plan {
+                repos: vec![ui, api],
+                ..Plan::default()
+            },
+        },
+    ]);
+    feed(&mut h, setup);
+    feed(&mut h, [ready(&issue, &[("ui", "12"), ("api", "34")])]);
+    feed(&mut h, approved(&issue, 1));
+    feed(
+        &mut h,
+        [
+            merged(&issue, "ui"),
+            merged(&issue, "api"),
+            Event::Deployed {
+                issue: issue.clone(),
+            },
+            failed_verify(&issue),
+        ],
+    );
+    feed(&mut h, [ready(&issue, &[("ui", "13"), ("api", "35")])]);
+    feed(&mut h, approved(&issue, 1));
+    feed(
+        &mut h,
+        [
+            merged(&issue, "ui"),
+            Event::MergeRefused {
+                issue: issue.clone(),
+                reason: "pull request 35 conflicts with the branch it merges into".into(),
+            },
+        ],
+    );
+    let entry = &h.world().issues[&issue];
+    assert_eq!(entry.stage, crate::model::Stage::Fixing { round: 1 });
+    assert!(entry.merged.contains(&ProjectId::new("ui")));
+    assert_verify_line(
+        &h,
+        &issue,
+        "the merged change of guild#GLD-12 failed the verify check and is being fixed; it is \
+         fixing, round 1, a stage where a close in its tracker is not applied",
+    );
+}
