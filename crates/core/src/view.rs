@@ -1173,6 +1173,9 @@ mod tests {
             assert!(!view.issues.is_empty(), "{old}");
             // A daemon from before the hold sends neither field: not held.
             assert_eq!((view.held, view.held_since), (false, None));
+            // Nor, from before assign, who a person assigned or may assign.
+            assert!(view.issues.iter().all(|i| i.assignable.is_empty()));
+            assert!(view.agents.iter().all(|a| !a.assigned && !a.unassigned));
         }
     }
 

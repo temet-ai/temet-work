@@ -36,6 +36,27 @@ pub(crate) fn issue_stage(world: &World, issue: &Issue) -> String {
     }
 }
 
+/// Where an agent works, after its id: ` on ISSUE`, with `, assigned by a person`
+/// when a person put it there, or ` unassigned from ISSUE by a person`, with
+/// `, stopping` until it has ended. Empty for an agent on no issue.
+pub fn placed(a: &crate::model::Agent) -> String {
+    let Some(issue) = &a.issue else {
+        return String::new();
+    };
+    if a.unassigned {
+        let stopping = if a.state == AgentState::Ended {
+            ""
+        } else {
+            ", stopping"
+        };
+        return format!(" unassigned from {issue} by a person{stopping}");
+    }
+    if a.assigned() {
+        return format!(" on {issue}, assigned by a person");
+    }
+    format!(" on {issue}")
+}
+
 /// An agent's state in a few words.
 pub fn agent_state(state: &AgentState) -> String {
     match state {
@@ -170,14 +191,11 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     waiting(&mut out, world);
     let _ = writeln!(out, "Agents");
     for a in world.agents.values() {
-        let issue = a
-            .issue
-            .as_ref()
-            .map_or_else(String::new, |i| format!(" on {i}"));
         let _ = writeln!(
             out,
-            "  {}{issue}: {} (on {})",
+            "  {}{}: {} (on {})",
             a.id,
+            placed(a),
             agent_state(&a.state),
             a.machine
         );
@@ -585,9 +603,16 @@ pub fn issue(
         .values()
         .filter(|a| a.issue.as_ref() == Some(id))
     {
+        // Only a person's assign or unassign is said: every agent listed is on
+        // the issue.
+        let by_a_person = if a.assigned() || a.unassigned {
+            placed(a)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             out,
-            "  {} ({}): {}",
+            "  {} ({}){by_a_person}: {}",
             a.id,
             a.role.name(),
             agent_state(&a.state)

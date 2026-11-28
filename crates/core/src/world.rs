@@ -1079,11 +1079,7 @@ impl World {
                     out.extend(self.stop_agent(&agent));
                 }
             }
-            Event::Assigned {
-                issue,
-                agent,
-                from,
-            } => self.assign(issue, agent, from, &mut out),
+            Event::Assigned { issue, agent, from } => self.assign(issue, agent, from, &mut out),
             Event::Unassigned { issue, agent } => {
                 if self.agents.get(agent).is_some_and(|a| a.works_on(issue)) {
                     self.unassign(agent, &mut out);
@@ -1421,9 +1417,7 @@ impl World {
                         self.agents
                             .values()
                             .filter(|a| {
-                                a.role == Role::Arbiter
-                                    && a.works_on(&i.id)
-                                    && !self.waiting_on(a)
+                                a.role == Role::Arbiter && a.works_on(&i.id) && !self.waiting_on(a)
                             })
                             .map(|a| Effect::StopAgent {
                                 agent: a.id.clone(),

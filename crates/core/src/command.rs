@@ -383,8 +383,7 @@ impl World {
             return Err(format!("only a person sets {key}, because {why}"));
         }
         match scope {
-            Scope::Task(issue) if agent.role == Role::Refiner && agent.works_on(issue) =>
-            {
+            Scope::Task(issue) if agent.role == Role::Refiner && agent.works_on(issue) => {
                 match self.issues.get(issue).map(|i| i.stage) {
                     Some(Stage::Refining) => match role {
                         Some(other) if agents == Agents::ForAuthor && other != Role::Author => {
@@ -574,7 +573,10 @@ impl World {
             return Ok(());
         }
         if let Some(why) = Self::taken_off(agent, issue) {
-            return Err(format!("{step} for {issue} is no longer {}'s: {why}", agent.id));
+            return Err(format!(
+                "{step} for {issue} is no longer {}'s: {why}",
+                agent.id
+            ));
         }
         let working = self
             .agents
@@ -1026,6 +1028,18 @@ impl World {
                 // A reviewer that has not heard of this round started its review on
                 // the one before: its verdict is about code that has since changed.
                 let heard = self.issues.get(issue).is_some_and(|i| i.told);
+                // A reviewer a person moved here judges once its brief, with the
+                // round and pull requests to review, has reached it.
+                if let Some(a) = by
+                    .and_then(|by| self.agents.get(by))
+                    .filter(|a| a.awaits_brief())
+                {
+                    return Err(format!(
+                        "a person moved {} to {issue}, and its brief for {issue} has not reached \
+                         it yet; review the whole change once it has",
+                        a.id
+                    ));
+                }
                 if by.is_some() && !heard {
                     return Err(format!(
                         "review round {round} of {issue} started after your review began; \

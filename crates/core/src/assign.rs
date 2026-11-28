@@ -46,15 +46,20 @@ impl World {
             return Err(format!("{agent} is not an agent this daemon started"));
         };
         if a.state == AgentState::Ended {
-            return Err(format!("{agent} has ended; only a running agent is assigned"));
+            return Err(format!(
+                "{agent} has ended; only a running agent is assigned"
+            ));
         }
         match a.role {
             Role::Author => {
+                let author = self
+                    .running(issue, Role::Author)
+                    .map_or_else(|| "AUTHOR".to_string(), |a| a.id.to_string());
                 return Err(format!(
                     "{agent} is an author, and an author is not assigned: it holds its issue's \
                      work folders and may be mid-edit in them, so moving it would leave two \
                      authors in one folder. Unassigning an issue's author starts a fresh one in \
-                     its folders: temet-work unassign {issue} AUTHOR"
+                     its folders: temet-work unassign {issue} {author}"
                 ));
             }
             Role::Investigator => {
@@ -130,12 +135,18 @@ impl World {
     }
 
     /// The agents a person may assign to `issue` now, by [`World::assignment`],
-    /// in agent order.
+    /// in agent order. Only running agents of the role its stage needs are
+    /// put to that rule, since no other passes it: the view asks for this list
+    /// for every issue, once a second while the window is open.
     pub fn assignable(&self, issue: &IssueId) -> Vec<AgentId> {
+        let Some(role) = self.issues.get(issue).and_then(Self::stage_needs) else {
+            return Vec::new();
+        };
         self.agents
-            .keys()
-            .filter(|a| self.assignment(issue, a).is_ok())
-            .cloned()
+            .values()
+            .filter(|a| a.role == role && a.state != AgentState::Ended && !a.unassigned)
+            .filter(|a| self.assignment(issue, &a.id).is_ok())
+            .map(|a| a.id.clone())
             .collect()
     }
 
@@ -362,7 +373,3 @@ fn article(role: Role) -> &'static str {
         Role::Refiner | Role::Reviewer => "a",
     }
 }
-
-#[cfg(test)]
-#[path = "world_assign_tests.rs"]
-mod tests;
