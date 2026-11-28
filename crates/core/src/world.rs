@@ -1101,6 +1101,48 @@ impl World {
         pulls
     }
 
+    /// An issue's pull requests as an agent is told of them, each with where to
+    /// open it, in the order they merge. One a person closed is given in its
+    /// repository's place, as closed.
+    pub fn pulled(&self, issue: &Issue) -> Vec<brief::Pulled> {
+        let order = self.repos_of(issue);
+        order
+            .iter()
+            .chain(issue.pulls.keys().filter(|r| !order.contains(r)))
+            .chain(
+                issue
+                    .closed
+                    .keys()
+                    .filter(|r| !order.contains(r) && !issue.pulls.contains_key(*r)),
+            )
+            .filter_map(|r| {
+                let repo = self
+                    .projects
+                    .get(r)
+                    .map_or_else(String::new, |p| p.repo.clone());
+                if let Some(number) = issue.pulls.get(r) {
+                    return Some(brief::Pulled {
+                        project: r.clone(),
+                        repo,
+                        number: number.clone(),
+                        merged: issue.merged.contains(r),
+                        branch: issue.branches.get(r).cloned(),
+                        closed: false,
+                    });
+                }
+                let closed = issue.closed.get(r)?;
+                Some(brief::Pulled {
+                    project: r.clone(),
+                    repo,
+                    number: closed.number.clone(),
+                    merged: false,
+                    branch: closed.branch.clone(),
+                    closed: true,
+                })
+            })
+            .collect()
+    }
+
     /// The repository an issue is worked in: its first.
     pub fn repo_of(&self, issue: &Issue) -> Option<&Project> {
         self.repos_of(issue)
@@ -1378,43 +1420,6 @@ impl World {
         } else {
             Vec::new()
         };
-        // Every pull request with where to open it, in the order they merge.
-        let order = self.repos_of(i);
-        // One a person closed is given in its repository's place, as closed.
-        let pulls: Vec<brief::Pulled> = order
-            .iter()
-            .chain(i.pulls.keys().filter(|r| !order.contains(r)))
-            .chain(
-                i.closed
-                    .keys()
-                    .filter(|r| !order.contains(r) && !i.pulls.contains_key(*r)),
-            )
-            .filter_map(|r| {
-                let repo = self
-                    .projects
-                    .get(r)
-                    .map_or_else(String::new, |p| p.repo.clone());
-                if let Some(number) = i.pulls.get(r) {
-                    return Some(brief::Pulled {
-                        project: r.clone(),
-                        repo,
-                        number: number.clone(),
-                        merged: i.merged.contains(r),
-                        branch: i.branches.get(r).cloned(),
-                        closed: false,
-                    });
-                }
-                let closed = i.closed.get(r)?;
-                Some(brief::Pulled {
-                    project: r.clone(),
-                    repo,
-                    number: closed.number.clone(),
-                    merged: false,
-                    branch: closed.branch.clone(),
-                    closed: true,
-                })
-            })
-            .collect();
         Some(Launch {
             agent: AgentId::new(format!("{}-{n}", role.name())),
             group: group.clone(),
@@ -1435,7 +1440,7 @@ impl World {
                         shared,
                         held,
                     },
-                    &pulls,
+                    &self.pulled(i),
                     &self.kept_rules(),
                 )
             },

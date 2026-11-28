@@ -80,6 +80,24 @@ fn pull_list(pulls: &[Pulled]) -> String {
         .collect()
 }
 
+/// What a reviewer and an arbiter are told to review: each of `pulls`, an
+/// issue's pull requests, that is not closed, for one repository as for
+/// several. One a person closed is not named. The reader may have been working
+/// with it, so it is told that a pull request not listed is no part of the
+/// change. Empty when there is none to list.
+fn to_review(pulls: &[Pulled]) -> String {
+    let listed: Vec<Pulled> = pulls.iter().filter(|p| !p.closed).cloned().collect();
+    let which = match listed.len() {
+        0 => return String::new(),
+        1 => "Review the pull request listed here",
+        _ => "It changes several repositories; review every pull request listed here",
+    };
+    format!(
+        "{which}. A pull request not listed is not part of the change:\n{}",
+        pull_list(&listed)
+    )
+}
+
 /// How to check out `branch`: plain git, the same on every code host. A work
 /// folder is a person's own checkout, so no remote is named.
 fn switch_to(branch: &str) -> String {
@@ -409,16 +427,7 @@ pub fn write(
         format!(" {}", reply_flags(block.points.len()))
     });
     let (work, ready) = authors_work(id, &held, pulls);
-    // A reader is not sent to one a person closed.
-    let reviewed: Vec<Pulled> = pulls.iter().filter(|p| !p.closed).cloned().collect();
-    let to_review = if reviewed.len() > 1 {
-        format!(
-            "It changes several repositories; review every one of its pull requests:\n{}",
-            pull_list(&reviewed)
-        )
-    } else {
-        String::new()
-    };
+    let to_review = to_review(pulls);
     let task = match role {
         Role::Refiner => format!(
             "Refine {id}: {title}. It is {source}.\n\
@@ -847,17 +856,19 @@ fn how_to_judge(issue: &Issue, round: u8, what: &str) -> String {
 }
 
 /// What a running reviewer is told when the author is ready again for round
-/// `round` of `issue`.
-pub fn next_round(issue: &Issue, round: u8) -> String {
+/// `round` of `issue`. `pulls` are the issue's pull requests as they are now, in
+/// the order they merge: one may have replaced the one it reviewed before.
+pub fn next_round(issue: &Issue, round: u8, pulls: &[Pulled]) -> String {
     let id = &issue.id;
     format!(
         "The author pushed fixes for {id}; this is review round {round}. Review the whole change again, \
          not only the new commits. The issue's text may have changed since the last round, so read it again.\n\
-         {judged}\
+         {to_review}{judged}\
          {LEAVE_THE_FOLDER}\n\
          {hold}\n\
          {BLOCK_WHAT_IS_NOT_MET}\n\
          {verdict}",
+        to_review = to_review(pulls),
         judged = to_judge(issue, round),
         hold = hold_to_the_issue(id),
         verdict = how_to_judge(issue, round, "<what is still wrong>"),
@@ -963,7 +974,7 @@ mod tests {
             "{reviewer}"
         );
         // A running reviewer hears it again on each later round.
-        let again = next_round(&issue, 2);
+        let again = next_round(&issue, 2, &[]);
         for line in told {
             assert!(again.contains(line), "missing {line:?} in:\n{again}");
         }
@@ -1018,7 +1029,7 @@ mod tests {
             brief.contains("2. a bell that jams is rung again and then reported (shown by: "),
             "{brief}"
         );
-        let again = next_round(&issue, 2);
+        let again = next_round(&issue, 2, &[]);
         for line in [
             "run temet-work issue watch#7, which prints the issue's text from its tracker.",
             "Check each of its points and its \"Done is\" line against the change, not only the \
@@ -1093,7 +1104,7 @@ mod tests {
                    fixes it again and the next round judges it again. Every point you leave unnamed \
                    counts as resolved, and a block may consist of kept points alone. An approve passes \
                    every check and resolves every point, and takes neither --failed nor --open.";
-        let again = next_round(&issue, 2);
+        let again = next_round(&issue, 2, &[]);
         assert!(again.contains(numbered), "{again}");
         assert!(again.ends_with(how), "{again}");
         // A reviewer started on round 2 hears the same in its brief.
@@ -1178,7 +1189,7 @@ mod tests {
             "an arbiter cannot block:\n{brief}"
         );
         assert!(!brief.contains("failure scenario"), "{brief}");
-        let again = next_round(&issue, 2);
+        let again = next_round(&issue, 2, &[]);
         assert!(
             again.contains("run temet-work issue watch#12, which prints"),
             "{again}"
@@ -1390,7 +1401,10 @@ mod tests {
         let told = "numbered as --open takes them:\n\
                     1. the hinge squeaks\n     3. the lock sticks\n   \
                     The author's reply: oiled it\n     2. the bar is bent\n";
-        for text in [lamp_task(Role::Reviewer, &issue), next_round(&issue, 2)] {
+        for text in [
+            lamp_task(Role::Reviewer, &issue),
+            next_round(&issue, 2, &[]),
+        ] {
             assert!(text.contains(told), "{text}");
             assert!(
                 !text
@@ -1910,7 +1924,7 @@ mod tests {
             ),
             "{brief}"
         );
-        let again = next_round(&issue, 2);
+        let again = next_round(&issue, 2, &[]);
         for line in [
             "A plan check or a recorded decision that departs from a point the issue states, or \
              that leaves any failure the issue describes happening, is a block, even when the plan \

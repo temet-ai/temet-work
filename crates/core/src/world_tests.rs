@@ -1106,6 +1106,89 @@ fn an_author_told_of_a_closed_pull_request_is_asked_for_a_number() {
     assert_eq!(w.issues[&watch_12()], before);
 }
 
+/// The text the running reviewer of `issue` is sent for review round `round`,
+/// as the runner makes it, and the brief of a reviewer newly launched on it.
+fn told_a_reviewer(w: &World, issue: &IssueId, round: u8) -> [String; 2] {
+    let i = &w.issues[issue];
+    let again = crate::brief::next_round(i, round, &w.pulled(i));
+    [again, launched_task(w, Role::Reviewer, issue)]
+}
+
+fn launched_task(w: &World, role: Role, issue: &IssueId) -> String {
+    w.launch(&GroupId::new("watch"), role, issue, None)
+        .expect("launch")
+        .brief
+        .task
+}
+
+#[test]
+fn a_reviewer_is_given_the_pull_request_that_replaced_a_closed_one() {
+    let mut w = watch_12_merging_57();
+    w.apply(&closed_57());
+    let ready = ready_12(&w, "author-1", Some("58")).expect("ready 58");
+    let effects = apply_all(&mut w, &ready);
+    assert!(
+        effects.contains(&Effect::StartReview {
+            issue: watch_12(),
+            round: 1
+        }),
+        "{effects:?}"
+    );
+
+    let listed = "Review the pull request listed here. A pull request not listed is not part of \
+                  the change:\n- watch (ankh-morpork/watch): pull request 58\n";
+    let [again, brief] = told_a_reviewer(&w, &watch_12(), 1);
+    let arbiter = launched_task(&w, Role::Arbiter, &watch_12());
+    for text in [again, brief, arbiter] {
+        assert!(text.contains(listed), "missing {listed:?} in:\n{text}");
+        assert!(!text.contains("57"), "{text}");
+    }
+}
+
+#[test]
+fn a_reviewer_of_several_repositories_is_given_the_replacement_of_a_closed_one() {
+    let mut w = merging_two();
+    merged(&mut w, "ui");
+    w.apply(&Event::PullClosed {
+        issue: gld(),
+        repo: pid("api"),
+        number: "34".into(),
+    });
+    w.apply(&Event::AgentStarted {
+        agent: AgentId::new("author-1"),
+        group: GroupId::new("watch"),
+        role: Role::Author,
+        issue: Some(gld()),
+        machine: MachineId::new("morpork"),
+        folder: None,
+        secret_digest: None,
+        runtime: None,
+        model: None,
+    });
+    let ready = Command::Ready {
+        issue: gld(),
+        pull: None,
+        pulls: [(pid("api"), "35".to_string())].into(),
+        replies: Vec::new(),
+    };
+    let ready = w
+        .events(Some(&AgentId::new("author-1")), &ready)
+        .expect("ready");
+    apply_all(&mut w, &ready);
+    let Stage::InReview { round } = w.issues[&gld()].stage else {
+        panic!("{:?}", w.issues[&gld()].stage);
+    };
+
+    let listed = "It changes several repositories; review every pull request listed here. A pull \
+                  request not listed is not part of the change:\n\
+                  - ui (group/ui): pull request 12 (merged already)\n\
+                  - api (group/api): pull request 35\n";
+    for text in told_a_reviewer(&w, &gld(), round) {
+        assert!(text.contains(listed), "missing {listed:?} in:\n{text}");
+        assert!(!text.contains("34"), "{text}");
+    }
+}
+
 #[test]
 fn a_pull_requests_branch_is_kept_by_repository() {
     let mut w = merging_two();
