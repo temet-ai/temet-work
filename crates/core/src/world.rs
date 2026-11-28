@@ -600,6 +600,9 @@ impl World {
                         if i.pulls.insert(repo.clone(), number.clone()) != Some(number) {
                             i.merged.remove(&repo);
                             i.branches.remove(&repo);
+                            // A person's overturn approved the change on
+                            // record, not one in another pull request.
+                            i.review_waived = false;
                         }
                         // A reopened or new one takes the place of one a person closed.
                         i.closed.remove(&repo);
@@ -870,10 +873,10 @@ impl World {
                     .get(issue)
                     .map(|i| self.repos_of(i))
                     .unwrap_or_default();
-                // A running reviewer or arbiter was started on the closed one, and
-                // a next round's message would not name its replacement: a fresh
-                // one starts once ready names that. One stopped now ends while the
-                // issue is fixed, so it does not count against `starts`.
+                // A running reviewer or arbiter was judging the closed one: a
+                // fresh one starts once ready names its replacement. One stopped
+                // now ends while the issue is fixed, so it does not count against
+                // `starts`.
                 let reviewers = self.stop(issue, &[Role::Reviewer]);
                 let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
@@ -920,6 +923,10 @@ impl World {
                          it if its branch still exists, or open a new one{there}"
                     );
                     i.review_ok = false;
+                    // Even a reopen is reviewed: the closed branch can take new
+                    // commits, and the record does not say which ones a person
+                    // approved.
+                    i.review_waived = false;
                     out.extend(reviewers);
                     if matches!(i.stage, Stage::Fixing { .. }) {
                         // Already back with its author, as after a failed check: one

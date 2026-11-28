@@ -182,7 +182,9 @@ pub struct Issue {
     #[serde(default)]
     pub reopen_due: bool,
     /// Whether a person's overturn of a ruling approved it: the review is not
-    /// asked again, and it merges once the checks pass.
+    /// asked again, and it merges once the checks pass. A ready naming a pull
+    /// request not on record, as after one is closed, ends the waiver and asks
+    /// for the review again.
     #[serde(default)]
     pub review_waived: bool,
     /// Its review rounds, in the order they finished.
