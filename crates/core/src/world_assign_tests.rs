@@ -374,7 +374,7 @@ fn an_assign_of_an_author_investigator_unknown_or_ended_agent_is_refused_with_it
         "author-1 is an author, and an author is not assigned: it holds its issue's work \
          folders and may be mid-edit in them, so moving it would leave two authors in one \
          folder. Unassigning an issue's author starts a fresh one in its folders: temet-work \
-         unassign ankh#2 AUTHOR"
+         unassign ankh#2 author-2"
     );
     assert_eq!(
         refused(&w, &assign("2", "investigator-1")),
