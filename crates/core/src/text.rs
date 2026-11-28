@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::IssueText;
-use crate::model::{AgentState, Role, Stage};
+use crate::model::{AgentState, Issue, PointState, Review, Role, Stage};
+use crate::placement::{Hold, StartWait, Unlisted, Why};
 use crate::world::World;
 
 /// A stage in a word or two.
@@ -26,7 +27,7 @@ pub fn stage(stage: Stage) -> String {
 }
 
 /// An issue's stage, and "out of scope" when its group no longer covers it.
-pub(crate) fn issue_stage(world: &World, issue: &crate::model::Issue) -> String {
+pub(crate) fn issue_stage(world: &World, issue: &Issue) -> String {
     let at = stage(issue.stage);
     if world.out_of_scope(issue) {
         format!("{at}, out of scope")
@@ -182,9 +183,30 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             .enumerate()
             .map(|(n, o)| format!("{}={o}", n + 1))
             .collect();
+        // What overturning it costs and the point after which it costs more; a
+        // ruling from an older log has neither.
+        let point = d.point.map(|p| {
+            let passed = world.issues.get(&d.issue).is_some_and(|i| p.passed(i));
+            format!(
+                "point {}{}",
+                p.name(),
+                if passed { " (passed)" } else { "" }
+            )
+        });
+        let costs: Vec<String> = d
+            .cost
+            .map(|c| format!("cost {}", c.name()))
+            .into_iter()
+            .chain(point)
+            .collect();
+        let costs = if costs.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", costs.join(", "))
+        };
         let _ = writeln!(
             out,
-            "  {} {}: {} [{}] chose {chosen}, by {}: {}{overturned}",
+            "  {} {}: {} [{}] chose {chosen}, by {}: {}{costs}{overturned}",
             d.id.0,
             d.issue,
             d.question,
@@ -223,15 +245,23 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     out
 }
 
-/// The issues waiting for a work folder on the machine a setting names; no
-/// section when there are none.
+/// The issues waiting for a work folder on the machine a setting names, then the
+/// ready ones that would not start once a folder is free, with each reason; no
+/// section when there are neither.
 fn waiting(out: &mut String, world: &World) {
-    let waits = world.machine_waits();
-    if waits.is_empty() {
+    let machines = world.machine_waits();
+    let starts: Vec<StartWait> = world
+        .issues
+        .values()
+        .filter(|i| i.stage == Stage::Ready)
+        .filter_map(|i| Some((world.groups.get(i.group.as_ref()?)?, i)))
+        .flat_map(|(group, i)| world.start_waits(group, i))
+        .collect();
+    if machines.is_empty() && starts.is_empty() {
         return;
     }
     let _ = writeln!(out, "Waiting");
-    for w in waits {
+    for w in machines {
         let agent = if w.role == Role::Author {
             String::new()
         } else {
@@ -246,6 +276,45 @@ fn waiting(out: &mut String, world: &World) {
             w.issue, w.machine
         );
     }
+    for w in starts {
+        let _ = writeln!(out, "  {} {}", w.issue, start_wait(&w));
+    }
+}
+
+/// Why a ready issue waits, after its key: `waiting on klatch#5, never synced`.
+fn start_wait(w: &StartWait) -> String {
+    let group = &w.group;
+    let (on, through, hold) = match &w.why {
+        Why::OutOfScope(unlisted) => {
+            let what = match unlisted {
+                Unlisted::Project(p) => format!("{p} is not a project of {group}"),
+                Unlisted::Area(a) => format!("{a} is not an area of {group}"),
+                Unlisted::Milestone(m) => format!("{m} is not a milestone of {group}"),
+                Unlisted::NoMilestone => "it has no milestone".to_string(),
+            };
+            return format!("waiting, out of scope ({what})");
+        }
+        Why::On { on, through, hold } => (on, through, hold),
+    };
+    let through: Vec<String> = through.iter().map(ToString::to_string).collect();
+    let through = match through.split_last() {
+        None => String::new(),
+        Some((only, [])) => format!(" through {only}"),
+        Some((last, rest)) => format!(" through {} and {last}", rest.join(", ")),
+    };
+    let why = match hold {
+        Hold::NeverSynced => "never synced".to_string(),
+        Hold::OutOfScope(None) => "out of scope (no group covers it)".to_string(),
+        Hold::OutOfScope(Some(m)) => {
+            format!("out of scope ({m} is not a milestone of {group})")
+        }
+        Hold::NotDone(at) => format!("not done ({})", stage(*at)),
+    };
+    // A name nothing matches is shown as its "Depends on" line writes it.
+    let on = on
+        .unmatched()
+        .map_or_else(|| on.to_string(), str::to_string);
+    format!("waiting on {on}{through}, {why}")
 }
 
 /// The settings in effect over `target` for `role`, one per line with the level
@@ -260,33 +329,171 @@ pub fn settings(
     Ok(format!("{head}\n{}", lines(world, &scope, role)))
 }
 
-/// The settings in effect, as lines indented two spaces.
+/// The longest value listed in the value column.
+const VALUE_COLUMN: usize = 40;
+
+/// The settings in effect, as lines indented two spaces. A value of several lines,
+/// or of more than [`VALUE_COLUMN`] characters, leaves the value column empty and
+/// is printed below its key, indented further than the keys so that none of it
+/// reads as one.
 fn lines(
     world: &World,
     scope: &crate::settings::Scope,
     role: Option<crate::model::Role>,
 ) -> String {
-    let rows = world.in_effect(scope, role);
-    let key = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let rows: Vec<_> = world
+        .in_effect(scope, role)
+        .into_iter()
+        .map(|(k, r)| (k, r.value.to_string(), r.source()))
+        .collect();
+    let in_column = |v: &str| !v.contains('\n') && v.chars().count() <= VALUE_COLUMN;
+    let key = rows.iter().map(|(k, ..)| k.len()).max().unwrap_or(0);
     let value = rows
         .iter()
-        .map(|(_, r)| r.value.to_string().len())
+        .filter(|(_, v, _)| in_column(v))
+        .map(|(_, v, _)| v.chars().count())
         .max()
         .unwrap_or(0);
     let mut out = String::new();
-    for (k, r) in rows {
-        let _ = writeln!(
-            out,
-            "  {k:key$}  {:value$}  {}",
-            r.value.to_string(),
-            r.source()
-        );
+    for (k, v, source) in rows {
+        let (here, below) = if in_column(&v) {
+            (v.as_str(), None)
+        } else {
+            ("", Some(v.as_str()))
+        };
+        let _ = writeln!(out, "  {k:key$}  {here:value$}  {source}");
+        for line in below.into_iter().flat_map(str::lines) {
+            let line = format!("      {line}");
+            let _ = writeln!(out, "{}", line.trim_end());
+        }
     }
     out
 }
 
+/// `issue`'s finished review rounds, all of them and each one whole, in the
+/// order they finished. Empty before the first round ends. [`issue`] prints it.
+pub(crate) fn review_rounds(issue: &Issue) -> String {
+    let blocks = round_blocks(issue, None);
+    if blocks.is_empty() {
+        return String::new();
+    }
+    format!("Review rounds:\n{}{}", blocks.concat(), after_rounds(issue))
+}
+
+/// One block of lines for each of `issue`'s finished review rounds: its verdict
+/// and, for a block, each point with the author's reply to it and what the next
+/// round made of it. Each point and reply is whole, or with `pointer` cut as
+/// [`crate::fit::cut`] cuts it, as a brief prints it.
+pub(crate) fn round_blocks(issue: &Issue, pointer: Option<&str>) -> Vec<String> {
+    let said = |text: &str| match pointer {
+        None => indented(text, 9),
+        Some(pointer) => crate::fit::Item::new(text).printed(9, usize::MAX, pointer),
+    };
+    let block = |(at, r): (usize, &Review)| {
+        let mut out = String::new();
+        let verdict = if r.approve { "approved" } else { "blocked" };
+        let _ = writeln!(out, "  Round {}: {verdict}", r.round);
+        // A verdict judges the entry before it, unless it is a round 1's
+        // (`Issue::round_before`).
+        let next = issue.reviews.get(at + 1).filter(|n| n.round > 1);
+        for (n, point) in r.points.iter().enumerate() {
+            let reply = r.replies.get(n).map_or("none on record", String::as_str);
+            // A round from an older log holds no state, and one that no later
+            // round judged is recorded as open: neither was kept open.
+            let state = match (r.states.get(n), next) {
+                (None, _) => "not on record".to_string(),
+                (Some(_), None) => "not judged by a later round".into(),
+                (Some(state), Some(next)) => {
+                    let judged = match state {
+                        PointState::Open => "kept open",
+                        PointState::Resolved => "resolved",
+                        PointState::Unknown => "marked with a word this build lacks",
+                    };
+                    // A failed check or a conflict keeps the round's number.
+                    let later = if next.round == r.round {
+                        "the later "
+                    } else {
+                        ""
+                    };
+                    format!("{judged} by {later}round {}", next.round)
+                }
+            };
+            let _ = writeln!(
+                out,
+                "    {}. {}\n       The author's reply: {}\n       State: {state}",
+                n + 1,
+                said(point),
+                said(reply),
+            );
+        }
+        out
+    };
+    issue.reviews.iter().enumerate().map(block).collect()
+}
+
+/// What is said after an issue's review rounds: for one with its arbiter, that
+/// no round judged the last block. Empty otherwise.
+pub(crate) fn after_rounds(issue: &Issue) -> String {
+    // The latest block is the one that sent an issue to its arbiter.
+    if matches!(issue.stage, Stage::Arbitration { .. })
+        && let Some(last) = issue
+            .reviews
+            .last()
+            .filter(|r| r.blocks() && r.replies.is_empty())
+    {
+        return format!(
+            "  No later round judged the points of round {}, the last block, and the author has not \
+             replied to it because review rounds ran out before the author's next ready.\n",
+            last.round
+        );
+    }
+    String::new()
+}
+
+/// `text` with each line after its first indented `by` spaces, so that none of
+/// them reads as a line of the list it is printed in, and with the controls
+/// [`clean`] drops dropped.
+pub(crate) fn indented(text: &str, by: usize) -> String {
+    lined(&clean(text), by)
+}
+
+/// `text`, which [`clean`] has cleaned, with each line after its first indented
+/// `by` spaces.
+pub(crate) fn lined(text: &str, by: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines.join(&format!("\n{:by$}", ""))
+}
+
+/// `text` with every control character dropped but a line feed and a tab, and
+/// each other line break made a line feed: a carriage return, alone or before a
+/// line feed, NEL (U+0085), and the line and paragraph separators (U+2028 and
+/// U+2029). The controls are those Unicode names: U+0000 to U+001F, DEL and
+/// U+0080 to U+009F, among them ESC, NUL, VT, FF and BS. Text an agent or a
+/// person sends is stored this way, and text from an older log, or from a code
+/// host, is printed this way.
+pub(crate) fn clean(text: &str) -> String {
+    cleaned(text).collect()
+}
+
+/// The characters of `text` as [`clean`] leaves them, one at a time.
+pub(crate) fn cleaned(text: &str) -> impl Iterator<Item = char> + '_ {
+    let mut chars = text.chars().peekable();
+    std::iter::from_fn(move || {
+        loop {
+            match chars.next()? {
+                '\r' if chars.peek() == Some(&'\n') => {}
+                '\r' | '\u{85}' | '\u{2028}' | '\u{2029}' => return Some('\n'),
+                c @ ('\n' | '\t') => return Some(c),
+                c if c.is_control() => {}
+                c => return Some(c),
+            }
+        }
+    })
+}
+
 /// One issue in full: where it is, its own text (`read`, or why there is none to
-/// show), its plan, its pull request, what it is to fix, and its agents.
+/// show), its plan, its pull request, what it is to fix, its review rounds and
+/// its agents.
 pub fn issue(
     world: &World,
     id: &crate::ids::IssueId,
@@ -343,15 +550,17 @@ pub fn issue(
     if let Some(plan) = &i.plan {
         let _ = writeln!(out, "Plan:");
         for c in &plan.checks {
-            let _ = writeln!(out, "  - {} (shown by: {})", c.done_when, c.proven_by);
+            let check = format!("{} (shown by: {})", c.done_when, c.proven_by);
+            let _ = writeln!(out, "  - {}", indented(&check, 4));
         }
     }
     if !i.fix.is_empty() {
         let _ = writeln!(out, "To fix:");
         for p in &i.fix {
-            let _ = writeln!(out, "  - {p}");
+            let _ = writeln!(out, "  - {}", indented(p, 4));
         }
     }
+    out.push_str(&review_rounds(i));
     let _ = writeln!(out, "Agents:");
     for a in world
         .agents
@@ -666,13 +875,14 @@ radar#44, author
 Projects
   radar: city/radar in t
 Groups
-  watch (Night watch): radar; every milestone; refines 3 at a time; 2 in its queue, investigates below 2
+  watch (Night watch): radar; every milestone; refines 3 at a time; 1 in its queue, investigates below 2
 Issues
   radar#1  working  Issue 1
   radar#2  ready  Issue 2
   radar#3  ready  Issue 3
 Waiting
   radar#2 waiting for a work folder on mac
+  radar#3 waiting on radar#2, not done (ready)
 Agents
 Decisions
 Rules
@@ -699,13 +909,15 @@ Problems
             issue: issue("1"),
             pull: Some("7".into()),
             pulls: Default::default(),
+            replies: Vec::new(),
         });
         let status = text(&w, &BTreeMap::new());
         assert!(
             status.contains(
                 "Waiting\n  \
                  radar#1 waiting for a work folder on mac2 for its reviewer (radar has no work folder there)\n  \
-                 radar#2 waiting for a work folder on mac2 (radar has no work folder there)\nAgents\n"
+                 radar#2 waiting for a work folder on mac2 (radar has no work folder there)\n  \
+                 radar#3 waiting on radar#2, not done (ready)\nAgents\n"
             ),
             "{status}"
         );
@@ -766,6 +978,115 @@ Problems
             status.contains("  global: model.alpha = sonnet, set by person\n"),
             "{status}"
         );
+    }
+
+    /// Both listings of `w`'s issue: `temet-work settings`, then `temet-work issue`.
+    fn listings(w: &World) -> [String; 2] {
+        let id = IssueId::new("radar", "44");
+        [
+            settings(w, &Target::Issue(id.clone()), Some(Role::Author)).expect("a known issue"),
+            issue(w, &id, &unread()).expect("a known issue"),
+        ]
+    }
+
+    /// The test world with `key` set to `value` for its project, by a person.
+    fn with_setting(key: &str, value: &str) -> World {
+        let mut w = world();
+        let radar = Scope::Project(ProjectId::new("radar"));
+        w.put(&radar, None, key, &text_of(value), "person");
+        w
+    }
+
+    /// `listing` taken apart at the row of `key`: that row, the lines printed below
+    /// it with their indent removed, and every other line as it was.
+    fn take_row<'a>(listing: &'a str, key: &str) -> (&'a str, Vec<&'a str>, String) {
+        let start = format!("  {key} ");
+        let (mut row, mut below, mut others) = ("", Vec::new(), String::new());
+        for line in listing.split_inclusive('\n') {
+            let bare = line.trim_end_matches('\n');
+            if line.starts_with(&start) {
+                row = bare;
+            } else if !row.is_empty() && (bare.is_empty() || bare.starts_with("      ")) {
+                below.push(bare.strip_prefix("      ").unwrap_or(bare));
+            } else {
+                others.push_str(line);
+            }
+        }
+        (row, below, others)
+    }
+
+    #[test]
+    fn a_multi_line_deploy_is_printed_below_its_key_and_widens_no_row() {
+        let command = "git pull --ff-only &&\n  make install &&\n  make smoke &&\n  make restart";
+        let without = listings(&world());
+        // The key column is `review_rounds`, the value column `squash`.
+        let widest_gap = " ".repeat("review_rounds".len() + "squash".len() + 4);
+        for (before, after) in without
+            .iter()
+            .zip(listings(&with_setting("deploy", command)))
+        {
+            let (row, below, others) = take_row(&after, "deploy");
+            assert_eq!(
+                row, "  deploy                 project, set by person",
+                "{after}"
+            );
+            assert_eq!(below.join("\n"), command, "{after}");
+            assert_eq!(&others, before);
+            for line in after.lines() {
+                assert!(!line.ends_with(' '), "{line:?} in {after}");
+                assert!(
+                    !line.contains(&format!("{widest_gap} ")),
+                    "{line:?} in {after}"
+                );
+            }
+        }
+        // A line break at the end adds no line, and a blank line gets no indent.
+        for (value, want) in [
+            ("make deploy\n", vec!["make deploy"]),
+            (
+                "make build  \r\n\r\nmake deploy",
+                vec!["make build", "", "make deploy"],
+            ),
+        ] {
+            for after in listings(&with_setting("deploy", value)) {
+                let (row, below, _) = take_row(&after, "deploy");
+                assert!(row.ends_with("  project, set by person"), "{after}");
+                assert_eq!(below, want, "{after}");
+                assert!(!after.lines().any(|l| l.ends_with(' ')), "{after}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_value_over_the_limit_is_printed_below_its_key() {
+        let long = format!("/srv/{}", "r".repeat(36));
+        assert_eq!(long.chars().count(), 41);
+        let without = listings(&world());
+        for (before, after) in without.iter().zip(listings(&with_setting("run_in", &long))) {
+            let (row, below, others) = take_row(&after, "run_in");
+            assert_eq!(
+                row, "  run_in                 project, set by person",
+                "{after}"
+            );
+            assert_eq!(below, [long.as_str()], "{after}");
+            assert_eq!(&others, before);
+        }
+        // The limit counts characters, so the two bytes of the u-umlaut are one.
+        let fits = format!("/srv/\u{fc}berwald/{}", "r".repeat(26));
+        assert_eq!(fits.chars().count(), 40);
+        for after in listings(&with_setting("run_in", &fits)) {
+            let (row, below, _) = take_row(&after, "run_in");
+            assert_eq!(
+                row,
+                format!("  run_in         {fits}  project, set by person"),
+                "{after}"
+            );
+            assert!(below.is_empty(), "{after}");
+            assert!(
+                after.contains(&format!("  merge          {:40}  built in\n", "squash")),
+                "{after}"
+            );
+        }
     }
 
     /// What a build that reads no issue text gives the view.
@@ -854,6 +1175,8 @@ Problems
                     machine: MachineId::new("local"),
                     folder: None,
                     secret_digest: None,
+                    runtime: None,
+                    model: None,
                 },
             ]
         };
@@ -945,6 +1268,86 @@ Problems
     }
 
     #[test]
+    fn the_status_names_an_out_of_scope_dependency() {
+        use crate::ids::{GroupId, MachineId, MilestoneId};
+        let ankh = ProjectId::new("ankh");
+        let mut w = World::default();
+        for (id, name) in [("ankh", "city/ankh"), ("klatch", "desert/klatch")] {
+            w.apply(&Event::ProjectAdded {
+                project: ProjectId::new(id),
+                tracker: "t".into(),
+                name: name.into(),
+                code_host: None,
+                repo: None,
+            });
+        }
+        w.apply(&Event::FolderAdded {
+            folder: crate::ids::FolderId::new("f1"),
+            project: ankh.clone(),
+            machine: MachineId::new("morpork"),
+            path: "/srv/ankh/f1".into(),
+        });
+        w.apply(&Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ankh],
+            areas: Vec::new(),
+            milestones: vec![MilestoneId::new("First")],
+            refining_at_once: 1,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        });
+        // ankh#2 waits for a folder on a machine that has none.
+        w.apply(&Event::SettingSet {
+            scope: crate::settings::Scope::Task(IssueId::new("ankh", "2")),
+            role: Some(Role::Author),
+            key: "machine".into(),
+            value: crate::settings::Value::Text("mac".into()),
+            by: "person".into(),
+        });
+        let later = IssueId::new("ankh", "100");
+        let uncovered = IssueId::new("klatch", "3");
+        let sync = |issue: &IssueId, milestone: Option<&str>, depends_on: Vec<IssueId>| {
+            Event::IssueSynced {
+                issue: issue.clone(),
+                title: format!("Issue {}", issue.key),
+                milestone: milestone.map(MilestoneId::new),
+                depends_on,
+                order: 1,
+                closed: false,
+            }
+        };
+        w.apply(&sync(&later, Some("Later"), Vec::new()));
+        w.apply(&sync(&uncovered, None, Vec::new()));
+        for (key, depends_on) in [
+            ("1", vec![later.clone(), uncovered.clone()]),
+            ("2", Vec::new()),
+            // An open dependency in scope, which counts in its place.
+            ("4", vec![IssueId::new("ankh", "2")]),
+        ] {
+            let issue = IssueId::new("ankh", key);
+            w.apply(&sync(&issue, Some("First"), depends_on));
+            w.apply(&Event::PlanWritten {
+                issue,
+                plan: Default::default(),
+            });
+        }
+        let all = text(&w, &BTreeMap::new());
+        assert!(
+            all.contains(
+                "Waiting\n  \
+                 ankh#2 waiting for a work folder on mac (ankh has no work folder there)\n  \
+                 ankh#1 waiting on ankh#100, out of scope (Later is not a milestone of watch)\n  \
+                 ankh#1 waiting on klatch#3, out of scope (no group covers it)\n  \
+                 ankh#4 waiting on ankh#2, not done (ready)\n\
+                 Agents\n"
+            ),
+            "{all}"
+        );
+    }
+
+    #[test]
     fn the_status_lists_each_event_with_who_made_it() {
         let w = world();
         let all = text(&w, &BTreeMap::new());
@@ -960,5 +1363,502 @@ Problems
             all.contains("  radar, reviewer: permission = plan, set by person\n"),
             "{all}"
         );
+    }
+}
+
+#[cfg(test)]
+mod review_rounds {
+    use super::*;
+    use crate::brief;
+    use crate::event::{Event, Verdict};
+    use crate::ids::{AgentId, FolderId, GroupId, IssueId, MachineId, ProjectId};
+    use crate::model::{Check, Plan};
+
+    fn watch12() -> IssueId {
+        IssueId::new("watch", "12")
+    }
+
+    /// `watch#12` with its author at work, and no review round yet.
+    fn working() -> World {
+        let group = GroupId::new("night-watch");
+        let started = |agent: &str, role| Event::AgentStarted {
+            agent: AgentId::new(agent),
+            group: group.clone(),
+            role,
+            issue: Some(watch12()),
+            machine: MachineId::new("pseudopolis"),
+            folder: None,
+            secret_digest: None,
+            runtime: None,
+            model: None,
+        };
+        let events = [
+            Event::ProjectAdded {
+                project: ProjectId::new("watch"),
+                tracker: "fake".into(),
+                name: "ankh-morpork/watch".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::FolderAdded {
+                folder: FolderId::new("yard-1"),
+                project: ProjectId::new("watch"),
+                machine: MachineId::new("pseudopolis"),
+                path: "/srv/pseudopolis-yard/watch".into(),
+            },
+            Event::GroupCreated {
+                group: group.clone(),
+                name: "Night Watch".into(),
+                projects: vec![ProjectId::new("watch")],
+                areas: Vec::new(),
+                milestones: Vec::new(),
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+            Event::IssueSynced {
+                issue: watch12(),
+                title: "Shut the gate at dusk".into(),
+                milestone: None,
+                depends_on: Vec::new(),
+                order: 12,
+                closed: false,
+            },
+            started("refiner-1", Role::Refiner),
+            Event::PlanWritten {
+                issue: watch12(),
+                plan: Plan {
+                    checks: vec![Check::new("the gate shuts at dusk", "the dusk test")],
+                    ..Plan::default()
+                },
+            },
+            started("author-2", Role::Author),
+        ];
+        World::replay(&events).0
+    }
+
+    fn ready(w: &mut World, replies: &[&str]) {
+        w.apply(&Event::PullRequestReady {
+            issue: watch12(),
+            pull: Some("41".into()),
+            pulls: BTreeMap::new(),
+            replies: replies.iter().map(ToString::to_string).collect(),
+        });
+    }
+
+    /// The verdict on `round`: an approval with no `points`, else a block. `open`
+    /// is none in a log from before points had states.
+    fn verdict(w: &mut World, round: u8, points: &[&str], open: Option<&[usize]>) {
+        let verdict = if points.is_empty() {
+            Verdict::Approve
+        } else {
+            Verdict::Block {
+                points: points.iter().map(ToString::to_string).collect(),
+            }
+        };
+        w.apply(&Event::ReviewFinished {
+            issue: watch12(),
+            round,
+            verdict,
+            failed: None,
+            open: open.map(<[usize]>::to_vec),
+        });
+    }
+
+    fn view(w: &World) -> String {
+        let unread = Err("not read here".into());
+        issue(w, &watch12(), &unread).expect("known")
+    }
+
+    #[test]
+    fn the_issue_view_lists_every_review_round_with_each_reply_and_state() {
+        let mut w = working();
+        assert!(!view(&w).contains("Review rounds:"), "{}", view(&w));
+        ready(&mut w, &[]);
+        assert!(!view(&w).contains("Review rounds:"), "{}", view(&w));
+        verdict(
+            &mut w,
+            1,
+            &["the hinge squeaks", "the bar is bent"],
+            Some(&[]),
+        );
+        // Listed while the author fixes it, after what it is to fix.
+        let fixing = view(&w);
+        assert!(
+            fixing.contains(
+                "To fix:\n  - the hinge squeaks\n  - the bar is bent\n\
+                 Review rounds:\n  Round 1: blocked\n    \
+                 1. the hinge squeaks\n       The author's reply: none on record\n       \
+                 State: not judged by a later round\n    \
+                 2. the bar is bent\n       The author's reply: none on record\n       \
+                 State: not judged by a later round\n\
+                 Agents:\n"
+            ),
+            "{fixing}"
+        );
+        ready(&mut w, &["oiled it", "the bar holds"]);
+        // Round 2 keeps the bar open.
+        verdict(
+            &mut w,
+            2,
+            &["the lock sticks", "the bar is bent"],
+            Some(&[2]),
+        );
+        ready(&mut w, &["filed the lock", "straightened the bar"]);
+        // Round 3 keeps the lock open.
+        verdict(
+            &mut w,
+            3,
+            &["the chain is short", "the lock sticks"],
+            Some(&[1]),
+        );
+        assert_eq!(w.issues[&watch12()].stage, Stage::Arbitration { round: 3 });
+        let rounds = "Review rounds:\n  \
+             Round 1: blocked\n    \
+             1. the hinge squeaks\n       The author's reply: oiled it\n       \
+             State: resolved by round 2\n    \
+             2. the bar is bent\n       The author's reply: the bar holds\n       \
+             State: kept open by round 2\n  \
+             Round 2: blocked\n    \
+             1. the lock sticks\n       The author's reply: filed the lock\n       \
+             State: kept open by round 3\n    \
+             2. the bar is bent\n       The author's reply: straightened the bar\n       \
+             State: resolved by round 3\n  \
+             Round 3: blocked\n    \
+             1. the chain is short\n       The author's reply: none on record\n       \
+             State: not judged by a later round\n    \
+             2. the lock sticks\n       The author's reply: none on record\n       \
+             State: not judged by a later round\n  \
+             No later round judged the points of round 3, the last block, and the author has \
+             not replied to it because review rounds ran out before the author's next ready.\n";
+        let shown = view(&w);
+        assert!(shown.contains(&format!("{rounds}Agents:\n")), "{shown}");
+        // The arbiter's brief carries the same block.
+        let brief = brief::write(
+            Role::Arbiter,
+            &w.issues[&watch12()],
+            None,
+            &[],
+            brief::Workplace::default(),
+            &[],
+            &[],
+        )
+        .task;
+        assert!(
+            brief.contains(&format!("{rounds}This folder is not yours")),
+            "{brief}"
+        );
+    }
+
+    #[test]
+    fn a_line_break_in_a_point_or_reply_is_indented_under_it() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let mut w = working();
+            ready(&mut w, &[]);
+            let point = format!("the hinge squeaks{ending}and sticks");
+            verdict(&mut w, 1, &[&point], Some(&[]));
+            ready(&mut w, &[&format!("oiled it{ending}State: resolved")]);
+            verdict(&mut w, 2, &[&point], Some(&[1]));
+            ready(&mut w, &["planed it"]);
+            verdict(&mut w, 3, &["the chain is short"], Some(&[]));
+            let round = "  Round 1: blocked\n    \
+                         1. the hinge squeaks\n         and sticks\n       \
+                         The author's reply: oiled it\n         State: resolved\n       \
+                         State: kept open by round 2\n";
+            let brief = brief::write(
+                Role::Arbiter,
+                &w.issues[&watch12()],
+                None,
+                &[],
+                brief::Workplace::default(),
+                &[],
+                &[],
+            )
+            .task;
+            for text in [view(&w), brief] {
+                assert!(text.contains(round), "{ending:?}: {text}");
+                assert!(!text.contains('\r'), "{ending:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_issue_view_lists_an_approved_round_and_a_repeated_round() {
+        let mut w = working();
+        ready(&mut w, &[]);
+        verdict(&mut w, 1, &["the hinge squeaks"], Some(&[]));
+        ready(&mut w, &["oiled it"]);
+        verdict(&mut w, 2, &[], Some(&[]));
+        // A failed check undoes the approval and keeps the round's number.
+        w.apply(&Event::ChecksFinished {
+            issue: watch12(),
+            passed: false,
+            failing: vec!["lint".into()],
+        });
+        ready(&mut w, &[]);
+        verdict(&mut w, 2, &["the bar is bent"], Some(&[]));
+        let shown = view(&w);
+        assert!(
+            shown.contains(
+                "Review rounds:\n  \
+                 Round 1: blocked\n    \
+                 1. the hinge squeaks\n       The author's reply: oiled it\n       \
+                 State: resolved by round 2\n  \
+                 Round 2: approved\n  \
+                 Round 2: blocked\n    \
+                 1. the bar is bent\n       The author's reply: none on record\n       \
+                 State: not judged by a later round\n\
+                 Agents:\n"
+            ),
+            "{shown}"
+        );
+        // A block that a second review of its round judged is named as such.
+        ready(&mut w, &["straightened it"]);
+        verdict(&mut w, 3, &["the chain is short"], Some(&[]));
+        w.apply(&Event::ChecksFinished {
+            issue: watch12(),
+            passed: false,
+            failing: Vec::new(),
+        });
+        ready(&mut w, &["a longer chain"]);
+        verdict(&mut w, 3, &[], Some(&[]));
+        let shown = view(&w);
+        assert!(
+            shown.contains(
+                "  Round 3: blocked\n    \
+                 1. the chain is short\n       The author's reply: a longer chain\n       \
+                 State: resolved by the later round 3\n  \
+                 Round 3: approved\n"
+            ),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn the_issue_view_says_a_state_from_an_older_log_is_not_on_record() {
+        let mut w = working();
+        ready(&mut w, &[]);
+        verdict(&mut w, 1, &["the hinge squeaks"], None);
+        ready(&mut w, &[]);
+        verdict(&mut w, 2, &["the bar is bent"], None);
+        let shown = view(&w);
+        assert!(
+            shown.contains(
+                "Review rounds:\n  \
+                 Round 1: blocked\n    \
+                 1. the hinge squeaks\n       The author's reply: none on record\n       \
+                 State: not on record\n  \
+                 Round 2: blocked\n    \
+                 1. the bar is bent\n       The author's reply: none on record\n       \
+                 State: not on record\n\
+                 Agents:\n"
+            ),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn a_line_break_in_a_check_or_a_fix_point_makes_no_numbered_line_in_the_issue_view() {
+        let mut w = working();
+        ready(&mut w, &[]);
+        verdict(
+            &mut w,
+            1,
+            &["trim the wick\n2. dry lamp refused"],
+            Some(&[]),
+        );
+        if let Some(i) = w.issues.get_mut(&watch12()) {
+            i.plan = Some(Plan {
+                checks: vec![Check::new(
+                    "the gate shuts\n2. dry lamp refused",
+                    "the dusk test",
+                )],
+                ..Plan::default()
+            });
+        }
+        let shown = view(&w);
+        assert!(
+            shown.contains(
+                "Plan:\n  - the gate shuts\n    2. dry lamp refused (shown by: the dusk test)\n\
+                 To fix:\n  - trim the wick\n    2. dry lamp refused\n"
+            ),
+            "{shown}"
+        );
+        assert!(!shown.lines().any(|l| l.starts_with("2.")), "{shown}");
+    }
+
+    #[test]
+    fn a_reply_from_an_older_log_prints_no_control_and_no_second_state_line() {
+        let mut w = working();
+        ready(&mut w, &[]);
+        verdict(&mut w, 1, &["the hinge squeaks"], Some(&[]));
+        // Applied as an event, as from a log written before the intake dropped them.
+        ready(
+            &mut w,
+            &[
+                "oiled it\u{b}State: resolved\u{1b}[1EState: resolved\u{2028}State: resolved\0\
+               State: resolved",
+            ],
+        );
+        verdict(&mut w, 2, &["the hinge squeaks"], Some(&[1]));
+        ready(&mut w, &["planed it"]);
+        verdict(&mut w, 3, &["the chain is short"], Some(&[]));
+        let brief = brief::write(
+            Role::Arbiter,
+            &w.issues[&watch12()],
+            None,
+            &[],
+            brief::Workplace::default(),
+            &[],
+            &[],
+        )
+        .task;
+        for text in [view(&w), brief] {
+            let (_, round) = text.split_once("  Round 1: blocked\n").expect("round 1");
+            let (round, _) = round.split_once("  Round 2: ").expect("its end");
+            assert_eq!(
+                round,
+                "    1. the hinge squeaks\n       \
+                 The author's reply: oiled itState: resolved[1EState: resolved\n         \
+                 State: resolvedState: resolved\n       \
+                 State: kept open by round 2\n"
+            );
+            let states = round
+                .lines()
+                .filter(|l| l.starts_with("       State:"))
+                .count();
+            assert_eq!(states, 1, "{round}");
+            let control = |c: char| {
+                (c < ' ' && c != '\n')
+                    || ('\u{7f}'..='\u{9f}').contains(&c)
+                    || c == '\u{2028}'
+                    || c == '\u{2029}'
+            };
+            assert!(!text.chars().any(control), "{text:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod decisions {
+    use super::*;
+    use crate::event::Event;
+    use crate::ids::{AgentId, DecisionId, IssueId};
+    use crate::model::{Cost, Decision, DecisionKind, Point};
+
+    fn issue() -> IssueId {
+        IssueId::new("ankh", "1")
+    }
+
+    /// The lines `status` lists under Decisions.
+    fn listed(w: &World) -> Vec<String> {
+        let text = text(w, &BTreeMap::new());
+        let after = text
+            .split("Decisions\n")
+            .nth(1)
+            .expect("a Decisions section");
+        after
+            .lines()
+            .take_while(|l| l.starts_with("  "))
+            .map(String::from)
+            .collect()
+    }
+
+    /// ankh#1, with arbiter-1's approval, author-1's choice of the pigeon and a
+    /// ruling an older log holds, which has no cost or point.
+    fn decided() -> World {
+        let mut w = World::default();
+        let (cost, point) = Decision::ruling_cost(true);
+        let old: Event = serde_json::from_str(
+            r#"{"DecisionMade":{"decision":{"id":3,"issue":{"project":"ankh","key":"1"},"by":"arbiter-1","kind":{"Ruling":{"approve":false}},"question":"Does ankh#1 merge?","options":["merge","fix first"],"chosen":1,"reason":"the bell is cracked","overturned_to":null}}}"#,
+        )
+        .expect("an older line reads");
+        for e in [
+            Event::IssueSynced {
+                issue: issue(),
+                title: "Send word to Pseudopolis".into(),
+                milestone: None,
+                depends_on: vec![],
+                order: 1,
+                closed: false,
+            },
+            Event::DecisionMade {
+                decision: Decision {
+                    id: DecisionId(1),
+                    issue: issue(),
+                    by: AgentId::new("arbiter-1"),
+                    kind: DecisionKind::Ruling { approve: true },
+                    question: "Does ankh#1 merge after 3 review rounds?".into(),
+                    options: vec!["merge".into(), "fix first".into()],
+                    chosen: 0,
+                    reason: "it rings true".into(),
+                    overturned_to: None,
+                    overturn_reason: String::new(),
+                    cost: Some(cost),
+                    point: Some(point),
+                },
+            },
+            Event::DecisionMade {
+                decision: Decision {
+                    id: DecisionId(2),
+                    issue: issue(),
+                    by: AgentId::new("author-1"),
+                    kind: DecisionKind::Choice,
+                    question: "Which way does the clacks message go?".into(),
+                    options: vec!["clacks".into(), "pigeon".into(), "Post Office".into()],
+                    chosen: 1,
+                    reason: "the towers are down".into(),
+                    overturned_to: None,
+                    overturn_reason: String::new(),
+                    cost: Some(Cost::Medium),
+                    point: Some(Point::Merge),
+                },
+            },
+            Event::DecisionOverturned {
+                decision: DecisionId(2),
+                to: 2,
+                reason: "the Post Office delivers".into(),
+                by: "person".into(),
+            },
+            old,
+        ] {
+            w.apply(&e);
+        }
+        w
+    }
+
+    #[test]
+    fn each_decision_lists_its_cost_and_point_and_an_older_ruling_neither() {
+        let mut w = decided();
+        assert_eq!(
+            listed(&w),
+            [
+                "  1 ankh#1: Does ankh#1 merge after 3 review rounds? [1=merge, 2=fix first] chose \
+                 merge, by arbiter-1: it rings true; cost high, point merge",
+                "  2 ankh#1: Which way does the clacks message go? [1=clacks, 2=pigeon, 3=Post \
+                 Office] chose pigeon, by author-1: the towers are down; cost medium, point merge; \
+                 overturned to option 3 (Post Office): the Post Office delivers",
+                "  3 ankh#1: Does ankh#1 merge? [1=merge, 2=fix first] chose fix first, by \
+                 arbiter-1: the bell is cracked",
+            ]
+        );
+        // Merging is not past the merge; deploying, verifying and done are.
+        let stage = |w: &mut World, s| w.issues.get_mut(&issue()).expect("synced").stage = s;
+        stage(&mut w, Stage::Merging);
+        assert!(listed(&w)[0].ends_with("; cost high, point merge"));
+        for s in [Stage::Deploying, Stage::Verifying, Stage::Done] {
+            stage(&mut w, s);
+            let lines = listed(&w);
+            assert!(
+                lines[0].ends_with("; cost high, point merge (passed)"),
+                "{lines:?}"
+            );
+            assert!(
+                lines[1].contains("; cost medium, point merge (passed); overturned"),
+                "{lines:?}"
+            );
+            assert!(lines[2].ends_with(": the bell is cracked"), "{lines:?}");
+        }
     }
 }

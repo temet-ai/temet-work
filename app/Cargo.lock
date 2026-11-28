@@ -6513,6 +6513,7 @@ dependencies = [
 name = "temet-work-app"
 version = "0.0.1"
 dependencies = [
+ "futures-channel",
  "gpui-base",
  "gpui-component",
  "gpui-pre",

@@ -10,6 +10,9 @@ session_id:
   - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
   - 0645e4e2-33bd-43f8-980f-503649da2f15
   - edd1e649-f07a-4d7c-b5c6-ff74b0021fbb
+  - c14f6d16-7688-4e50-99d4-32021f0e29db
+  - a8be342d-b7b2-4e65-bf6b-bcd753f14a12
+  - ba3664be-ec7f-4b51-af6a-b1c20c80634d
 ---
 
 # Commands
@@ -21,15 +24,16 @@ reports its step done.
 | Command | Who runs it | Accepted when the issue is |
 |---|---|---|
 | `temet-work status [--json]` | anyone; `--json` prints the state as data (below) | any |
-| `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes and agents. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise) | any |
+| `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes, review rounds and agents. The review rounds are every finished round in the order they finished: its number and whether it approved or blocked, and for a block each point with the author's reply to it, or "none on record", and whether the next round kept it open or resolved it, naming that round; a point no later round judged, or whose state an older log does not hold, says so. Each later line of a check, point to fix, point or reply is indented under it, and no control character is printed. An arbiter's brief holds the last of these rounds always, and as many of the earlier ones as fit in the room the rest of the brief leaves, with a line counting those it leaves out; a last round too long for the room is cut there, with a line saying so (see "What a brief holds"). `temet-work issue` still holds every check, point to fix, round, point and reply whole. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise). An issue that is merging, deploying, being verified or waiting to be reopened after a failed verify keeps the text of the last sync that listed it | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
-| `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...` | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time; an issue that changes several repositories names each as `REPO=PULL` | working, or fixing |
-| `temet-work review ISSUE approve` | only the reviewer working on ISSUE | in review |
-| `temet-work review ISSUE block POINT...` | only the reviewer working on ISSUE, one argument per thing to fix | in review |
+| `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...`, with `--reply TEXT` for each point of the block it answers | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time, and again in a repository where a person closed the pull request on record without merging, since a read in review or the merge then drops it; an issue that changes several repositories names each as `REPO=PULL`. The first ready after a block (from the review, or from an arbiter's fix ruling, where the replies answer the reviewer's last block) carries one `--reply` for each of the block's points, in their order: what the author did about it, or why not. A ready without exactly one reply for each point is refused, and the refusal lists the points and the form to use; any other ready takes no `--reply`. Each reply is kept on its point and shown with it by `temet-work issue` and `status --json`. A ready that starts a review round sets each of the plan's checks to running, since the author reports that every check holds; after a person's overturn has waived the review, the checks keep their state. A ready naming a pull request not on record, as after one is closed, ends that waiver and asks for the review again | working, or fixing |
+| `temet-work review ISSUE approve` | only the reviewer working on ISSUE. Every check of the plan is marked passed, and every point of the round before resolved; `--failed` and `--open` are refused | in review |
+| `temet-work review ISSUE block POINT... [--failed N ...] [--open N ...]` | only the reviewer working on ISSUE, one argument per thing to fix. `--failed N`, once for each check that does not hold, counts from 1 in the plan's order; every check left unnamed is marked passed. After round 1, `--open N`, once for each point of the round before that is still not dealt with, counts from 1 in that round's order: the point stays open and joins this block's points, so the author fixes it again and the next round judges it again. Every point left unnamed is resolved, and a block may consist of kept points alone. A block takes at most 300 points, new and kept together: the author replies to each, and its brief lists one `--reply` for each. A block with more is refused. The reviewer's brief and each next-round message number the checks and the round before's points this way, each point with the author's reply. A number the plan or the round before does not have is refused, and so is `--open` in round 1 | in review |
 | `temet-work retry ISSUE` | a person only | deploying or verifying: runs the deploy (or verify) again, at once unless a deploy or verify of the same project or `run_in` folder is running, and clears its failure count, its ten-minute wait and its reruns in `deploy-handoff.stale`, so a deploy that failed three times gets three fresh tries |
 | `temet-work rule ISSUE approve REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
 | `temet-work rule ISSUE fix REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
+| `temet-work choose ISSUE --question TEXT --option TEXT --option TEXT [--option TEXT ...] --took TEXT --why TEXT --cost low\|medium\|high` | any agent working on ISSUE, whatever its role; not a person, who decides through settings and overturns. It records a choice the agent made as a decision by that agent: the question, the options weighed (at least two, each once), the one it took, given as its text among the options, why, and what overturning it costs. The point is the issue's merge, the only point the loop has. Work carries on at once: the choice moves no stage, stops no agent and asks for no fix or merge. The reply names the decision, as `decision 1 is recorded`. A choice with no cost or another word for it is refused, naming low, medium and high, and so is one whose taken option is not among the options, which the refusal lists, one with an empty question or reason, and one with fewer than two options or an empty or repeated one. Each flag's text is the argument after it, whatever it says | any |
 | `temet-work overturn DECISION OPTION REASON` | a person only; `DECISION` and `OPTION` are the numbers `status` lists (options count from 1), `REASON` is required | any, if the decision exists, the option is another than the one chosen, and the reason is not empty. What it changes depends on the issue: see below |
 | `temet-work proposal RULE keep` | a person only: the rule moves to kept and ends every brief written from then on | the rule is proposed |
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
@@ -56,6 +60,10 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
   and `unset`.
 - `status` (with or without `--json`), `issue`, `screen` and `settings` are open to
   anyone. `set` and `unset` keep their own rule, in the table.
+- `choose` is not a step: any agent working on the issue may record a choice on it. An
+  agent working on another issue is refused with the issue it works on, and so is an id
+  the daemon did not start. A person is refused too: a choice recorded as a person's would
+  have that person overturn themselves.
 - `file` and `investigated` belong to a group's running investigator, which works for its
   group and on no issue. A person, another agent, or an investigator whose investigation
   has ended is refused with the reason; a person files issues in the tracker itself.
@@ -147,15 +155,19 @@ role at work on the issue. `KEY` is a setting's name, or `model.<runtime>`
 (`model.codex`) for the model of one runtime's agents; a plain `model` is recorded as the
 global runtime's `model.<runtime>` when it is set, and the reply names that key. A value of
 the wrong kind, an unknown key, a runtime or runner the build lacks, a `model.<runtime>`
-for such a runtime, or a plain `model` where that scope and role run a runtime other than
-the global one is refused with the reason, and the command exits 1.
+for such a runtime, a plain `model` where that scope and role run a runtime other than
+the global one, or `set` of a setting at a level that never reads it (`sync_every` and
+`investigate` on an issue or a milestone) is refused with the reason, and the command
+exits 1. `unset` does not check the level, so a person can take away such a value that an
+older log holds.
 
 A refiner may add task-level settings to its plan, other than the nine only a person
 sets: `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`,
-`run_in` and `investigate` (`docs/settings.md`, "Setting them"). What it sets is recorded
-as set by it. Its `model` or `model.<runtime>`, from the plan or from its `set`, is for the
-author only: the models of reviewers, arbiters and refiners are a person's to set, and a
-person's `set` on the issue with no role overturns the refiner's value. A plan with settings:
+`run_in` and `investigate` (`docs/settings.md`, "Setting them"), and other than
+`sync_every`, which no task reads. What it sets is recorded as set by it. Its `model` or
+`model.<runtime>`, from the plan or from its `set`, is for the author only: the models of
+reviewers, arbiters and refiners are a person's to set, and a person's `set` on the issue
+with no role overturns the refiner's value. A plan with settings:
 
 ```yaml
 checks:
@@ -168,20 +180,28 @@ settings:
 
 A command for an issue at another step is refused, with the step the issue is at. The
 command line exits 0 when the daemon did it, 1 when the daemon refused it, and 2 when the
-command was not understood or no daemon answered.
+command was not understood or no daemon answered. It also exits 2 when its
+output cannot be written, and says why on standard error. A reader that stops reading
+early, as `head` does, is no such failure: the command line says nothing and exits 0.
 
 `temet-work status --json` sends the `view` command (`{"command":"view"}` on the socket)
-and prints the reply as indented JSON: projects, groups, the issues that are not done and
-the count of done ones, agents, decisions and problems (`crates/core/src/view.rs`; what it
-carries is listed in `docs/privacy.md`). Issue ids are `project#key`, each stage and agent
-state is a fixed word with the text form's words beside it, and decision options are
-numbered from 1. `--json` on any other command is refused with the usage; inside a value,
-a title, a body, a review point or a reason it is a word like any other.
+and prints the reply as indented JSON: projects with the web addresses of their issues and
+code, milestones, groups, the issues that are not done and the count of done ones, agents,
+decisions and problems (`crates/core/src/view.rs`; what it carries is listed in
+`docs/privacy.md`). Issue ids are `project#key`, each stage and agent state is a
+fixed word with the text form's words beside it, each check's state (`passed`, `running`,
+`waiting`, `failed`) and each review point's state (`open`, `resolved`) is a fixed word, and
+decision options are numbered from 1.
+Times, such as when an issue last changed, are milliseconds since 1970, and due dates are
+`YYYY-MM-DD`; a value temet-work does not know, such as a due date the tracker does not
+give, is `null`. `--json` on any other command is refused
+with the usage; inside a value, a title, a body, a review point or a reason it is a word
+like any other.
 
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
 `status`, `issue`, `screen` and `settings`; `act` adds `plan`, `ready`, `review`, `rule`,
-`retry`, `overturn`, `proposal`, `file`, `investigated`, `set` and `unset`.
+`choose`, `retry`, `overturn`, `proposal`, `file`, `investigated`, `set` and `unset`.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
@@ -191,8 +211,62 @@ asking the daemon. The build id is the commit the binary was built from, as
 `temet-workd --version` shows it.
 
 A command an agent runs is recorded as that agent's (see "How the daemon knows who sent a
-command"). A ruling is recorded as a decision, listed by `temet-work status` with its
-numbered options.
+command"). A ruling and a choice recorded with `choose` are each a decision, listed by
+`temet-work status` with its numbered options, the option taken, who decided and why, then
+its cost to undo and its point: the issue's merge, after which overturning it costs more,
+as in `cost medium, point merge`, and `point merge (passed)` once the issue is deploying,
+verifying or done. A choice costs what its agent gave. An approval costs high, since the
+loop does not take back a merged change, and a send-back costs low, since the author's fix
+finishes either way and the issue merges once the checks pass. `status --json` gives the
+cost as `low`, `medium` or `high`, and the point as `merge` with whether the issue is past
+it. It gives the point no time, since nothing in temet-work knows when a merge will
+happen. Only a ruling recorded before rulings kept them has neither, and `status` prints
+none for it.
+
+## What a brief holds
+
+Every brief, next-round message and fix message is held to 100 KiB (102,400 bytes). A
+brief is one argument of the command that starts its agent, and Linux refuses one over
+128 KiB; the two messages reach a running agent through herdr-core and add to its context.
+
+A plan check (its done_when and proven_by together), kept rule, review point, point to fix
+or author's reply of more than 1,000 characters is printed as its first 1,000 characters,
+followed by `(cut here; temet-work issue ISSUE prints it whole)`, or for a rule
+`(cut here; temet-work status prints it whole, under Rules)`. One of 1,000 characters or
+fewer is printed whole. Each later line of one is indented under it, so that none reads as
+another item of its list.
+
+The parts of a brief take the room in this order:
+
+1. The role's own text, its commands and the pull requests, whole.
+2. The checks and the points it judges or answers, with the author's replies. When they
+   do not fit at 1,000 characters each, each is cut shorter, to no less than 200 bytes;
+   when they do not fit at that, the last are left out, and a line counts them and names
+   `temet-work issue`.
+3. For an arbiter, the latest review round, cut with a line saying so when it alone is too
+   long. The checks before it leave it at least 16 KiB.
+4. The latest kept rules that fit, after a line counting the others and naming
+   `temet-work status`, which lists every kept rule whole under Rules.
+5. For an arbiter, the latest earlier review rounds that fit, each whole, after a line
+   counting the others and naming `temet-work issue`.
+
+A next-round or fix message takes its room the same way, without rules. The `ready` an
+author's brief and fix message end with lists one `--reply` for each point of the block,
+and a block takes at most 300 points, so that list stays under 10 KB; for a block of more
+from an older log, it gives the first and the last `--reply` and the number of points.
+When the plain parts alone would take a text over the limit, as a long list of the issues
+a person closed can in an investigator's brief, the longest is cut, with a line saying so.
+The command the agent reports with is never cut.
+
+`plan`, `review`, `ready`, `rule`, `choose` and `overturn` store their text with every
+control character dropped but the line feed and the tab: ESC, NUL, VT, FF, BS, DEL and the C1
+controls among them. A carriage return, alone or before a line feed, NEL (U+0085) and the
+line and paragraph separators (U+2028 and U+2029) are stored as a line feed. Briefs,
+messages and `temet-work issue` print text the same way when it was logged before this,
+and the text a code host gives a point to fix. A choice keeps its question and each option
+on one line, each run of spaces and line breaks in them stored as one space, so that
+`status` lists the decision on one line and `--took` matches an option however it was
+wrapped.
 
 ## Overturning a decision
 
@@ -205,7 +279,10 @@ has reached:
 - An arbiter's ruling that approved, before the issue has merged: the issue goes back to
   its author as a fix whose point is the reason.
 - A ruling that sent it back, while it is being fixed or in review: the author's fix
-  finishes, no review is asked for again, and the issue merges once the checks pass.
+  finishes, no review is asked for again, and the issue merges once the checks pass. In
+  review, the reviewer is stopped, so each check still running goes back to waiting: no
+  one judged it. A pull request on record that is found closed, or a ready naming one not
+  on record, ends this: the change is reviewed again.
 - After the merge nothing changes: the merge is the point after which overturning costs
   more, and the loop does not undo it. The overturn is recorded and the rule is still
   proposed.
@@ -217,7 +294,8 @@ option now preferred and the reason. `status` lists proposed and kept rules unde
 each with its decision, issue, the agent that decided and who overturned it. `proposal
 RULE keep` or `proposal RULE drop` answers it (`proposal`, because `rule` is the
 arbiter's ruling). A kept rule ends every brief written afterwards, for every role, under
-"Rules from overturned decisions". Agents already running keep their old brief: new
+"Rules from overturned decisions"; when not all fit, it holds the latest that do (see
+"What a brief holds"). Agents already running keep their old brief: new
 rules apply from the next start, so nothing waits on a person.
 
 A review from an agent that has not yet heard of the round under review is refused: it

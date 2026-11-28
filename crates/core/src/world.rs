@@ -14,13 +14,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::brief;
 use crate::effect::Effect;
 use crate::event::{Event, Verdict};
-use crate::ids::{AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, ProjectId, RuleId};
+use crate::ids::{
+    AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId, RuleId,
+};
 use crate::launch::Launch;
 use crate::model::Decision;
 use crate::model::{
-    Agent, AgentState, Area, DecisionKind, Folder, Group, INVESTIGATE_EVERY, Investigation, Issue,
-    Project, Role, Rule, RuleState, Stage,
+    Addresses, Agent, AgentState, Area, CheckState, ClosedPull, DecisionKind, Folder, Group,
+    INVESTIGATE_EVERY, Investigation, Issue, PointState, Project, Review, Role, Rule, RuleState,
+    Stage,
 };
+use crate::placement::Unlisted;
 use crate::settings::{self, FILE, Scope, Value};
 
 /// What [`World::missing`] finds.
@@ -34,6 +38,13 @@ pub struct Missing {
 
 /// The machine an agent runs on when its project has no work folder.
 pub const LOCAL: &str = "local";
+
+/// How many agents of one role whose programs were lost one issue may wait on,
+/// for each start the `starts` setting allows, before [`World::missing`] gives
+/// up on it. Such ends do not use up `starts`, so a reboot costs no start, but
+/// a program lost at the same point every run, as to an out-of-memory kill, is
+/// started at most three times `starts` (nine by default).
+pub const LOST_PER_START: u64 = 3;
 
 /// Everything the loop knows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -67,8 +78,87 @@ pub struct World {
     /// What the build's adapters offer for the settings that name one, put in by
     /// the host. It is not built from events.
     pub catalog: BTreeMap<String, crate::settings::Choice>,
+    /// The open milestones each project's or area's tracker last listed, with
+    /// each one's due date as `YYYY-MM-DD` when the tracker gives one.
+    pub milestones: BTreeMap<ProjectId, BTreeMap<MilestoneId, Option<String>>>,
+    /// Each project's and area's web addresses, put in by the host each round
+    /// from what the parts give. It is not built from events.
+    pub addresses: BTreeMap<ProjectId, Addresses>,
+    /// When each issue last changed, from the times events were applied at.
+    pub updated: Updated,
     /// How many events have been applied.
     pub applied: u64,
+}
+
+/// When each issue last changed: the time of the last event after which its
+/// record differed. Only events applied with a time ([`World::apply_at`]) set
+/// one; a world replayed without times has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Updated {
+    /// The time, in milliseconds since 1970, by issue.
+    at: BTreeMap<IssueId, u64>,
+    /// A mark of each issue's record after the last event, to tell whether the
+    /// next one changed it ([`mark`]).
+    marks: BTreeMap<IssueId, u64>,
+}
+
+impl Updated {
+    /// When `issue` last changed, in milliseconds since 1970; none when no event
+    /// with a time changed it.
+    pub fn at(&self, issue: &IssueId) -> Option<u64> {
+        self.at.get(issue).copied()
+    }
+
+    /// Marks every issue as it is now, and stamps `at_ms` on each whose mark
+    /// changed, when there is a time.
+    fn note(&mut self, issues: &BTreeMap<IssueId, Issue>, at_ms: Option<u64>) {
+        for (id, issue) in issues {
+            let m = mark(issue);
+            let changed = match self.marks.get_mut(id) {
+                Some(old) if *old == m => false,
+                Some(old) => {
+                    *old = m;
+                    true
+                }
+                None => {
+                    self.marks.insert(id.clone(), m);
+                    true
+                }
+            };
+            if let (true, Some(at)) = (changed, at_ms) {
+                self.at.insert(id.clone(), at);
+            }
+        }
+    }
+}
+
+/// A mark of an issue's record: two records with different marks differ. Text
+/// that changes only together with the issue's stage or with a count, its plan,
+/// what it is to fix, its review points and the author's replies, is marked by
+/// its count, so marking every issue after every event stays cheap. The checks'
+/// and points' states are short, so they are marked whole.
+fn mark(i: &Issue) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    (&i.id, &i.title, &i.milestone, &i.depends_on, i.order).hash(&mut h);
+    (i.stage, &i.group, &i.folder, &i.other_folders).hash(&mut h);
+    i.plan
+        .as_ref()
+        .map(|p| (p.checks.len(), p.repos.len(), p.settings.len()))
+        .hash(&mut h);
+    (i.review_ok, i.checks_ok, &i.pulls, &i.merged, i.fix.len()).hash(&mut h);
+    (&i.branches, &i.closed).hash(&mut h);
+    (i.told, i.fix_keeps_round, i.round, i.closed_by_loop).hash(&mut h);
+    let replies: usize = i.reviews.iter().map(|r| r.replies.len()).sum();
+    (i.has_merged, i.review_waived, i.reviews.len(), replies).hash(&mut h);
+    for c in i.plan.iter().flat_map(|p| &p.checks) {
+        c.state.hash(&mut h);
+    }
+    for r in &i.reviews {
+        r.states.hash(&mut h);
+    }
+    (i.verify_failed, i.reopen_due).hash(&mut h);
+    h.finish()
 }
 
 impl World {
@@ -92,8 +182,41 @@ impl World {
         (self, effects)
     }
 
-    /// Applies one event and returns what the daemon must do.
+    /// Builds the state from events in order onto this world, each applied at
+    /// the time it was logged with ([`World::apply_at`]), with every effect they
+    /// asked for. A log replayed this way gives each issue the time it last
+    /// changed, the same as when its events were first applied.
+    pub fn replay_at<'a>(
+        mut self,
+        events: impl IntoIterator<Item = (u64, &'a Event)>,
+    ) -> (Self, Vec<Effect>) {
+        let mut effects = Vec::new();
+        for (at_ms, event) in events {
+            effects.extend(self.apply_at(at_ms, event));
+        }
+        (self, effects)
+    }
+
+    /// Applies one event and returns what the daemon must do. It gives no issue
+    /// a time it changed: [`World::apply_at`] does.
     pub fn apply(&mut self, event: &Event) -> Vec<Effect> {
+        let out = self.change(event);
+        self.updated.note(&self.issues, None);
+        out
+    }
+
+    /// Applies one event that happened at `at_ms`, in milliseconds since 1970,
+    /// and returns what the daemon must do. Each issue whose record it changed
+    /// last changed at `at_ms`; an event that changes no issue leaves the times
+    /// alone.
+    pub fn apply_at(&mut self, at_ms: u64, event: &Event) -> Vec<Effect> {
+        let out = self.change(event);
+        self.updated.note(&self.issues, Some(at_ms));
+        out
+    }
+
+    /// Changes the state for one event and returns what the daemon must do.
+    fn change(&mut self, event: &Event) -> Vec<Effect> {
         self.applied += 1;
         let mut out = Vec::new();
         match event {
@@ -291,13 +414,18 @@ impl World {
                     checks_ok: None,
                     pulls: BTreeMap::new(),
                     merged: BTreeSet::new(),
+                    branches: BTreeMap::new(),
+                    closed: BTreeMap::new(),
                     fix: Vec::new(),
                     told: false,
                     fix_keeps_round: false,
                     round: 0,
                     closed_by_loop: false,
                     has_merged: false,
+                    verify_failed: false,
+                    reopen_due: false,
                     review_waived: false,
+                    reviews: Vec::new(),
                 });
                 entry.title = title.clone();
                 entry.milestone = milestone.clone();
@@ -312,22 +440,29 @@ impl World {
                     entry.checks_ok = None;
                     entry.pulls.clear();
                     entry.merged.clear();
+                    entry.branches.clear();
+                    entry.closed.clear();
                     entry.has_merged = false;
                     entry.fix.clear();
                     entry.review_waived = false;
+                    entry.reviews.clear();
+                } else if !*closed && entry.reopen_due {
+                    // Open in the tracker after a failed verify: the reopen has
+                    // happened, whoever made it, so a later close is a person's.
+                    entry.reopen_due = false;
+                    entry.has_merged = false;
                 }
                 // A pull request that closes its issue on merge must not skip deploy
                 // and verify: the loop closes it itself when they pass.
                 // Nor must one that closes it when only the first of several merged.
-                let finishing = matches!(
-                    entry.stage,
-                    Stage::Merging | Stage::Deploying | Stage::Verifying
-                ) || !entry.merged.is_empty();
-                if *closed && entry.stage != Stage::Done && !finishing {
+                if *closed && entry.stage != Stage::Done && !entry.finishing() {
                     entry.stage = Stage::Done;
+                    entry.verify_failed = false;
+                    entry.reopen_due = false;
                     let folders = entry.take_folders();
-                    // Closed in the tracker while agents worked on it: stop them
-                    // before the folder goes to the next issue.
+                    // Closed in the tracker while agents worked on it: stop them.
+                    // No other author is given the folders until this issue's
+                    // author has ended (`World::in_use`).
                     out.extend(
                         self.agents
                             .values()
@@ -341,6 +476,22 @@ impl World {
                     self.release(folders, &mut out);
                 }
             }
+            Event::MilestoneSynced {
+                project,
+                milestone,
+                due,
+                open,
+            } => {
+                let listed = self.milestones.entry(project.clone()).or_default();
+                if *open {
+                    listed.insert(milestone.clone(), due.clone());
+                } else {
+                    listed.remove(milestone);
+                }
+                if listed.is_empty() {
+                    self.milestones.remove(project);
+                }
+            }
             Event::AgentStarted {
                 agent,
                 group,
@@ -349,7 +500,18 @@ impl World {
                 machine,
                 folder,
                 secret_digest,
+                runtime,
+                model,
             } => {
+                // An author holds its issue's folders, one per repository; an
+                // older log's author may name none of them.
+                let held = match issue.as_ref().and_then(|id| self.issues.get(id)) {
+                    _ if *role != Role::Author => Vec::new(),
+                    Some(i) if folder.is_none() || *folder == i.folder => {
+                        i.folder.iter().chain(&i.other_folders).cloned().collect()
+                    }
+                    _ => folder.iter().cloned().collect(),
+                };
                 self.agents.insert(
                     agent.clone(),
                     Agent {
@@ -359,11 +521,15 @@ impl World {
                         issue: issue.clone(),
                         machine: machine.clone(),
                         folder: folder.clone(),
+                        held,
                         state: AgentState::Idle,
                         started: self.applied,
                         secret_digest: secret_digest.clone(),
                         continued: None,
                         ended_waited_on: false,
+                        lost_waited_on: false,
+                        runtime: runtime.clone(),
+                        model: model.clone(),
                     },
                 );
                 // A new agent hears what its stage needs in its brief.
@@ -383,7 +549,7 @@ impl World {
                     i.told = true;
                 }
             }
-            Event::AgentChanged { agent, state } => {
+            Event::AgentChanged { agent, state, lost } => {
                 let waited_on = self.agents.get(agent).is_some_and(|a| self.waiting_on(a));
                 // An ended session stays ended: an update already on its way when it
                 // was stopped must not bring it back.
@@ -391,7 +557,9 @@ impl World {
                     && a.state != AgentState::Ended
                 {
                     a.state = state.clone();
-                    a.ended_waited_on = *state == AgentState::Ended && waited_on;
+                    let ended = *state == AgentState::Ended && waited_on;
+                    a.ended_waited_on = ended && !lost;
+                    a.lost_waited_on = ended && *lost;
                 }
             }
             Event::Continued { agent, resets_ms } => {
@@ -415,12 +583,23 @@ impl World {
                     out.extend(done);
                 }
             }
-            Event::PullRequestReady { issue, pull, pulls } => {
+            Event::PullRequestReady {
+                issue,
+                pull,
+                pulls,
+                replies,
+            } => {
                 let first = self
                     .issues
                     .get(issue)
                     .and_then(|i| self.repos_of(i).into_iter().next());
                 if let Some(i) = self.issues.get_mut(issue) {
+                    // The author's replies go on the block this ready answers.
+                    if i.block_to_answer().is_some()
+                        && let Some(r) = i.reviews.last_mut()
+                    {
+                        r.replies.extend(replies.iter().cloned());
+                    }
                     // Older logs name one pull request: the first repository's.
                     let old = pull.clone().zip(first).map(|(n, repo)| (repo, n));
                     for (repo, number) in old
@@ -428,10 +607,16 @@ impl World {
                         .chain(pulls.iter().map(|(r, n)| (r.clone(), n.clone())))
                     {
                         // A new pull request where one merged is a fix that has yet
-                        // to merge.
+                        // to merge, on a branch the code host has yet to report.
                         if i.pulls.insert(repo.clone(), number.clone()) != Some(number) {
                             i.merged.remove(&repo);
+                            i.branches.remove(&repo);
+                            // A person's overturn approved the change on
+                            // record, not one in another pull request.
+                            i.review_waived = false;
                         }
+                        // A reopened or new one takes the place of one a person closed.
+                        i.closed.remove(&repo);
                     }
                     let round = match i.stage {
                         Stage::Working => Some(1),
@@ -449,6 +634,11 @@ impl World {
                         i.told = false;
                         i.fix_keeps_round = false;
                         if !i.review_waived {
+                            // The author reports that every check holds, all at
+                            // once; CI and the reviewer check that now. With the
+                            // review waived no one will judge them, so they keep
+                            // their state.
+                            i.set_checks(CheckState::Running);
                             out.push(Effect::StartReview {
                                 issue: issue.clone(),
                                 round,
@@ -461,13 +651,33 @@ impl World {
                 issue,
                 round,
                 verdict,
+                failed,
+                open,
             } => {
                 let rounds = self.setting_number(issue, None, "review_rounds");
                 let arbiter_running = self.running(issue, Role::Arbiter).is_some();
+                let reviewer = self.running(issue, Role::Reviewer).map(|a| a.id.clone());
                 let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
                     && i.stage == (Stage::InReview { round: *round })
                 {
+                    Self::judge(i, *round, failed.as_deref(), open.as_deref());
+                    let points = match verdict {
+                        Verdict::Approve => Vec::new(),
+                        Verdict::Block { points } => points.clone(),
+                    };
+                    i.reviews.push(Review {
+                        round: *round,
+                        reviewer,
+                        approve: matches!(verdict, Verdict::Approve),
+                        // A point is open until the next round judges it.
+                        states: match open {
+                            Some(_) => vec![PointState::Open; points.len()],
+                            None => Vec::new(),
+                        },
+                        points,
+                        replies: Vec::new(),
+                    });
                     // The latest verdict counts: a block takes an approval back.
                     i.review_ok = matches!(verdict, Verdict::Approve);
                     match verdict {
@@ -528,20 +738,23 @@ impl World {
             }
             Event::DecisionMade { decision } => {
                 self.decisions.insert(decision.id, decision.clone());
-                // The arbiter's work is done once its ruling is in; a later
-                // arbitration starts a fresh one, which hears that dispute.
-                let done = self.stop(&decision.issue, &[Role::Arbiter]);
-                if let DecisionKind::Ruling { approve } = decision.kind
-                    && let Some(i) = self.issues.get_mut(&decision.issue)
-                    && let Stage::Arbitration { round } = i.stage
-                {
-                    if approve {
-                        out.extend(done);
-                        i.review_ok = true;
-                        Self::try_merge(i, &mut out);
-                    } else {
-                        let points = vec![decision.reason.clone()];
-                        Self::send_back(i, round, points, false, done, &mut out);
+                // A choice is only recorded: the agent that made it carries on,
+                // and no stage or agent changes.
+                if let DecisionKind::Ruling { approve } = decision.kind {
+                    // The arbiter's work is done once its ruling is in; a later
+                    // arbitration starts a fresh one, which hears that dispute.
+                    let done = self.stop(&decision.issue, &[Role::Arbiter]);
+                    if let Some(i) = self.issues.get_mut(&decision.issue)
+                        && let Stage::Arbitration { round } = i.stage
+                    {
+                        if approve {
+                            out.extend(done);
+                            i.review_ok = true;
+                            Self::try_merge(i, &mut out);
+                        } else {
+                            let points = vec![decision.reason.clone()];
+                            Self::send_back(i, round, points, false, done, &mut out);
+                        }
                     }
                 }
             }
@@ -610,6 +823,8 @@ impl World {
                         .all(|r| i.merged.contains(r) || !i.pulls.contains_key(r))
                     {
                         // Merged everywhere: the author, reviewer and arbiter are done.
+                        // The folders go to no other author until the author has
+                        // ended (`World::in_use`).
                         i.stage = Stage::Deploying;
                         let folders = i.take_folders();
                         out.push(Effect::Deploy {
@@ -637,11 +852,111 @@ impl World {
                         .as_ref()
                         .filter(|_| i.pulls.len() > 1)
                         .map_or_else(String::new, |r| format!(" in {r}"));
+                    // An older log names no repository: its one pull request's.
+                    let branch = repo
+                        .as_ref()
+                        .or_else(|| i.pulls.keys().next().filter(|_| i.pulls.len() == 1))
+                        .and_then(|r| i.branches.get(r))
+                        .map_or_else(|| "your own branch".to_string(), Clone::clone);
                     let points = vec![format!(
                         "the pull request{which} conflicts with the branch it merges into: rebase \
-                         onto that branch, then push your own branch with `git push --force-with-lease`"
+                         onto that branch, then push {branch} with `git push --force-with-lease`"
                     )];
                     Self::send_back(i, round, points, true, arbiters, &mut out);
+                }
+            }
+            Event::PullBranch {
+                issue,
+                repo,
+                number,
+                branch,
+            } => {
+                // Only the branch of the pull request on record: a late read of
+                // one since closed or replaced is history.
+                if let Some(i) = self.issues.get_mut(issue)
+                    && i.pulls.get(repo) == Some(number)
+                {
+                    i.branches.insert(repo.clone(), branch.clone());
+                }
+            }
+            Event::PullClosed {
+                issue,
+                repo,
+                number,
+            } => {
+                let repos = self
+                    .issues
+                    .get(issue)
+                    .map(|i| self.repos_of(i))
+                    .unwrap_or_default();
+                // A running reviewer or arbiter was judging the closed one: a
+                // fresh one starts once ready names its replacement. One stopped
+                // now ends while the issue is fixed, so it does not count against
+                // `starts`.
+                let reviewers = self.stop(issue, &[Role::Reviewer]);
+                let arbiters = self.stop(issue, &[Role::Arbiter]);
+                if let Some(i) = self.issues.get_mut(issue)
+                    && i.pulls.get(repo) == Some(number)
+                    && let Some(round) = match i.stage {
+                        Stage::InReview { round }
+                        | Stage::Arbitration { round }
+                        | Stage::Fixing { round } => Some(round),
+                        Stage::Merging => Some(i.round.max(1)),
+                        _ => None,
+                    }
+                {
+                    // Dropped, so that ready asks for the number of the one the
+                    // author reopens or opens in its place.
+                    i.pulls.remove(repo);
+                    i.merged.remove(repo);
+                    let branch = i.branches.remove(repo);
+                    i.closed.insert(
+                        repo.clone(),
+                        ClosedPull {
+                            number: number.clone(),
+                            branch,
+                        },
+                    );
+                    let merged: Vec<String> = repos
+                        .iter()
+                        .filter(|r| i.merged.contains(*r))
+                        .map(ToString::to_string)
+                        .collect();
+                    let (which, there) = if repos.len() > 1 {
+                        (format!(" in {repo}"), " there".to_string())
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    let before = match merged.len() {
+                        0 => String::new(),
+                        1 => format!("{} is merged; ", merged[0]),
+                        _ => format!("{} are merged; ", merged.join(", ")),
+                    };
+                    // It cannot be reopened once its branch is deleted, as when the
+                    // code host closed it for that reason.
+                    let point = format!(
+                        "{before}pull request {number}{which} was closed without merging: reopen \
+                         it if its branch still exists, or open a new one{there}"
+                    );
+                    i.review_ok = false;
+                    // Even a reopen is reviewed: the closed branch can take new
+                    // commits, and the record does not say which ones a person
+                    // approved.
+                    i.review_waived = false;
+                    out.extend(reviewers);
+                    if matches!(i.stage, Stage::Fixing { .. }) {
+                        // Already back with its author, as after a failed check: one
+                        // more point, in the same stage and round.
+                        out.extend(arbiters);
+                        i.fix.push(point);
+                        i.told = false;
+                        out.push(Effect::RequestFix {
+                            issue: issue.clone(),
+                            points: i.fix.clone(),
+                        });
+                    } else {
+                        Self::send_back(i, round, vec![point], true, arbiters, &mut out);
+                    }
                 }
             }
             Event::MergeRefused { issue, reason } => {
@@ -685,7 +1000,17 @@ impl World {
                     .get(group)
                     .is_some_and(Investigation::running);
                 if self.groups.contains_key(group) && !open {
-                    let since_ms = self.investigations.get(group).map(|i| i.started_ms);
+                    let last = self.investigations.get(group);
+                    // The window moves on only past an investigation that
+                    // finished: one that did not may have read nothing.
+                    let since_ms = last.and_then(|i| {
+                        if i.done {
+                            Some(i.started_ms)
+                        } else {
+                            i.since_ms
+                        }
+                    });
+                    let first_started_ms = last.map_or(*at_ms, |i| i.first_started_ms);
                     self.investigations.insert(
                         group.clone(),
                         Investigation {
@@ -693,6 +1018,7 @@ impl World {
                             agent: agent.clone(),
                             started_ms: *at_ms,
                             since_ms,
+                            first_started_ms,
                             ended_ms: None,
                             filed: Vec::new(),
                             done: false,
@@ -767,17 +1093,25 @@ impl World {
                     if *passed {
                         i.stage = Stage::Done;
                         i.closed_by_loop = true;
+                        i.verify_failed = false;
+                        i.reopen_due = false;
                         out.push(Effect::Close {
                             issue: issue.clone(),
                         });
                     } else {
-                        // Back to work, with what failed; the merged pull request is history.
+                        // Back to work, with what failed; the merged pull request is
+                        // history. The merge may have closed it in its tracker, where
+                        // the tracker part reopens it.
                         i.stage = Stage::Ready;
                         i.review_ok = false;
                         i.checks_ok = None;
                         i.pulls.clear();
                         i.merged.clear();
+                        i.branches.clear();
+                        i.closed.clear();
                         i.review_waived = false;
+                        i.verify_failed = true;
+                        i.reopen_due = true;
                         i.fix = vec![format!(
                             "after the last change merged and deployed, the verify check failed: {output}"
                         )];
@@ -827,6 +1161,48 @@ impl World {
         pulls
     }
 
+    /// An issue's pull requests as an agent is told of them, each with where to
+    /// open it, in the order they merge. One a person closed is given in its
+    /// repository's place, as closed.
+    pub fn pulled(&self, issue: &Issue) -> Vec<brief::Pulled> {
+        let order = self.repos_of(issue);
+        order
+            .iter()
+            .chain(issue.pulls.keys().filter(|r| !order.contains(r)))
+            .chain(
+                issue
+                    .closed
+                    .keys()
+                    .filter(|r| !order.contains(r) && !issue.pulls.contains_key(*r)),
+            )
+            .filter_map(|r| {
+                let repo = self
+                    .projects
+                    .get(r)
+                    .map_or_else(String::new, |p| p.repo.clone());
+                if let Some(number) = issue.pulls.get(r) {
+                    return Some(brief::Pulled {
+                        project: r.clone(),
+                        repo,
+                        number: number.clone(),
+                        merged: issue.merged.contains(r),
+                        branch: issue.branches.get(r).cloned(),
+                        closed: false,
+                    });
+                }
+                let closed = issue.closed.get(r)?;
+                Some(brief::Pulled {
+                    project: r.clone(),
+                    repo,
+                    number: closed.number.clone(),
+                    merged: false,
+                    branch: closed.branch.clone(),
+                    closed: true,
+                })
+            })
+            .collect()
+    }
+
     /// The repository an issue is worked in: its first.
     pub fn repo_of(&self, issue: &Issue) -> Option<&Project> {
         self.repos_of(issue)
@@ -861,6 +1237,9 @@ impl World {
     /// on that agent. An arbiter that has ruled on the issue has finished its step,
     /// and so has an author on a paused issue that has not heard its fixes. A
     /// group's investigation waits on its investigator until it says it is done.
+    /// Nothing waits on an agent whose step is over for good
+    /// ([`Self::over_for_good`]), such as an old author whose issue works again
+    /// in another folder: it is not reminded, and its stop is asked for again.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
         if self.investigates(agent) {
             return true;
@@ -868,6 +1247,9 @@ impl World {
         let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
             return false;
         };
+        if self.over_for_good(agent) {
+            return false;
+        }
         match (i.stage, agent.role) {
             (Stage::Refining, Role::Refiner) | (Stage::Working, Role::Author) => true,
             (Stage::Fixing { .. }, Role::Author) => i.told || !self.paused(i),
@@ -900,18 +1282,23 @@ impl World {
     /// with the arbiter. An issue in review or with the arbiter whose approval is in
     /// needs neither while its checks run. This brings back an agent whose session
     /// ended, or one the daemon decided on and did not start before it stopped. A
-    /// running author or reviewer that has not heard its fixes or its new round is
+    /// running author or reviewer that has not heard its fixes or its round is
     /// told again, and an arbiter that ruled in an earlier arbitration and still
-    /// runs is asked again to stop. After the `starts` setting's number of agents of one role have
-    /// ended while one issue waited on them it gives up, and says so. A paused
+    /// runs is asked again to stop. So is every agent that runs although its step
+    /// is over for good ([`Self::over_for_good`]), first, since its stop may have
+    /// failed or been lost to a restart. After the `starts` setting's number of agents of one role have
+    /// ended while one issue waited on them it gives up, and says so. Agents whose programs were
+    /// lost do not count toward `starts`; after [`LOST_PER_START`] times `starts` of them it gives
+    /// up too, with a line of its own. A paused
     /// issue gets nothing until it is back in its group's scope, and then what its
     /// stage needs. A running investigation whose investigator never started gets
     /// one.
     pub fn missing(&self) -> Missing {
         let mut out = Missing {
-            start: self.missing_investigators(),
+            start: self.stops_again(),
             ..Missing::default()
         };
+        out.start.extend(self.missing_investigators());
         for i in self.issues.values().filter(|i| !self.paused(i)) {
             // A merge, deploy or verify lost to a restart or a failure is asked for
             // again; the parts that do them do not repeat work already done or running.
@@ -998,28 +1385,37 @@ impl World {
                             issue: i.id.clone(),
                             points: i.fix.clone(),
                         }),
-                        Stage::InReview { round } if round > 1 => {
-                            out.start.push(Effect::StartReview {
-                                issue: i.id.clone(),
-                                round,
-                            })
-                        }
+                        Stage::InReview { round } => out.start.push(Effect::StartReview {
+                            issue: i.id.clone(),
+                            round,
+                        }),
                         _ => {}
                     }
                 }
                 continue;
             }
             // Only agents that ended while the issue waited on them count: not one
-            // the loop stopped because the issue went back to its author.
-            let tried = self
+            // the loop stopped because the issue went back to its author. One
+            // whose program was lost, as to a reboot, counts toward a limit of
+            // its own, so a program lost at the same point every run is not
+            // started forever.
+            let of_role: Vec<&Agent> = self
                 .agents
                 .values()
                 .filter(|a| a.issue.as_ref() == Some(&i.id) && a.role == role)
-                .filter(|a| a.ended_waited_on)
-                .count();
-            if tried as u64 >= self.setting_number(&i.id, Some(role), "starts") {
+                .collect();
+            let tried = of_role.iter().filter(|a| a.ended_waited_on).count();
+            let lost = of_role.iter().filter(|a| a.lost_waited_on).count();
+            let starts = self.setting_number(&i.id, Some(role), "starts");
+            if tried as u64 >= starts {
                 out.given_up.push(format!(
                     "{}: {tried} {}s ended before it moved on; no more are started",
+                    i.id,
+                    role.name()
+                ));
+            } else if lost as u64 >= starts.saturating_mul(LOST_PER_START) {
+                out.given_up.push(format!(
+                    "{}: the programs of {lost} {}s were lost before it moved on; no more are started",
                     i.id,
                     role.name()
                 ));
@@ -1029,6 +1425,59 @@ impl World {
         }
         out.start.retain(|e| !self.waits_for_machine(e));
         out
+    }
+
+    /// A stop for each agent that runs although its step is over for good
+    /// ([`Self::over_for_good`]), in agent order. The loop asked for it when the
+    /// step ended, but that stop may have failed, or been lost to a restart,
+    /// since a replay drops effects. It is asked for on a paused issue too: a
+    /// stop starts no work.
+    fn stops_again(&self) -> Vec<Effect> {
+        self.agents
+            .values()
+            .filter(|a| a.state != AgentState::Ended && self.over_for_good(a))
+            .map(|a| Effect::StopAgent {
+                agent: a.id.clone(),
+            })
+            .collect()
+    }
+
+    /// Whether nothing will need `agent` again: an agent on an issue that is
+    /// done, deploying or verifying, or back to new or ready, as after a reopen
+    /// in the tracker or a failed verify; any but the refiner on an issue being
+    /// refined; a refiner whose issue's plan is in; an author whose issue holds
+    /// other folders than the ones it held; an investigator whose investigation
+    /// has ended. An author or reviewer on an issue in review, being fixed or
+    /// merging, a refiner while its issue is refining and the investigator of a
+    /// running investigation are still needed. An arbiter that has ruled is
+    /// asked to stop by [`Self::missing`] once its issue waits on an arbiter
+    /// again.
+    fn over_for_good(&self, agent: &Agent) -> bool {
+        if agent.role == Role::Investigator && agent.issue.is_none() {
+            return self
+                .investigating(&agent.group)
+                .is_none_or(|i| i.agent != agent.id);
+        }
+        let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
+            return false;
+        };
+        match i.stage {
+            // Back to new or ready, every agent on it is from before: a reopen
+            // in the tracker or a failed verify ended their steps.
+            Stage::Done | Stage::Deploying | Stage::Verifying | Stage::New | Stage::Ready => true,
+            Stage::Refining => agent.role != Role::Refiner,
+            _ => match agent.role {
+                Role::Refiner => i.plan.is_some(),
+                // Its issue let them go, as at a close before a reopen, and
+                // holds others now, for a later author.
+                Role::Author => {
+                    let holds =
+                        |f: &FolderId| i.folder.as_ref() == Some(f) || i.other_folders.contains(f);
+                    i.folder.is_some() && !agent.held.is_empty() && !agent.held.iter().any(holds)
+                }
+                _ => false,
+            },
+        }
     }
 
     /// The folder an agent of `role` on `issue` runs in: its own, else (for a
@@ -1093,23 +1542,6 @@ impl World {
         } else {
             Vec::new()
         };
-        // Every pull request with where to open it, in the order they merge.
-        let order = self.repos_of(i);
-        let pulls: Vec<brief::Pulled> = order
-            .iter()
-            .chain(i.pulls.keys().filter(|r| !order.contains(r)))
-            .filter_map(|r| {
-                Some(brief::Pulled {
-                    project: r.clone(),
-                    repo: self
-                        .projects
-                        .get(r)
-                        .map_or_else(String::new, |p| p.repo.clone()),
-                    number: i.pulls.get(r)?.clone(),
-                    merged: i.merged.contains(r),
-                })
-            })
-            .collect();
         Some(Launch {
             agent: AgentId::new(format!("{}-{n}", role.name())),
             group: group.clone(),
@@ -1130,7 +1562,7 @@ impl World {
                         shared,
                         held,
                     },
-                    &pulls,
+                    &self.pulled(i),
                     &self.kept_rules(),
                 )
             },
@@ -1174,6 +1606,7 @@ impl World {
         out: &mut Vec<Effect>,
     ) {
         out.extend(arbiters);
+        i.checks_wait();
         i.stage = Stage::Fixing { round };
         i.fix.clone_from(&points);
         i.told = false;
@@ -1227,10 +1660,45 @@ impl World {
                     out.extend(reviewers);
                     i.review_waived = true;
                     i.review_ok = true;
+                    // The stopped reviewer judges no check, and no one else
+                    // will: as with a send-back, the running ones wait.
+                    i.checks_wait();
                     Self::try_merge(i, out);
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// What a reviewer's verdict on round `round` of `i` says beside approve or
+    /// block, from a verdict line that gives it: each of the plan's checks is
+    /// failed when `failed` names it and passed otherwise, and each point of the
+    /// round before stays open when `open` names it and is resolved otherwise.
+    /// Unlike a ready, such a line marks a check from an older plan too, since
+    /// it names every check.
+    fn judge(i: &mut Issue, round: u8, failed: Option<&[usize]>, open: Option<&[usize]>) {
+        if let Some(failed) = failed {
+            for (n, c) in (1..).zip(i.plan.iter_mut().flat_map(|p| p.checks.iter_mut())) {
+                c.state = Some(if failed.contains(&n) {
+                    CheckState::Failed
+                } else {
+                    CheckState::Passed
+                });
+            }
+        }
+        if let Some(open) = open
+            && i.round_before(round).is_some()
+            && let Some(before) = i.reviews.last_mut()
+        {
+            before.states = (1..=before.points.len())
+                .map(|n| {
+                    if open.contains(&n) {
+                        PointState::Open
+                    } else {
+                        PointState::Resolved
+                    }
+                })
+                .collect();
         }
     }
 
@@ -1252,15 +1720,6 @@ impl World {
                 out.push(Effect::ReleaseFolder { folder: id });
             }
         }
-    }
-
-    /// Whether every issue `issue` depends on is done. An issue the loop has not
-    /// seen counts as not done.
-    pub(crate) fn ready_to_start(&self, issue: &Issue) -> bool {
-        issue
-            .depends_on
-            .iter()
-            .all(|d| self.issues.get(d).is_some_and(|i| i.stage == Stage::Done))
     }
 
     /// The order a group takes issues in: its milestones first to last, then the
@@ -1346,6 +1805,13 @@ impl World {
     /// Whether a group works on an issue: one of its projects, and one of its
     /// milestones when it names any.
     pub(crate) fn in_scope(&self, group: &Group, issue: &Issue) -> bool {
+        self.unlisted(group, issue).is_none()
+    }
+
+    /// What `group` does not list that it would need to for `issue` to be in its
+    /// scope; `None` when it is. Its project or area comes first, since without
+    /// it the milestone does not matter.
+    pub(crate) fn unlisted(&self, group: &Group, issue: &Issue) -> Option<Unlisted> {
         let from = &issue.id.project;
         let taken = group.projects.contains(from)
             || group.areas.contains(from)
@@ -1354,28 +1820,37 @@ impl World {
                 .iter()
                 .filter_map(|a| self.areas.get(a))
                 .any(|a| a.projects.contains(from));
-        taken
-            && (group.milestones.is_empty()
-                || issue
-                    .milestone
-                    .as_ref()
-                    .is_some_and(|m| group.milestones.contains(m)))
+        if !taken {
+            return Some(if self.areas.contains_key(from) {
+                Unlisted::Area(from.clone())
+            } else {
+                Unlisted::Project(from.clone())
+            });
+        }
+        match &issue.milestone {
+            _ if group.milestones.is_empty() => None,
+            Some(m) if group.milestones.contains(m) => None,
+            Some(m) => Some(Unlisted::Milestone(m.clone())),
+            None => Some(Unlisted::NoMilestone),
+        }
     }
 
     /// A free work folder `may` allows in each of `repos`, in their order and all
     /// on one machine, since one author has to reach every one: the machine of the
     /// first repository's folder. `None` when no such machine has them all, so two
-    /// issues cannot each hold half of what the other needs.
+    /// issues cannot each hold half of what the other needs. A folder no issue
+    /// holds is not free while an agent that held it runs ([`Self::in_use`]).
     pub(crate) fn free_folders(
         &self,
         repos: &[ProjectId],
         may: impl Fn(&Folder) -> bool,
     ) -> Option<Vec<FolderId>> {
         let (first, others) = repos.split_first()?;
+        let in_use = self.in_use();
         let free = || {
             self.folders
                 .values()
-                .filter(|f| f.holder.is_none() && may(f))
+                .filter(|f| f.holder.is_none() && !in_use.contains(&f.id) && may(f))
         };
         free().filter(|f| &f.project == first).find_map(|start| {
             std::iter::once(Some(start.id.clone()))
@@ -1386,6 +1861,17 @@ impl World {
                 }))
                 .collect()
         })
+    }
+
+    /// The work folders held by an agent that has not ended: an author's stop
+    /// may have failed after its issue merged or was closed, and its session may
+    /// still change them.
+    pub(crate) fn in_use(&self) -> BTreeSet<&FolderId> {
+        self.agents
+            .values()
+            .filter(|a| a.state != AgentState::Ended)
+            .flat_map(|a| &a.held)
+            .collect()
     }
 
     /// Takes new issues for refining and starts authors on ready ones.
@@ -1430,8 +1916,7 @@ impl World {
                 .filter(|i| {
                     i.group.as_ref() == Some(&group.id)
                         && i.stage == Stage::Ready
-                        && self.in_scope(group, i)
-                        && self.ready_to_start(i)
+                        && self.start_waits(group, i).is_empty()
                 })
                 .collect();
             ready.sort_by_key(|i| Self::rank(group, i));
@@ -1471,3 +1956,11 @@ mod tests;
 #[cfg(test)]
 #[path = "world_settings_tests.rs"]
 mod settings_scope;
+
+#[cfg(test)]
+#[path = "world_states_tests.rs"]
+mod states;
+
+#[cfg(test)]
+#[path = "world_stops_tests.rs"]
+mod stops;

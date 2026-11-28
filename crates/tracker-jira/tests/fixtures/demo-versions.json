@@ -1,6 +1,6 @@
 [
   {"id": "10000", "name": "Launch", "released": true, "archived": false},
-  {"id": "10001", "name": "Sign-in rework", "released": false, "archived": false},
+  {"id": "10001", "name": "Sign-in rework", "released": false, "archived": false, "releaseDate": "2026-12-12"},
   {"id": "10002", "name": "Later", "released": false, "archived": false},
   {"id": "10003", "name": "Old plan", "released": false, "archived": true}
 ]

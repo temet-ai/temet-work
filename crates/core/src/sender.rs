@@ -208,6 +208,7 @@ impl Command {
             Self::Settings { .. } => "settings",
             Self::Retry { .. } => "retry",
             Self::Rule { .. } => "rule",
+            Self::Choose { .. } => "choose",
             Self::Overturn { .. } => "overturn",
             Self::Proposal { .. } => "proposal",
             Self::File { .. } => "file",
@@ -249,6 +250,8 @@ mod tests {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: digest,
+            runtime: None,
+            model: None,
         }
     }
 
@@ -265,10 +268,12 @@ mod tests {
             Event::AgentChanged {
                 agent: AgentId::new("reviewer-0"),
                 state: crate::model::AgentState::Ended,
+                lost: false,
             },
             Event::AgentChanged {
                 agent: AgentId::new("reviewer-2"),
                 state: crate::model::AgentState::Ended,
+                lost: false,
             },
         ])
         .0
@@ -301,6 +306,8 @@ mod tests {
         Command::Review {
             issue: IssueId::new("ankh", "1"),
             verdict: Verdict::Approve,
+            failed: Vec::new(),
+            open: Vec::new(),
         }
     }
 

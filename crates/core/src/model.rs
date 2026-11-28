@@ -5,7 +5,7 @@ use crate::ids::{
 };
 
 /// Where an issue is in the loop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Stage {
     /// Synced from the tracker, not taken by a group yet.
     New,
@@ -47,6 +47,54 @@ pub struct Check {
     pub done_when: String,
     /// The test or command that proves it.
     pub proven_by: String,
+    /// Where it stands, as the loop last learned it: waiting from the plan,
+    /// running from the author's ready, passed or failed from the reviewer's
+    /// verdict. None in a plan from an older log. The loop sets it: a plan sent
+    /// with states has each replaced by waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<CheckState>,
+}
+
+impl Check {
+    /// A check with no state yet.
+    pub fn new(done_when: impl Into<String>, proven_by: impl Into<String>) -> Self {
+        Self {
+            done_when: done_when.into(),
+            proven_by: proven_by.into(),
+            state: None,
+        }
+    }
+}
+
+/// Where one of a plan's checks stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckState {
+    /// The reviewer found that it holds on the current change.
+    Passed,
+    /// CI and the reviewer are checking the current change.
+    Running,
+    /// No change is being checked: none was made yet, or the last one went back
+    /// to its author, or had its review waived, before the reviewer judged it.
+    Waiting,
+    /// The reviewer found that it does not hold on the current change.
+    Failed,
+    /// A word this build lacks, from a newer one.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Whether the next review round counts a review point as dealt with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PointState {
+    /// Not judged yet, or the next round kept it open.
+    Open,
+    /// The next round counts it as dealt with.
+    Resolved,
+    /// A word this build lacks, from a newer one.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The refiner's plan for an issue.
@@ -97,6 +145,14 @@ pub struct Issue {
     pub pulls: std::collections::BTreeMap<ProjectId, String>,
     /// The repositories whose pull request has merged.
     pub merged: std::collections::BTreeSet<ProjectId>,
+    /// The branch of its pull request in each repository, as the code host
+    /// reported it; none for one whose branch was never read, and in older logs.
+    #[serde(default)]
+    pub branches: std::collections::BTreeMap<ProjectId, String>,
+    /// The pull request a person closed without merging, in each repository
+    /// where no ready has named another since. Empty in older logs.
+    #[serde(default)]
+    pub closed: std::collections::BTreeMap<ProjectId, ClosedPull>,
     /// What its author is to fix, while it is being fixed.
     pub fix: Vec<String>,
     /// Whether the agent its stage needs has heard what to do: the author what
@@ -112,16 +168,114 @@ pub struct Issue {
     /// later reopened is worked again; one the loop closed stays closed.
     pub closed_by_loop: bool,
     /// Whether one of its pull requests has merged. A failed verify clears
-    /// `merged` and keeps this; reopening the issue in the tracker clears it.
+    /// `merged` and keeps this; a sync that lists the issue as open after the
+    /// failed verify clears it, and so does reopening a done issue in the tracker.
     #[serde(default)]
     pub has_merged: bool,
+    /// Whether a failed verify sent it back and it has not been done since. It
+    /// is listed under Problems while this holds.
+    #[serde(default)]
+    pub verify_failed: bool,
+    /// Whether a failed verify sent it back and no sync has listed it as open
+    /// since. The merge may have closed it in its tracker: the tracker part
+    /// reopens it there, and passes no close of it to the loop while this holds.
+    #[serde(default)]
+    pub reopen_due: bool,
     /// Whether a person's overturn of a ruling approved it: the review is not
-    /// asked again, and it merges once the checks pass.
+    /// asked again, and it merges once the checks pass. A ready naming a pull
+    /// request not on record, as after one is closed, ends the waiver and asks
+    /// for the review again.
     #[serde(default)]
     pub review_waived: bool,
+    /// Its review rounds, in the order they finished.
+    #[serde(default)]
+    pub reviews: Vec<Review>,
+}
+
+/// A pull request a person closed without merging: a read in review or the
+/// merge found it so.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ClosedPull {
+    /// Its number.
+    pub number: String,
+    /// Its branch, when the code host had reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// One finished review round of an issue.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Review {
+    /// The round, from 1.
+    pub round: u8,
+    /// The reviewer working on the issue when the round finished; none when no
+    /// reviewer was running, as when a person reviewed it.
+    pub reviewer: Option<AgentId>,
+    /// Whether it approved the change.
+    pub approve: bool,
+    /// What a block asked to change; empty for an approval.
+    pub points: Vec<String>,
+    /// The author's replies to its points, in their order, sent with the first
+    /// ready after it (`temet-work ready --reply`); empty until then, and in
+    /// older logs.
+    #[serde(default)]
+    pub replies: Vec<String>,
+    /// Each point's state, in their order: open until the next round judges it,
+    /// then open or resolved. Empty for a round from an older log.
+    #[serde(default)]
+    pub states: Vec<PointState>,
+}
+
+impl Review {
+    /// Whether it is a block with points to answer.
+    pub fn blocks(&self) -> bool {
+        !self.approve && !self.points.is_empty()
+    }
 }
 
 impl Issue {
+    /// The review round whose points the author's next ready answers: the
+    /// latest one, while the issue is being fixed, when it is a block the
+    /// author has not replied to. The first ready after a block answers it,
+    /// whether the review, an arbiter's ruling or a failed check sent the change
+    /// back; a later ready answers none.
+    pub fn block_to_answer(&self) -> Option<&Review> {
+        if !matches!(self.stage, Stage::Fixing { .. }) {
+            return None;
+        }
+        self.reviews
+            .last()
+            .filter(|r| r.blocks() && r.replies.is_empty())
+    }
+
+    /// The review round whose points the verdict on round `round` judges: the
+    /// latest one finished, when `round` is after the first. Round 1 judges
+    /// none.
+    pub fn round_before(&self, round: u8) -> Option<&Review> {
+        self.reviews.last().filter(|_| round > 1)
+    }
+
+    /// Sets each of the plan's checks that has a state to `to`. A check from an
+    /// older log keeps no state.
+    pub fn set_checks(&mut self, to: CheckState) {
+        for c in self.plan.iter_mut().flat_map(|p| p.checks.iter_mut()) {
+            if c.state.is_some() {
+                c.state = Some(to);
+            }
+        }
+    }
+
+    /// Puts each check still running back to waiting: the change went back to
+    /// its author, or a person's overturn waived its review, before anyone
+    /// judged it.
+    pub fn checks_wait(&mut self) {
+        for c in self.plan.iter_mut().flat_map(|p| p.checks.iter_mut()) {
+            if c.state == Some(CheckState::Running) {
+                c.state = Some(CheckState::Waiting);
+            }
+        }
+    }
+
     /// Whether a person closed it, as far as the loop can tell: done, not closed
     /// by the loop after verifying it, and with no pull request of its merged,
     /// since one that merged may have closed it. A closed dependency the loop
@@ -132,6 +286,17 @@ impl Issue {
             && !self.closed_by_loop
             && !self.has_merged
             && !self.title.is_empty()
+    }
+
+    /// Whether it is merging, deploying or verifying, or one of its pull requests
+    /// has merged and the rest have not. A pull request can close its issue as it
+    /// merges, so a close in the tracker does not finish such an issue: the loop
+    /// closes it itself once it is verified.
+    pub fn finishing(&self) -> bool {
+        matches!(
+            self.stage,
+            Stage::Merging | Stage::Deploying | Stage::Verifying
+        ) || !self.merged.is_empty()
     }
 
     /// Takes every work folder the issue holds, the first one first.
@@ -234,6 +399,12 @@ pub struct Agent {
     pub machine: MachineId,
     /// The work folder it runs in, if any.
     pub folder: Option<FolderId>,
+    /// The work folders it held when it started: an author's are its issue's,
+    /// one in each repository the issue changes, the first first. A reader
+    /// holds none. No author is given one of them while this agent runs, even
+    /// once its issue has let them go, since it may still change them.
+    #[serde(default)]
+    pub held: Vec<FolderId>,
     /// What it is doing.
     pub state: AgentState,
     /// When it started: how many events the loop had applied by then. A later
@@ -247,10 +418,27 @@ pub struct Agent {
     #[serde(default)]
     pub continued: Option<u64>,
     /// Whether its session ended while its issue still waited on it
-    /// ([`crate::world::World::waiting_on`]). Only such agents count toward the
-    /// `starts` limit: one stopped because its issue moved on had finished its step.
+    /// ([`crate::world::World::waiting_on`]) and its program was not lost. Only
+    /// such agents count toward the `starts` limit: one stopped because its issue
+    /// moved on had finished its step, and one whose program was lost, as to a
+    /// reboot, did not give up.
     #[serde(default)]
     pub ended_waited_on: bool,
+    /// Whether its session ended while its issue still waited on it and its
+    /// program was lost. Such ends have a limit of their own, three times
+    /// `starts` ([`crate::world::LOST_PER_START`]), so a program lost at the
+    /// same point every run, as to an out-of-memory kill, is not started
+    /// forever.
+    #[serde(default)]
+    pub lost_waited_on: bool,
+    /// The runtime it was started with; none for an agent from an older log.
+    #[serde(default)]
+    pub runtime: Option<String>,
+    /// The model its brief named when it started; none when its settings named
+    /// none, or for an agent from an older log. A person may change the model
+    /// setting while it runs; this stays what it runs.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl AgentState {
@@ -321,8 +509,12 @@ pub struct Investigation {
     pub agent: AgentId,
     /// When it started, in milliseconds since the Unix epoch.
     pub started_ms: u64,
-    /// When the group's investigation before it started; none for its first.
+    /// When the group's last finished investigation started, the time it reads
+    /// merged pull requests from; none while none has finished, when it reads
+    /// those merged in the 7 days before `first_started_ms`.
     pub since_ms: Option<u64>,
+    /// When the group's first investigation started: `started_ms` for the first.
+    pub first_started_ms: u64,
     /// When it ended; none while it runs.
     pub ended_ms: Option<u64>,
     /// The issues its investigator filed, in order.
@@ -394,7 +586,7 @@ pub enum DecisionKind {
         /// True to approve, false to send the change back to its author.
         approve: bool,
     },
-    /// Any other choice an agent made.
+    /// Any other choice an agent made, recorded with `choose`.
     Choice,
 }
 
@@ -422,6 +614,99 @@ pub struct Decision {
     /// Why the person overturned it.
     #[serde(default)]
     pub overturn_reason: String,
+    /// What overturning it costs, as the agent gave it for a choice and as
+    /// [`Decision::ruling_cost`] sets it for a ruling; none only for a ruling
+    /// from an older log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<Cost>,
+    /// The point after which overturning it costs more: the issue's merge, for
+    /// a choice and a ruling alike; none only for a ruling from an older log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<Point>,
+}
+
+/// What overturning a decision costs: how much work it throws away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Cost {
+    /// Nothing done is thrown away.
+    Low,
+    /// Some work is done again.
+    Medium,
+    /// What it led to cannot be taken back by the loop.
+    High,
+    /// A word this build lacks, from a newer one.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The point after which overturning a decision costs more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Point {
+    /// Its issue's merge. Once the issue is deploying, verifying or done, the
+    /// loop no longer acts on an overturn.
+    Merge,
+    /// A word this build lacks, from a newer one.
+    #[serde(other)]
+    Unknown,
+}
+
+impl Cost {
+    /// The cost in one lower-case word, as `choose` takes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl Point {
+    /// The point in one lower-case word.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Whether `issue` is past this point. This build cannot place a point it
+    /// does not know, so no issue is past one.
+    pub fn passed(self, issue: &Issue) -> bool {
+        match self {
+            Self::Merge => matches!(
+                issue.stage,
+                Stage::Deploying | Stage::Verifying | Stage::Done
+            ),
+            Self::Unknown => false,
+        }
+    }
+}
+
+impl Decision {
+    /// What a ruling records when it is made: an approval costs high to undo,
+    /// since once the change merges the loop does not take it back; sending the
+    /// change back costs low, since overturning it throws no work away (the
+    /// author's fix finishes and the issue merges once the checks pass). Both
+    /// stop being cheap at the issue's merge.
+    pub fn ruling_cost(approve: bool) -> (Cost, Point) {
+        let cost = if approve { Cost::High } else { Cost::Low };
+        (cost, Point::Merge)
+    }
+}
+
+/// A project's or area's web addresses, as the part that holds each gives them.
+/// They follow from the configuration and the daemon's environment, so the log
+/// holds none of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Addresses {
+    /// Where its issues are, from its tracker.
+    pub issues: Option<String>,
+    /// Where its code is, from its code host.
+    pub code: Option<String>,
 }
 
 /// Where a rule is.

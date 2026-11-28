@@ -54,6 +54,7 @@ fn pull_ready() -> Event {
         issue: issue("1"),
         pull: None,
         pulls: Default::default(),
+        replies: Vec::new(),
     }
 }
 
@@ -143,6 +144,19 @@ fn a_refining_issue_moved_out_finishes_its_plan_and_then_waits() {
     );
     assert_eq!(stage(&w, "1"), Stage::Ready);
     assert_eq!(holder(&w, "f1"), None);
+    // Its plan is in, so a refiner still running is asked again to stop, on a
+    // paused issue too.
+    assert_eq!(
+        w.missing().start,
+        [Effect::StopAgent {
+            agent: AgentId::new("refiner-1")
+        }]
+    );
+    w.apply(&Event::AgentChanged {
+        agent: AgentId::new("refiner-1"),
+        state: crate::model::AgentState::Ended,
+        lost: false,
+    });
     assert_eq!(w.missing(), Missing::default());
 }
 
@@ -372,7 +386,13 @@ fn an_issue_that_left_its_groups_scope_shows_its_stage_and_out_of_scope() {
         status.contains("\n  ankh#2  ready, out of scope  issue 2 [m9]\n"),
         "{status}"
     );
-    assert!(!status.contains("Waiting"), "{status}");
+    // It waits on its scope, and not on the machine any more.
+    assert!(
+        status.contains(
+            "Waiting\n  ankh#2 waiting, out of scope (m9 is not a milestone of watch)\nAgents\n"
+        ),
+        "{status}"
+    );
     let unread = Err("not read here".into());
     let shown = crate::text::issue(&w, &issue("2"), &unread).unwrap_or_default();
     assert!(shown.contains("\nStage: ready, out of scope\n"), "{shown}");

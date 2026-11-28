@@ -1,15 +1,17 @@
 ---
 session_id:
   - 7bb2fb4e-ea63-41fd-bb34-aad02f0a2882
+  - c14f6d16-7688-4e50-99d4-32021f0e29db
+  - a8be342d-b7b2-4e65-bf6b-bcd753f14a12
 ---
 
 # What temet-work holds
 
 Every screen, command and message in temet-work is about one of these objects. The app,
 the CLI and the MCP server show and change them through the same commands. The core crate
-defines areas, projects, groups, agents, work folders, issues, plans, checks, decisions
-and events today; a milestone is an id on its issues, and the other objects are not built
-yet.
+defines areas, projects, groups, agents, work folders, issues, plans, checks, review
+rounds, decisions and events today. A milestone is an id on its issues, with the due date
+its tracker gives. The other objects are not built yet.
 
 ## Objects
 
@@ -28,10 +30,10 @@ yet.
 | Issue | a project, in a milestone or none | From the tracker. One group at a time takes it through the loop. |
 | Work folder | a project | A checkout on one machine, held by one issue at a time (an issue holds one in each repository it changes), with a target directory that stays warm between issues. |
 | Plan | an issue | Written by the refiner as YAML: the checks and, for an area's issue, the repositories it changes in merge order (`repos`). The parts and who does each are not built yet. |
-| Check | a plan | One "Done when" line from the issue and the test or command that proves it. |
+| Check | a plan | One "Done when" line from the issue, the test or command that proves it, and its state: waiting until a change is checked, running while CI and the reviewer check one, then passed or failed as the reviewer finds it. A change sent back before the reviewer judged it, or whose review a person's overturn waived, puts a running check back to waiting. CI's pass or fail is the issue's, not a check's. |
 | Pull request | an issue | The branch, CI, and the review rounds. An issue has one in each repository it changes. |
-| Review round | a pull request | The reviewer's blocking points and the author's replies. A dispute between them goes to an arbiter. |
-| Decision | an issue | A choice an agent made: the options it weighed, the one it took, why, who decided, and the point after which overturning it costs more. Work carries on at once; a person reads decisions afterwards and can overturn them. |
+| Review round | a pull request | The reviewer's verdict and blocking points. Each point has the author's reply, sent with the first ready after the block, and a state: open until the next round judges it, then open or resolved. A point kept open joins the next block. A dispute between them goes to an arbiter. |
+| Decision | an issue | A choice an agent made: the options it weighed, the one it took, why, who decided, its cost to undo (low, medium or high) and the point after which overturning it costs more. Work carries on at once; a person reads decisions afterwards and can overturn them. An arbiter's ruling is one; any other choice an agent records with `temet-work choose`, with the cost it gives. The point is the issue's merge (`docs/commands.md`). |
 | Message | an agent | Agent to agent, or agent to a person. |
 | Event | everything | What happened, with its time, in one append-only log. State is built from events. |
 

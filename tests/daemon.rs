@@ -38,16 +38,35 @@ name = "Night watch"
 projects = ["ankh"]
 "#;
 
-/// A journal the test reads after the host has taken it.
+/// A journal the test reads after the host has taken it: the events, and the
+/// time each was logged with.
 #[derive(Clone, Default)]
-struct Kept(std::sync::Arc<std::sync::Mutex<Vec<temet_work_core::Event>>>);
+struct Kept(
+    std::sync::Arc<std::sync::Mutex<Vec<temet_work_core::Event>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+);
+
+impl Kept {
+    /// The world the log rebuilds, as the daemon rebuilds it at start: each
+    /// event at its time, with what the build's parts put in and the log does
+    /// not hold (`host`'s catalog and addresses).
+    fn replayed(&self, host: &World) -> World {
+        let events = self.0.lock().expect("journal").clone();
+        let times = self.1.lock().expect("journal").clone();
+        let mut world = World::default().replay_at(times.into_iter().zip(&events)).0;
+        world.catalog = host.catalog.clone();
+        world.addresses = host.addresses.clone();
+        world
+    }
+}
 
 impl temet_work_core::Journal for Kept {
-    fn append(&mut self, _at_ms: u64, event: &temet_work_core::Event) -> Result<(), String> {
+    fn append(&mut self, at_ms: u64, event: &temet_work_core::Event) -> Result<(), String> {
         self.0
             .lock()
             .map_err(|e| e.to_string())?
             .push(event.clone());
+        self.1.lock().map_err(|e| e.to_string())?.push(at_ms);
         Ok(())
     }
 }
@@ -184,6 +203,8 @@ fn host_tracking(
                 state: PullState::Open,
                 checks: Checks::Passed,
                 conflicting: false,
+                draft: false,
+                branch: String::new(),
             },
         )],
         ..FakeCodeHost::default()
@@ -356,6 +377,7 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
         checks: vec![Check {
             done_when: "the clock strikes thirteen".into(),
             proven_by: "listening at midnight".into(),
+            state: None,
         }],
     };
     run(
@@ -373,6 +395,7 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
             issue,
             pull: Some("57".into()),
             pulls: Default::default(),
+            replies: Vec::new(),
         },
     );
     assert!(host.problems().is_empty(), "{:?}", host.problems());
@@ -442,6 +465,7 @@ fn a_refiners_plan_naming_runtime_is_refused_and_the_author_runs_claude_in_plan_
             checks: vec![Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
+                state: None,
             }],
         },
     };
@@ -549,6 +573,7 @@ fn commands_reach_the_daemon_over_its_socket() {
                     issue: IssueId::new("ankh", "1"),
                     pull: Some("57".into()),
                     pulls: Default::default(),
+                    replies: Vec::new(),
                 }),
             )
         })
@@ -692,6 +717,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         checks: vec![Check {
             done_when: "the clock strikes thirteen".into(),
             proven_by: "listening at midnight".into(),
+            state: None,
         }],
     };
     run(
@@ -707,6 +733,7 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         issue: issue.clone(),
         pull: Some("57".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     };
     // The refiner was stopped once its plan was in, so nothing may name it any
     // more; the author's own ready is accepted.
@@ -733,13 +760,22 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         verdict: Verdict::Block {
             points: vec!["no test for a stopped clock".into()],
         },
+        failed: vec![1],
+        open: Vec::new(),
     };
     assert_eq!(
         run(&mut host, "reviewer-1", block),
         "ankh#1 is fixing, round 1"
     );
+    // The first ready after the block replies to its point.
+    let replied = Command::Ready {
+        issue: issue.clone(),
+        pull: None,
+        pulls: Default::default(),
+        replies: vec!["added a test that stops the clock".into()],
+    };
     assert_eq!(
-        run(&mut host, "author-1", ready),
+        run(&mut host, "author-1", replied),
         "ankh#1 is in review, round 2"
     );
     let reviewers: Vec<&str> = host
@@ -760,6 +796,8 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
     let approve = Command::Review {
         issue: issue.clone(),
         verdict: Verdict::Approve,
+        failed: Vec::new(),
+        open: Vec::new(),
     };
     run(&mut host, "reviewer-1", approve);
     host.tick(2).expect("CI read");
@@ -786,12 +824,9 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         host.problems()
     );
     assert!(host.problems().is_empty(), "{:?}", host.problems());
-    // The log of a live run, with parts carrying out effects, replays to the same state.
-    let logged = kept.0.lock().expect("journal").clone();
-    let mut replayed = World::replay(&logged).0;
-    // What the build's parts offer is not in the log.
-    replayed.catalog = host.world().catalog.clone();
-    assert_eq!(&replayed, host.world());
+    // The log of a live run, with parts carrying out effects, replays to the same
+    // state, with the same time each issue last changed.
+    assert_eq!(&kept.replayed(host.world()), host.world());
 }
 
 mod settings_commands {
@@ -983,6 +1018,7 @@ mod settings_commands {
                 checks: vec![Check {
                     done_when: "the clock strikes thirteen".into(),
                     proven_by: "listening at midnight".into(),
+                    state: None,
                 }],
             },
         };
@@ -1209,6 +1245,75 @@ fn status_json_prints_the_view() {
         temet_work_core::View::new(host.world(), host.problems())
     );
     assert_eq!(view.issues[0].id, "ankh#1");
+}
+
+/// Runs `status` and `status --json`, each with a standard output from
+/// `stdout`, answers each through the socket and returns how each one ended.
+fn status_writing_to(
+    socket: &str,
+    stdout: impl Fn() -> std::process::Stdio,
+) -> [std::process::Output; 2] {
+    use temet_work::socket;
+
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(socket);
+    let requests = socket::listen(&path).expect("listen");
+    let (mut host, _) = host();
+    host.tick(0).expect("tick");
+    [
+        (&["status"][..], Command::Status),
+        (&["status", "--json"][..], Command::View),
+    ]
+    .map(|(args, command)| {
+        let client = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+            .args(args)
+            .env("TEMET_WORK_SOCKET", &path)
+            .env_remove("TEMET_WORK_DAEMON")
+            .env_remove("TEMET_WORK_AGENT")
+            .env_remove(SECRET_VAR)
+            .stdout(stdout())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("runs");
+        let pending = requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a request");
+        assert_eq!(pending.request.command, command);
+        let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
+        pending.answer(reply);
+        client.wait_with_output().expect("client")
+    })
+}
+
+#[test]
+fn status_to_a_gone_reader_is_a_quiet_success() {
+    let ended = status_writing_to("gone-reader.sock", || {
+        let (reader, writer) = std::io::pipe().expect("pipe");
+        drop(reader);
+        writer.into()
+    });
+    for out in ended {
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_to_a_full_device_is_reported_and_exits_2() {
+    let ended = status_writing_to("full-device.sock", || {
+        std::fs::File::options()
+            .write(true)
+            .open("/dev/full")
+            .expect("/dev/full")
+            .into()
+    });
+    for out in ended {
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "standard output: No space left on device (os error 28)\n"
+        );
+    }
 }
 
 #[test]
@@ -1671,6 +1776,8 @@ fn an_overturn_and_a_keep_go_through_the_daemon_and_reach_the_next_brief() {
                 reason: "easiest to undo".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             },
         },
     )
@@ -1782,6 +1889,8 @@ areas = ["guild"]
             state: PullState::Open,
             checks,
             conflicting: false,
+            draft: false,
+            branch: String::new(),
         }
     }
 
@@ -1878,6 +1987,7 @@ areas = ["guild"]
                     checks: vec![Check {
                         done_when: "both show the guild".into(),
                         proven_by: "looking".into(),
+                        state: None,
                     }],
                 },
             },
@@ -1893,6 +2003,7 @@ areas = ["guild"]
                 (ProjectId::new("svc"), "34".to_string()),
             ]
             .into(),
+            replies: Vec::new(),
         };
         done(run(f, "author-1", ready));
         issue
@@ -1912,6 +2023,8 @@ areas = ["guild"]
             Command::Review {
                 issue: issue.clone(),
                 verdict: Verdict::Approve,
+                failed: Vec::new(),
+                open: Vec::new(),
             },
         ));
         f.host.tick(1).expect("CI read, then ui merges");
@@ -1940,10 +2053,7 @@ areas = ["guild"]
         assert_eq!(f.host.world().issues[&issue].stage, Stage::Done);
         assert_eq!(*f.deploys.lock().expect("lock"), 1, "after the last merge");
         assert!(f.host.world().folders.values().all(|f| f.holder.is_none()));
-        let logged = f.kept.0.lock().expect("journal").clone();
-        let mut replayed = World::replay(&logged).0;
-        replayed.catalog = f.host.world().catalog.clone();
-        assert_eq!(&replayed, f.host.world());
+        assert_eq!(&f.kept.replayed(f.host.world()), f.host.world());
     }
 
     #[test]
@@ -1965,6 +2075,195 @@ areas = ["guild"]
 
 /// Two issues of one project merge in the same round: their deploys run one
 /// after the other, and both end verified and closed.
+/// author-1's choice on ankh#1, at `cost`: the clacks, the pigeon or the Post Office.
+fn clacks_choice(cost: Option<&str>) -> Command {
+    Command::Choose {
+        issue: IssueId::new("ankh", "1"),
+        question: "Which way does the clacks message go?".into(),
+        options: vec!["clacks".into(), "pigeon".into(), "Post Office".into()],
+        took: "pigeon".into(),
+        why: "the towers are down past Sto Lat".into(),
+        cost: cost.map(String::from),
+    }
+}
+
+/// A host whose ankh#1 is being worked on by author-1, after author-1 has
+/// recorded [`clacks_choice`] at medium cost through the socket's answer; the
+/// log it kept, and the reply to the choice.
+fn chosen() -> (Host, Starts, Kept, String) {
+    use temet_work::socket::{Reply, answer};
+
+    let kept = Kept::default();
+    let (mut host, starts) = host_with(Box::new(kept.clone()));
+    host.tick(0).expect("sync");
+    plan_one_check(&mut host, &starts);
+    let author = AgentId::new("author-1");
+    let issue = IssueId::new("ankh", "1");
+    assert_eq!(host.world().issues[&issue].stage, Stage::Working);
+    let before = host.world().agents[&author].clone();
+    let request = from(&starts, Some("author-1"), clacks_choice(Some("medium")));
+    let reply = answer(&mut host, 1, &request, &Peer::Unchecked).expect("answer");
+    let Reply::Done { text } = reply else {
+        panic!("the choice is refused: {reply:?}");
+    };
+    // The author carries on: its state and its issue's stage are as they were.
+    assert_eq!(host.world().agents[&author], before);
+    assert_eq!(host.world().issues[&issue].stage, Stage::Working);
+    (host, starts, kept, text)
+}
+
+#[test]
+fn an_authors_choice_is_listed_by_status_and_the_view_and_kept_in_the_log() {
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::Event;
+    use temet_work_core::model::{Cost, DecisionKind, Point};
+
+    let (mut host, starts, kept, reply) = chosen();
+    assert_eq!(reply, "decision 1 is recorded");
+    let mut ask = |by: Option<&str>, command| {
+        let request = from(&starts, by, command);
+        answer(&mut host, 1, &request, &Peer::Unchecked).expect("answer")
+    };
+    let Reply::Done { text } = ask(None, Command::Status) else {
+        panic!("status refused");
+    };
+    assert!(
+        text.contains(
+            "Decisions\n  1 ankh#1: Which way does the clacks message go? [1=clacks, 2=pigeon, \
+             3=Post Office] chose pigeon, by author-1: the towers are down past Sto Lat; cost \
+             medium, point merge\nRules\n"
+        ),
+        "{text}"
+    );
+    let Reply::View { view } = ask(None, Command::View) else {
+        panic!("view refused");
+    };
+    // As `status --json` prints it.
+    let json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string_pretty(&view).expect("json")).expect("reads");
+    assert_eq!(
+        json["decisions"],
+        serde_json::json!([{
+            "id": 1,
+            "issue": "ankh#1",
+            "by": "author-1",
+            "question": "Which way does the clacks message go?",
+            "options": ["clacks", "pigeon", "Post Office"],
+            "chosen": 2,
+            "reason": "the towers are down past Sto Lat",
+            "overturned_to": null,
+            "overturn_reason": "",
+            "cost": "medium",
+            "point": {"at": "merge", "passed": false}
+        }])
+    );
+    // A choice with no cost, sent as a raw socket line, is refused by the loop.
+    let raw = r#"{"by":"author-1","command":{"command":"choose","issue":{"project":"ankh","key":"1"},"question":"Which way?","options":["clacks","pigeon"],"took":"pigeon","why":"it flies"}}"#;
+    let mut bare: Request = serde_json::from_str(raw).expect("a request without a cost reads");
+    bare.secret = from(&starts, Some("author-1"), Command::Status).secret;
+    assert!(matches!(
+        answer(&mut host, 1, &bare, &Peer::Unchecked).expect("answer"),
+        Reply::Refused { why } if why.contains("cost to undo: low, medium or high")
+    ));
+    assert_eq!(host.world().decisions.len(), 1);
+    // One event in the log, and the log alone rebuilds the same decisions.
+    let events = kept.0.lock().expect("log").clone();
+    let made: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::DecisionMade { decision } => Some(decision),
+            _ => None,
+        })
+        .collect();
+    let [decision] = made.as_slice() else {
+        panic!("{made:?}");
+    };
+    assert_eq!(
+        (
+            decision.id.0,
+            &decision.kind,
+            decision.by.0.as_str(),
+            decision.chosen,
+            decision.cost,
+            decision.point
+        ),
+        (
+            1,
+            &DecisionKind::Choice,
+            "author-1",
+            1,
+            Some(Cost::Medium),
+            Some(Point::Merge)
+        )
+    );
+    let (replayed, _) = World::replay(&events);
+    assert_eq!(replayed.decisions, host.world().decisions);
+    // Work carries on: the author's ready is accepted at once.
+    let ready = Command::Ready {
+        issue: IssueId::new("ankh", "1"),
+        pull: Some("57".into()),
+        pulls: Default::default(),
+        replies: Vec::new(),
+    };
+    assert_eq!(
+        answer(
+            &mut host,
+            1,
+            &from(&starts, Some("author-1"), ready),
+            &Peer::Unchecked
+        )
+        .expect("answer"),
+        Reply::Done {
+            text: "ankh#1 is in review, round 1".into()
+        }
+    );
+}
+
+#[test]
+fn a_person_overturns_an_agents_recorded_choice_through_the_daemon() {
+    use temet_work::socket::{Reply, answer};
+
+    let (mut host, starts, _, _) = chosen();
+    let issue = IssueId::new("ankh", "1");
+    let mut ask = |by: Option<&str>, command| {
+        let request = from(&starts, by, command);
+        answer(&mut host, 1, &request, &Peer::Unchecked).expect("answer")
+    };
+    let overturn = Command::Overturn {
+        decision: temet_work_core::ids::DecisionId(1),
+        option: 3,
+        reason: "the Post Office delivers in the rain".into(),
+    };
+    assert!(matches!(
+        ask(Some("author-1"), overturn.clone()),
+        Reply::Refused { why } if why.contains("overturn is a person's")
+    ));
+    assert_eq!(
+        ask(None, overturn),
+        Reply::Done {
+            text: "decision 1 is overturned to option 3".into()
+        }
+    );
+    let Reply::Done { text } = ask(None, Command::Status) else {
+        panic!("status refused");
+    };
+    assert!(
+        text.contains(
+            "chose pigeon, by author-1: the towers are down past Sto Lat; cost medium, point \
+             merge; overturned to option 3 (Post Office): the Post Office delivers in the rain\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "1 proposed: Which way does the clacks message go? Prefer: Post Office. Why: the Post \
+             Office delivers in the rain"
+        ),
+        "{text}"
+    );
+    assert_eq!(host.world().issues[&issue].stage, Stage::Working);
+}
+
 #[test]
 fn two_merges_in_one_project_deploy_one_after_the_other() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2053,6 +2352,8 @@ projects = ["ankh"]
                 state: PullState::Open,
                 checks: Checks::Passed,
                 conflicting: false,
+                draft: false,
+                branch: String::new(),
             },
         )
     };
@@ -2123,6 +2424,7 @@ projects = ["ankh"]
             checks: vec![Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
+                state: None,
             }],
         };
         let plan = Command::Plan {
@@ -2136,6 +2438,7 @@ projects = ["ankh"]
             issue: issue.clone(),
             pull: Some(pull.into()),
             pulls: Default::default(),
+            replies: Vec::new(),
         };
         run(&mut host, issue, Role::Author, ready);
     }
@@ -2143,6 +2446,8 @@ projects = ["ankh"]
         let approve = Command::Review {
             issue: issue.clone(),
             verdict: Verdict::Approve,
+            failed: Vec::new(),
+            open: Vec::new(),
         };
         run(&mut host, issue, Role::Reviewer, approve);
     }
@@ -2703,6 +3008,8 @@ refining_at_once = 2
                 machine: MachineId::new("local"),
                 folder: None,
                 secret_digest: Some(temet_work::peer::digest(secret)),
+                runtime: None,
+                model: None,
             });
         }
         // Decision 1 is the one to overturn; decision 2's rule is proposed too.
@@ -2718,6 +3025,8 @@ refining_at_once = 2
                 reason: "quieter".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             };
             w.apply(&Event::DecisionMade { decision });
             w.apply(&Event::RuleProposed {
@@ -2993,6 +3302,8 @@ refining_at_once = 2
             command: Command::Review {
                 issue: IssueId::new("ankh", "1"),
                 verdict: temet_work_core::Verdict::Approve,
+                failed: Vec::new(),
+                open: Vec::new(),
             },
         })
         .expect("line");
@@ -3104,6 +3415,7 @@ refining_at_once = 2
                     TrackedMilestone {
                         title: "First".into(),
                         open: 1,
+                        due: None,
                     },
                 )],
                 ..FakeTracker::default()

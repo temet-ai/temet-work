@@ -3,15 +3,43 @@
     {
       "id": "unseen",
       "tracker_name": "unseen/university",
+      "issues_url": null,
+      "code_url": null,
       "area": null
     },
     {
       "id": "watch",
       "tracker_name": "ankh-morpork/watch",
+      "issues_url": "https://tracker.example.com/ankh-morpork/watch/issues",
+      "code_url": "https://git.example.com/ankh-morpork/watch",
       "area": {
         "id": "ankh-morpork",
-        "name": "Ankh-Morpork"
+        "name": "Ankh-Morpork",
+        "issues_url": "https://tracker.example.com/browse/AM"
       }
+    }
+  ],
+  "milestones": [
+    {
+      "project": "unseen",
+      "id": "The Clacks",
+      "done": 0,
+      "total": 1,
+      "due": null
+    },
+    {
+      "project": "watch",
+      "id": "Snuff",
+      "done": 0,
+      "total": 0,
+      "due": null
+    },
+    {
+      "project": "watch",
+      "id": "The Clacks",
+      "done": 2,
+      "total": 6,
+      "due": "2026-12-12"
     }
   ],
   "groups": [
@@ -43,7 +71,10 @@
       "pulls": [],
       "review_ok": false,
       "checks_ok": null,
-      "agents": []
+      "agents": [],
+      "updated_ms": 1795000900000,
+      "checks": [],
+      "reviews": []
     },
     {
       "id": "watch#1",
@@ -57,7 +88,10 @@
       "pulls": [],
       "review_ok": false,
       "checks_ok": null,
-      "agents": []
+      "agents": [],
+      "updated_ms": 1795000480000,
+      "checks": [],
+      "reviews": []
     },
     {
       "id": "watch#2",
@@ -73,7 +107,10 @@
       "checks_ok": null,
       "agents": [
         "refiner-1"
-      ]
+      ],
+      "updated_ms": 1795000540000,
+      "checks": [],
+      "reviews": []
     },
     {
       "id": "watch#3",
@@ -89,17 +126,20 @@
       "checks_ok": null,
       "agents": [
         "author-2"
-      ]
+      ],
+      "updated_ms": 1795000600000,
+      "checks": [],
+      "reviews": []
     },
     {
       "id": "watch#4",
       "title": "Ring the bells",
       "stage": "in_review",
-      "stage_text": "in review, round 2",
+      "stage_text": "in review, round 3",
       "milestone": "The Clacks",
       "group": "night-watch",
       "depends_on": [],
-      "round": 2,
+      "round": 3,
       "pulls": [
         {
           "repo": "watch",
@@ -111,6 +151,45 @@
       "checks_ok": false,
       "agents": [
         "reviewer-3"
+      ],
+      "updated_ms": 1795000660000,
+      "checks": [
+        {
+          "done_when": "the clock strikes thirteen",
+          "proven_by": "listening at midnight",
+          "state": "running"
+        }
+      ],
+      "reviews": [
+        {
+          "round": 1,
+          "reviewer": "reviewer-3",
+          "verdict": "block",
+          "points": [
+            {
+              "text": "the bell is cracked",
+              "reply": "recast the bell",
+              "state": "resolved"
+            },
+            {
+              "text": "the rope is frayed",
+              "reply": "the rope stays: it was checked",
+              "state": "open"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "reviewer": "reviewer-3",
+          "verdict": "block",
+          "points": [
+            {
+              "text": "the rope is frayed",
+              "reply": "a new rope is on order",
+              "state": "open"
+            }
+          ]
+        }
       ]
     },
     {
@@ -133,7 +212,31 @@
       "checks_ok": null,
       "agents": [
         "author-4"
-      ]
+      ],
+      "updated_ms": 1795000720000,
+      "checks": [
+        {
+          "done_when": "the cobbles are clear",
+          "proven_by": "walking the yard at dawn",
+          "state": "passed"
+        },
+        {
+          "done_when": "the drains run",
+          "proven_by": "pouring a bucket",
+          "state": "running"
+        },
+        {
+          "done_when": "the leaves are bagged",
+          "proven_by": "counting the bags",
+          "state": "waiting"
+        },
+        {
+          "done_when": "the corner smells of nothing",
+          "proven_by": "sniffing the corner",
+          "state": "failed"
+        }
+      ],
+      "reviews": []
     }
   ],
   "done": 2,
@@ -147,7 +250,9 @@
       "folder": "yard-1",
       "state": "working",
       "state_text": "working: winding the clock",
-      "started": 17
+      "started": 19,
+      "runtime": "hex",
+      "model": "anthill"
     },
     {
       "id": "author-4",
@@ -158,7 +263,9 @@
       "folder": "yard-1",
       "state": "errored",
       "state_text": "error: usage limit reached",
-      "started": 21
+      "started": 23,
+      "runtime": "hex",
+      "model": "anthill"
     },
     {
       "id": "author-5",
@@ -169,7 +276,9 @@
       "folder": "yard-1",
       "state": "ended",
       "state_text": "ended",
-      "started": 23
+      "started": 25,
+      "runtime": null,
+      "model": null
     },
     {
       "id": "refiner-1",
@@ -180,7 +289,9 @@
       "folder": null,
       "state": "idle",
       "state_text": "idle",
-      "started": 15
+      "started": 17,
+      "runtime": "hex",
+      "model": null
     },
     {
       "id": "reviewer-3",
@@ -191,7 +302,9 @@
       "folder": null,
       "state": "blocked",
       "state_text": "blocked: permission",
-      "started": 19
+      "started": 21,
+      "runtime": "hex",
+      "model": "anthill"
     }
   ],
   "decisions": [
@@ -207,7 +320,12 @@
       "chosen": 1,
       "reason": "it is easier to undo",
       "overturned_to": null,
-      "overturn_reason": ""
+      "overturn_reason": "",
+      "cost": "low",
+      "point": {
+        "at": "merge",
+        "passed": false
+      }
     },
     {
       "id": 2,
@@ -222,7 +340,50 @@
       "chosen": 2,
       "reason": "it is easier to undo",
       "overturned_to": 3,
-      "overturn_reason": "the guild pays by the bell"
+      "overturn_reason": "the guild pays by the bell",
+      "cost": "low",
+      "point": {
+        "at": "merge",
+        "passed": false
+      }
+    },
+    {
+      "id": 3,
+      "issue": "watch#4",
+      "by": "arbiter-6",
+      "question": "Does watch#4 merge after 3 review rounds?",
+      "options": [
+        "merge",
+        "fix first"
+      ],
+      "chosen": 1,
+      "reason": "the bells were rung by the book",
+      "overturned_to": null,
+      "overturn_reason": "",
+      "cost": "high",
+      "point": {
+        "at": "merge",
+        "passed": false
+      }
+    },
+    {
+      "id": 4,
+      "issue": "watch#6",
+      "by": "arbiter-6",
+      "question": "Does watch#6 merge after 3 review rounds?",
+      "options": [
+        "merge",
+        "fix first"
+      ],
+      "chosen": 2,
+      "reason": "the bells were rung by the book",
+      "overturned_to": null,
+      "overturn_reason": "",
+      "cost": "low",
+      "point": {
+        "at": "merge",
+        "passed": true
+      }
     }
   ],
   "problems": {

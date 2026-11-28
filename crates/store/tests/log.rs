@@ -17,6 +17,14 @@ fn path(name: &str) -> PathBuf {
     p
 }
 
+/// The world `events` make when each is applied at `at_ms`, as the daemon
+/// applies them as they come.
+fn applied(at_ms: u64, events: &[Event]) -> World {
+    World::default()
+        .replay_at(events.iter().map(|e| (at_ms, e)))
+        .0
+}
+
 fn events() -> Vec<Event> {
     vec![
         Event::GroupCreated {
@@ -73,15 +81,24 @@ fn appends_and_reads_back_in_order_with_numbers_from_one() {
 }
 
 #[test]
-fn replaying_the_log_gives_the_same_state_as_applying_the_events() {
+fn replaying_the_log_gives_the_same_state_and_change_times_as_applying_the_events() {
     let p = path("replay");
     let (mut log, _) = Log::open(&p).expect("open");
-    for e in events() {
-        log.append(0, &e).expect("append");
+    let mut live = World::default();
+    // A minute apart, as the daemon stamps them when it applies them.
+    for (n, e) in (0..).zip(events()) {
+        let at_ms = 1_795_000_000_000 + n * 60_000;
+        log.append(at_ms, &e).expect("append");
+        live.apply_at(at_ms, &e);
     }
     drop(log);
     let (_, entries) = Log::open(&p).expect("reopen");
-    assert_eq!(replay(&entries), World::replay(&events()).0);
+    let replayed = replay(&entries);
+    assert_eq!(replayed, live);
+    // The plan, the fourth event, was the last change to ankh#1.
+    let issue = IssueId::new("ankh", "1");
+    assert_eq!(replayed.updated.at(&issue), Some(1_795_000_180_000));
+    assert_eq!(replayed.updated.at(&issue), live.updated.at(&issue));
 }
 
 #[test]
@@ -111,6 +128,8 @@ fn replaying_the_log_gives_the_same_rules_section_after_a_restart() {
                 reason: "easiest to undo".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             },
         },
         Event::DecisionOverturned {
@@ -224,6 +243,7 @@ fn pull_requests_by_repository_survive_the_log() {
         issue: IssueId::new("guild", "GLD-1"),
         pull: None,
         pulls: [(ProjectId::new("ui"), "12".to_string())].into(),
+        replies: Vec::new(),
     };
     log.append(0, &event).expect("append");
     drop(log);
@@ -232,17 +252,19 @@ fn pull_requests_by_repository_survive_the_log() {
 }
 
 #[test]
-fn an_agent_started_before_secrets_reads_with_no_digest_and_a_digest_survives_the_log() {
+fn an_agent_started_before_secrets_reads_with_no_digest_runtime_or_model_and_each_survives_the_log()
+{
     use temet_work_core::ids::AgentId;
     use temet_work_core::sender::Digest;
     let p = path("agent-digest");
-    // As a daemon wrote it before agents had secrets.
+    // As a daemon wrote it before agents had secrets, runtimes or models on record.
     let old = r#"{"seq":1,"at_ms":0,"event":{"AgentStarted":{"agent":"author-1","group":"watch","role":"Author","issue":{"project":"ankh","key":"1"},"machine":"local","folder":"ankh-1"}}}"#;
     std::fs::write(&p, format!("{old}\n")).expect("write");
     let (mut log, entries) = Log::open(&p).expect("an old log opens");
+    let author = &replay(&entries).agents[&AgentId::new("author-1")];
     assert_eq!(
-        replay(&entries).agents[&AgentId::new("author-1")].secret_digest,
-        None
+        (&author.secret_digest, &author.runtime, &author.model),
+        (&None, &None, &None)
     );
     let digest = Digest("ab".repeat(32));
     let event = Event::AgentStarted {
@@ -253,15 +275,70 @@ fn an_agent_started_before_secrets_reads_with_no_digest_and_a_digest_survives_th
         machine: MachineId::new("local"),
         folder: None,
         secret_digest: Some(digest.clone()),
+        runtime: Some("hex".into()),
+        model: Some("anthill".into()),
     };
     log.append(1, &event).expect("append");
     drop(log);
     let entries = Log::read(&p).expect("read");
     assert_eq!(entries[1].event, event);
+    let reviewer = &replay(&entries).agents[&AgentId::new("reviewer-1")];
+    assert_eq!(reviewer.secret_digest, Some(digest));
     assert_eq!(
-        replay(&entries).agents[&AgentId::new("reviewer-1")].secret_digest,
-        Some(digest)
+        (reviewer.runtime.as_deref(), reviewer.model.as_deref()),
+        (Some("hex"), Some("anthill"))
     );
+}
+
+#[test]
+fn replaying_the_log_keeps_whether_an_ended_agent_had_lost_its_program() {
+    use temet_work_core::ids::AgentId;
+    use temet_work_core::model::{AgentState, Role, Stage};
+    let p = path("agent-lost");
+    let author = AgentId::new("author-1");
+    let mut events = events();
+    events.push(Event::AgentStarted {
+        agent: author.clone(),
+        group: GroupId::new("watch"),
+        role: Role::Author,
+        issue: Some(IssueId::new("ankh", "1")),
+        machine: MachineId::new("morpork"),
+        folder: Some(FolderId::new("f1")),
+        secret_digest: None,
+        runtime: None,
+        model: None,
+    });
+    let working = applied(0, &events);
+    assert_eq!(
+        working.issues[&IssueId::new("ankh", "1")].stage,
+        Stage::Working
+    );
+    assert!(working.waiting_on(&working.agents[&author]));
+
+    for lost in [true, false] {
+        let end = Event::AgentChanged {
+            agent: author.clone(),
+            state: AgentState::Ended,
+            lost,
+        };
+        let _ = std::fs::remove_file(&p);
+        let (mut log, _) = Log::open(&p).expect("open");
+        for e in events.iter().chain([&end]) {
+            log.append(0, e).expect("append");
+        }
+        drop(log);
+        // An end by the program itself is written as it was before the flag, so
+        // a line from an older log reads as one.
+        let text = std::fs::read_to_string(&p).expect("the log");
+        let line = text.lines().last().expect("a line");
+        assert_eq!(line.contains("\"lost\""), lost, "{line}");
+        let entries = Log::read(&p).expect("read");
+        assert_eq!(entries.last().expect("the end").event, end);
+        let agent = &replay(&entries).agents[&author];
+        assert_eq!(agent.state, AgentState::Ended);
+        assert_eq!(agent.ended_waited_on, !lost, "lost {lost}");
+        assert_eq!(agent.lost_waited_on, lost, "lost {lost}");
+    }
 }
 
 #[test]
@@ -276,6 +353,7 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
             line: "You've hit your 5-hour limit · resets 5:40pm".into(),
             resets_ms: Some(1_796_060_400_000),
         },
+        lost: false,
     };
     let mut events = events();
     events.extend([
@@ -287,6 +365,8 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
             machine: MachineId::new("morpork"),
             folder: Some(FolderId::new("f1")),
             secret_digest: None,
+            runtime: None,
+            model: None,
         },
         limited.clone(),
     ]);
@@ -298,7 +378,7 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
     // A daemon restarted while the agent waits on its limit still knows when it resets.
     let (mut log, entries) = Log::open(&p).expect("reopen");
     let world = replay(&entries);
-    assert_eq!(world, World::replay(&events).0);
+    assert_eq!(world, applied(0, &events));
     assert_eq!(world.agents[&author].limit_reset(), Some(1_796_060_400_000));
 
     // Continued, then the same limit again: it is not waited on a second time.
@@ -310,12 +390,12 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
         limited,
     ];
     for e in &more {
-        log.append(1, e).expect("append");
+        log.append(0, e).expect("append");
     }
     events.extend(more);
     drop(log);
     let world = replay(&Log::read(&p).expect("read"));
-    assert_eq!(world, World::replay(&events).0);
+    assert_eq!(world, applied(0, &events));
     assert_eq!(world.agents[&author].continued, Some(1_796_060_400_000));
     assert_eq!(world.agents[&author].limit_reset(), None);
 }
@@ -361,7 +441,7 @@ fn replaying_an_investigation_gives_the_same_state_as_applying_its_events() {
     drop(log);
     let (_, entries) = Log::open(&p).expect("reopen");
     let replayed = replay(&entries);
-    assert_eq!(replayed, World::replay(&all).0);
+    assert_eq!(replayed, applied(0, &all));
     let investigation = &replayed.investigations[&watch];
     assert_eq!(
         (
@@ -393,4 +473,190 @@ fn an_older_logs_group_replays_with_the_default_queue_low_and_investigate_every(
     let entry = log.append(0, &events()[0]).expect("append");
     let text = serde_json::to_string(&entry).expect("json");
     assert!(!text.contains("queue_low"), "{text}");
+}
+
+#[test]
+fn an_older_log_replays_to_the_last_finished_investigations_window() {
+    /// The brief's window line after replaying `events`, each one raw line.
+    fn replayed(name: &str, events: &[&str]) -> (Option<u64>, String) {
+        let p = path(name);
+        let lines: String = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| format!("{{\"seq\":{},\"at_ms\":0,\"event\":{e}}}\n", i + 1))
+            .collect();
+        std::fs::write(&p, lines).expect("write");
+        let (_, entries) = Log::open(&p).expect("open");
+        let world = replay(&entries);
+        let watch = GroupId::new("watch");
+        let launch = world.launch_investigator(&watch).expect("running");
+        let line = launch.brief.task.lines().find(|l| l.starts_with("3. "));
+        (
+            world.investigations[&watch].since_ms,
+            line.expect("line 3").to_string(),
+        )
+    }
+    let group = r#"{"GroupCreated":{"group":"watch","name":"Night watch","projects":["ankh"],"milestones":[],"refining_at_once":1}}"#;
+
+    let (since_ms, line) = replayed(
+        "older-investigations",
+        &[
+            group,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-1","at_ms":0}}"#,
+            r#"{"Investigated":{"group":"watch","agent":"investigator-1"}}"#,
+            r#"{"InvestigationEnded":{"group":"watch","at_ms":600000,"filed":0}}"#,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-2","at_ms":7800000}}"#,
+            r#"{"InvestigationEnded":{"group":"watch","at_ms":8400000,"filed":0}}"#,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-3","at_ms":15600000}}"#,
+        ],
+    );
+    assert_eq!(since_ms, Some(0));
+    assert!(
+        line.contains(
+            "since 1970-01-01 00:00 UTC, when the group's last finished investigation started"
+        ),
+        "{line}"
+    );
+
+    // 2026-11-27 13:05 UTC, and the group's first investigation ends unfinished.
+    let (since_ms, line) = replayed(
+        "older-unfinished-first",
+        &[
+            group,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-1","at_ms":1795784700000}}"#,
+            r#"{"InvestigationEnded":{"group":"watch","at_ms":1795785300000,"filed":0}}"#,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-2","at_ms":1795792500000}}"#,
+        ],
+    );
+    assert_eq!(since_ms, None);
+    assert!(
+        line.contains(
+            "since 2026-11-20 13:05 UTC, 7 days before the group's first investigation started, \
+             as none has finished yet"
+        ),
+        "{line}"
+    );
+}
+
+#[test]
+fn replaying_the_log_gives_the_same_check_states_replies_and_point_states_as_applying_them() {
+    use temet_work_core::Command;
+    use temet_work_core::Verdict;
+    use temet_work_core::ids::AgentId;
+    use temet_work_core::model::{Check, CheckState, PointState, Role};
+
+    let issue = IssueId::new("ankh", "1");
+    let started = |agent: &str, role| Event::AgentStarted {
+        agent: AgentId::new(agent),
+        group: GroupId::new("watch"),
+        role,
+        issue: Some(issue.clone()),
+        machine: MachineId::new("morpork"),
+        folder: None,
+        secret_digest: None,
+        runtime: None,
+        model: None,
+    };
+    let mut setup = events();
+    // The issue is being refined; its plan comes from the refiner's command.
+    setup.pop();
+    setup.push(started("refiner-1", Role::Refiner));
+    let ready = |replies: &[&str]| Command::Ready {
+        issue: issue.clone(),
+        pull: Some("57".into()),
+        pulls: Default::default(),
+        replies: replies.iter().map(ToString::to_string).collect(),
+    };
+    let block = |points: &[&str], failed: Vec<usize>, open: Vec<usize>| Command::Review {
+        issue: issue.clone(),
+        verdict: Verdict::Block {
+            points: points.iter().map(ToString::to_string).collect(),
+        },
+        failed,
+        open,
+    };
+    let steps = [
+        (
+            "refiner-1",
+            Command::Plan {
+                issue: issue.clone(),
+                plan: Plan {
+                    checks: vec![
+                        Check::new("the clock strikes thirteen", "listening at midnight"),
+                        Check::new("the hands point up", "looking at the face"),
+                    ],
+                    ..Plan::default()
+                },
+            },
+        ),
+        ("author-1", ready(&[])),
+        (
+            "reviewer-1",
+            block(
+                &["the spring is weak", "the face is dusty"],
+                vec![2],
+                vec![],
+            ),
+        ),
+        ("author-1", ready(&["a new spring", "dusted it"])),
+        ("reviewer-1", block(&[], vec![1], vec![2])),
+    ];
+
+    // The lines are written as the log writes them, in one write: syncing each
+    // of them would take most of a second.
+    let mut written = Vec::new();
+    let mut live = World::default();
+    let mut record = |live: &mut World, e: &Event| {
+        let entry = temet_work_store::Entry {
+            seq: written.len() as u64 + 1,
+            at_ms: 1_795_000_000_000 + 60_000 * written.len() as u64,
+            event: e.clone(),
+        };
+        live.apply_at(entry.at_ms, e);
+        written.push(serde_json::to_string(&entry).expect("a line"));
+    };
+    for e in &setup {
+        record(&mut live, e);
+    }
+    for (by, command) in steps {
+        if by == "refiner-1" {
+            record(&mut live, &started("author-1", Role::Author));
+            record(&mut live, &started("reviewer-1", Role::Reviewer));
+        }
+        if matches!(command, Command::Review { .. }) {
+            record(
+                &mut live,
+                &Event::Told {
+                    issue: issue.clone(),
+                },
+            );
+        }
+        let made = live
+            .events(Some(&AgentId::new(by)), &command)
+            .unwrap_or_else(|e| panic!("{by} is refused: {e}"));
+        for e in &made {
+            record(&mut live, e);
+        }
+    }
+    let p = path("states");
+    std::fs::write(&p, written.join("\n") + "\n").expect("write");
+    let (_, entries) = Log::open(&p).expect("open");
+    let replayed = replay(&entries);
+    assert_eq!(replayed, live);
+    // What the loop learned is all there after the restart.
+    let i = &replayed.issues[&issue];
+    let states: Vec<_> = i
+        .plan
+        .iter()
+        .flat_map(|p| &p.checks)
+        .map(|c| c.state)
+        .collect();
+    assert_eq!(states, [Some(CheckState::Failed), Some(CheckState::Passed)]);
+    assert_eq!(i.reviews[0].replies, ["a new spring", "dusted it"]);
+    assert_eq!(
+        i.reviews[0].states,
+        [PointState::Resolved, PointState::Open]
+    );
+    assert_eq!(i.reviews[1].points, ["the face is dusty"]);
+    assert_eq!(i.reviews[1].states, [PointState::Open]);
 }

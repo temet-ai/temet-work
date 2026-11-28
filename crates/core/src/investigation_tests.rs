@@ -85,6 +85,8 @@ fn tick(w: &mut World, now_ms: u64) -> Vec<Launch> {
                     machine: launch.machine.clone(),
                     folder: launch.folder.clone(),
                     secret_digest: None,
+                    runtime: None,
+                    model: None,
                 });
                 started.push(launch);
             }
@@ -93,16 +95,49 @@ fn tick(w: &mut World, now_ms: u64) -> Vec<Launch> {
     started
 }
 
+/// Has the running investigator say it is done, as `temet-work investigated`.
+fn investigated(w: &mut World) {
+    let agent = w.investigating(&watch()).expect("running").agent.clone();
+    w.apply(&Event::Investigated {
+        group: watch(),
+        agent,
+    });
+}
+
 /// Ends the running investigation as its session ending would, at `now_ms`.
 fn end(w: &mut World, now_ms: u64) {
+    end_session(w, now_ms, false);
+}
+
+/// Ends the running investigation by its session ending, at `now_ms`, with its
+/// program `lost` or not.
+fn end_session(w: &mut World, now_ms: u64, lost: bool) {
     let agent = w.investigating(&watch()).expect("running").agent.clone();
     w.apply(&Event::AgentChanged {
         agent,
         state: AgentState::Ended,
+        lost,
     });
     for e in w.investigation_events(now_ms, false) {
         w.apply(&e);
     }
+}
+
+/// The one investigator `tick` starts at `now_ms`.
+fn next(w: &mut World, now_ms: u64) -> Launch {
+    let mut started = tick(w, now_ms);
+    assert_eq!(started.len(), 1, "{started:?}");
+    started.remove(0)
+}
+
+/// The line of an investigator's brief that names its pull request window.
+fn window_line(launch: &Launch) -> &str {
+    launch
+        .brief
+        .task
+        .lines()
+        .find(|l| l.starts_with("3. "))
+        .expect("line 3")
 }
 
 #[test]
@@ -246,6 +281,8 @@ fn out_of_scope_by_project_or_area_leaves_the_queue() {
         machine: MachineId::new("morpork"),
         folder: None,
         secret_digest: None,
+        runtime: None,
+        model: None,
     });
     assert_eq!(queued(&w), 3);
 
@@ -277,6 +314,676 @@ fn issues_back_in_scope_count_again() {
 
     wider.apply(&group(&["First", "Later"], Some(8), None));
     assert_eq!(queued(&wider), 12);
+}
+
+fn ankh_issue(key: &str) -> IssueId {
+    IssueId::new("ankh", key)
+}
+
+fn sync_on(issue: &IssueId, milestone: Option<&str>, depends_on: &[&IssueId]) -> Event {
+    Event::IssueSynced {
+        issue: issue.clone(),
+        title: format!("issue {}", issue.key),
+        milestone: milestone.map(MilestoneId::new),
+        depends_on: depends_on.iter().map(|d| (*d).clone()).collect(),
+        order: issue.key.parse().unwrap_or(0),
+        closed: false,
+    }
+}
+
+/// Syncs an issue of ankh into First and has its refiner write the plan. No issue
+/// may be refining already, since watch refines one at a time.
+fn make_ready(w: &mut World, key: &str, depends_on: &[&IssueId]) {
+    let issue = ankh_issue(key);
+    w.apply(&sync_on(&issue, Some("First"), depends_on));
+    w.apply(&Event::PlanWritten {
+        issue: issue.clone(),
+        plan: Plan::default(),
+    });
+    assert_eq!(w.issues[&issue].stage, Stage::Ready, "{issue}");
+}
+
+/// Project ankh with no work folder and its group watch (queue_low 8, milestone
+/// First).
+fn unstaffed() -> World {
+    World::replay(&[
+        project("ankh", "city/ankh"),
+        group(&["First"], Some(8), None),
+    ])
+    .0
+}
+
+/// Every wait of a ready issue that would not start once a work folder is free.
+fn start_waits(w: &World) -> Vec<crate::placement::StartWait> {
+    w.issues
+        .values()
+        .filter(|i| i.stage == Stage::Ready)
+        .flat_map(|i| w.start_waits(&w.groups[i.group.as_ref().expect("taken")], i))
+        .collect()
+}
+
+/// Each wait as the waiting issue and the dependency it names; an empty one
+/// when the issue is out of scope itself.
+fn waits(w: &World) -> Vec<(String, String)> {
+    start_waits(w)
+        .into_iter()
+        .map(|s| {
+            let on = match s.why {
+                crate::placement::Why::On { on, .. } => on.to_string(),
+                crate::placement::Why::OutOfScope(_) => String::new(),
+            };
+            (s.issue.to_string(), on)
+        })
+        .collect()
+}
+
+fn wait(issue: &str, on: &str) -> (String, String) {
+    (issue.into(), on.into())
+}
+
+fn status(w: &World) -> String {
+    crate::text::text(w, &Default::default())
+}
+
+#[test]
+fn ready_issues_on_an_out_of_scope_dependency_leave_the_queue() {
+    let mut w = unstaffed();
+    let later = ankh_issue("100");
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    for key in 1..=8 {
+        make_ready(&mut w, &key.to_string(), &[&later]);
+    }
+    assert_eq!(queued(&w), 0);
+    assert_eq!(
+        w.investigation_events(0, true),
+        [Event::InvestigationStarted {
+            group: watch(),
+            agent: AgentId::new("investigator-1"),
+            at_ms: 0,
+        }]
+    );
+    let status = status(&w);
+    assert!(
+        status.contains("; 0 in its queue, investigates below 8"),
+        "{status}"
+    );
+    let lines: String = (1..=8)
+        .map(|key| {
+            format!(
+                "  ankh#{key} waiting on ankh#100, out of scope \
+                 (Later is not a milestone of watch)\n"
+            )
+        })
+        .collect();
+    assert!(
+        status.contains(&format!("Waiting\n{lines}Agents\n")),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_dependency_no_group_covers_keeps_a_ready_issue_out_of_the_queue() {
+    // In a project no group covers, with and without a milestone watch takes,
+    // and in watch's own project with no milestone.
+    let klatch = IssueId::new("klatch", "3");
+    for (on, milestone) in [
+        (&klatch, None),
+        (&klatch, Some("First")),
+        (&ankh_issue("100"), None),
+    ] {
+        let mut w = unstaffed();
+        w.apply(&project("klatch", "desert/klatch"));
+        w.apply(&sync_on(on, milestone, &[]));
+        make_ready(&mut w, "1", &[on]);
+        assert_eq!(queued(&w), 0, "{on} {milestone:?}");
+        let status = status(&w);
+        assert!(
+            status.contains(&format!(
+                "  ankh#1 waiting on {on}, out of scope (no group covers it)\n"
+            )),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn a_dependency_on_a_repository_nothing_matches_keeps_a_ready_issue_out_of_the_queue() {
+    // The tracker keeps a name no project or area matches as the key of an issue
+    // in the project that names it, and never syncs it.
+    let (short, long) = (ankh_issue("nowhere#5"), ankh_issue("desert/elsewhere#12"));
+    let mut w = unstaffed();
+    for key in 1..=8 {
+        make_ready(&mut w, &key.to_string(), &[&short]);
+    }
+    make_ready(&mut w, "9", &[&long]);
+    make_ready(&mut w, "10", &[&ankh_issue("9")]);
+    assert_eq!(queued(&w), 0);
+    assert_eq!(w.investigation_events(0, true).len(), 1);
+    let status = status(&w);
+    for line in [
+        "  ankh#1 waiting on nowhere#5, out of scope (no group covers it)\n",
+        "  ankh#8 waiting on nowhere#5, out of scope (no group covers it)\n",
+        "  ankh#9 waiting on desert/elsewhere#12, out of scope (no group covers it)\n",
+        "  ankh#10 waiting on desert/elsewhere#12 through ankh#9, out of scope \
+         (no group covers it)\n",
+    ] {
+        assert!(status.contains(line), "{line}{status}");
+    }
+
+    // Dropping the line counts the issue again.
+    w.apply(&sync_on(&ankh_issue("1"), Some("First"), &[]));
+    assert_eq!(queued(&w), 1);
+}
+
+#[test]
+fn a_dependency_in_a_milestone_another_group_takes_keeps_it_out_too() {
+    let mut w = unstaffed();
+    let guard = GroupId::new("guard");
+    w.apply(&Event::GroupCreated {
+        group: guard.clone(),
+        name: "Day watch".into(),
+        projects: vec![ankh()],
+        areas: Vec::new(),
+        milestones: vec![MilestoneId::new("Later")],
+        refining_at_once: 1,
+        model: None,
+        queue_low: None,
+        investigate_every: None,
+    });
+    let later = ankh_issue("100");
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    assert_eq!(w.issues[&later].group.as_ref(), Some(&guard));
+    make_ready(&mut w, "1", &[&later]);
+    assert_eq!(queued(&w), 0);
+    assert_eq!(w.queue(&w.groups[&guard]), 1, "guard is refining ankh#100");
+    assert_eq!(waits(&w), [wait("ankh#1", "ankh#100")]);
+}
+
+#[test]
+fn done_dependencies_keep_a_ready_issue_in_the_queue() {
+    let mut w = unstaffed();
+    let (working, done, later) = (ankh_issue("7"), ankh_issue("50"), ankh_issue("100"));
+    let unseen = ankh_issue("999");
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    w.apply(&Event::IssueSynced {
+        issue: done.clone(),
+        title: "issue 50".into(),
+        milestone: Some(MilestoneId::new("Later")),
+        depends_on: vec![],
+        order: 50,
+        closed: true,
+    });
+    // The one work folder goes to ankh#7, so the others stay ready.
+    make_ready(&mut w, "7", &[]);
+    w.apply(&folder("f1", "ankh"));
+    make_ready(&mut w, "1", &[&working]);
+    make_ready(&mut w, "2", &[&done]);
+    make_ready(&mut w, "3", &[&unseen]);
+    assert_eq!(w.issues[&working].stage, Stage::Working);
+    assert_eq!(
+        queued(&w),
+        1,
+        "2; 1 waits on 7, which is being worked on, and 3 on 999, never synced"
+    );
+    let waiting = [wait("ankh#1", "ankh#7"), wait("ankh#3", "ankh#999")];
+    assert_eq!(waits(&w), waiting);
+
+    // One refining and one new, both on the dependency in Later: they count.
+    w.apply(&sync_on(&ankh_issue("4"), Some("First"), &[&later]));
+    w.apply(&sync_on(&ankh_issue("5"), Some("First"), &[&later]));
+    assert_eq!(w.issues[&ankh_issue("4")].stage, Stage::Refining);
+    assert_eq!(w.issues[&ankh_issue("5")].stage, Stage::New);
+    assert_eq!(queued(&w), 3);
+    assert_eq!(waits(&w), waiting);
+    let status = status(&w);
+    assert!(
+        status.contains(
+            "Waiting\n  \
+             ankh#1 waiting on ankh#7, not done (working)\n  \
+             ankh#3 waiting on ankh#999, never synced\n\
+             Agents\n"
+        ),
+        "{status}"
+    );
+
+    w.apply(&Event::PlanWritten {
+        issue: ankh_issue("4"),
+        plan: Plan::default(),
+    });
+    assert_eq!(queued(&w), 2, "4 is ready and cannot start");
+    assert_eq!(
+        waits(&w),
+        [
+            wait("ankh#1", "ankh#7"),
+            wait("ankh#3", "ankh#999"),
+            wait("ankh#4", "ankh#100")
+        ]
+    );
+}
+
+#[test]
+fn closing_the_dependency_or_dropping_the_line_counts_the_issue_again() {
+    let mut w = unstaffed();
+    let later = ankh_issue("100");
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    make_ready(&mut w, "1", &[&later]);
+    assert_eq!(queued(&w), 0);
+    assert_eq!(waits(&w), [wait("ankh#1", "ankh#100")]);
+
+    // Moved into scope, the dependency counts and the issue waits on it there.
+    let mut moved = w.clone();
+    moved.apply(&sync_on(&later, Some("First"), &[]));
+    assert_eq!(queued(&moved), 1, "ankh#100, now refining");
+    assert_eq!(waits(&moved), [wait("ankh#1", "ankh#100")]);
+    assert!(
+        status(&moved).contains("  ankh#1 waiting on ankh#100, not done (refining)\n"),
+        "{}",
+        status(&moved)
+    );
+
+    let mut closed = w.clone();
+    closed.apply(&Event::IssueSynced {
+        issue: later.clone(),
+        title: "issue 100".into(),
+        milestone: Some(MilestoneId::new("Later")),
+        depends_on: vec![],
+        order: 100,
+        closed: true,
+    });
+    assert_eq!(queued(&closed), 1);
+
+    let mut dropped = w;
+    dropped.apply(&sync_on(&ankh_issue("1"), Some("First"), &[]));
+    assert_eq!(queued(&dropped), 1);
+
+    for w in [closed, dropped] {
+        assert_eq!(waits(&w), []);
+        assert!(!status(&w).contains("Waiting"), "{}", status(&w));
+    }
+}
+
+#[test]
+fn an_out_of_scope_dependency_through_another_issue_leaves_the_queue() {
+    let mut w = unstaffed();
+    let (near, far, later) = (ankh_issue("5"), ankh_issue("6"), ankh_issue("100"));
+    w.apply(&sync_on(&later, Some("Later"), &[]));
+    make_ready(&mut w, "5", &[&later]);
+    make_ready(&mut w, "1", &[&near]);
+    assert_eq!(queued(&w), 0);
+    let chained = status(&w);
+    assert!(
+        chained.contains(
+            "Waiting\n  \
+             ankh#1 waiting on ankh#100 through ankh#5, out of scope \
+             (Later is not a milestone of watch)\n  \
+             ankh#5 waiting on ankh#100, out of scope (Later is not a milestone of watch)\n\
+             Agents\n"
+        ),
+        "{chained}"
+    );
+
+    // Longer chains name each issue on the way, and one that closes on itself
+    // still ends.
+    make_ready(&mut w, "6", &[&near]);
+    make_ready(&mut w, "2", &[&far]);
+    make_ready(&mut w, "3", &[&ankh_issue("2")]);
+    w.apply(&sync_on(&near, Some("First"), &[&ankh_issue("1"), &later]));
+    assert_eq!(queued(&w), 0);
+    let longer = status(&w);
+    assert!(
+        longer.contains("  ankh#2 waiting on ankh#100 through ankh#6 and ankh#5, out of scope"),
+        "{longer}"
+    );
+    assert!(
+        longer.contains(
+            "  ankh#3 waiting on ankh#100 through ankh#2, ankh#6 and ankh#5, out of scope"
+        ),
+        "{longer}"
+    );
+
+    // A cycle with nothing out of scope waits on itself too: each of its two
+    // issues names the other, and an issue that leads to it names the first of
+    // them it meets.
+    w.apply(&sync_on(&near, Some("First"), &[&ankh_issue("1")]));
+    assert_eq!(queued(&w), 0);
+    assert_eq!(
+        waits(&w),
+        [
+            wait("ankh#1", "ankh#5"),
+            wait("ankh#2", "ankh#5"),
+            wait("ankh#3", "ankh#5"),
+            wait("ankh#5", "ankh#1"),
+            wait("ankh#6", "ankh#5"),
+        ]
+    );
+    let cycle = status(&w);
+    assert!(
+        cycle.contains("  ankh#3 waiting on ankh#5 through ankh#2 and ankh#6, not done (ready)\n"),
+        "{cycle}"
+    );
+}
+
+/// The issues being worked on.
+fn working(w: &World) -> Vec<String> {
+    w.issues
+        .values()
+        .filter(|i| i.stage == Stage::Working)
+        .map(|i| i.id.to_string())
+        .collect()
+}
+
+/// The issues the Waiting section of `status` names.
+fn named(status: &str) -> BTreeSet<String> {
+    status
+        .split_once("\nWaiting\n")
+        .and_then(|(_, rest)| rest.split_once("\nAgents\n").or(Some((rest, ""))))
+        .map(|(section, _)| section)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_never_synced_dependency_keeps_a_ready_issue_out_of_the_queue() {
+    // An issue of a known project, two of its own (#149's merged pull request
+    // among them), and a name nothing matches; the world holds none of them.
+    let mut w = unstaffed();
+    w.apply(&project("klatch", "desert/klatch"));
+    let never = [
+        IssueId::new("klatch", "5"),
+        ankh_issue("999"),
+        ankh_issue("129"),
+        ankh_issue("nowhere#5"),
+    ];
+    for (n, on) in never.iter().enumerate() {
+        make_ready(&mut w, &(n + 1).to_string(), &[on]);
+    }
+    assert_eq!(queued(&w), 0);
+    assert_eq!(
+        waits(&w),
+        [
+            wait("ankh#1", "klatch#5"),
+            wait("ankh#2", "ankh#999"),
+            wait("ankh#3", "ankh#129"),
+            wait("ankh#4", "ankh#nowhere#5"),
+        ]
+    );
+    w.apply(&folder("f1", "ankh"));
+    assert_eq!(working(&w), Vec::<String>::new());
+    assert_eq!(w.folders[&FolderId::new("f1")].holder, None);
+    assert_eq!(queued(&w), 0);
+}
+
+#[test]
+fn the_status_names_a_never_synced_dependency() {
+    let mut w = unstaffed();
+    w.apply(&project("klatch", "desert/klatch"));
+    make_ready(&mut w, "1", &[&IssueId::new("klatch", "5")]);
+    make_ready(&mut w, "2", &[&ankh_issue("1")]);
+    let status = crate::text::text(&w, &Default::default());
+    for line in [
+        "  ankh#1 waiting on klatch#5, never synced\n",
+        "  ankh#2 waiting on klatch#5 through ankh#1, never synced\n",
+    ] {
+        assert!(status.contains(line), "{line}{status}");
+    }
+}
+
+#[test]
+fn a_chain_onto_a_never_synced_dependency_leaves_the_queue() {
+    // ankh#2 needs ankh#1, which is in scope and ready, and ankh#1 needs
+    // klatch#5, which the world never synced.
+    let mut w = unstaffed();
+    w.apply(&project("klatch", "desert/klatch"));
+    make_ready(&mut w, "1", &[&IssueId::new("klatch", "5")]);
+    make_ready(&mut w, "2", &[&ankh_issue("1")]);
+    assert_eq!(queued(&w), 0);
+    w.apply(&folder("f1", "ankh"));
+    assert_eq!(working(&w), Vec::<String>::new());
+    assert_eq!(
+        waits(&w),
+        [wait("ankh#1", "klatch#5"), wait("ankh#2", "klatch#5")]
+    );
+}
+
+#[test]
+fn eight_ready_issues_on_a_never_synced_dependency_start_an_investigator() {
+    let mut w = unstaffed();
+    w.apply(&project("klatch", "desert/klatch"));
+    let unsynced = IssueId::new("klatch", "5");
+    for key in 1..=8 {
+        make_ready(&mut w, &key.to_string(), &[&unsynced]);
+    }
+    assert_eq!(
+        w.investigation_events(0, true),
+        [Event::InvestigationStarted {
+            group: watch(),
+            agent: AgentId::new("investigator-1"),
+            at_ms: 0,
+        }]
+    );
+    let status = status(&w);
+    assert!(
+        status.contains("; 0 in its queue, investigates below 8"),
+        "{status}"
+    );
+    let lines: String = (1..=8)
+        .map(|key| format!("  ankh#{key} waiting on klatch#5, never synced\n"))
+        .collect();
+    assert!(
+        status.contains(&format!("Waiting\n{lines}Agents\n")),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_ready_issue_on_an_open_dependency_in_scope_waits() {
+    let mut w = unstaffed();
+    // ankh#7 takes the one work folder; ankh#6 waits for it, and for nothing else.
+    make_ready(&mut w, "7", &[]);
+    w.apply(&folder("f1", "ankh"));
+    make_ready(&mut w, "6", &[]);
+    let (seven, three, four) = (ankh_issue("7"), ankh_issue("3"), ankh_issue("4"));
+    make_ready(&mut w, "1", &[&seven]);
+    make_ready(&mut w, "2", &[&ankh_issue("1")]);
+    make_ready(&mut w, "3", &[&four]);
+    make_ready(&mut w, "4", &[&three]);
+    make_ready(&mut w, "5", &[&ankh_issue("6")]);
+    // One that names itself.
+    make_ready(&mut w, "10", &[&ankh_issue("10")]);
+    // On an issue that is refining and on one still new.
+    make_ready(&mut w, "8", &[&ankh_issue("80")]);
+    make_ready(&mut w, "9", &[&ankh_issue("90")]);
+    w.apply(&sync_on(&ankh_issue("80"), Some("First"), &[]));
+    w.apply(&sync_on(&ankh_issue("90"), Some("First"), &[]));
+    assert_eq!(w.issues[&seven].stage, Stage::Working);
+    assert_eq!(w.issues[&ankh_issue("80")].stage, Stage::Refining);
+    assert_eq!(w.issues[&ankh_issue("90")].stage, Stage::New);
+    assert_eq!(queued(&w), 3, "6, ready; 80, refining; 90, new");
+    let status = status(&w);
+    for line in [
+        "  ankh#1 waiting on ankh#7, not done (working)\n",
+        "  ankh#2 waiting on ankh#7 through ankh#1, not done (working)\n",
+        "  ankh#3 waiting on ankh#4, not done (ready)\n",
+        "  ankh#4 waiting on ankh#3, not done (ready)\n",
+        "  ankh#5 waiting on ankh#6, not done (ready)\n",
+        "  ankh#8 waiting on ankh#80, not done (refining)\n",
+        "  ankh#9 waiting on ankh#90, not done (new)\n",
+        "  ankh#10 waiting on ankh#10, not done (ready)\n",
+    ] {
+        assert!(status.contains(line), "{line}{status}");
+    }
+    assert_eq!(waits(&w).len(), 8, "{status}");
+}
+
+#[test]
+fn a_ready_issue_out_of_scope_says_so_under_waiting() {
+    let mut w = unstaffed();
+    make_ready(&mut w, "3", &[]);
+    assert_eq!(queued(&w), 1);
+    w.apply(&sync_on(&ankh_issue("3"), Some("Later"), &[]));
+    assert_eq!(queued(&w), 0);
+    let later = status(&w);
+    assert!(
+        later.contains("  ankh#3  ready, out of scope  issue 3"),
+        "{later}"
+    );
+    assert!(
+        later.contains(
+            "Waiting\n  ankh#3 waiting, out of scope (Later is not a milestone of watch)\nAgents\n"
+        ),
+        "{later}"
+    );
+
+    // With no milestone, and once the group no longer lists the project.
+    w.apply(&sync_on(&ankh_issue("3"), None, &[]));
+    let none = status(&w);
+    assert!(
+        none.contains("  ankh#3 waiting, out of scope (it has no milestone)\n"),
+        "{none}"
+    );
+    w.apply(&project("klatch", "desert/klatch"));
+    w.apply(&Event::GroupCreated {
+        group: watch(),
+        name: "Night watch".into(),
+        projects: vec![ProjectId::new("klatch")],
+        areas: Vec::new(),
+        milestones: Vec::new(),
+        refining_at_once: 1,
+        model: None,
+        queue_low: Some(8),
+        investigate_every: None,
+    });
+    let moved = status(&w);
+    assert!(
+        moved.contains("  ankh#3 waiting, out of scope (ankh is not a project of watch)\n"),
+        "{moved}"
+    );
+
+    // Another group that covers it takes it, and it waits no more.
+    w.apply(&Event::GroupCreated {
+        group: GroupId::new("guard"),
+        name: "Day watch".into(),
+        projects: vec![ankh()],
+        areas: Vec::new(),
+        milestones: Vec::new(),
+        refining_at_once: 1,
+        model: None,
+        queue_low: None,
+        investigate_every: None,
+    });
+    assert_eq!(
+        w.issues[&ankh_issue("3")].group,
+        Some(GroupId::new("guard"))
+    );
+    assert!(!status(&w).contains("Waiting"), "{}", status(&w));
+}
+
+#[test]
+fn every_ready_issue_starts_once_a_folder_is_free_or_says_why() {
+    // watch covers ankh and lancre in First; no group covers klatch. ankh has no
+    // work folder, and lancre#71 is being worked on in lancre's.
+    let (mut w, _) = World::replay(&[
+        project("ankh", "city/ankh"),
+        project("lancre", "ramtops/lancre"),
+        project("klatch", "desert/klatch"),
+        folder("l1", "lancre"),
+        Event::GroupCreated {
+            group: watch(),
+            name: "Night watch".into(),
+            projects: vec![ankh(), ProjectId::new("lancre")],
+            areas: Vec::new(),
+            milestones: vec![MilestoneId::new("First")],
+            refining_at_once: 1,
+            model: None,
+            queue_low: Some(8),
+            investigate_every: None,
+        },
+    ]);
+    let lancre = IssueId::new("lancre", "71");
+    w.apply(&sync_on(&lancre, Some("First"), &[]));
+    w.apply(&Event::PlanWritten {
+        issue: lancre.clone(),
+        plan: Plan::default(),
+    });
+    assert_eq!(w.issues[&lancre].stage, Stage::Working);
+    w.apply(&sync_on(&ankh_issue("100"), Some("Later"), &[]));
+    w.apply(&sync_on(&IssueId::new("klatch", "3"), None, &[]));
+    w.apply(&Event::IssueSynced {
+        issue: ankh_issue("50"),
+        title: "issue 50".into(),
+        milestone: Some(MilestoneId::new("First")),
+        depends_on: vec![],
+        order: 50,
+        closed: true,
+    });
+    // One ready issue of each shape, by what it depends on.
+    let shapes: [(&str, Option<IssueId>); 11] = [
+        ("1", None),
+        ("2", Some(ankh_issue("50"))),
+        ("3", Some(ankh_issue("73"))),
+        ("4", Some(ankh_issue("72"))),
+        ("5", Some(ankh_issue("1"))),
+        ("6", Some(lancre.clone())),
+        ("7", Some(IssueId::new("klatch", "3"))),
+        ("8", Some(ankh_issue("100"))),
+        ("9", Some(ankh_issue("nowhere#5"))),
+        ("10", Some(IssueId::new("klatch", "5"))),
+        ("11", Some(ankh_issue("999"))),
+    ];
+    for (key, on) in &shapes {
+        make_ready(&mut w, key, &on.iter().collect::<Vec<_>>());
+    }
+    // A chain through each of them, a cycle of two, and one out of scope.
+    for (key, _) in &shapes {
+        make_ready(&mut w, &format!("2{key}"), &[&ankh_issue(key)]);
+    }
+    make_ready(&mut w, "40", &[&ankh_issue("41")]);
+    make_ready(&mut w, "41", &[&ankh_issue("40")]);
+    make_ready(&mut w, "42", &[]);
+    w.apply(&sync_on(&ankh_issue("42"), Some("Later"), &[]));
+    make_ready(&mut w, "43", &[&ankh_issue("42")]);
+    // Its dependencies that are refining and new come last: watch refines one at
+    // a time.
+    w.apply(&sync_on(&ankh_issue("72"), Some("First"), &[]));
+    w.apply(&sync_on(&ankh_issue("73"), Some("First"), &[]));
+    assert_eq!(w.issues[&ankh_issue("72")].stage, Stage::Refining);
+    assert_eq!(w.issues[&ankh_issue("73")].stage, Stage::New);
+
+    let ready: BTreeSet<String> = w
+        .issues
+        .values()
+        .filter(|i| i.stage == Stage::Ready)
+        .map(|i| i.id.to_string())
+        .collect();
+    assert_eq!(ready.len(), 2 * shapes.len() + 4);
+    assert!(!w.folders.values().any(|f| f.project == ankh()));
+    let before = named(&status(&w));
+    let counted = queued(&w);
+
+    for n in 0..ready.len() {
+        w.apply(&folder(&format!("f{n}"), "ankh"));
+    }
+    let still: BTreeSet<String> = w
+        .issues
+        .values()
+        .filter(|i| i.stage == Stage::Ready)
+        .map(|i| i.id.to_string())
+        .collect();
+    let started: BTreeSet<String> = ready.difference(&still).cloned().collect();
+    assert_eq!(
+        started,
+        BTreeSet::from(["ankh#1".to_string(), "ankh#2".to_string()]),
+        "the one with no dependency and the one whose dependency is done"
+    );
+    assert_eq!(before, still, "{}", status(&w));
+    assert_eq!(
+        counted,
+        started.len() + 2,
+        "and ankh#72, refining, and ankh#73, new"
+    );
 }
 
 #[test]
@@ -398,6 +1105,7 @@ fn no_investigator_within_investigate_every_of_the_last_end() {
 fn one_starts_again_after_investigate_every_when_still_short() {
     let mut w = short(None);
     tick(&mut w, 0);
+    investigated(&mut w);
     end(&mut w, 10 * MINUTE);
     let started = tick(&mut w, 130 * MINUTE);
     assert_eq!(
@@ -413,6 +1121,62 @@ fn one_starts_again_after_investigate_every_when_still_short() {
         Some(0),
         "the last one's start"
     );
+}
+
+#[test]
+fn an_unfinished_investigation_keeps_the_window_of_the_last_finished_one() {
+    let mut w = short(None);
+    next(&mut w, 0);
+    investigated(&mut w);
+    end(&mut w, 10 * MINUTE);
+    next(&mut w, 130 * MINUTE);
+    end_session(&mut w, 140 * MINUTE, true);
+    let third = next(&mut w, 260 * MINUTE);
+    assert_eq!(third.agent, AgentId::new("investigator-3"));
+    assert_eq!(w.investigations[&watch()].since_ms, Some(0));
+    assert_eq!(
+        window_line(&third),
+        "3. The pull requests merged since 1970-01-01 00:00 UTC, when the group's last \
+         finished investigation started, for defects you can show in that work."
+    );
+}
+
+#[test]
+fn two_unfinished_investigations_in_a_row_do_not_move_the_window() {
+    let mut w = short(None);
+    next(&mut w, 0);
+    investigated(&mut w);
+    end(&mut w, 10 * MINUTE);
+    next(&mut w, 130 * MINUTE);
+    end_session(&mut w, 140 * MINUTE, true);
+    next(&mut w, 260 * MINUTE);
+    // Stopped, as an idle investigator is.
+    end_session(&mut w, 270 * MINUTE, false);
+    let fourth = next(&mut w, 390 * MINUTE);
+    assert_eq!(fourth.agent, AgentId::new("investigator-4"));
+    assert_eq!(w.investigations[&watch()].since_ms, Some(0));
+    assert_eq!(
+        window_line(&fourth),
+        "3. The pull requests merged since 1970-01-01 00:00 UTC, when the group's last \
+         finished investigation started, for defects you can show in that work."
+    );
+}
+
+#[test]
+fn an_unfinished_first_investigation_keeps_its_seven_days() {
+    // 2026-11-27 13:05 UTC.
+    let first = 1_795_784_700_000;
+    let line = "3. The pull requests merged since 2026-11-20 13:05 UTC, 7 days before the \
+                group's first investigation started, as none has finished yet, for defects you \
+                can show in that work.";
+    let mut w = short(None);
+    next(&mut w, first);
+    end(&mut w, first + 10 * MINUTE);
+    let second = next(&mut w, first + 130 * MINUTE);
+    assert_eq!(window_line(&second), line);
+    end(&mut w, first + 140 * MINUTE);
+    let third = next(&mut w, first + 260 * MINUTE);
+    assert_eq!(window_line(&third), line);
 }
 
 #[test]
@@ -499,6 +1263,7 @@ fn an_ended_investigator_ends_the_investigation() {
     w.apply(&Event::AgentChanged {
         agent: AgentId::new("investigator-1"),
         state: AgentState::Ended,
+        lost: false,
     });
     assert_eq!(
         w.investigation_events(7, false),
@@ -574,6 +1339,8 @@ fn investigating() -> World {
         machine: MachineId::new("morpork"),
         folder: None,
         secret_digest: None,
+        runtime: None,
+        model: None,
     });
     w
 }
@@ -878,11 +1645,14 @@ fn an_issue_closed_after_its_pull_request_merged_is_not_a_persons_close() {
             issue: issue.clone(),
             pull: Some("57".into()),
             pulls: Default::default(),
+            replies: Vec::new(),
         },
         Event::ReviewFinished {
             issue: issue.clone(),
             round: 1,
             verdict: Verdict::Approve,
+            failed: None,
+            open: None,
         },
         Event::ChecksFinished {
             issue: issue.clone(),
@@ -935,6 +1705,7 @@ fn a_person_closed_issue_stays_refused_in_later_investigations() {
     let mut w = short(None);
     close_by_person(&mut w, "ankh", "3", "Wind the clock", 3);
     tick(&mut w, 0);
+    investigated(&mut w);
     end(&mut w, 10 * MINUTE);
     let started = tick(&mut w, 130 * MINUTE);
     let [second] = started.as_slice() else {

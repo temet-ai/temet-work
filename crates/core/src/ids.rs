@@ -73,6 +73,13 @@ impl IssueId {
             key: key.into(),
         }
     }
+
+    /// For a dependency naming a repository that no project or area matched when
+    /// its issue was synced, that name and number as the text writes them: the
+    /// tracker keeps them whole as the key (`nowhere#5`). No sync looks it up.
+    pub fn unmatched(&self) -> Option<&str> {
+        self.key.contains('#').then_some(self.key.as_str())
+    }
 }
 
 impl fmt::Display for IssueId {

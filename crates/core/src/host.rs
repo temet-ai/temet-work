@@ -4,8 +4,10 @@
 //!
 //! Work runs depth first: what an effect leads to is handled before the next
 //! effect, so an agent started by one effect is known before the next one is
-//! numbered.
+//! numbered. Each event is applied at the time it is logged with, so the world
+//! knows when each issue last changed.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::Part;
@@ -81,6 +83,9 @@ const BLOCKED: &str = "blocked: ";
 /// How problems from an agent whose turn ended in an error are keyed.
 const ERRORED: &str = "errored: ";
 
+/// How problems from an issue a failed verify sent back are keyed.
+const VERIFY_FAILED: &str = "verify failed: ";
+
 /// The most events and effects one call handles before it stops, so a loop
 /// between parts cannot hang the daemon.
 pub const MAX_STEPS: usize = 10_000;
@@ -152,12 +157,63 @@ impl Host {
     /// A host over `world`, already built from the journal's events.
     pub fn new(mut world: World, parts: Vec<Box<dyn Part>>, journal: Box<dyn Journal>) -> Self {
         world.catalog = catalog(&parts);
-        Self {
+        let mut host = Self {
             world,
             parts,
             journal,
             problems: BTreeMap::new(),
+        };
+        host.put_addresses();
+        host.report_verify_failed();
+        host
+    }
+
+    /// Lists every issue a failed verify sent back and that is not done yet as
+    /// a problem: a change of it merged and failed the verify check. The line
+    /// says what a close in its tracker does now. Rebuilt after each event, so
+    /// it follows the issue's stage and goes when the issue is done.
+    fn report_verify_failed(&mut self) {
+        self.problems.retain(|k, _| !k.starts_with(VERIFY_FAILED));
+        for i in self.world.issues.values() {
+            if !i.verify_failed || i.stage == crate::model::Stage::Done {
+                continue;
+            }
+            // Finishing comes first: the close is not applied then, whether or
+            // not the reopen has happened.
+            let finish: Cow<str> = if i.finishing() {
+                format!(
+                    "it is {}, a stage where a close in its tracker is not applied",
+                    crate::text::stage(i.stage)
+                )
+                .into()
+            } else if i.reopen_due {
+                "once the daemon has reopened it in its tracker, closing it there finishes it"
+                    .into()
+            } else {
+                "closing it in its tracker finishes it".into()
+            };
+            self.problems.insert(
+                format!("{VERIFY_FAILED}{}", i.id),
+                format!(
+                    "the merged change of {} failed the verify check and is being fixed; {finish}",
+                    i.id
+                ),
+            );
         }
+    }
+
+    /// Puts in the world the web addresses the parts give for each project and
+    /// area; the first part to give one wins.
+    fn put_addresses(&mut self) {
+        let mut all: BTreeMap<crate::ids::ProjectId, crate::model::Addresses> = BTreeMap::new();
+        for part in &self.parts {
+            for (id, given) in part.addresses(&self.world) {
+                let a = all.entry(id).or_default();
+                a.issues = a.issues.take().or(given.issues);
+                a.code = a.code.take().or(given.code);
+            }
+        }
+        self.world.addresses = all;
     }
 
     /// The loop's state.
@@ -262,7 +318,7 @@ impl Host {
             match work {
                 Work::Event(e) => {
                     self.journal.append(now_ms, &e)?;
-                    let effects = self.world.apply(&e);
+                    let effects = self.world.apply_at(now_ms, &e);
                     stack.extend(effects.into_iter().rev().map(Work::Effect));
                 }
                 Work::Effect(effect) => match self.offer(&effect) {
@@ -282,12 +338,33 @@ impl Host {
                 },
             }
         }
+        self.report_verify_failed();
+        self.drop_stops_of_ended();
         Ok(())
+    }
+
+    /// Drops the problem of each failed stop whose agent has ended, whatever
+    /// ended it: the runner's later try, or its terminal found gone or unknown.
+    /// The line otherwise goes only when the same stop is carried out, which
+    /// no one asks for once the agent has ended.
+    fn drop_stops_of_ended(&mut self) {
+        let agents = &self.world.agents;
+        // A key names the agent last; the description is checked whole.
+        let of_ended = |key: &str| {
+            let id = key.rsplit(' ').next()?;
+            let a = agents.get(&crate::ids::AgentId::new(id))?;
+            let stop = Effect::StopAgent {
+                agent: a.id.clone(),
+            };
+            Some(a.state == AgentState::Ended && stop.describe() == key)
+        };
+        self.problems.retain(|key, _| of_ended(key) != Some(true));
     }
 
     /// Asks each part what it has seen and handles the events it reports, then
     /// starts the agents issues are missing. Returns how many events there were.
     pub fn tick(&mut self, now_ms: u64) -> Result<usize, String> {
+        self.put_addresses();
         let mut seen = Vec::new();
         for part in &mut self.parts {
             let polled = part.poll(&self.world, now_ms);

@@ -6,7 +6,9 @@
 //! test run, the real transport runs nothing.
 
 use serde_json::Value;
-use temet_work_tracker::{TrackedIssue, TrackedMilestone, Tracker, TrackerError, depends_on};
+use temet_work_tracker::{
+    TrackedIssue, TrackedMilestone, Tracker, TrackerError, depends_on, is_date,
+};
 
 /// Runs `gh` with arguments and returns what it printed.
 pub trait Transport: Send {
@@ -38,21 +40,45 @@ impl Transport for Cli {
 const LIMIT: usize = 1000;
 const LIMIT_ARG: &str = "1000";
 
+/// The host GitHub is on when `GH_HOST` names none.
+const GITHUB: &str = "github.com";
+
 /// The GitHub adapter.
 pub struct GitHub {
     transport: Box<dyn Transport>,
+    /// The host `gh` reaches, which the web addresses name.
+    host: String,
 }
 
 impl Default for GitHub {
+    /// Runs the real `gh`, on the host `GH_HOST` names when the daemon has it,
+    /// as `gh` does.
     fn default() -> Self {
-        Self::with(Box::new(Cli))
+        Self::with(Box::new(Cli)).host(&std::env::var("GH_HOST").unwrap_or_default())
     }
 }
 
 impl GitHub {
-    /// A GitHub tracker that runs `gh` through `transport`.
+    /// A GitHub tracker that runs `gh` through `transport`, on github.com.
     pub fn with(transport: Box<dyn Transport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            host: GITHUB.into(),
+        }
+    }
+
+    /// The same tracker on `host`, such as a GitHub Enterprise server: a name,
+    /// or an address whose scheme is dropped. An empty one leaves it as it was.
+    pub fn host(mut self, host: &str) -> Self {
+        let host = host
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        if !host.is_empty() {
+            self.host = host.to_string();
+        }
+        self
     }
 
     fn run(&mut self, args: &[&str]) -> Result<String, TrackerError> {
@@ -121,6 +147,13 @@ fn parse_milestones(jsonl: &str) -> Result<Vec<TrackedMilestone>, TrackerError> 
                     .unwrap_or_default()
                     .to_string(),
                 open: v.get("open").and_then(Value::as_u64).unwrap_or(0),
+                // GitHub gives a time (`2026-12-12T08:00:00Z`); the date is its day.
+                due: v
+                    .get("due")
+                    .and_then(Value::as_str)
+                    .and_then(|d| d.get(..10))
+                    .filter(|d| is_date(d))
+                    .map(String::from),
             })
         })
         .collect()
@@ -161,9 +194,13 @@ impl Tracker for GitHub {
             &path,
             "--paginate",
             "--jq",
-            ".[] | {title: .title, open: .open_issues}",
+            ".[] | {title: .title, open: .open_issues, due: .due_on}",
         ])?;
         parse_milestones(&out)
+    }
+
+    fn address(&self, project: &str) -> Option<String> {
+        Some(format!("https://{}/{project}/issues", self.host))
     }
 
     fn closed(&mut self, project: &str, key: &str) -> Result<bool, TrackerError> {
@@ -171,7 +208,8 @@ impl Tracker for GitHub {
         let v: Value = serde_json::from_str(&out)
             .map_err(|e| TrackerError::Other(format!("gh issue view: {e}")))?;
         match v.get("state").and_then(Value::as_str) {
-            Some("CLOSED") => Ok(true),
+            // `gh issue view` answers for a pull request's number too.
+            Some("CLOSED" | "MERGED") => Ok(true),
             Some(_) => Ok(false),
             None => Err(TrackerError::Other("gh issue view gave no state".into())),
         }
@@ -186,6 +224,14 @@ impl Tracker for GitHub {
         match self.run(&["issue", "close", key, "-R", project]) {
             // A pull request that said "Closes #N" closed it on merge.
             Err(TrackerError::Other(e)) if e.to_lowercase().contains("already closed") => Ok(()),
+            other => other.map(|_| ()),
+        }
+    }
+
+    fn reopen(&mut self, project: &str, key: &str) -> Result<(), TrackerError> {
+        match self.run(&["issue", "reopen", key, "-R", project]) {
+            // A person reopened it first, or no merge closed it.
+            Err(TrackerError::Other(e)) if e.to_lowercase().contains("already open") => Ok(()),
             other => other.map(|_| ()),
         }
     }
@@ -228,7 +274,8 @@ impl Tracker for GitHub {
 mod tests {
     use super::*;
 
-    /// Replays `gh` output recorded from temet-ai/radar on 26 November 2026.
+    /// Replays `gh` output recorded from temet-ai/radar on 26 November 2026;
+    /// its milestones with their due dates on 27 November 2026.
     struct Recorded;
 
     impl Transport for Recorded {
@@ -277,6 +324,49 @@ mod tests {
     }
 
     #[test]
+    fn a_milestones_due_date_is_the_day_of_github_due_on_and_none_without_one() {
+        let due = |jsonl: &str| -> Vec<(String, Option<String>)> {
+            parse_milestones(jsonl)
+                .expect("milestones")
+                .into_iter()
+                .map(|m| (m.title, m.due))
+                .collect()
+        };
+        assert_eq!(
+            due(include_str!("../tests/fixtures/radar-milestones.jsonl")),
+            [("Slack sign-in rework".to_string(), None)]
+        );
+        assert_eq!(
+            due(include_str!("../tests/fixtures/milestones-due.jsonl")),
+            [
+                ("The Clacks".to_string(), Some("2026-12-12".to_string())),
+                ("Snuff".to_string(), None)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_issues_address_is_on_github_or_the_host_gh_host_names() {
+        let gh = GitHub::with(Box::new(Recorded));
+        assert_eq!(
+            gh.address("ankh-morpork/watch").as_deref(),
+            Some("https://github.com/ankh-morpork/watch/issues")
+        );
+        for host in ["git.example.com", "https://git.example.com/"] {
+            let gh = GitHub::with(Box::new(Recorded)).host(host);
+            assert_eq!(
+                gh.address("ankh-morpork/watch").as_deref(),
+                Some("https://git.example.com/ankh-morpork/watch/issues")
+            );
+        }
+        let gh = GitHub::with(Box::new(Recorded)).host("");
+        assert_eq!(
+            gh.address("ankh-morpork/watch").as_deref(),
+            Some("https://github.com/ankh-morpork/watch/issues")
+        );
+    }
+
+    #[test]
     fn reads_number_title_milestone_and_order() {
         let mut gh = GitHub::with(Box::new(Recorded));
         let issues = gh.issues("temet-ai/radar").expect("recorded issues");
@@ -284,6 +374,30 @@ mod tests {
         assert_eq!(first.milestone.as_deref(), Some("Slack sign-in rework"));
         assert_eq!(first.order, 44);
         assert!(issues.iter().any(|i| i.milestone.is_none()));
+    }
+
+    /// Answers `issue view` with the state named by the key asked about.
+    struct States;
+
+    impl Transport for States {
+        fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            match args {
+                ["issue", "view", state, ..] => Ok(format!(r#"{{"state":"{state}"}}"#)),
+                _ => Err(format!("not expected: {args:?}")),
+            }
+        }
+    }
+
+    #[test]
+    fn a_merged_pull_request_counts_as_closed() {
+        let mut gh = GitHub::with(Box::new(States));
+        for (state, closed) in [("MERGED", true), ("CLOSED", true), ("OPEN", false)] {
+            assert_eq!(
+                gh.closed("ankh-morpork/watch", state),
+                Ok(closed),
+                "{state}"
+            );
+        }
     }
 
     /// The recorded output, with an issue filed through it listed afterwards as
@@ -385,6 +499,57 @@ mod tests {
         let mut none = GitHub::with(Box::new(Filing::default()));
         none.create("temet-ai/radar", "Mend the clock", "", None)
             .expect("created with no milestone");
+    }
+
+    /// The recorded output, with every `gh issue reopen` noted and answered as
+    /// gh answers: issue 12 is already open, and issue 19 may not be reopened.
+    #[derive(Clone, Default)]
+    struct Reopening {
+        sent: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl Transport for Reopening {
+        fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            if !args.starts_with(&["issue", "reopen"]) {
+                return Recorded.gh(args);
+            }
+            self.sent
+                .lock()
+                .map_err(|e| e.to_string())?
+                .push(args.iter().map(ToString::to_string).collect());
+            match args.get(2).copied() {
+                Some("12") => {
+                    Err("! Issue temet-ai/radar#12 (Mend the clock) is already open".into())
+                }
+                Some("19") => Err("HTTP 403: Resource not accessible by integration".into()),
+                _ => Ok(String::new()),
+            }
+        }
+    }
+
+    #[test]
+    fn reopens_with_gh_and_counts_an_issue_already_open_as_reopened() {
+        let reopening = Reopening::default();
+        let mut gh = GitHub::with(Box::new(reopening.clone()));
+        assert_eq!(gh.reopen("temet-ai/radar", "44"), Ok(()));
+        assert_eq!(
+            reopening
+                .sent
+                .lock()
+                .expect("lock")
+                .last()
+                .map(Vec::as_slice),
+            Some(
+                ["issue", "reopen", "44", "-R", "temet-ai/radar"]
+                    .map(String::from)
+                    .as_slice()
+            )
+        );
+        assert_eq!(gh.reopen("temet-ai/radar", "12"), Ok(()), "already open");
+        assert!(matches!(
+            gh.reopen("temet-ai/radar", "19"),
+            Err(TrackerError::Denied(_))
+        ));
     }
 
     #[test]

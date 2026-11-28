@@ -133,6 +133,14 @@ fn read_settings(table: &toml::Table, scope: &Scope, out: &mut Wanted) -> Result
         }
         Ok::<(), String>(())
     };
+    // A setting at a level that never reads it is refused under the level's own
+    // table, whether it is in that table or in a role's. A key that is no setting
+    // is refused where it is read.
+    let level_reads = |key: &str| match settings::spec(key) {
+        Ok(_) => settings::check_level(key, scope.level())
+            .map_err(|e| format!("{}: {e}", table_name(scope, None, ""))),
+        Err(_) => Ok(()),
+    };
     for (key, value) in table {
         if let toml::Value::Table(inner) = value
             && key != "model"
@@ -146,12 +154,14 @@ fn read_settings(table: &toml::Table, scope: &Scope, out: &mut Wanted) -> Result
             })?;
             let role_table = table_name(scope, Some(role), "");
             for (key, value) in inner {
+                level_reads(key)?;
                 settings::check_role(key, "role table")
                     .map_err(|e| format!("{role_table}: {e}"))?;
                 read(Some(role), key, value)?;
             }
             continue;
         }
+        level_reads(key)?;
         read(None, key, value)?;
     }
     Ok(())
@@ -1574,6 +1584,52 @@ model = "sonnet"
         }
         Config::parse(&format!("[settings.reviewer]\nmodel = \"opus\"\n{TODAY}"))
             .expect("the model is read per role");
+    }
+
+    #[test]
+    fn a_milestone_table_refuses_a_setting_no_milestone_reads() {
+        let milestone = "[[milestone]]\nof = \"radar\"\nname = \"Clocks\"\n";
+        let area = "[[area]]\nid = \"guild\"\nprojects = [\"radar\"]\n";
+        for (key, line) in [
+            ("sync_every", "sync_every = 7"),
+            ("investigate", "investigate = \"the clock tower\""),
+        ] {
+            for table in ["[milestone.settings]", "[milestone.settings.reviewer]"] {
+                let text = format!("{TODAY}\n{milestone}{table}\n{line}\n");
+                let why = Config::parse(&text).expect_err(table);
+                assert_eq!(
+                    why,
+                    format!(
+                        "[milestone.settings] of radar:Clocks: {key} is not read at the \
+                         milestone level, so a value there would have no effect; the levels \
+                         that read it are: project, area, global"
+                    )
+                );
+            }
+            // The same key at each level of the file that reads it.
+            let global = format!("[settings]\n{line}\n{TODAY}");
+            let project = TODAY.replace(
+                "ci = false\n",
+                &format!("ci = false\n[project.settings]\n{line}\n"),
+            );
+            let in_area = format!("{TODAY}\n{area}[area.settings]\n{line}\n");
+            for (scope, text) in [
+                (Scope::Global, global),
+                (Scope::Project(ProjectId::new("radar")), project),
+                (Scope::Area(ProjectId::new("guild")), in_area),
+            ] {
+                let config = Config::parse(&text).expect("a level that reads it");
+                let events = config.events(&World::default());
+                assert!(
+                    events.iter().any(|e| matches!(
+                        e,
+                        Event::SettingSet { scope: at, key: k, by, .. }
+                            if *at == scope && k == key && by == FILE
+                    )),
+                    "{key} at {scope}: {events:?}"
+                );
+            }
+        }
     }
 
     #[test]

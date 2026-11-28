@@ -144,7 +144,18 @@ A group takes its projects' open issues in milestone order, then in the tracker'
 It refines `refining_at_once` issues at a time. It starts an author on a refined issue
 when one of the project's folders is free (on the issue's `machine`, when that setting
 names one) and every issue in the issue's "Depends on" lines is done. A project with two
-folders has at most two authors working at once.
+folders has at most two authors working at once. A folder whose issue has merged or been
+closed is not free while that issue's author still runs, as when its stop failed.
+
+A merged pull request named in a "Depends on" line counts as done. In such a line, `#491` is
+number 491 of the same project. An issue of another project or area has that project's or
+area's id, or its tracker's name for it, before the number: `klatch#4` or `owner/repo#4`.
+For a dependency the daemon has not synced, a sync asks the tracker of its project or area
+whether it is closed. When no configured tracker can be asked about it, or the tracker answers
+with an error, `temet-work status` lists the dependency under Problems with the reason, and
+the issue waits. The dependency is also listed under Problems when the tracker says it is open
+but a sync of its project or area, once one has worked, does not list it, as GitHub lists no
+pull request among the issues. The daemon then never syncs it, and the issue waits on it.
 
 An issue leaves a group's scope when the group no longer lists its milestone, project or
 area, because the issue moved or the group changed. An agent already working on it
@@ -170,25 +181,72 @@ not refined again.
 A group's work queue is the refining, ready and new issues in its scope (its milestones,
 projects and areas): those it is refining or has refined and not started, and those no group
 has taken yet. An issue moved out of them does not hold off an investigator, and counts again
-once it is back. When the queue holds fewer than `queue_low` issues, the daemon starts one
-investigator for the group. Left out, `queue_low` is twice the work folders of the group's
-projects and of the projects in its areas, or 2 when they have none; 0 starts no
-investigator. The investigator holds no work folder and changes no file: it runs in a
-free folder of the group's first project, or in one an author holds when none is free. It
-reads each project's docs for planned work that is not built, the open issues, and the pull
-requests merged since the group's last investigation started (the last 7 days for its
-first), and files an issue for each planned item no open issue covers and for each defect
-it can show (`temet-work file`, `docs/commands.md`). Each goes in the last milestone of the
-group's list unless it names another the group takes, and is in the loop as soon as it is
-filed. A project's `investigate` setting adds lines to the investigator's brief
-(`docs/settings.md`). Closing an issue is how a person says no to it: the brief lists the
-issues a person closed in the group's projects and areas, and the investigator files none of
-them again. The list holds issues the daemon saw open while syncing. A close in the tracker
-counts as a person's unless the daemon made it after verifying the issue, or one of the
-issue's pull requests had merged before it, since a pull request can close its issue as it
-merges. So a person's own close after such a merge does not count either, and the issue may
-be filed again; reopening the issue clears the merge. A person who wants a listed issue
-built reopens it.
+once it is back. Refining and new issues count whatever they depend on. A ready issue counts
+only while it would start once a work folder is free, even in a project with none yet, decided
+by the same rule that starts its author: its group covers it and every issue in its "Depends
+on" lines is done.
+`temet-work status` lists each ready issue that would not start under Waiting, with a line for
+each reason:
+
+- `radar#44 waiting on radar#51, never synced`: the daemon holds no issue by that name, in the
+  issue's own project or another, so nothing says it is done.
+- `radar#44 waiting on radar#51, out of scope (Later is not a milestone of core)`: the
+  dependency is open and in a milestone the group does not take, even when another group takes
+  it. The brackets say `no group covers it` when no group covers the dependency at all. A
+  dependency on a repository that no project or area matches is one no group covers: no tracker
+  is asked about it, and the line shows it as the issue's text writes it, such as `nowhere#5`.
+- `radar#44 waiting on radar#51, not done (working)`: the dependency is open and in scope, at
+  the stage in the brackets. It counts in its own place while it is new, refining or ready.
+- `radar#44 waiting, out of scope (Later is not a milestone of core)`: the group no longer
+  covers the issue itself, and no other group does. The brackets name what the group no longer
+  lists: the milestone, the project or area, or, for an issue with no milestone, `it has no
+  milestone`.
+
+An open dependency in scope is followed to its own dependencies, and the line names the one
+where that walk ends: one whose own open dependencies all lead back to it, as in a cycle,
+where each of two issues names the other. `through radar#47` names the issues between when
+radar#44 reaches it through radar#47. The issue counts again once nothing holds it: the
+dependency is done or back in scope, its "Depends on" line is gone, or the issue is back in its
+group's lists.
+
+When the queue holds fewer than `queue_low` issues, the daemon starts one investigator for
+the group. Left out, `queue_low` is twice the work folders of the group's projects and of
+the projects in its areas, or 2 when they have none; 0 starts no investigator. The
+investigator holds no work folder and changes no file: it runs in a free folder of the
+group's first project, or in one an author holds when none is free. It reads each project's
+docs for planned work that is not built, the open issues, and the pull requests merged since
+the group's last finished investigation started: one is finished when its investigator ran
+`temet-work investigated`. While none has finished, it reads those merged in the 7 days
+before the group's first investigation started. It files an issue for each planned item no
+open issue covers and for each defect it can show (`temet-work file`, `docs/commands.md`).
+It reads docs and code at the current head of each repository's default branch, not as a
+checkout's files stand: it fetches, then reads with `git show` or in a separate checkout
+outside the checkouts its brief names and the folder it runs in. Each issue it files goes in
+the last milestone of the group's list unless it names another the group takes, and is in
+the loop as soon as it is filed. A project's `investigate` setting adds lines to the
+investigator's brief (`docs/settings.md`). Closing an issue is how a person says no to it:
+the brief lists the issues a person closed in the group's projects and areas, and the
+investigator files none of them again. The list holds issues the daemon saw open while
+syncing. A close in the tracker counts as a person's unless the daemon made it after
+verifying the issue, or one of the issue's pull requests had merged before it, since a pull
+request can close its issue as it merges. For the same reason the daemon ignores a close
+while the issue merges, deploys or is verified. Reopening a done issue clears the merge. A
+person who wants a listed issue built reopens it.
+
+When the verify check fails, the issue goes back to its author to be fixed, and the daemon
+reopens it in its tracker, since the merge may have closed it there: GitHub through
+`gh issue reopen`, Jira through the first transition out of the Done status category. It
+posts no comment. It syncs the issue's project at once to do this, and tries again at each
+sync until a sync lists the issue as open. A failed reopen, such as a Jira workflow with no
+transition out of Done, is listed under Problems with the tracker's error, and the daemon
+ignores a close of the issue until the reopen happens. Meanwhile `temet-work issue` shows the
+text from the last sync that listed the issue. A sync that lists the issue as open counts as
+the reopen, whoever reopened it. From then on a close in the tracker is a person's: it
+finishes the issue, stops its agents and frees its work folders, and the investigator does not
+file it again. While the fix merges, deploys or is verified, and once one of its pull
+requests has merged, the daemon ignores a close. Until the issue is done,
+`temet-work status` and the app list it under Problems with what a close does now. Where the
+daemon ignores one, the line gives the issue's stage and says that a close is not applied.
 
 The investigation ends when the investigator runs `temet-work investigated GROUP` or its
 session ends. An idle investigator is reminded and then stopped after `remind_after` and
@@ -224,7 +282,9 @@ file behaves as before. A group's `model` is bound to the file's global runtime 
 stops the start; under a project on another runtime, that project's agents run their
 runtime's default. A key the
 daemon does not know is an error naming the key, and so is a key in a role's table that
-takes no role (`docs/settings.md`, Roles). A value that names a runtime or runner the
+takes no role (`docs/settings.md`, Roles). `sync_every` or `investigate` in a
+`[[milestone]]`'s settings stops the daemon at start, naming the levels that read it
+(`docs/settings.md`, "The settings"). A value that names a runtime or runner the
 build does not have, or a model for such a runtime, stops the daemon at start, with the
 ones it has listed, and so does a build with no default runtime or runner and no global
 value for it. What a person or an agent has set since is not overwritten by the file; a

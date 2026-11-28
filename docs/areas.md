@@ -63,7 +63,9 @@ Stage 2: an issue that changes several repositories.
   every one, and all or none, so two issues cannot each
   hold half of what the other needs. Its author starts in the first, and makes the branch
   and one pull request per repository itself, on one branch name; the daemon only holds the
-  folders.
+  folders. An author started again on the issue is given each pull request there is, is
+  told to open no other in a repository that has one, merged or not, and opens one in a
+  repository that has none.
 - `temet-work ready ISSUE REPO=NUMBER...` names the pull requests; a bare number works
   when the plan names one repository. `temet-work issue` lists each with its repository
   and whether it merged. Event logs from stage 1 replay: their single pull request is the
@@ -73,13 +75,17 @@ Stage 2: an issue that changes several repositories.
 - They merge in the plan's order, each after the previous repository's main pipeline has
   passed (with `ci = false` there, without waiting). A main branch that still shows no run
   for the merge at a later read is listed as a problem until it has one, and so is a GitLab
-  pipeline held at a manual job.
+  pipeline held at a manual job. Before the merge, a
+  pull request in review that still shows no run at a later read, while its repository's
+  `ci` is true, is listed as a problem until it has one.
 - Deploy and verify run once, after the last merge. The folders are released together,
-  then or when the issue is closed.
+  then or when the issue is closed. None goes to another issue's author until the issue's
+  author has ended, since it held every one of them.
 - Merged pull requests are recorded per repository, so a restart or a refused merge
   part-way never merges one twice. Nothing is reverted: the author hears what merged and
   what cannot, and fixes forward. To change a repository that already merged, the author
   opens a new pull request there and names it with `ready`; it merges in its turn.
+  An author started again on the issue is told to open none there.
 - Once one has merged, closing the issue in the tracker no longer drops the rest, since a
   pull request that closes its issue on merge would otherwise do so.
 

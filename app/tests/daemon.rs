@@ -1,6 +1,11 @@
 //! The daemon entity against a Unix socket each test serves on a thread, in a temp folder of its
-//! own. The waits between asks run on gpui's fake clock, and no test opens a window. The core
-//! holds the real period and deadline; the durations written here are the tests' own.
+//! own. The waits between asks and an ask's deadline run on gpui's fake clock, and no test opens
+//! a window. The core holds the real period and deadline; the durations written here are the
+//! tests' own.
+//!
+//! The app reads the socket on a thread of its own, so a test waits in real time for an answer
+//! that comes, at most [`WAIT`], and never on gpui's parking, which adds the real time it parks
+//! to the fake clock. No assertion depends on a thread answering within a second.
 
 use std::cell::Cell;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -11,7 +16,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{AppContext, Entity, TestAppContext};
 use temet_work_app::daemon::{Daemon, Problem};
@@ -20,11 +25,12 @@ use temet_work_core::event::Event;
 use temet_work_core::ids::ProjectId;
 use temet_work_core::{Command, Reply, Request, View, World};
 
-/// A deadline short enough for a test to wait it out in real time.
-const SHORT: Duration = Duration::from_millis(20);
-
 /// A tick of the fake clock.
 const TICK: Duration = Duration::from_millis(1);
+
+/// The longest a test waits in real time for a thread, the socket's or the app's: far longer than
+/// either takes on a loaded machine. A test waits this long only when it is about to fail.
+const WAIT: Duration = Duration::from_secs(5);
 
 /// A folder of the test's own under the temp folder, made private and removed when the test
 /// ends. Its path stays short, since a socket's path has a limit of about a hundred bytes.
@@ -92,6 +98,8 @@ struct Socket {
     /// Requests read; counted before the answer is written, so an ask that has returned is
     /// always counted.
     asks: Arc<AtomicUsize>,
+    /// A message for each request read, sent once it is counted.
+    heard: mpsc::Receiver<()>,
     seen: mpsc::Receiver<Seen>,
     _folder: Folder,
 }
@@ -102,6 +110,7 @@ impl Socket {
         let path = folder.join("daemon.sock");
         let listener = UnixListener::bind(&path).expect("bind the socket");
         let asks = Arc::new(AtomicUsize::new(0));
+        let (hear, heard) = mpsc::channel();
         let (tx, seen) = mpsc::channel();
         let counted = asks.clone();
         std::thread::spawn(move || {
@@ -114,6 +123,7 @@ impl Socket {
                     continue;
                 }
                 counted.fetch_add(1, Ordering::SeqCst);
+                let _ = hear.send(());
                 let answer = answers[n.min(answers.len() - 1)].clone();
                 match answer {
                     Answer::Line(text) => {
@@ -135,6 +145,7 @@ impl Socket {
         Self {
             path,
             asks,
+            heard,
             seen,
             _folder: folder,
         }
@@ -144,18 +155,60 @@ impl Socket {
         self.asks.load(Ordering::SeqCst)
     }
 
+    /// Waits until the socket has read `n` requests.
+    fn heard(&self, n: usize) {
+        while self.asks() < n {
+            self.heard
+                .recv_timeout(WAIT)
+                .expect("the socket read a request");
+        }
+    }
+
     /// The next connection the socket finished with.
     fn next_seen(&self) -> Seen {
         self.seen
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(WAIT)
             .expect("the socket saw a connection")
     }
 }
 
-fn start(cx: &mut TestAppContext, path: PathBuf, deadline: Duration) -> Entity<Daemon> {
-    let daemon = cx.new(|cx| Daemon::at(path, deadline, cx));
+/// Makes the entity, which starts its first ask. The app's reading thread wakes the test's
+/// executor from outside it, which gpui's test executor allows only once parking is allowed;
+/// nothing here parks it.
+fn new(cx: &mut TestAppContext, path: PathBuf) -> Entity<Daemon> {
+    cx.executor().allow_parking();
+    cx.new(|cx| Daemon::at(path, cx))
+}
+
+fn start(cx: &mut TestAppContext, path: PathBuf) -> Entity<Daemon> {
+    let daemon = new(cx, path);
     cx.run_until_parked();
     daemon
+}
+
+/// Waits for the socket to finish with its next connection, then runs what the answer woke. The
+/// app hands its answer over before it closes the connection, so the entity has taken the answer
+/// when this returns.
+fn answered(cx: &mut TestAppContext, socket: &Socket) -> Seen {
+    let seen = socket.next_seen();
+    cx.run_until_parked();
+    seen
+}
+
+/// Runs what is ready until `done` holds. Between tries the test's thread parks, at most [`WAIT`]
+/// in all, and the app's reading thread unparks it when it wakes the executor. That parking is
+/// the thread's own, not gpui's, so the fake clock does not move.
+fn until(cx: &mut TestAppContext, done: impl Fn(&mut TestAppContext) -> bool) {
+    let end = Instant::now() + WAIT;
+    loop {
+        cx.run_until_parked();
+        if done(cx) {
+            return;
+        }
+        let left = end.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "not done within {WAIT:?}");
+        std::thread::park_timeout(left);
+    }
 }
 
 /// Moves the fake clock on and runs what that wakes.
@@ -178,14 +231,31 @@ fn state(
 fn holds_the_view_the_socket_sends(cx: &mut TestAppContext) {
     let sent = view("the clacks are down");
     let socket = Socket::serve(vec![view_reply(&sent)]);
-    let daemon = start(cx, socket.path.clone(), VIEW_DEADLINE);
+    let daemon = start(cx, socket.path.clone());
 
+    let seen = answered(cx, &socket);
     assert_eq!(state(cx, &daemon), (Some(sent), None, false));
-    let seen = socket.next_seen();
     assert!(seen.request.ends_with('\n'), "{:?}", seen.request);
     let request: Request = serde_json::from_str(&seen.request).expect("a request");
     assert_eq!(request, Request::new(None, Command::View));
     assert_eq!(seen.rest, "", "the ask sent more than one line");
+}
+
+/// The view a daemon from before milestones, checks and reviews (#130) sends, as the core's
+/// tests keep it.
+const OLDER_VIEW: &str = include_str!("../../crates/core/tests/fixtures/view-before-130.json");
+
+#[gpui::test]
+fn holds_the_view_an_older_daemon_sends(cx: &mut TestAppContext) {
+    let sent: serde_json::Value = serde_json::from_str(OLDER_VIEW).expect("json");
+    assert_eq!(sent.get("milestones"), None, "not an older view");
+    let reply = serde_json::json!({"reply": "view", "view": sent});
+    let socket = Socket::serve(vec![Answer::Line(reply.to_string())]);
+    let daemon = start(cx, socket.path.clone());
+
+    answered(cx, &socket);
+    let want: View = serde_json::from_str(OLDER_VIEW).expect("a view");
+    assert_eq!(state(cx, &daemon), (Some(want), None, false));
 }
 
 #[gpui::test]
@@ -194,7 +264,8 @@ fn no_socket(cx: &mut TestAppContext) {
 
     // No file at the path.
     let missing = folder.join("daemon.sock");
-    let daemon = start(cx, missing.clone(), VIEW_DEADLINE);
+    let daemon = start(cx, missing.clone());
+    until(cx, |cx| state(cx, &daemon).1.is_some());
     let want = Problem::NoSocket {
         path: missing.clone(),
     };
@@ -208,7 +279,8 @@ fn no_socket(cx: &mut TestAppContext) {
     let left = folder.join("left.sock");
     drop(UnixListener::bind(&left).expect("bind"));
     assert!(left.exists());
-    let daemon = start(cx, left.clone(), VIEW_DEADLINE);
+    let daemon = start(cx, left.clone());
+    until(cx, |cx| state(cx, &daemon).1.is_some());
     assert_eq!(
         state(cx, &daemon),
         (None, Some(Problem::NoSocket { path: left }), false)
@@ -219,8 +291,9 @@ fn no_socket(cx: &mut TestAppContext) {
 fn a_refusal_gives_its_reason(cx: &mut TestAppContext) {
     let why = "no daemon of this user answers at Pseudopolis Yard".to_string();
     let socket = Socket::serve(vec![line(&Reply::Refused { why: why.clone() })]);
-    let daemon = start(cx, socket.path.clone(), VIEW_DEADLINE);
+    let daemon = start(cx, socket.path.clone());
 
+    answered(cx, &socket);
     assert_eq!(
         state(cx, &daemon),
         (None, Some(Problem::Refused { why }), false)
@@ -229,6 +302,8 @@ fn a_refusal_gives_its_reason(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn an_unreadable_reply_says_why(cx: &mut TestAppContext) {
+    // A reply of a kind this build's core lacks, as a newer daemon sends: a problem, and the asks
+    // go on.
     let not_a_reply = r#"{"reply":"shrug"}"#;
     let parser = serde_json::from_str::<Reply>(not_a_reply)
         .expect_err("not a reply")
@@ -240,13 +315,15 @@ fn an_unreadable_reply_says_why(cx: &mut TestAppContext) {
         }),
         Answer::Close,
     ]);
-    let daemon = start(cx, socket.path.clone(), VIEW_DEADLINE);
+    let daemon = start(cx, socket.path.clone());
+    answered(cx, &socket);
     assert_eq!(
         state(cx, &daemon),
         (None, Some(Problem::Unreadable { why: parser }), false)
     );
 
     wait(cx, VIEW_PERIOD);
+    answered(cx, &socket);
     let (view, problem, _) = state(cx, &daemon);
     assert_eq!(view, None);
     let Some(Problem::Unreadable { why }) = problem else {
@@ -255,6 +332,7 @@ fn an_unreadable_reply_says_why(cx: &mut TestAppContext) {
     assert!(why.contains("watch#1 is ready"), "{why}");
 
     wait(cx, VIEW_PERIOD);
+    answered(cx, &socket);
     assert_eq!(
         state(cx, &daemon),
         (
@@ -282,28 +360,33 @@ fn a_good_reply_clears_the_stale_mark(cx: &mut TestAppContext) {
         line(&Reply::Refused { why: why.clone() }),
         view_reply(&second),
     ]);
-    let daemon = start(cx, socket.path.clone(), VIEW_DEADLINE);
+    let daemon = start(cx, socket.path.clone());
+    answered(cx, &socket);
     assert_eq!(state(cx, &daemon), (Some(first.clone()), None, false));
 
     wait(cx, VIEW_PERIOD);
+    answered(cx, &socket);
     assert_eq!(
         state(cx, &daemon),
         (Some(first), Some(Problem::Refused { why }), true)
     );
 
     wait(cx, VIEW_PERIOD);
+    answered(cx, &socket);
     assert_eq!(state(cx, &daemon), (Some(second), None, false));
 }
 
 #[gpui::test]
 fn asks_once_a_second_and_stops_when_dropped(cx: &mut TestAppContext) {
     let socket = Socket::serve(vec![view_reply(&view("the clacks are down"))]);
-    let daemon = start(cx, socket.path.clone(), VIEW_DEADLINE);
+    let daemon = start(cx, socket.path.clone());
+    answered(cx, &socket);
     assert_eq!(socket.asks(), 1, "it asks as soon as it is made");
 
     wait(cx, VIEW_PERIOD - TICK);
     assert_eq!(socket.asks(), 1, "before a second has passed");
     wait(cx, TICK);
+    answered(cx, &socket);
     assert_eq!(socket.asks(), 2, "once a second has passed");
 
     let weak = daemon.downgrade();
@@ -317,7 +400,7 @@ fn asks_once_a_second_and_stops_when_dropped(cx: &mut TestAppContext) {
 #[gpui::test]
 fn an_unchanged_view_does_not_notify(cx: &mut TestAppContext) {
     let socket = Socket::serve(vec![view_reply(&view("the clacks are down"))]);
-    let daemon = cx.new(|cx| Daemon::at(socket.path.clone(), VIEW_DEADLINE, cx));
+    let daemon = new(cx, socket.path.clone());
     let notified = Rc::new(Cell::new(0));
     let _observing = cx.update(|cx| {
         let notified = notified.clone();
@@ -325,8 +408,11 @@ fn an_unchanged_view_does_not_notify(cx: &mut TestAppContext) {
     });
 
     cx.run_until_parked();
+    answered(cx, &socket);
     wait(cx, VIEW_PERIOD);
+    answered(cx, &socket);
     wait(cx, VIEW_PERIOD);
+    answered(cx, &socket);
     assert_eq!(socket.asks(), 3);
     assert_eq!(
         notified.get(),
@@ -344,14 +430,32 @@ fn no_answer_in_time_marks_it_stale(cx: &mut TestAppContext) {
         Answer::Silent,
         view_reply(&second),
     ]);
-    let daemon = start(cx, socket.path.clone(), SHORT);
+    let daemon = start(cx, socket.path.clone());
+    answered(cx, &socket);
     assert_eq!(state(cx, &daemon), (Some(first.clone()), None, false));
 
+    // The second ask: the socket reads it and never answers. Its deadline passes on the fake
+    // clock alone; the read's own timeout, in real time, does not run out during the test. The
+    // test waits until the socket has read it, so the third ask is the socket's third connection
+    // and gets the third answer.
     wait(cx, VIEW_PERIOD);
-    assert_eq!(socket.asks(), 2);
+    socket.heard(2);
+    wait(cx, VIEW_DEADLINE - TICK);
     assert_eq!(
         state(cx, &daemon),
-        (Some(first), Some(Problem::NoAnswer { within: SHORT }), true)
+        (Some(first.clone()), None, false),
+        "before the deadline"
+    );
+    wait(cx, TICK);
+    assert_eq!(
+        state(cx, &daemon),
+        (
+            Some(first),
+            Some(Problem::NoAnswer {
+                within: VIEW_DEADLINE
+            }),
+            true
+        )
     );
     assert_eq!(
         Problem::NoAnswer {
@@ -362,5 +466,6 @@ fn no_answer_in_time_marks_it_stale(cx: &mut TestAppContext) {
     );
 
     wait(cx, VIEW_PERIOD);
+    answered(cx, &socket);
     assert_eq!(state(cx, &daemon), (Some(second), None, false));
 }

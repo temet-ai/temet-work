@@ -43,11 +43,15 @@ impl Transport for Cli {
 /// The GitLab adapter.
 pub struct GitLab {
     transport: Box<dyn Transport>,
+    /// The host `glab` reaches, which the web addresses name.
+    host: String,
 }
 
 impl Default for GitLab {
+    /// Runs the real `glab`, on the host `GITLAB_HOST` names when the daemon has
+    /// it, as `glab` does.
     fn default() -> Self {
-        Self::with(Box::new(Cli))
+        Self::with(Box::new(Cli)).host(&std::env::var("GITLAB_HOST").unwrap_or_default())
     }
 }
 
@@ -66,9 +70,26 @@ fn encode(repo: &str) -> String {
 }
 
 impl GitLab {
-    /// A GitLab code host that runs `glab` through `transport`.
+    /// A GitLab code host that runs `glab` through `transport`, on gitlab.com.
     pub fn with(transport: Box<dyn Transport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            host: "gitlab.com".into(),
+        }
+    }
+
+    /// The same code host on `host`: a name, or an address whose scheme is
+    /// dropped. An empty one leaves it as it was.
+    pub fn host(mut self, host: &str) -> Self {
+        let host = host
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        if !host.is_empty() {
+            self.host = host.to_string();
+        }
+        self
     }
 
     fn run(&mut self, args: &[&str]) -> Result<String, CodeHostError> {
@@ -208,6 +229,13 @@ impl CodeHost for GitLab {
             state,
             checks,
             conflicting: v.get("has_conflicts").and_then(Value::as_bool) == Some(true),
+            // Draft merge requests are not read yet.
+            draft: false,
+            branch: v
+                .get("source_branch")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         })
     }
 
@@ -235,6 +263,10 @@ impl CodeHost for GitLab {
         ];
         args.extend(flag);
         self.run(&args).map(|_| ())
+    }
+
+    fn address(&self, repo: &str) -> Option<String> {
+        Some(format!("https://{}/{repo}", self.host))
     }
 
     fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
@@ -360,12 +392,45 @@ mod tests {
     }
 
     #[test]
+    fn the_code_is_on_gitlab_or_the_host_gitlab_host_names() {
+        let at = |host: GitLab| host.address("ankh-morpork/watch/clacks");
+        assert_eq!(
+            at(GitLab::with(Box::new(Recorded))).as_deref(),
+            Some("https://gitlab.com/ankh-morpork/watch/clacks")
+        );
+        for host in ["git.example.com", "https://git.example.com/"] {
+            assert_eq!(
+                at(GitLab::with(Box::new(Recorded)).host(host)).as_deref(),
+                Some("https://git.example.com/ankh-morpork/watch/clacks")
+            );
+        }
+    }
+
+    #[test]
     fn passes_the_code_host_contract_on_recorded_output() {
         let mut host = GitLab::with(Box::new(Recorded));
         assert_eq!(
             temet_work_codehost::contract::check(&mut host, &ReadOnly),
             Ok(())
         );
+    }
+
+    #[test]
+    fn reads_a_pull_requests_branch() {
+        let mut host = GitLab::with(Box::new(Recorded));
+        assert_eq!(
+            host.pull(REPO, "7").expect("recorded").branch,
+            "night-watch"
+        );
+        let body = json!({"iid": 3, "state": "opened", "source_branch": "watch-12-night-shift"});
+        let mut host = GitLab::with(Box::new(Spy(Seen::default(), Ok(body.to_string()))));
+        assert_eq!(
+            host.pull(REPO, "3").expect("parses").branch,
+            "watch-12-night-shift"
+        );
+        let none = json!({"iid": 3, "state": "opened"});
+        let mut host = GitLab::with(Box::new(Spy(Seen::default(), Ok(none.to_string()))));
+        assert_eq!(host.pull(REPO, "3").expect("parses").branch, "");
     }
 
     #[test]

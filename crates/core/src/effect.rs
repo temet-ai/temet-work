@@ -96,6 +96,8 @@ pub enum Effect {
     Run {
         /// The agent. Boxed, so the effect stays small.
         launch: Box<Launch>,
+        /// The id of the runtime that made its program.
+        runtime: String,
         /// Its program.
         program: Program,
         /// A program run to its end on the agent's machine before its program

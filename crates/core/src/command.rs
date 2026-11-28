@@ -8,12 +8,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::brief::{MOST_POINTS, numbered, reply_flags};
 use crate::effect::Effect;
 use crate::event::{Event, Verdict};
 use crate::ids::{AgentId, DecisionId, GroupId, IssueId, MilestoneId, ProjectId, RuleId};
-use crate::model::{Decision, DecisionKind, Plan, Role, Rule, RuleState, Stage};
+use crate::model::{
+    CheckState, Cost, Decision, DecisionKind, Plan, Point, Role, Rule, RuleState, Stage,
+};
 use crate::settings::{self, Agents, Scope, Target};
-use crate::text::stage;
+use crate::text::{clean, stage};
 use crate::world::World;
 
 /// One command.
@@ -52,6 +55,11 @@ pub enum Command {
         /// for an issue that changes several repositories.
         #[serde(default)]
         pulls: std::collections::BTreeMap<crate::ids::ProjectId, String>,
+        /// The author's replies to the points of the block this ready answers
+        /// ([`crate::model::Issue::block_to_answer`]), one for each point, in
+        /// their order; none for any other ready.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replies: Vec<String>,
     },
     /// A reviewer's verdict on the round under review.
     Review {
@@ -59,6 +67,15 @@ pub enum Command {
         issue: IssueId,
         /// The verdict.
         verdict: Verdict,
+        /// On a block, the plan's checks that do not hold, counted from 1 in the
+        /// plan's order; every check left out counts as passed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        failed: Vec<usize>,
+        /// On a block after round 1, the points of the round before that are
+        /// still not dealt with, counted from 1 in its order: each stays open
+        /// and joins this block's points. Every point left out is resolved.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        open: Vec<usize>,
     },
     /// Gives a setting a value at one level, for a role or for every role.
     Set {
@@ -103,6 +120,31 @@ pub enum Command {
         approve: bool,
         /// Why, or what must change.
         reason: String,
+    },
+    /// An agent records a choice it made on the issue it works on, as a decision
+    /// a person can overturn later. The agent carries on at once; the reply
+    /// names the new decision. Every field may be missing here, so that the loop
+    /// refuses an incomplete choice with its reason, the same from the command
+    /// line, MCP and a raw socket request.
+    Choose {
+        /// The issue.
+        issue: IssueId,
+        /// What was decided, in a line.
+        #[serde(default)]
+        question: String,
+        /// The options weighed: at least two, each once.
+        #[serde(default)]
+        options: Vec<String>,
+        /// The option taken, as written among `options`.
+        #[serde(default)]
+        took: String,
+        /// Why it was taken.
+        #[serde(default)]
+        why: String,
+        /// What overturning it costs: `low`, `medium` or `high`; refused when
+        /// none is given.
+        #[serde(default)]
+        cost: Option<String>,
     },
     /// A person's overturn of a decision an agent made.
     Overturn {
@@ -171,7 +213,8 @@ impl Command {
             | Self::Ready { issue, .. }
             | Self::Review { issue, .. }
             | Self::Retry { issue }
-            | Self::Rule { issue, .. } => Some(issue),
+            | Self::Rule { issue, .. }
+            | Self::Choose { issue, .. } => Some(issue),
         }
     }
 }
@@ -217,6 +260,17 @@ impl std::fmt::Debug for Request {
 
 /// Who a decision is recorded as made by when a person makes it.
 pub const PERSON: &str = "person";
+
+/// What a reviewer's verdict names besides approve or block, as the daemon
+/// takes it.
+struct Judged {
+    /// The plan's checks that do not hold, counted from 1.
+    failed: Vec<usize>,
+    /// The points of the round before that stay open, counted from 1.
+    open: Vec<usize>,
+    /// Those points' text, in that order, for the block to end with.
+    kept: Vec<String>,
+}
 
 impl World {
     /// The events a command becomes, in the order they are applied: a plan's
@@ -337,6 +391,133 @@ impl World {
         }
     }
 
+    /// The author's replies `ready` sends for `issue`, trimmed, or why they are
+    /// refused. The first ready after a block
+    /// ([`crate::model::Issue::block_to_answer`]) carries exactly one reply for
+    /// each of its points, none of them empty, so every point it answers has its
+    /// reply on record; any other ready carries none.
+    fn replies(&self, issue: &IssueId, replies: &[String]) -> Result<Vec<String>, String> {
+        let replies: Vec<String> = replies
+            .iter()
+            .map(|r| clean(r).trim().to_string())
+            .collect();
+        let Some(block) = self.issues.get(issue).and_then(|i| i.block_to_answer()) else {
+            if replies.is_empty() {
+                return Ok(replies);
+            }
+            return Err(format!(
+                "{issue} has no review point to reply to: replies answer the points of the block \
+                 that sent the change back, once, with the first ready after it. Run temet-work \
+                 ready {issue} without --reply"
+            ));
+        };
+        if replies.len() == block.points.len() && !replies.iter().any(String::is_empty) {
+            return Ok(replies);
+        }
+        let got = if replies.iter().any(String::is_empty) {
+            "one of its replies is empty".to_string()
+        } else {
+            match replies.len() {
+                0 => "it has none".to_string(),
+                1 => "it has 1 reply".to_string(),
+                n => format!("it has {n} replies"),
+            }
+        };
+        Err(format!(
+            "this ready answers review round {round} of {issue}, so it needs exactly one reply for \
+             each of the round's points below, in this order, saying what you did about it or why \
+             you did not; {got}:\n{points}Run: temet-work ready {issue} {flags}\n\
+             In the MCP ready tool, give replies with one entry for each point, in this order.",
+            round = block.round,
+            points = numbered(&block.points),
+            flags = reply_flags(block.points.len()),
+        ))
+    }
+
+    /// The `review` command's `failed` and `open` for `issue` in review round
+    /// `round`, sorted and each named once, with the points they keep open; or
+    /// why they are refused: either on an approve, a check the plan does not
+    /// have, a point in round 1, or one the round before does not have.
+    fn judged(
+        &self,
+        issue: &IssueId,
+        round: u8,
+        verdict: &Verdict,
+        failed: &[usize],
+        open: &[usize],
+    ) -> Result<Judged, String> {
+        let tidy = |list: &[usize]| {
+            let mut list = list.to_vec();
+            list.sort_unstable();
+            list.dedup();
+            list
+        };
+        let (failed, open) = (tidy(failed), tidy(open));
+        if matches!(verdict, Verdict::Approve) {
+            if !failed.is_empty() {
+                return Err(format!(
+                    "an approve passes every check of {issue}; to name a check that does not hold \
+                     with --failed, block"
+                ));
+            }
+            if !open.is_empty() {
+                return Err(
+                    "an approve resolves every point of the round before; to keep a point of it \
+                     open with --open, block"
+                        .into(),
+                );
+            }
+        }
+        let i = self.issues.get(issue);
+        let checks = i
+            .and_then(|i| i.plan.as_ref())
+            .map_or(0, |p| p.checks.len());
+        if let Some(n) = failed.iter().find(|n| **n == 0 || **n > checks) {
+            return Err(match checks {
+                0 => format!("{issue}'s plan has no checks, so --failed {n} names none"),
+                1 => format!("{issue}'s plan has 1 check, numbered 1, not {n}"),
+                _ => format!("{issue}'s plan has checks 1 to {checks}, not {n}"),
+            });
+        }
+        let before = i.and_then(|i| i.round_before(round));
+        let kept = match (open.first(), before) {
+            (None, _) => Vec::new(),
+            (Some(_), _) if round <= 1 => {
+                return Err(format!(
+                    "review round 1 of {issue} has no round before it, so --open names no point; \
+                     put what is wrong in the block's points"
+                ));
+            }
+            (Some(n), None) => {
+                return Err(format!(
+                    "review round {round} of {issue} has no round before it on record, so --open \
+                     {n} names no point"
+                ));
+            }
+            (Some(_), Some(before)) => {
+                let count = before.points.len();
+                if let Some(n) = open.iter().find(|n| **n == 0 || **n > count) {
+                    return Err(match count {
+                        0 => format!(
+                            "review round {} of {issue} raised no points, so --open {n} names none",
+                            before.round
+                        ),
+                        1 => format!(
+                            "review round {} of {issue} has 1 point, numbered 1, not {n}",
+                            before.round
+                        ),
+                        _ => format!(
+                            "review round {} of {issue} has points 1 to {count}, not {n}",
+                            before.round
+                        ),
+                    });
+                }
+                open.iter().map(|n| before.points[n - 1].clone()).collect()
+            }
+        };
+        Ok(Judged { failed, open, kept })
+    }
+
     /// Why `by` may not run a step command of `role` on `issue`. An agent must
     /// have that role and work on that issue; a person may only rule.
     fn may_step(
@@ -377,6 +558,132 @@ impl World {
             "{step} for {issue} is the {owner}'s: {working}; you are {}",
             agent.id
         ))
+    }
+
+    /// The decision a `choose` from `by` records, or why it is refused. Only an
+    /// agent this daemon started may record a choice, and only on the issue it
+    /// works on, whatever its role. A person is refused: a person decides
+    /// through settings and overturns, and a choice recorded as a person's would
+    /// have that person overturn themselves. The question, the options and the
+    /// option taken are each kept on one line, so that `status` lists the
+    /// decision on one; the reason keeps its line feeds, as a ruling's does.
+    /// The point is the issue's merge, the only point the loop has.
+    fn choice(&self, by: Option<&AgentId>, command: &Command) -> Result<Decision, String> {
+        let Command::Choose {
+            issue,
+            question,
+            options,
+            took,
+            why,
+            cost,
+        } = command
+        else {
+            return Err(format!("{} is not choose", command.name()));
+        };
+        let Some(by) = by else {
+            return Err(format!(
+                "choose for {issue} is an agent's: a person decides through settings and \
+                 overturns, and a choice recorded as yours would have you overturn yourself"
+            ));
+        };
+        let Some(agent) = self.agents.get(by) else {
+            return Err(format!(
+                "choose for {issue} is an agent's that works on it: {by} is not an agent this \
+                 daemon started"
+            ));
+        };
+        if agent.issue.as_ref() != Some(issue) {
+            let holds = agent.issue.as_ref().map_or_else(
+                || "works on no issue".to_string(),
+                |i| format!("works on {i}"),
+            );
+            return Err(format!(
+                "choose for {issue} is for the agents that work on it: {by} {holds}; record a \
+                 choice on the issue you work on"
+            ));
+        }
+        if !self.issues.contains_key(issue) {
+            return Err(format!("there is no issue {issue}"));
+        }
+        let one_line = |text: &str| clean(text).split_whitespace().collect::<Vec<_>>().join(" ");
+        let question = one_line(question);
+        if question.is_empty() {
+            return Err("a choice needs its question: what you decided, in a line".into());
+        }
+        let options: Vec<String> = options.iter().map(|o| one_line(o)).collect();
+        if options.len() < 2 {
+            return Err(format!(
+                "a choice needs at least two options, since overturning it takes another; this \
+                 one has {}",
+                options.len()
+            ));
+        }
+        for (n, option) in options.iter().enumerate() {
+            if option.is_empty() {
+                return Err(format!(
+                    "option {} is empty; give each option its text",
+                    n + 1
+                ));
+            }
+            if let Some(first) = options[..n].iter().position(|o| o == option) {
+                return Err(format!(
+                    "option {} repeats option {} ({option}); give each option once",
+                    n + 1,
+                    first + 1
+                ));
+            }
+        }
+        let took = one_line(took);
+        let Some(chosen) = options.iter().position(|o| *o == took) else {
+            let listed: Vec<String> = options
+                .iter()
+                .enumerate()
+                .map(|(n, o)| format!("{}={o}", n + 1))
+                .collect();
+            return Err(format!(
+                "the option taken, \"{took}\", is not among the options ({}); give the one you \
+                 took as written there",
+                listed.join(", ")
+            ));
+        };
+        let reason = clean(why).trim().to_string();
+        if reason.is_empty() {
+            return Err("a choice needs its reason: why you took that option".into());
+        }
+        let given = cost.as_deref().map(str::trim);
+        let cost = match given.map(str::to_ascii_lowercase).as_deref() {
+            Some("low") => Cost::Low,
+            Some("medium") => Cost::Medium,
+            Some("high") => Cost::High,
+            None | Some("") => {
+                return Err(
+                    "a choice needs its cost to undo: low, medium or high, so that every \
+                     decision a person reads can be ordered by what overturning it costs"
+                        .into(),
+                );
+            }
+            Some(_) => {
+                return Err(format!(
+                    "{} is not a cost to undo; give low, medium or high",
+                    given.unwrap_or_default()
+                ));
+            }
+        };
+        let id = self.decisions.keys().next_back().map_or(1, |d| d.0 + 1);
+        Ok(Decision {
+            id: DecisionId(id),
+            issue: issue.clone(),
+            by: by.clone(),
+            kind: DecisionKind::Choice,
+            question,
+            options,
+            chosen,
+            reason,
+            overturned_to: None,
+            overturn_reason: String::new(),
+            cost: Some(cost),
+            point: Some(Point::Merge),
+        })
     }
 
     /// The investigator `by` names, with its group, when it runs its group's
@@ -553,6 +860,7 @@ impl World {
                     let role = settings::recorded_role(None, key, &who);
                     let at = self
                         .may_set(by, &task, None, key)
+                        .and_then(|()| settings::check_level(key, task.level()))
                         .and_then(|()| settings::check_value(key, value))
                         .and_then(|()| self.check_choice(key, value))
                         .and_then(|()| self.model_key(&task, role, key))
@@ -562,6 +870,12 @@ impl World {
                             "the plan's settings: {other} and {key} are both {at}; give one"
                         ));
                     }
+                }
+                // Stored with its controls dropped and its line breaks line feeds.
+                let mut plan = plan.clone();
+                for c in &mut plan.checks {
+                    c.done_when = clean(&c.done_when);
+                    c.proven_by = clean(&c.proven_by);
                 }
                 if let Some(c) = plan
                     .checks
@@ -573,15 +887,25 @@ impl World {
                         c.done_when, c.proven_by
                     ));
                 }
+                // No change has been checked yet.
+                for c in &mut plan.checks {
+                    c.state = Some(CheckState::Waiting);
+                }
                 Event::PlanWritten {
                     issue: issue.clone(),
-                    plan: plan.clone(),
+                    plan,
                 }
             }
-            Command::Ready { issue, pull, pulls } => {
+            Command::Ready {
+                issue,
+                pull,
+                pulls,
+                replies,
+            } => {
                 self.may_step(by, "ready", Role::Author, issue)?;
                 match at(issue)? {
                     Stage::Working | Stage::Fixing { .. } => {
+                        let replies = self.replies(issue, replies)?;
                         let (repos, known) = self.issues.get(issue).map_or_else(
                             || (Vec::new(), Vec::new()),
                             |i| (self.repos_of(i), i.pulls.keys().cloned().collect()),
@@ -630,12 +954,18 @@ impl World {
                             issue: issue.clone(),
                             pull: None,
                             pulls: named,
+                            replies,
                         }
                     }
                     now => return refuse(issue, now, "being worked on"),
                 }
             }
-            Command::Review { issue, verdict } => {
+            Command::Review {
+                issue,
+                verdict,
+                failed,
+                open,
+            } => {
                 self.may_step(by, "review", Role::Reviewer, issue)?;
                 let Stage::InReview { round } = at(issue)? else {
                     return refuse(issue, at(issue)?, "in review");
@@ -649,14 +979,48 @@ impl World {
                          review the whole change again once its message reaches you"
                     ));
                 }
-                if matches!(verdict, Verdict::Block { points } if points.iter().all(|p| p.trim().is_empty()))
-                {
-                    return Err("a block needs at least one point to fix".into());
-                }
+                let Judged { failed, open, kept } =
+                    self.judged(issue, round, verdict, failed, open)?;
+                let verdict = match verdict {
+                    Verdict::Approve => Verdict::Approve,
+                    // A point kept open joins the block, so the author fixes it
+                    // again and the next round judges it again.
+                    Verdict::Block { points } => {
+                        let mut points: Vec<String> = points
+                            .iter()
+                            .map(|p| clean(p))
+                            .filter(|p| !p.trim().is_empty())
+                            .collect();
+                        let new = points.len();
+                        points.extend(kept);
+                        if points.is_empty() {
+                            return Err(
+                                "a block needs at least one point to fix, or a point of the \
+                                 round before kept open with --open"
+                                    .into(),
+                            );
+                        }
+                        // The author replies to each point, and its brief spells
+                        // out one --reply for each.
+                        if points.len() > MOST_POINTS {
+                            return Err(format!(
+                                "a block takes at most {MOST_POINTS} points, new and kept open \
+                                 together, so that the author's brief can list one reply for \
+                                 each; this one has {} ({new} new, {} kept open): put related \
+                                 points together in one",
+                                points.len(),
+                                points.len() - new
+                            ));
+                        }
+                        Verdict::Block { points }
+                    }
+                };
                 Event::ReviewFinished {
                     issue: issue.clone(),
                     round,
-                    verdict: verdict.clone(),
+                    verdict,
+                    failed: Some(failed),
+                    open: Some(open),
                 }
             }
             Command::Settings { target, .. } => {
@@ -674,6 +1038,7 @@ impl World {
                     settings::check_role(key, "--role")?;
                 }
                 self.may_set(by, &scope, *role, key)?;
+                settings::check_level(key, scope.level())?;
                 let value = settings::parse_value(key, value)?;
                 self.check_choice(key, &value)?;
                 let by = by.map_or_else(|| PERSON.to_string(), |a| a.0.clone());
@@ -749,6 +1114,10 @@ impl World {
                     now => return refuse(issue, now, "deploying or verifying"),
                 }
             }
+            // A choice moves no work: its agent carries on at once.
+            Command::Choose { .. } => Event::DecisionMade {
+                decision: self.choice(by, command)?,
+            },
             Command::Overturn {
                 decision,
                 option,
@@ -783,6 +1152,7 @@ impl World {
                         decision.0
                     ));
                 }
+                let reason = clean(reason);
                 if reason.trim().is_empty() {
                     return Err("an overturn needs a reason".into());
                 }
@@ -824,10 +1194,12 @@ impl World {
                 let Stage::Arbitration { round } = at(issue)? else {
                     return refuse(issue, at(issue)?, "with the arbiter");
                 };
+                let reason = clean(reason);
                 if reason.trim().is_empty() {
                     return Err("a ruling needs a reason".into());
                 }
                 let id = self.decisions.keys().next_back().map_or(1, |d| d.0 + 1);
+                let (cost, point) = Decision::ruling_cost(*approve);
                 Event::DecisionMade {
                     decision: Decision {
                         id: DecisionId(id),
@@ -837,9 +1209,11 @@ impl World {
                         question: format!("Does {issue} merge after {round} review rounds?"),
                         options: vec!["merge".into(), "fix first".into()],
                         chosen: usize::from(!approve),
-                        reason: reason.clone(),
+                        reason,
                         overturned_to: None,
                         overturn_reason: String::new(),
+                        cost: Some(cost),
+                        point: Some(point),
                     },
                 }
             }
@@ -865,6 +1239,7 @@ mod tests {
             checks: vec![Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
+                state: None,
             }],
         }
     }
@@ -920,6 +1295,8 @@ mod tests {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: None,
+            runtime: None,
+            model: None,
         }
     }
 
@@ -933,6 +1310,22 @@ mod tests {
             _ => return None,
         };
         Some(AgentId::new(format!("{}-1", role.name())))
+    }
+
+    /// A ready from ankh#1's author, with a reply to each point of the block it
+    /// answers.
+    fn ready_replying(w: &World) -> Command {
+        let replies = w.issues[&issue()]
+            .block_to_answer()
+            .map_or_else(Vec::new, |b| {
+                b.points.iter().map(|p| format!("fixed: {p}")).collect()
+            });
+        Command::Ready {
+            issue: issue(),
+            pull: Some("57".into()),
+            pulls: Default::default(),
+            replies,
+        }
     }
 
     fn run(w: &mut World, command: Command) -> Result<(), String> {
@@ -969,12 +1362,15 @@ mod tests {
                 issue: issue(),
                 pull: Some("57".into()),
                 pulls: Default::default(),
+                replies: Vec::new(),
             },
         )
         .expect("ready");
         let approve = Command::Review {
             issue: issue(),
             verdict: Verdict::Approve,
+            failed: Vec::new(),
+            open: Vec::new(),
         };
         run(&mut w, approve).expect("review");
         w.apply(&Event::ChecksFinished {
@@ -995,7 +1391,8 @@ mod tests {
                 &Command::Ready {
                     issue: issue(),
                     pull: Some("57".into()),
-                    pulls: Default::default()
+                    pulls: Default::default(),
+                    replies: Vec::new(),
                 }
             ),
             Err("ankh#1 is refining, not being worked on".into())
@@ -1007,6 +1404,7 @@ mod tests {
                     issue: IssueId::new("ankh", "9"),
                     pull: None,
                     pulls: Default::default(),
+                    replies: Vec::new(),
                 }
             )
             .is_err()
@@ -1051,6 +1449,7 @@ mod tests {
             issue: issue(),
             pull: None,
             pulls: Default::default(),
+            replies: Vec::new(),
         };
         assert!(
             w.check(owner(&bare).as_ref(), &bare)
@@ -1062,6 +1461,7 @@ mod tests {
                 issue: issue(),
                 pull: Some("57".into()),
                 pulls: Default::default(),
+                replies: Vec::new(),
             },
         )
         .expect("ready");
@@ -1077,9 +1477,77 @@ mod tests {
             verdict: Verdict::Block {
                 points: vec!["no test for a stopped clock".into()],
             },
+            failed: Vec::new(),
+            open: Vec::new(),
         };
         run(&mut w, block).expect("block");
-        run(&mut w, bare).expect("the pull request is on record");
+        let Command::Ready {
+            issue, pull, pulls, ..
+        } = bare
+        else {
+            unreachable!("a ready")
+        };
+        let replied = Command::Ready {
+            issue,
+            pull,
+            pulls,
+            replies: vec!["added one that stops the clock".into()],
+        };
+        run(&mut w, replied).expect("the pull request is on record");
+    }
+
+    #[test]
+    fn ready_puts_the_authors_replies_on_the_review_round_its_fix_answers() {
+        let mut w = refining();
+        run(
+            &mut w,
+            Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        )
+        .expect("plan");
+        let ready = |replies: &[&str]| Command::Ready {
+            issue: issue(),
+            pull: Some("57".into()),
+            pulls: Default::default(),
+            replies: replies.iter().map(ToString::to_string).collect(),
+        };
+        let refused = |w: &World, replies: &[&str]| {
+            let command = ready(replies);
+            w.check(owner(&command).as_ref(), &command)
+                .expect_err("refused")
+        };
+        // The first pull request answers no block.
+        assert!(refused(&w, &["early"]).contains("no review point to reply to"));
+        run(&mut w, ready(&[])).expect("ready");
+        run(
+            &mut w,
+            Command::Review {
+                issue: issue(),
+                verdict: Verdict::Block {
+                    points: vec!["no test for a stopped clock".into()],
+                },
+                failed: Vec::new(),
+                open: Vec::new(),
+            },
+        )
+        .expect("block");
+        assert!(refused(&w, &[" "]).contains("one of its replies is empty"));
+        run(&mut w, ready(&[" added one that stops the clock "])).expect("ready");
+        assert_eq!(
+            w.issues[&issue()].reviews[0].replies,
+            ["added one that stops the clock"]
+        );
+        // A failed check sends it back for the same round: that fix answers no
+        // review round.
+        w.apply(&Event::ChecksFinished {
+            issue: issue(),
+            passed: false,
+            failing: vec!["lint".into()],
+        });
+        assert!(refused(&w, &["fixed the lint"]).contains("no review point to reply to"));
+        run(&mut w, ready(&[])).expect("ready without replies");
     }
 
     #[test]
@@ -1099,6 +1567,7 @@ mod tests {
                 issue: issue(),
                 pull: Some("57".into()),
                 pulls: Default::default(),
+                replies: Vec::new(),
             },
         )
         .expect("ready");
@@ -1106,6 +1575,8 @@ mod tests {
         let approve = Command::Review {
             issue: issue(),
             verdict: Verdict::Approve,
+            failed: Vec::new(),
+            open: Vec::new(),
         };
         let reviewer = AgentId::new("reviewer-1");
         assert!(
@@ -1148,6 +1619,7 @@ mod tests {
                     issue: issue(),
                     pull: Some("57".into()),
                     pulls: Default::default(),
+                    replies: Vec::new(),
                 },
             ),
             (
@@ -1156,6 +1628,8 @@ mod tests {
                 Command::Review {
                     issue: issue(),
                     verdict: Verdict::Approve,
+                    failed: Vec::new(),
+                    open: Vec::new(),
                 },
             ),
             (
@@ -1205,7 +1679,8 @@ mod tests {
                 &Command::Ready {
                     issue: issue(),
                     pull: Some("57".into()),
-                    pulls: Default::default()
+                    pulls: Default::default(),
+                    replies: Vec::new(),
                 }
             ),
             Err(
@@ -1236,10 +1711,13 @@ mod tests {
                 issue: issue(),
                 pull: Some("57".into()),
                 pulls: Default::default(),
+                replies: Vec::new(),
             },
             Command::Review {
                 issue: issue(),
                 verdict: Verdict::Approve,
+                failed: Vec::new(),
+                open: Vec::new(),
             },
         ] {
             let why = w.check(None, &command).expect_err("a person is refused");
@@ -1254,20 +1732,15 @@ mod tests {
         )
         .expect("plan");
         for _ in 0..3 {
-            run(
-                &mut w,
-                Command::Ready {
-                    issue: issue(),
-                    pull: Some("57".into()),
-                    pulls: Default::default(),
-                },
-            )
-            .expect("ready");
+            let ready = ready_replying(&w);
+            run(&mut w, ready).expect("ready");
             let block = Command::Review {
                 issue: issue(),
                 verdict: Verdict::Block {
                     points: vec!["x".into()],
                 },
+                failed: Vec::new(),
+                open: Vec::new(),
             };
             run(&mut w, block).expect("block");
         }
@@ -1296,20 +1769,15 @@ mod tests {
         )
         .expect("plan");
         for _ in 0..3 {
-            run(
-                &mut w,
-                Command::Ready {
-                    issue: issue(),
-                    pull: Some("57".into()),
-                    pulls: Default::default(),
-                },
-            )
-            .expect("ready");
+            let ready = ready_replying(&w);
+            run(&mut w, ready).expect("ready");
             let block = Command::Review {
                 issue: issue(),
                 verdict: Verdict::Block {
                     points: vec!["no test for a stopped clock".into()],
                 },
+                failed: Vec::new(),
+                open: Vec::new(),
             };
             run(&mut w, block).expect("block");
         }
@@ -1324,6 +1792,409 @@ mod tests {
         let d = &w.decisions[&DecisionId(1)];
         assert_eq!((d.by.0.as_str(), d.chosen), ("arbiter-1", 1));
         assert!(matches!(w.issues[&issue()].stage, Stage::Fixing { .. }));
+    }
+
+    /// Text holding the controls the intake drops and the line breaks it makes
+    /// line feeds.
+    pub(super) const NOISY: &str =
+        "a\u{b}b\u{c}c\u{8}d\u{1b}[1Ee\0f\u{7f}g\u{85}h\u{2028}i\u{2029}j\rk\r\nl\tm";
+
+    /// [`NOISY`] as it is stored: only line feeds and tabs are left.
+    pub(super) const STORED: &str = "abcd[1Eefg\nh\ni\nj\nk\nl\tm";
+
+    /// The event `command` from its owner becomes on `w`, applied to it.
+    fn logged(w: &mut World, command: &Command) -> Event {
+        if matches!(command, Command::Review { .. }) {
+            w.apply(&Event::Told { issue: issue() });
+        }
+        let event = w
+            .check(owner(command).as_ref(), command)
+            .expect("accepted")
+            .expect("an event");
+        w.apply(&event);
+        event
+    }
+
+    fn block(points: &[&str]) -> Command {
+        Command::Review {
+            issue: issue(),
+            verdict: Verdict::Block {
+                points: points.iter().map(ToString::to_string).collect(),
+            },
+            failed: Vec::new(),
+            open: Vec::new(),
+        }
+    }
+
+    /// ankh#1 with its plan written and its first block, `points`, in.
+    fn blocked(points: &[&str]) -> World {
+        let mut w = refining();
+        logged(
+            &mut w,
+            &Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        );
+        let ready = ready_replying(&w);
+        logged(&mut w, &ready);
+        logged(&mut w, &block(points));
+        w
+    }
+
+    /// What author-1's choice on ankh#1 asks.
+    const CLACKS: &str = "Which way does the clacks message go?";
+
+    /// Why author-1 takes the option it takes.
+    const NOON: &str = "the towers are up, and it reaches Pseudopolis by noon";
+
+    /// A choice on ankh#1 between `options`, taking `took`, at `cost`.
+    fn choice(
+        question: &str,
+        options: &[&str],
+        took: &str,
+        why: &str,
+        cost: Option<&str>,
+    ) -> Command {
+        Command::Choose {
+            issue: issue(),
+            question: question.into(),
+            options: options.iter().map(ToString::to_string).collect(),
+            took: took.into(),
+            why: why.into(),
+            cost: cost.map(String::from),
+        }
+    }
+
+    /// The clacks, the pigeon or the Post Office.
+    const WAYS: [&str; 3] = ["clacks", "pigeon", "Post Office"];
+
+    /// author-1's choice of the pigeon, at `cost`.
+    fn pigeon(cost: Option<&str>) -> Command {
+        choice(CLACKS, &WAYS, "pigeon", NOON, cost)
+    }
+
+    /// ankh#1 being worked on by author-1, its plan written.
+    fn working() -> World {
+        let mut w = refining();
+        logged(
+            &mut w,
+            &Command::Plan {
+                issue: issue(),
+                plan: plan(),
+            },
+        );
+        assert_eq!(w.issues[&issue()].stage, Stage::Working);
+        w
+    }
+
+    #[test]
+    fn an_agents_choice_is_one_decision_numbered_after_the_others() {
+        let mut w = working();
+        // Decision 4 is on record already.
+        let Event::DecisionMade { decision: before } = working()
+            .events(Some(&AgentId::new("refiner-1")), &pigeon(Some("low")))
+            .expect("a refiner may choose")
+            .remove(0)
+        else {
+            panic!("not a decision");
+        };
+        w.apply(&Event::DecisionMade {
+            decision: Decision {
+                id: DecisionId(4),
+                ..before
+            },
+        });
+        let events = w
+            .events(Some(&AgentId::new("author-1")), &pigeon(Some("medium")))
+            .expect("accepted");
+        assert_eq!(
+            events,
+            [Event::DecisionMade {
+                decision: Decision {
+                    id: DecisionId(5),
+                    issue: issue(),
+                    by: AgentId::new("author-1"),
+                    kind: DecisionKind::Choice,
+                    question: CLACKS.into(),
+                    options: WAYS.iter().map(ToString::to_string).collect(),
+                    chosen: 1,
+                    reason: NOON.into(),
+                    overturned_to: None,
+                    overturn_reason: String::new(),
+                    cost: Some(Cost::Medium),
+                    point: Some(Point::Merge),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn a_choice_moves_no_work_and_its_agent_carries_on() {
+        let mut w = working();
+        let author = AgentId::new("author-1");
+        let (issue_before, agents_before) = (w.issues[&issue()].clone(), w.agents.clone());
+        let mut effects = Vec::new();
+        for e in w
+            .events(Some(&author), &pigeon(Some("medium")))
+            .expect("accepted")
+        {
+            effects.extend(w.apply(&e));
+        }
+        // No stop, no fix, no merge: the arbiter on ankh#1 is left running too.
+        assert_eq!(effects, []);
+        assert_eq!(w.decisions.len(), 1);
+        assert_eq!(w.issues[&issue()], issue_before);
+        assert_eq!(w.issues[&issue()].stage, Stage::Working);
+        assert_eq!(w.agents, agents_before);
+        let ready = ready_replying(&w);
+        let events = w.events(Some(&author), &ready).expect("ready is accepted");
+        assert!(
+            matches!(events.as_slice(), [Event::PullRequestReady { .. }]),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_choice_is_refused_with_the_reason_and_none_is_recorded() {
+        let w = working();
+        let author = AgentId::new("author-1");
+        let mut refused = vec![
+            (
+                pigeon(None),
+                "a choice needs its cost to undo: low, medium or high",
+            ),
+            (
+                pigeon(Some(" ")),
+                "a choice needs its cost to undo: low, medium or high",
+            ),
+            (
+                pigeon(Some("huge")),
+                "huge is not a cost to undo; give low, medium or high",
+            ),
+            (
+                choice(CLACKS, &WAYS, "camel", NOON, Some("low")),
+                "the option taken, \"camel\", is not among the options (1=clacks, 2=pigeon, 3=Post \
+                 Office); give the one you took as written there",
+            ),
+            (
+                choice(" \n", &WAYS, "pigeon", NOON, Some("low")),
+                "a choice needs its question",
+            ),
+            (
+                choice(CLACKS, &WAYS, "pigeon", "  ", Some("low")),
+                "a choice needs its reason",
+            ),
+            (
+                choice(CLACKS, &["clacks"], "clacks", NOON, Some("low")),
+                "a choice needs at least two options, since overturning it takes another; this \
+                 one has 1",
+            ),
+            (
+                choice(
+                    CLACKS,
+                    &["clacks", " ", "pigeon"],
+                    "clacks",
+                    NOON,
+                    Some("low"),
+                ),
+                "option 2 is empty",
+            ),
+            (
+                choice(
+                    CLACKS,
+                    &["clacks", "pigeon", "clacks"],
+                    "clacks",
+                    NOON,
+                    Some("low"),
+                ),
+                "option 3 repeats option 1 (clacks)",
+            ),
+        ];
+        // A missing question, options, option taken or reason reads as empty.
+        refused.push((
+            serde_json::from_str(r#"{"command":"choose","issue":{"project":"ankh","key":"1"}}"#)
+                .expect("a bare choice reads"),
+            "a choice needs its question",
+        ));
+        for (command, want) in refused {
+            let why = w.events(Some(&author), &command).expect_err("refused");
+            assert!(why.contains(want), "{why}");
+        }
+        assert!(w.decisions.is_empty());
+        // The words of the cost are read in any case, and every text without
+        // its surrounding space.
+        let events = w
+            .events(
+                Some(&author),
+                &choice(
+                    " Which way?\n",
+                    &[" clacks", "pigeon "],
+                    "pigeon",
+                    " noon ",
+                    Some("HIGH"),
+                ),
+            )
+            .expect("accepted");
+        assert!(matches!(
+            events.as_slice(),
+            [Event::DecisionMade { decision }]
+                if decision.question == "Which way?"
+                    && decision.options == ["clacks", "pigeon"]
+                    && decision.chosen == 1
+                    && decision.reason == "noon"
+                    && decision.cost == Some(Cost::High)
+        ));
+    }
+
+    #[test]
+    fn only_an_agent_that_works_on_the_issue_records_a_choice_on_it() {
+        let w = working();
+        let command = pigeon(Some("medium"));
+        let why = |by: Option<&str>| {
+            w.events(by.map(AgentId::new).as_ref(), &command)
+                .expect_err("refused")
+        };
+        assert_eq!(
+            why(Some("author-2")),
+            "choose for ankh#1 is for the agents that work on it: author-2 works on ankh#2; \
+             record a choice on the issue you work on"
+        );
+        assert_eq!(
+            why(Some("author-9")),
+            "choose for ankh#1 is an agent's that works on it: author-9 is not an agent this \
+             daemon started"
+        );
+        let person = why(None);
+        assert!(
+            person.starts_with(
+                "choose for ankh#1 is an agent's: a person decides through settings \
+                                and overturns"
+            ),
+            "{person}"
+        );
+        // Any role on the issue may.
+        for agent in ["refiner-1", "author-1", "reviewer-1", "arbiter-1"] {
+            assert!(
+                w.events(Some(&AgentId::new(agent)), &command).is_ok(),
+                "{agent}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plans_checks_are_stored_with_their_controls_dropped() {
+        let mut w = refining();
+        let mut noisy = plan();
+        noisy.checks[0] = Check::new(NOISY, NOISY);
+        let Event::PlanWritten { plan, .. } = logged(
+            &mut w,
+            &Command::Plan {
+                issue: issue(),
+                plan: noisy,
+            },
+        ) else {
+            panic!("not a plan");
+        };
+        assert_eq!(plan.checks[0].done_when, STORED);
+        assert_eq!(plan.checks[0].proven_by, STORED);
+    }
+
+    #[test]
+    fn a_blocks_points_are_stored_with_their_controls_dropped() {
+        let w = blocked(&[NOISY]);
+        assert_eq!(w.issues[&issue()].reviews[0].points, [STORED]);
+    }
+
+    #[test]
+    fn a_block_takes_at_most_the_points_the_authors_brief_can_list_replies_for() {
+        let many = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("p{i}")).collect() };
+        fn refs(points: &[String]) -> Vec<&str> {
+            points.iter().map(String::as_str).collect()
+        }
+        // One over, new: refused, naming the most.
+        let mut w = blocked(&["the clock stops"]);
+        let ready = ready_replying(&w);
+        logged(&mut w, &ready);
+        w.apply(&Event::Told { issue: issue() });
+        let over = block(&refs(&many(MOST_POINTS + 1)));
+        let why = w
+            .check(owner(&over).as_ref(), &over)
+            .expect_err("over the most");
+        assert!(
+            why.contains("a block takes at most 300 points, new and kept open together"),
+            "{why}"
+        );
+        assert!(
+            why.contains("this one has 301 (301 new, 0 kept open)"),
+            "{why}"
+        );
+
+        // The most is taken.
+        let w = blocked(&refs(&many(MOST_POINTS)));
+        assert_eq!(w.issues[&issue()].reviews[0].points.len(), MOST_POINTS);
+
+        // Kept points count with the new ones.
+        let mut w = w;
+        let ready = ready_replying(&w);
+        logged(&mut w, &ready);
+        w.apply(&Event::Told { issue: issue() });
+        let kept = Command::Review {
+            issue: issue(),
+            verdict: Verdict::Block {
+                points: vec!["the clock is slow".into()],
+            },
+            failed: Vec::new(),
+            open: (1..=MOST_POINTS).collect(),
+        };
+        let why = w
+            .check(owner(&kept).as_ref(), &kept)
+            .expect_err("over the most with kept points");
+        assert!(
+            why.contains("this one has 301 (1 new, 300 kept open)"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn a_ready_s_replies_are_stored_with_their_controls_dropped() {
+        let mut w = blocked(&["the clock stops"]);
+        let Event::PullRequestReady { replies, .. } = logged(
+            &mut w,
+            &Command::Ready {
+                issue: issue(),
+                pull: None,
+                pulls: Default::default(),
+                replies: vec![NOISY.into()],
+            },
+        ) else {
+            panic!("not a ready");
+        };
+        assert_eq!(replies, [STORED]);
+    }
+
+    #[test]
+    fn a_rulings_reason_is_stored_with_its_controls_dropped() {
+        let mut w = blocked(&["the clock stops"]);
+        for _ in 0..2 {
+            let ready = ready_replying(&w);
+            logged(&mut w, &ready);
+            logged(&mut w, &block(&["the clock is slow"]));
+        }
+        assert_eq!(w.issues[&issue()].stage, Stage::Arbitration { round: 3 });
+        let Event::DecisionMade { decision } = logged(
+            &mut w,
+            &Command::Rule {
+                issue: issue(),
+                approve: false,
+                reason: NOISY.into(),
+            },
+        ) else {
+            panic!("not a ruling");
+        };
+        assert_eq!(decision.reason, STORED);
+        // It is the author's point to fix.
+        assert_eq!(w.issues[&issue()].fix, [STORED]);
     }
 }
 
@@ -1375,6 +2246,8 @@ mod plan_settings {
                 machine: MachineId::new("local"),
                 folder: None,
                 secret_digest: None,
+                runtime: None,
+                model: None,
             },
         ]);
         w
@@ -1392,6 +2265,7 @@ mod plan_settings {
                 checks: vec![Check {
                     done_when: "the clock strikes thirteen".into(),
                     proven_by: "listening at midnight".into(),
+                    state: None,
                 }],
             },
         }
@@ -2181,6 +3055,8 @@ mod plan_settings {
                 reason: "easiest to undo".into(),
                 overturned_to: None,
                 overturn_reason: String::new(),
+                cost: None,
+                point: None,
             },
         });
         w
@@ -2400,6 +3276,17 @@ mod plan_settings {
             );
         }
     }
+
+    #[test]
+    fn an_overturns_reason_is_stored_with_its_controls_dropped() {
+        let events = decided()
+            .events(None, &overturn(1, 1, super::tests::NOISY))
+            .expect("a person may");
+        let Some(Event::DecisionOverturned { reason, .. }) = events.first() else {
+            panic!("not an overturn: {events:?}");
+        };
+        assert_eq!(reason, super::tests::STORED);
+    }
 }
 
 #[cfg(test)]
@@ -2473,6 +3360,8 @@ mod ready_in_several_repositories {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: None,
+            runtime: None,
+            model: None,
         });
         World::replay(&events).0
     }
@@ -2482,6 +3371,7 @@ mod ready_in_several_repositories {
             issue: gld(),
             pull: pull.map(String::from),
             pulls: pulls.iter().map(|(r, n)| (pid(r), n.to_string())).collect(),
+            replies: Vec::new(),
         }
     }
 
@@ -2504,6 +3394,7 @@ mod ready_in_several_repositories {
                     (pid("api"), "34".to_string())
                 ]
                 .into(),
+                replies: Vec::new(),
             }
         );
     }
@@ -2548,6 +3439,7 @@ mod ready_in_several_repositories {
                 (pid("api"), "34".to_string()),
             ]
             .into(),
+            replies: Vec::new(),
         });
         w.apply(&Event::ReviewFinished {
             issue: gld(),
@@ -2555,7 +3447,15 @@ mod ready_in_several_repositories {
             verdict: Verdict::Block {
                 points: vec!["x".into()],
             },
+            failed: None,
+            open: None,
         });
-        assert!(check(&w, &ready(None, &[])).is_ok());
+        let replied = Command::Ready {
+            issue: gld(),
+            pull: None,
+            pulls: Default::default(),
+            replies: vec!["done as asked".into()],
+        };
+        assert!(check(&w, &replied).is_ok());
     }
 }

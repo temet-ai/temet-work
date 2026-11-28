@@ -37,18 +37,39 @@ impl Transport for Cli {
 /// The GitHub adapter.
 pub struct GitHub {
     transport: Box<dyn Transport>,
+    /// The host `gh` reaches, which the web addresses name.
+    host: String,
 }
 
 impl Default for GitHub {
+    /// Runs the real `gh`, on the host `GH_HOST` names when the daemon has it,
+    /// as `gh` does.
     fn default() -> Self {
-        Self::with(Box::new(Cli))
+        Self::with(Box::new(Cli)).host(&std::env::var("GH_HOST").unwrap_or_default())
     }
 }
 
 impl GitHub {
-    /// A GitHub code host that runs `gh` through `transport`.
+    /// A GitHub code host that runs `gh` through `transport`, on github.com.
     pub fn with(transport: Box<dyn Transport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            host: "github.com".into(),
+        }
+    }
+
+    /// The same code host on `host`: a name, or an address whose scheme is
+    /// dropped. An empty one leaves it as it was.
+    pub fn host(mut self, host: &str) -> Self {
+        let host = host
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        if !host.is_empty() {
+            self.host = host.to_string();
+        }
+        self
     }
 
     fn run(&mut self, args: &[&str]) -> Result<String, CodeHostError> {
@@ -127,6 +148,12 @@ fn parse_pull(json: &str) -> Result<Pull, CodeHostError> {
         state,
         checks: checks_of(rollup),
         conflicting: v.get("mergeable").and_then(Value::as_str) == Some("CONFLICTING"),
+        draft: v.get("isDraft").and_then(Value::as_bool) == Some(true),
+        branch: v
+            .get("headRefName")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -170,7 +197,7 @@ impl CodeHost for GitHub {
             "-R",
             repo,
             "--json",
-            "number,state,statusCheckRollup,mergeable",
+            "number,state,statusCheckRollup,mergeable,isDraft,headRefName",
         ])?;
         parse_pull(&out)
     }
@@ -188,6 +215,10 @@ impl CodeHost for GitHub {
         };
         self.run(&["pr", "merge", number, "-R", repo, flag])
             .map(|_| ())
+    }
+
+    fn address(&self, repo: &str) -> Option<String> {
+        Some(format!("https://{}/{repo}", self.host))
     }
 
     fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
@@ -265,6 +296,25 @@ mod tests {
     }
 
     #[test]
+    fn the_code_is_on_github_or_the_host_gh_host_names() {
+        let at = |gh: GitHub| gh.address("ankh-morpork/watch");
+        assert_eq!(
+            at(GitHub::with(Box::new(Recorded))).as_deref(),
+            Some("https://github.com/ankh-morpork/watch")
+        );
+        for host in ["git.example.com", "https://git.example.com/"] {
+            assert_eq!(
+                at(GitHub::with(Box::new(Recorded)).host(host)).as_deref(),
+                Some("https://git.example.com/ankh-morpork/watch")
+            );
+        }
+        assert_eq!(
+            at(GitHub::with(Box::new(Recorded)).host("")).as_deref(),
+            Some("https://github.com/ankh-morpork/watch")
+        );
+    }
+
+    #[test]
     fn only_conflicting_counts_as_a_conflict_and_unknown_does_not() {
         for (mergeable, want) in [
             ("CONFLICTING", true),
@@ -278,6 +328,52 @@ mod tests {
                 "{mergeable}"
             );
         }
+    }
+
+    #[test]
+    fn reads_whether_a_pull_request_is_a_draft() {
+        for (draft, want) in [(Some(true), true), (Some(false), false), (None, false)] {
+            let mut json = json!({"number": 1, "state": "OPEN"});
+            if let Some(draft) = draft {
+                json["isDraft"] = draft.into();
+            }
+            let pull = parse_pull(&json.to_string()).expect("parses");
+            assert_eq!(pull.draft, want, "{draft:?}");
+        }
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // The Spy prints nothing, so only what it was asked matters.
+        let _ = GitHub::with(Box::new(Spy(seen.clone()))).pull("temet-ai/radar", "46");
+        let ran = seen.lock().expect("lock").clone();
+        let fields = ran[0]
+            .iter()
+            .skip_while(|a| *a != "--json")
+            .nth(1)
+            .expect("a --json field list");
+        assert!(fields.split(',').any(|f| f == "isDraft"), "{fields}");
+    }
+
+    #[test]
+    fn reads_a_pull_requests_branch() {
+        let pull = GitHub::with(Box::new(Recorded))
+            .pull("temet-ai/radar", "46")
+            .expect("recorded");
+        assert_eq!(pull.branch, "docs/installation-and-guide-audit");
+        let json = json!({"number": 1, "state": "OPEN", "headRefName": "watch-12-night-shift"});
+        assert_eq!(
+            parse_pull(&json.to_string()).expect("parses").branch,
+            "watch-12-night-shift"
+        );
+        let none = json!({"number": 1, "state": "OPEN"}).to_string();
+        assert_eq!(parse_pull(&none).expect("parses").branch, "");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _ = GitHub::with(Box::new(Spy(seen.clone()))).pull("temet-ai/radar", "46");
+        let ran = seen.lock().expect("lock").clone();
+        let fields = ran[0]
+            .iter()
+            .skip_while(|a| *a != "--json")
+            .nth(1)
+            .expect("a --json field list");
+        assert!(fields.split(',').any(|f| f == "headRefName"), "{fields}");
     }
 
     #[test]

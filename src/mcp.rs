@@ -4,9 +4,10 @@
 //!
 //! The server has two levels. At `read`, the default, it offers the views:
 //! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
-//! that move work and change settings: `plan`, `ready`, `review`, `retry`, `rule`, `overturn`, `proposal`, `set` and
-//! `unset`. A tool above the server's level is
-//! not listed, and calling it is refused.
+//! that move work, record choices and change settings: `plan`, `ready`, `review`,
+//! `retry`, `rule`, `choose`, `overturn`, `proposal`, `file`, `investigated`, `set`
+//! and `unset`. A tool above the server's level is not listed, and calling it is
+//! refused.
 
 use serde_json::{Value, json};
 use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
@@ -81,7 +82,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "issue",
-            description: "One issue in full: its stage, its text from its tracker's last sync (or why that was not read), plan, pull request, what it is to fix, its dependencies and its agents.",
+            description: "One issue in full: its stage, its text from its tracker's last sync (or why that was not read), plan, pull request, what it is to fix, its review rounds with each point, the author's reply and the point's state, its dependencies and its agents.",
             acts: false,
             schema: json!({"type": "object", "properties": {"issue": issue_field()}, "required": ["issue"]}),
         },
@@ -111,18 +112,20 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ready",
-            description: "The author's pull requests are open and every check of the plan holds. Their numbers are needed the first time: pull for an issue that changes one repository, pulls (repository to number) for each repository of one that changes several.",
+            description: "The author's pull requests are open and every check of the plan holds. Their numbers are needed the first time: pull for an issue that changes one repository, pulls (repository to number) for each repository of one that changes several. The first ready after a review's block takes replies, one for each of the block's points, in their order; any other ready takes none.",
             acts: true,
-            schema: json!({"type": "object", "properties": {"issue": issue_field(), "pull": {"type": "string"}, "pulls": {"type": "object", "additionalProperties": {"type": "string"}}}, "required": ["issue"]}),
+            schema: json!({"type": "object", "properties": {"issue": issue_field(), "pull": {"type": "string"}, "pulls": {"type": "object", "additionalProperties": {"type": "string"}}, "replies": {"type": "array", "items": {"type": "string"}, "description": "One entry for each point of the block this ready answers, in the points' order: what you did about it, or why you did not."}}, "required": ["issue"]}),
         },
         Tool {
             name: "review",
-            description: "A reviewer's verdict on the round under review: approve, or block with each thing to fix.",
+            description: "A reviewer's verdict on the round under review: approve, or block with each thing to fix. An approve passes every check of the plan and resolves every point of the round before. A block names in failed_checks each check that does not hold, and in open_points each point of the round before still not dealt with; every check it leaves out counts as passed, and every point it leaves out as resolved. A point kept open joins the block's points.",
             acts: true,
             schema: json!({"type": "object", "properties": {
                 "issue": issue_field(),
                 "verdict": {"type": "string", "enum": ["approve", "block"]},
-                "points": {"type": "array", "items": {"type": "string"}}
+                "points": {"type": "array", "items": {"type": "string"}},
+                "failed_checks": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "On a block: the number of each check of the plan that does not hold, counted from 1 in the plan's order."},
+                "open_points": {"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "On a block after round 1: the number of each point of the round before that is still not dealt with, counted from 1 in its order."}
             }, "required": ["issue", "verdict"]}),
         },
         Tool {
@@ -138,6 +141,19 @@ fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {
                 "issue": issue_field(), "approve": {"type": "boolean"}, "reason": {"type": "string"}
             }, "required": ["issue", "approve", "reason"]}),
+        },
+        Tool {
+            name: "choose",
+            description: "An agent's: record a choice you made on the issue you work on, as a decision a person can overturn later. Record a choice between options a person might weigh differently, such as an approach, a dependency or a scope cut, not every step. took is one of the options as written. cost is what overturning it costs: low when nothing done is thrown away, medium when some work is done again, high when the loop cannot take back what it led to. Its point is the issue's merge, after which overturning costs more. Work carries on at once: the reply names the decision.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "issue": issue_field(),
+                "question": {"type": "string", "description": "What you decided, in a line."},
+                "options": {"type": "array", "minItems": 2, "items": {"type": "string"}, "description": "The options you weighed, each once."},
+                "took": {"type": "string", "description": "The option you took, as written among options."},
+                "why": {"type": "string", "description": "Why you took it."},
+                "cost": {"type": "string", "enum": ["low", "medium", "high"], "description": "What overturning it costs. A choice without one is refused."}
+            }, "required": ["issue", "question", "options", "took", "why"]}),
         },
         Tool {
             name: "overturn",
@@ -211,6 +227,22 @@ fn number(args: &Value, key: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{key} is missing or not a whole number"))
 }
 
+/// The whole numbers in the list `key`, or none when it is left out.
+fn numbers(args: &Value, key: &str) -> Result<Vec<usize>, String> {
+    let Some(list) = args.get(key) else {
+        return Ok(Vec::new());
+    };
+    list.as_array()
+        .ok_or_else(|| format!("{key} is a list of numbers"))?
+        .iter()
+        .map(|n| {
+            n.as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| format!("{key} holds whole numbers counted from 1, not {n}"))
+        })
+        .collect()
+}
+
 fn issue(args: &Value) -> Result<IssueId, String> {
     let s = text(args, "issue")?;
     IssueId::parse(&s).ok_or_else(|| format!("{s} is not an issue; write project#key"))
@@ -258,6 +290,7 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                         Ok(Check {
                             done_when: text(c, "done_when")?,
                             proven_by: text(c, "proven_by")?,
+                            state: None,
                         })
                     })
                     .collect::<Result<_, String>>()?,
@@ -282,6 +315,20 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                 })
                 .transpose()?
                 .unwrap_or_default(),
+            replies: args
+                .get("replies")
+                .and_then(Value::as_array)
+                .map(|r| {
+                    r.iter()
+                        .map(|t| {
+                            t.as_str()
+                                .map(String::from)
+                                .ok_or_else(|| "each reply is text".to_string())
+                        })
+                        .collect::<Result<_, String>>()
+                })
+                .transpose()?
+                .unwrap_or_default(),
         },
         "review" => Command::Review {
             issue: issue(args)?,
@@ -301,6 +348,8 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                 },
                 other => return Err(format!("verdict is approve or block, not {other}")),
             },
+            failed: numbers(args, "failed_checks")?,
+            open: numbers(args, "open_points")?,
         },
         "retry" => Command::Retry {
             issue: issue(args)?,
@@ -313,6 +362,37 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                 .ok_or("approve is missing")?,
             reason: text(args, "reason")?,
         },
+        // A field left out is sent empty, and a cost left out as none: the
+        // daemon refuses the choice with the reason, as it does the command line's.
+        "choose" => {
+            let given = |key: &str| {
+                args.get(key)
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_default()
+            };
+            Command::Choose {
+                issue: issue(args)?,
+                question: given("question"),
+                options: args
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .map(|o| {
+                                o.as_str()
+                                    .map(String::from)
+                                    .ok_or_else(|| "each option is text".to_string())
+                            })
+                            .collect::<Result<_, String>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
+                took: given("took"),
+                why: given("why"),
+                cost: args.get("cost").and_then(Value::as_str).map(String::from),
+            }
+        }
         "overturn" => Command::Overturn {
             decision: DecisionId(number(args, "decision")?),
             option: usize::try_from(number(args, "option")?)
@@ -489,7 +569,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 15);
+        assert_eq!(names(Level::Act).len(), 16);
     }
 
     #[test]
@@ -506,7 +586,7 @@ mod tests {
         let answer = call(
             Level::Act,
             "review",
-            json!({"issue": "ankh#1", "verdict": "block", "points": ["no test for a stopped clock"]}),
+            json!({"issue": "ankh#1", "verdict": "block", "points": ["no test for a stopped clock"], "failed_checks": [2], "open_points": [1, 3]}),
             &mut sent,
         );
         assert_eq!(answer["result"]["isError"], false);
@@ -520,10 +600,22 @@ mod tests {
                     issue: IssueId::new("ankh", "1"),
                     verdict: Verdict::Block {
                         points: vec!["no test for a stopped clock".into()]
-                    }
+                    },
+                    failed: vec![2],
+                    open: vec![1, 3],
                 }
             }]
         );
+        // A number that is not a whole number is refused before it is sent.
+        let mut sent = Vec::new();
+        let answer = call(
+            Level::Act,
+            "review",
+            json!({"issue": "ankh#1", "verdict": "block", "points": ["x"], "failed_checks": ["two"]}),
+            &mut sent,
+        );
+        assert_eq!(answer["result"]["isError"], true);
+        assert!(sent.is_empty());
     }
 
     #[test]
@@ -532,7 +624,7 @@ mod tests {
         call(
             Level::Act,
             "ready",
-            json!({"issue": "guild#GLD-1", "pulls": {"ui": "12", "api": 34}}),
+            json!({"issue": "guild#GLD-1", "pulls": {"ui": "12", "api": 34}, "replies": ["recast the bell"]}),
             &mut sent,
         );
         assert_eq!(
@@ -545,6 +637,7 @@ mod tests {
                     (ProjectId::new("api"), "34".to_string())
                 ]
                 .into(),
+                replies: vec!["recast the bell".into()],
             })
         );
     }
@@ -581,6 +674,38 @@ mod tests {
         );
         assert!(names(Level::Act).contains(&"overturn".to_string()));
         assert!(!names(Level::Read).contains(&"proposal".to_string()));
+    }
+
+    #[test]
+    fn choose_is_offered_at_act_becomes_the_command_lines_choice_and_is_refused_at_read() {
+        assert!(names(Level::Act).contains(&"choose".to_string()));
+        assert!(!names(Level::Read).contains(&"choose".to_string()));
+        let args = json!({
+            "issue": "ankh#1",
+            "question": "Which way does the clacks message go?",
+            "options": ["clacks", "pigeon", "Post Office"],
+            "took": "pigeon",
+            "why": "the towers are down",
+            "cost": "medium"
+        });
+        let mut sent = Vec::new();
+        let answer = call(Level::Read, "choose", args.clone(), &mut sent);
+        assert_eq!(answer["result"]["isError"], true);
+        assert!(sent.is_empty());
+        let answer = call(Level::Act, "choose", args.clone(), &mut sent);
+        assert_eq!(answer["result"]["isError"], false);
+        let mut no_cost = args;
+        no_cost.as_object_mut().map(|a| a.remove("cost"));
+        call(Level::Act, "choose", no_cost, &mut sent);
+        let commands: Vec<_> = sent.iter().map(|r| r.command.clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                crate::cli::tests::pigeon(Some("medium")),
+                crate::cli::tests::pigeon(None)
+            ]
+        );
+        assert_eq!(sent[0].by, Some(AgentId::new("reviewer-1")));
     }
 
     #[test]

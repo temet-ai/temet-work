@@ -1,9 +1,10 @@
 //! A setting changes behaviour for exactly the scope it names.
 
 use super::*;
+use crate::command::Command;
 use crate::event::{Event, Verdict};
 use crate::ids::{GroupId, MachineId};
-use crate::settings::{Level, Scope, Value};
+use crate::settings::{Level, Scope, Target, Value};
 
 fn id(project: &str, key: &str) -> IssueId {
     IssueId::new(project, key)
@@ -81,6 +82,7 @@ fn blocked(w: &mut World, issue: &IssueId, round: u8) -> Vec<Effect> {
         issue: issue.clone(),
         pull: Some("1".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     w.apply(&Event::ReviewFinished {
         issue: issue.clone(),
@@ -88,6 +90,8 @@ fn blocked(w: &mut World, issue: &IssueId, round: u8) -> Vec<Effect> {
         verdict: Verdict::Block {
             points: vec!["fix it".into()],
         },
+        failed: None,
+        open: None,
     })
 }
 
@@ -310,6 +314,8 @@ fn a_plain_model_keeps_the_runtime_it_was_written_for() {
             machine: MachineId::new("morpork"),
             folder: None,
             secret_digest: None,
+            runtime: None,
+            model: None,
         },
     ] {
         w.apply(&event);
@@ -326,6 +332,7 @@ fn a_plain_model_keeps_the_runtime_it_was_written_for() {
             checks: vec![crate::model::Check {
                 done_when: "the clock strikes thirteen".into(),
                 proven_by: "listening at midnight".into(),
+                state: None,
             }],
             repos: Vec::new(),
             settings: [("model".to_string(), text("opus"))].into(),
@@ -468,6 +475,8 @@ fn starts_changes_how_many_agents_of_a_role_are_tried_on_one_issue() {
         machine: MachineId::new("morpork"),
         folder: None,
         secret_digest: None,
+        runtime: None,
+        model: None,
     };
     for e in [author(1), author(2)] {
         w.apply(&e);
@@ -477,6 +486,7 @@ fn starts_changes_how_many_agents_of_a_role_are_tried_on_one_issue() {
                 _ => unreachable!(),
             },
             state: crate::model::AgentState::Ended,
+            lost: false,
         });
     }
     // ankh#2 has had none and starts one; ankh#1 gave up after one.
@@ -983,6 +993,7 @@ fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
         issue: issue.clone(),
         pull: Some("1".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     assert_eq!(review, vec![]);
     assert_eq!(place_of(&w, Role::Reviewer, "1"), None);
@@ -1015,6 +1026,8 @@ fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
         verdict: Verdict::Block {
             points: vec!["fix it".into()],
         },
+        failed: None,
+        open: None,
     });
     assert!(
         !ruled.iter().any(|e| matches!(e, Effect::StartAgent { .. })),
@@ -1056,12 +1069,15 @@ fn an_approved_issue_waits_for_its_checks_not_for_a_reviewers_machine() {
         issue: issue.clone(),
         pull: Some("1".into()),
         pulls: Default::default(),
+        replies: Vec::new(),
     });
     assert_eq!(w.machine_waits()[0].role, Role::Reviewer);
     w.apply(&Event::ReviewFinished {
         issue,
         round: 1,
         verdict: Verdict::Approve,
+        failed: None,
+        open: None,
     });
     assert_eq!(w.machine_waits(), vec![]);
 }
@@ -1165,4 +1181,276 @@ fn a_project_with_no_folder_runs_a_reader_here_unless_another_machine_is_named()
     assert_eq!(launch(&w).as_deref(), Some("local"));
     machine(&mut w, ankh(), None, "mac");
     assert_eq!(launch(&w), None);
+}
+
+/// ankh#44 in milestone "Clocks" of ankh, which is in the area guild, being
+/// refined by refiner-1.
+fn refining() -> World {
+    let ankh = ProjectId::new("ankh");
+    let mut w = World::default();
+    for event in [
+        Event::ProjectAdded {
+            project: ankh.clone(),
+            tracker: "t".into(),
+            name: "city/ankh".into(),
+            code_host: None,
+            repo: None,
+        },
+        Event::AreaDefined {
+            area: ProjectId::new("guild"),
+            name: "Guild".into(),
+            projects: vec![ankh.clone()],
+            tracker: String::new(),
+            tracker_name: String::new(),
+        },
+        Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ankh],
+            areas: Vec::new(),
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        },
+        Event::IssueSynced {
+            issue: id("ankh", "44"),
+            title: "Mend the clock".into(),
+            milestone: Some(crate::ids::MilestoneId::new("Clocks")),
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        },
+        Event::AgentStarted {
+            agent: AgentId::new("refiner-1"),
+            group: GroupId::new("watch"),
+            role: Role::Refiner,
+            issue: Some(id("ankh", "44")),
+            machine: MachineId::new("morpork"),
+            folder: None,
+            secret_digest: None,
+            runtime: None,
+            model: None,
+        },
+    ] {
+        w.apply(&event);
+    }
+    assert_eq!(w.issues[&id("ankh", "44")].stage, Stage::Refining);
+    w
+}
+
+/// A value of each setting that is read from a project or an area only.
+const FROM_PROJECT: [(&str, &str); 2] = [
+    ("sync_every", "5"),
+    ("investigate", "The clock tower is the Guild's"),
+];
+
+/// Why `key` is refused at `level`.
+fn unread(key: &str, level: &str) -> String {
+    format!(
+        "{key} is not read at the {level} level, so a value there would have no effect; the \
+         levels that read it are: project, area, global"
+    )
+}
+
+fn set_command(target: &str, key: &str, value: &str) -> Command {
+    Command::Set {
+        target: Target::parse(target),
+        role: None,
+        key: key.into(),
+        value: value.into(),
+    }
+}
+
+fn unset_command(target: &str, key: &str) -> Command {
+    Command::Unset {
+        target: Target::parse(target),
+        role: None,
+        key: key.into(),
+    }
+}
+
+/// A change as an older daemon logged it.
+fn logged(target: &str, key: &str, value: Value, by: &str) -> Event {
+    Event::SettingSet {
+        scope: refining().scope_of(&Target::parse(target)).expect("known"),
+        role: None,
+        key: key.into(),
+        value,
+        by: by.into(),
+    }
+}
+
+#[test]
+fn a_setting_is_refused_at_a_level_that_never_reads_it() {
+    let w = refining();
+    for (target, level) in [("ankh#44", "task"), ("ankh:Clocks", "milestone")] {
+        for (key, value) in FROM_PROJECT {
+            assert_eq!(
+                w.events(None, &set_command(target, key, value)),
+                Err(unread(key, level)),
+                "{target} {key}"
+            );
+        }
+    }
+    let plan = Command::Plan {
+        issue: id("ankh", "44"),
+        plan: crate::model::Plan {
+            checks: vec![crate::model::Check {
+                done_when: "the clock strikes thirteen".into(),
+                proven_by: "listening at midnight".into(),
+                state: None,
+            }],
+            repos: Vec::new(),
+            settings: [("sync_every".to_string(), Value::Number(5))].into(),
+        },
+    };
+    assert_eq!(
+        w.events(Some(&AgentId::new("refiner-1")), &plan),
+        Err(format!(
+            "the plan's settings: {}",
+            unread("sync_every", "task")
+        ))
+    );
+    assert_eq!(w.issues[&id("ankh", "44")].stage, Stage::Refining);
+    // A log that already holds such values replays with all of them.
+    let text = |t: &str| Value::Text(t.into());
+    let old = [
+        logged("ankh#44", "sync_every", Value::Number(5), "refiner-1"),
+        logged("ankh:Clocks", "sync_every", Value::Number(7), "person"),
+        logged("ankh#44", "investigate", text("the tower"), "person"),
+        logged("ankh:Clocks", "investigate", text("the bells"), "person"),
+    ];
+    let (replayed, _) = World::replay(&old);
+    let kept: Vec<String> = replayed
+        .settings
+        .iter()
+        .map(|((scope, _, key), e)| format!("{scope} {key} {}", e.value))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            "ankh:Clocks investigate the bells",
+            "ankh:Clocks sync_every 7",
+            "ankh#44 investigate the tower",
+            "ankh#44 sync_every 5",
+        ]
+    );
+}
+
+#[test]
+fn a_setting_is_accepted_at_the_levels_that_read_it() {
+    let w = refining();
+    let refiner = AgentId::new("refiner-1");
+    // The refiner's own issue, at a step where it may set what agents set.
+    assert_eq!(
+        w.events(Some(&refiner), &set_command("ankh#44", "sync_every", "5")),
+        Err(unread("sync_every", "task"))
+    );
+    // That only a person sets it comes before the level.
+    let why = w
+        .events(
+            Some(&refiner),
+            &set_command("ankh#44", "investigate", "the tower"),
+        )
+        .expect_err("an agent");
+    assert!(
+        why.starts_with("only a person sets investigate, because "),
+        "{why}"
+    );
+    for target in ["ankh", "guild", "global"] {
+        for (key, value) in FROM_PROJECT {
+            let set = w.events(None, &set_command(target, key, value));
+            assert!(set.is_ok(), "{target} {key}: {set:?}");
+        }
+    }
+    // Every other setting is read at every level.
+    for spec in crate::settings::specs() {
+        let levels: Vec<&str> = spec.levels.iter().map(|l| l.name()).collect();
+        let want: &[&str] = if FROM_PROJECT.iter().any(|(key, _)| *key == spec.key) {
+            &["project", "area", "global"]
+        } else {
+            &["task", "milestone", "project", "area", "global"]
+        };
+        assert_eq!(levels, want, "{}", spec.key);
+    }
+    for target in ["ankh#44", "ankh:Clocks"] {
+        let set = w.events(None, &set_command(target, "ci_every", "5"));
+        assert!(set.is_ok(), "{target}: {set:?}");
+    }
+}
+
+#[test]
+fn an_unread_level_value_from_the_log_can_be_unset() {
+    let mut w = refining();
+    w.apply(&logged(
+        "ankh#44",
+        "sync_every",
+        Value::Number(5),
+        "refiner-1",
+    ));
+    w.apply(&logged(
+        "ankh:Clocks",
+        "investigate",
+        Value::Text("the bells".into()),
+        "person",
+    ));
+    assert_eq!(w.settings.len(), 2);
+    for (target, key) in [("ankh#44", "sync_every"), ("ankh:Clocks", "investigate")] {
+        let events = w
+            .events(None, &unset_command(target, key))
+            .expect("accepted");
+        assert!(
+            matches!(events.as_slice(), [Event::SettingUnset { key: k, .. }] if k == key),
+            "{events:?}"
+        );
+        for event in events {
+            w.apply(&event);
+        }
+    }
+    assert!(w.settings.is_empty(), "{:?}", w.settings);
+}
+
+#[test]
+fn the_listing_passes_over_a_value_at_a_level_that_never_reads_it() {
+    let mut w = refining();
+    for event in [
+        logged("ankh#44", "sync_every", Value::Number(5), "refiner-1"),
+        logged("ankh:Clocks", "sync_every", Value::Number(7), "person"),
+        logged(
+            "ankh#44",
+            "investigate",
+            Value::Text("the tower".into()),
+            "person",
+        ),
+    ] {
+        w.apply(&event);
+    }
+    let listed = crate::text::settings(&w, &Target::parse("ankh#44"), None).expect("known");
+    let line = |key: &str| {
+        listed
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>())
+            .find(|words| words.first() == Some(&key))
+            .map(|words| words.join(" "))
+    };
+    assert_eq!(
+        line("sync_every").as_deref(),
+        Some("sync_every 60 built in")
+    );
+    assert_eq!(line("investigate"), None, "{listed}");
+    assert_eq!(
+        w.source_number(&ProjectId::new("ankh"), "sync_every"),
+        60,
+        "what the project is synced at"
+    );
+    // A person can still find each value, to unset it.
+    let status = crate::text::text(&w, &Default::default());
+    for held in [
+        "  ankh#44: sync_every = 5, set by refiner-1\n",
+        "  ankh:Clocks: sync_every = 7, set by person\n",
+    ] {
+        assert!(status.contains(held), "{status}");
+    }
 }

@@ -154,6 +154,20 @@ pub enum Event {
         /// Whether it is closed in the tracker.
         closed: bool,
     },
+    /// A tracker listed a milestone of a project or area as open, or its due
+    /// date there changed, or it stopped listing it as open. Logged only when
+    /// one of these changed.
+    MilestoneSynced {
+        /// The project or area whose tracker lists it.
+        project: ProjectId,
+        /// The milestone.
+        milestone: MilestoneId,
+        /// Its due date as `YYYY-MM-DD`; none when the tracker gives none.
+        due: Option<String>,
+        /// Whether the tracker lists it as open; false once it is closed there or
+        /// gone.
+        open: bool,
+    },
     /// An agent session started.
     AgentStarted {
         /// The agent.
@@ -172,6 +186,13 @@ pub enum Event {
         /// agent started before agents had secrets.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret_digest: Option<Digest>,
+        /// The runtime that made its program; none in older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+        /// The model its brief named; none when its settings named none, and in
+        /// older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// An agent's state changed.
     AgentChanged {
@@ -179,6 +200,12 @@ pub enum Event {
         agent: AgentId,
         /// Its new state.
         state: AgentState,
+        /// Whether it ended because its program was lost, as to a signal or a
+        /// reboot, and not by anything it did: such an end does not count
+        /// toward the `starts` limit. False for every other change, and in
+        /// older logs.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lost: bool,
     },
     /// The daemon typed `continue` into an agent whose turn ended on a limit,
     /// once that limit had reset; the agent is working again.
@@ -206,6 +233,10 @@ pub enum Event {
         /// The pull requests' numbers by repository, when the author names them.
         #[serde(default)]
         pulls: std::collections::BTreeMap<ProjectId, String>,
+        /// The author's replies to the points of the review round its fix
+        /// answers; empty when it sent none, and in older logs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replies: Vec<String>,
     },
     /// What an issue's agent was to hear reached it: the fixes, or a new round.
     Told {
@@ -218,8 +249,22 @@ pub enum Event {
         issue: IssueId,
         /// The round.
         round: u8,
-        /// The verdict.
+        /// The verdict. A block's points end with the points of the round before
+        /// that it keeps open.
         verdict: Verdict,
+        /// The plan's checks the reviewer found do not hold, counted from 1 in
+        /// the plan's order: each is marked failed and every other check passed.
+        /// Given, empty for an approve, on every verdict since checks had states;
+        /// none in older logs, whose verdicts mark no check.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed: Option<Vec<usize>>,
+        /// The points of the round before that this verdict keeps open, counted
+        /// from 1 in that round's order: each stays open and every other point of
+        /// that round is resolved. Given, empty when it keeps none, on every
+        /// verdict since points had states, and the points of a block given it
+        /// start open; none in older logs, whose verdicts judge no point.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open: Option<Vec<usize>>,
     },
     /// CI and the plan's checks finished on the current change.
     ChecksFinished {
@@ -338,6 +383,29 @@ pub enum Event {
         at_ms: u64,
         /// How many issues it filed.
         filed: usize,
+    },
+    /// The code host read the branch of one of an issue's pull requests. Logged
+    /// the first time a read finds it, and again only when it changes.
+    PullBranch {
+        /// The issue.
+        issue: IssueId,
+        /// The repository.
+        repo: ProjectId,
+        /// The pull request's number.
+        number: String,
+        /// Its branch.
+        branch: String,
+    },
+    /// A read in review or the merge found that a person closed one of an issue's
+    /// pull requests without merging it. It is dropped, and the issue goes back to
+    /// its author, who reopens it or opens another and names that with ready.
+    PullClosed {
+        /// The issue.
+        issue: IssueId,
+        /// The repository.
+        repo: ProjectId,
+        /// The closed pull request's number.
+        number: String,
     },
     /// The code host would not merge the pull request as it stands, such as for a
     /// conflict with the target branch.

@@ -22,7 +22,8 @@ use crate::world::{LOCAL, World};
 /// investigator, when its configuration names none.
 pub const QUEUE_LOW_WITHOUT_FOLDERS: usize = 2;
 
-/// How far back a group's first investigation reads merged pull requests.
+/// How far back from its start a group's first investigation reads merged pull
+/// requests, and each one after it while none has finished.
 pub const FIRST_SINCE_DAYS: u64 = 7;
 
 impl World {
@@ -30,16 +31,20 @@ impl World {
     /// it would take that no group has taken yet, each only while in its scope.
     /// The new ones count because the group refines them next; leaving them out
     /// would start investigations that file them again. One out of scope is no
-    /// work for the group until it comes back.
+    /// work for the group until it comes back. A ready one counts only while it
+    /// would start once a work folder is free ([`World::start_waits`]), so the
+    /// count never holds off an investigator with issues no author starts on.
     pub fn queue(&self, group: &Group) -> usize {
         self.issues
             .values()
             .filter(|i| match i.stage {
-                Stage::Refining | Stage::Ready => i.group.as_ref() == Some(&group.id),
-                Stage::New => i.group.is_none(),
+                Stage::Refining => i.group.as_ref() == Some(&group.id) && self.in_scope(group, i),
+                Stage::Ready => {
+                    i.group.as_ref() == Some(&group.id) && self.start_waits(group, i).is_empty()
+                }
+                Stage::New => i.group.is_none() && self.in_scope(group, i),
                 _ => false,
             })
-            .filter(|i| self.in_scope(group, i))
             .count()
     }
 
@@ -298,7 +303,7 @@ impl World {
                         closed,
                         notes,
                         milestone: self.filing_milestone(g),
-                        since: investigation.since_ms.map(utc),
+                        since: investigation.window(),
                     },
                     brief::Workplace {
                         folder: place.map(|f| PathBuf::from(&f.path)),
@@ -357,6 +362,23 @@ impl World {
             .collect()
     }
 }
+
+impl Investigation {
+    /// Where its window of merged pull requests begins, as its brief says it.
+    fn window(&self) -> brief::Since {
+        let reaches_back_to = self
+            .first_started_ms
+            .saturating_sub(FIRST_SINCE_DAYS * DAY_MS);
+        match self.since_ms {
+            Some(at) => brief::Since::Finished(utc(at)),
+            None if self.started_ms == self.first_started_ms => brief::Since::First,
+            None => brief::Since::BeforeFirst(utc(reaches_back_to)),
+        }
+    }
+}
+
+/// A day in milliseconds.
+const DAY_MS: u64 = 86_400_000;
 
 /// A time in milliseconds since the Unix epoch as `YYYY-MM-DD HH:MM UTC`.
 pub fn utc(ms: u64) -> String {
