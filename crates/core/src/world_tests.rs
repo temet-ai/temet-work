@@ -786,7 +786,7 @@ fn an_author_replacing_one_that_ended_is_given_the_pull_request_to_fix() {
     assert!(!task.contains("open a pull request"), "{task}");
     assert!(
         task.ends_with("run: temet-work ready ankh#1"),
-        "it names no number: {task}"
+        "the ready line takes no pull request number: {task}"
     );
     run_ready(&mut w, "author-2", None, &[]);
     assert_eq!(stage(&w, "1"), Stage::InReview { round: 1 });
@@ -1436,9 +1436,9 @@ fn failed_rust_12() -> Event {
     }
 }
 
-/// The task of a `role` started on watch#12 now. With one pull request it names
-/// no number: it sends the agent to `temet-work issue watch#12`, whose text is
-/// returned too.
+/// The task of a `role` started on watch#12 now, and the text of `temet-work
+/// issue watch#12`, which the task sends the agent to. With one pull request the
+/// brief lists it with its number.
 fn reader_of_12(w: &World, role: Role) -> (String, String) {
     let task = w
         .launch(&GroupId::new("watch"), role, &watch_12(), None)
@@ -1541,6 +1541,107 @@ fn a_pull_request_closed_while_fixing_adds_its_point_and_keeps_the_stage() {
         assert!(!i.told, "the author hears every point again");
         assert!(i.pulls.is_empty());
         assert_eq!(i.closed, closed_57_on_record());
+    }
+}
+
+/// watch#12 back with its author in round 3 with pull request 57, on an
+/// arbiter's fix ruling that a person has overturned.
+fn watch_12_overturned_on_57() -> World {
+    let mut w = watch_12_reviewing_57();
+    for round in 1..=3 {
+        w.apply(&block_12(round));
+        if round < 3 {
+            let ready = ready_12(&w, "author-1", None).expect("ready");
+            apply_all(&mut w, &ready);
+        }
+    }
+    let mut sent_back = ruling(false);
+    if let Event::DecisionMade { decision } = &mut sent_back {
+        decision.issue = watch_12();
+    }
+    w.apply(&sent_back);
+    w.apply(&overturned(0));
+    let i = &w.issues[&watch_12()];
+    assert_eq!(i.stage, Stage::Fixing { round: 3 });
+    assert!(i.review_waived);
+    w
+}
+
+/// That a ready naming `pull` on watch#12 asks for a review.
+fn ready_asks_for_a_review(w: &mut World, pull: &str) {
+    let ready = ready_12(w, "author-1", Some(pull)).expect("ready");
+    let effects = apply_all(w, &ready);
+    let i = &w.issues[&watch_12()];
+    let Stage::InReview { round } = i.stage else {
+        panic!("{i:?}");
+    };
+    let start = Effect::StartReview {
+        issue: watch_12(),
+        round,
+    };
+    assert!(effects.contains(&start), "{effects:?}");
+    assert!(!i.review_ok && !i.review_waived, "{i:?}");
+}
+
+#[test]
+fn a_closed_pull_request_ends_a_persons_review_waiver() {
+    let fixing = watch_12_overturned_on_57();
+    let mut in_review = fixing.clone();
+    let ready = ready_12(&in_review, "author-1", None).expect("ready");
+    apply_all(&mut in_review, &ready);
+    assert_eq!(
+        in_review.issues[&watch_12()].stage,
+        Stage::InReview { round: 4 }
+    );
+    let mut merging = in_review.clone();
+    merging.apply(&Event::ChecksFinished {
+        issue: watch_12(),
+        passed: true,
+        failing: vec![],
+    });
+    assert_eq!(merging.issues[&watch_12()].stage, Stage::Merging);
+
+    for mut held in [fixing, in_review, merging] {
+        // One that is not on record leaves the waiver.
+        held.apply(&Event::PullClosed {
+            issue: watch_12(),
+            repo: pid("watch"),
+            number: "56".into(),
+        });
+        assert!(held.issues[&watch_12()].review_waived);
+
+        held.apply(&closed_57());
+        let i = &held.issues[&watch_12()];
+        assert!(!i.review_ok && !i.review_waived, "{i:?}");
+        // A replacement is reviewed, and so is 57 reopened: its branch can
+        // have taken new commits.
+        for pull in ["58", "57"] {
+            ready_asks_for_a_review(&mut held.clone(), pull);
+        }
+    }
+}
+
+#[test]
+fn a_replacement_pull_request_ends_a_persons_review_waiver() {
+    // 57 is still on record, never found closed.
+    ready_asks_for_a_review(&mut watch_12_overturned_on_57(), "58");
+
+    // The fix the person approved, in 57, merges once the checks pass.
+    for pull in [Some("57"), None] {
+        let mut w = watch_12_overturned_on_57();
+        let ready = ready_12(&w, "author-1", pull).expect("ready");
+        assert_eq!(apply_all(&mut w, &ready), vec![], "{pull:?}");
+        assert!(w.issues[&watch_12()].review_waived, "{pull:?}");
+        let effects = w.apply(&Event::ChecksFinished {
+            issue: watch_12(),
+            passed: true,
+            failing: vec![],
+        });
+        assert_eq!(
+            effects,
+            vec![Effect::Merge { issue: watch_12() }],
+            "{pull:?}"
+        );
     }
 }
 
