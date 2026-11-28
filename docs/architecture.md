@@ -122,7 +122,13 @@ also asks again for a merge, deploy or verify that was lost; the parts that do t
 repeat work already done or running; a deploy that restarts the daemon is recorded by
 the new daemon, which finds the build in the handoff file (`docs/configuration.md`). An agent its
 issue waits on that sits idle is reminded after ten minutes and again after twenty, and its session
-is stopped after thirty so a fresh one takes over. An agent whose turn ends in an error, such as a
+is stopped after thirty so a fresh one takes over. A stop that fails, as when the terminal
+service cannot be reached or a request times out, is tried again at the next poll with no further
+reminder, and no fresh agent starts while the old one runs; a stop answered with the terminal gone
+or unknown ends the agent. While the daemon has no terminal for an agent, as before its runner has
+reported any after a restart, the agent is not ended either. Between tries an agent in a turn, at a
+prompt or waiting on a limit, or one its issue no longer waits on, is not stopped, and the rules
+below say whether its count is kept. An agent whose turn ends in an error, such as a
 usage limit, is listed under Problems with the line its turn ended on: the terminal's status
 message, or else the line on its screen that names the error, read once. When that line gives a
 reset time the runner family can read (`resets 5pm`, `resets 5:40pm` or `resets 17:40`, in the

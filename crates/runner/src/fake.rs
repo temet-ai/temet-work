@@ -57,6 +57,8 @@ pub struct FakeRunner {
     exec_error: Option<RunnerError>,
     /// What the next stops fail with, in order, changing nothing.
     stop_errors: std::collections::VecDeque<RunnerError>,
+    /// What every send fails with, typing nothing.
+    send_error: Option<RunnerError>,
 }
 
 /// Every [`Start`] a fake runner was given, shared so a test can read them after
@@ -101,6 +103,7 @@ impl FakeRunner {
             calls: Calls::default(),
             exec_error: None,
             stop_errors: std::collections::VecDeque::new(),
+            send_error: None,
         }
     }
 
@@ -129,6 +132,12 @@ impl FakeRunner {
     /// last failure works.
     pub fn fail_next_stop(&mut self, error: RunnerError) {
         self.stop_errors.push_back(error);
+    }
+
+    /// Makes every `send` from now on fail with `error` and type nothing, as a
+    /// terminal service that cannot be reached does.
+    pub fn fail_sends(&mut self, error: RunnerError) {
+        self.send_error = Some(error);
     }
 
     fn update(&mut self, terminal: &TerminalId, doing: Option<String>) {
@@ -318,6 +327,9 @@ impl Runner for FakeRunner {
         text: &str,
         only_if_idle: bool,
     ) -> Result<(), RunnerError> {
+        if let Some(e) = &self.send_error {
+            return Err(e.clone());
+        }
         let t = self
             .terms
             .get_mut(terminal)
