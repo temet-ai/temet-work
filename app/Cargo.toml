@@ -15,6 +15,8 @@ description = "temet-work's desktop app: draws the daemon's view data from the t
 # gpui-component 0.11.0 is built on `gpui-pre`, a crates.io snapshot of zed@f126950, not on
 # `gpui` 0.2.2. Pin the same snapshot under the same name (docs/findings/gpui.md).
 gpui = { package = "gpui-pre", version = "=0.3.14" }
+# The windowing backend: `application()` opens the window on Wayland.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.14", features = ["wayland"] }
 gpui-component = "=0.11.0"
 # Motion types (Easing, Spring) that gpui-component uses and does not re-export.
 gpui-base = "=0.11.0"
@@ -23,6 +25,22 @@ futures-channel = "0.3"
 serde_json = "1"
 temet-work-core = { path = "../crates/core" }
 temet-work-style = { path = "../crates/style" }
+# GPUI's text system and offscreen renderer, for the screenshot tool only (feature `shots`).
+gpui_wgpu = { package = "gpui-pre-wgpu", version = "=0.3.14", optional = true }
+
+[features]
+# `cargo run --example shots --features shots -- DIR`: draws the window offscreen with GPUI's
+# headless renderer and writes PNGs to DIR. It needs no window, Wayland or compositor.
+shots = ["dep:gpui_wgpu", "gpui/test-support", "gpui_platform/test-support"]
+
+[[example]]
+name = "shots"
+required-features = ["shots"]
+
+[[test]]
+# Clicks on the drawn page under GPUI's test support, with no window: about a second each.
+name = "clicks"
+required-features = ["shots"]
 
 [dev-dependencies]
 # gpui's fake clock and test app (`TestAppContext`), so the tests wait no real second and

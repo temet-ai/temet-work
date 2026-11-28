@@ -62,9 +62,14 @@ jobs:
           components: clippy, rustfmt
       # cargo reads the root .cargo/config.toml from app/ too, so the app links with mold.
       - uses: rui314/setup-mold@v1
-      # No apt step: the app has no gpui platform crate yet (it opens no window), so its
-      # build links only libc and needs no system package. The change that opens a window
-      # adds one here, a line per package naming the crate that needs it.
+      # The window's platform crate (gpui-pre-platform, Wayland) links these system libraries.
+      - name: System libraries
+        run: >-
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          libxkbcommon-dev
+          libwayland-dev
+          libfontconfig1-dev
+          libfreetype-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app -> target

@@ -1,0 +1,4 @@
+Archivo by the Archivo Project Authors, SIL Open Font License 1.1 (OFL.txt).
+From https://github.com/Omnibus-Type/Archivo at commit 211127690e8ff106c36c935f7e5e697114cff103:
+  fonts/ttf/Archivo-{Regular,Medium,SemiBold,Bold}.ttf
+  fonts/variable/Archivo[wdth,wght].ttf
