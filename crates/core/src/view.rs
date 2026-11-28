@@ -1067,22 +1067,32 @@ mod tests {
     }
 
     /// A host over the snapshot world after one tick, so its problems are the
-    /// ones the daemon reports: among them a line for the blocked agent and one
-    /// for the errored agent, each naming the work folder's path.
+    /// ones the daemon reports: among them a line for the blocked reviewer, naming
+    /// its readers' folder, and one for the errored author, naming its work
+    /// folder's path.
     fn ticked() -> Host {
-        let mut host = Host::new(world(), Vec::new(), Box::new(Memory::default()));
+        let world = World {
+            readers: Some(READERS_PATH.into()),
+            ..world()
+        };
+        let mut host = Host::new(world, Vec::new(), Box::new(Memory::default()));
         host.tick(0).expect("tick");
         host
     }
 
     const FOLDER_PATH: &str = "/srv/pseudopolis-yard/watch";
 
+    const READERS_PATH: &str = "/srv/pseudopolis-yard/readers";
+
     #[test]
     fn the_json_holds_no_digest_reset_time_path_fix_or_setting() {
         let host = ticked();
-        for key in ["blocked: reviewer-3", "errored: author-4"] {
+        for (key, path) in [
+            ("blocked: reviewer-3", READERS_PATH),
+            ("errored: author-4", FOLDER_PATH),
+        ] {
             let line = &host.problems()[key];
-            assert!(line.contains(FOLDER_PATH), "the host names it: {line}");
+            assert!(line.contains(path), "the host names it: {line}");
         }
         let w = host.world();
         let view = View::new(w, host.problems());
@@ -1114,6 +1124,7 @@ mod tests {
             reset.to_string(),
             CONTINUED_MS.to_string(),
             FOLDER_PATH.into(),
+            READERS_PATH.into(),
             "the-luggage".into(),
             "the broom is missing".into(),
             "ring-the-bells".into(),

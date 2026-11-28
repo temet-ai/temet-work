@@ -1,27 +1,26 @@
-//! Where an agent may run: the work folders its `machine` setting leaves it, the
-//! ones an author is given, and the issues waiting because none can take them
+//! Where an agent runs: the work folders an author is given on the machine its
+//! `machine` setting names, the issues waiting because none is free there, and
+//! the readers' folder a refiner, reviewer, arbiter or investigator runs in
 //! (`docs/settings.md`). A set value is never passed over for a folder on another
 //! machine. Also whether a ready issue starts at all once a folder is free, and
 //! why not (`docs/configuration.md`).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
 
-use crate::effect::Effect;
 use crate::ids::{FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId};
-use crate::model::{Folder, Group, Issue, Role, Stage};
+use crate::model::{Group, Issue, Role, Stage};
 use crate::world::{LOCAL, World};
 
-/// An issue whose next agent waits for a work folder on the machine its `machine`
-/// setting names.
+/// A ready issue whose author waits for a work folder on the machine its
+/// `machine` setting names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Waiting {
     /// The issue.
     pub issue: IssueId,
-    /// The agent that cannot start.
-    pub role: Role,
-    /// The machine the setting names for it.
+    /// The machine the setting names for its author.
     pub machine: MachineId,
-    /// A repository the agent needs a folder of that has none on the machine at
+    /// A repository the author needs a folder of that has none on the machine at
     /// all.
     pub none_in: Option<ProjectId>,
 }
@@ -96,7 +95,8 @@ enum Step<'a> {
 
 impl World {
     /// The machine `issue`'s agents of `role` must run on, when a level sets
-    /// `machine`; any machine when none does.
+    /// `machine`. When none does, an author takes a folder on any machine and
+    /// any other agent runs on this one, in its readers' folder.
     pub fn machine_for(&self, issue: &IssueId, role: Role) -> Option<MachineId> {
         self.setting_text(issue, Some(role), "machine")
             .map(MachineId::new)
@@ -108,18 +108,23 @@ impl World {
             .map_or_else(|| issue.id.project.clone(), |p| p.id.clone())
     }
 
-    /// The work folders an agent of `role` on `issue` may be given: those of the
-    /// repository it is worked in, on its `machine` when one is set.
-    pub(crate) fn usable_folders<'a>(
-        &'a self,
-        issue: &Issue,
-        role: Role,
-    ) -> impl Iterator<Item = &'a Folder> + use<'a> {
-        let project = self.folders_of(issue);
-        let machine = self.machine_for(&issue.id, role);
-        self.folders.values().filter(move |f| {
-            f.project == project && machine.as_ref().is_none_or(|m| &f.machine == m)
-        })
+    /// The folder readers of `project` run in: its subfolder of the daemon's
+    /// readers' folder ([`World::readers`]). It is no checkout, no author is
+    /// given it, and the readers of one project share it. None when the world
+    /// has no readers' folder.
+    pub fn readers_folder(&self, project: &ProjectId) -> Option<PathBuf> {
+        self.readers.as_ref().map(|r| r.join(&project.0))
+    }
+
+    /// The machine and folder a reader of `role` on `issue` runs in: the
+    /// readers' folder of the repository the issue is worked in, on the machine
+    /// its `machine` setting names, else this one. It never waits for a work
+    /// folder, so an author holding every one keeps no reader from starting.
+    pub(crate) fn reader_place(&self, issue: &Issue, role: Role) -> (MachineId, Option<PathBuf>) {
+        let machine = self
+            .machine_for(&issue.id, role)
+            .unwrap_or_else(|| MachineId::new(LOCAL));
+        (machine, self.readers_folder(&self.folders_of(issue)))
     }
 
     /// The free work folders the author of `issue` is given, one in each
@@ -315,43 +320,9 @@ impl World {
         Some(seen)
     }
 
-    /// Whether an agent of `role` that holds no folder of its own has somewhere to
-    /// run on `issue`. It may share a held folder. A project with no work folder
-    /// runs it on this machine, which a `machine` of `local` allows.
-    pub(crate) fn has_place(&self, issue: &Issue, role: Role) -> bool {
-        let Some(machine) = self.machine_for(&issue.id, role) else {
-            return true;
-        };
-        if self.usable_folders(issue, role).next().is_some() {
-            return true;
-        }
-        let project = self.folders_of(issue);
-        machine.0 == LOCAL && !self.folders.values().any(|f| f.project == project)
-    }
-
-    /// Whether `effect` would start an agent its `machine` setting leaves with
-    /// nowhere to run. The loop drops it, and asks again once that changes.
-    pub(crate) fn waits_for_machine(&self, effect: &Effect) -> bool {
-        let (issue, role) = match effect {
-            Effect::StartAgent {
-                issue,
-                role,
-                folder: None,
-                ..
-            } => (issue, *role),
-            // A running reviewer is told of the round; only a new one needs a place.
-            Effect::StartReview { issue, .. } if self.running(issue, Role::Reviewer).is_none() => {
-                (issue, Role::Reviewer)
-            }
-            _ => return false,
-        };
-        self.issues
-            .get(issue)
-            .is_some_and(|i| !self.has_place(i, role))
-    }
-
-    /// Every issue whose next agent waits for a work folder on a set machine, and
-    /// for nothing else, such as an issue it depends on or its group's scope.
+    /// Every ready issue whose author waits for a work folder on a set machine,
+    /// and for nothing else, such as an issue it depends on or its group's scope.
+    /// Only authors wait for a folder: a reader runs in its readers' folder.
     pub fn machine_waits(&self) -> Vec<Waiting> {
         self.issues
             .values()
@@ -360,37 +331,26 @@ impl World {
     }
 
     fn machine_wait(&self, i: &Issue) -> Option<Waiting> {
-        if self.paused(i) {
+        if self.paused(i) || !self.waits_for_author(i) {
             return None;
         }
-        let role = match i.stage {
-            Stage::New if self.groups.values().any(|g| self.in_scope(g, i)) => Role::Refiner,
-            Stage::Refining => Role::Refiner,
-            Stage::Ready if self.waits_for_author(i) => Role::Author,
-            Stage::InReview { .. } if !i.review_ok => Role::Reviewer,
-            Stage::Arbitration { .. } if !i.review_ok => Role::Arbiter,
-            _ => return None,
-        };
-        let machine = self.machine_for(&i.id, role)?;
-        // An author holds a folder of every repository the issue changes; every
-        // other agent may share one of the first.
-        let (served, repos) = if role == Role::Author {
-            let repos = self.repos_of(i);
-            let free = self.free_folders(&repos, |f| f.machine == machine);
-            (free.is_some(), repos)
-        } else {
-            let served = self.running(&i.id, role).is_some() || self.has_place(i, role);
-            (served, vec![self.folders_of(i)])
-        };
+        let machine = self.machine_for(&i.id, Role::Author)?;
+        // An author holds a folder of every repository the issue changes.
+        let repos = self.repos_of(i);
+        if self
+            .free_folders(&repos, |f| f.machine == machine)
+            .is_some()
+        {
+            return None;
+        }
         let none_in = repos.into_iter().find(|repo| {
             !self
                 .folders
                 .values()
                 .any(|f| &f.project == repo && f.machine == machine)
         });
-        (!served).then(|| Waiting {
+        Some(Waiting {
             issue: i.id.clone(),
-            role,
             machine,
             none_in,
         })

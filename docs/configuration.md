@@ -217,8 +217,9 @@ group's lists.
 When the queue holds fewer than `queue_low` issues, the daemon starts one investigator for
 the group. Left out, `queue_low` is twice the work folders of the group's projects and of
 the projects in its areas, or 2 when they have none; 0 starts no investigator. The
-investigator holds no work folder and changes no file: it runs in a free folder of the
-group's first project, or in one an author holds when none is free. It reads each project's
+investigator holds no work folder and changes no file. It runs in the daemon's empty folder
+for the group's first project, as a refiner or reviewer does (`docs/settings.md`, "Which
+machine an agent runs on"). It reads each project's
 docs for planned work that is not built, the open issues, and the pull requests merged since
 the group's last finished investigation started: one is finished when its investigator ran
 `temet-work investigated`. While none has finished, it reads those merged in the 7 days
@@ -295,8 +296,10 @@ ones it has listed, and so does a build with no default runtime or runner and no
 value for it. What a person or an agent has set since is not overwritten by the file; a
 value taken out of the file is unset.
 
-Listing a folder under `[[folder]]` is your choice to let agents work in it. Before each
-agent starts in a folder, the `claude` runtime marks the folder trusted
+Listing a folder under `[[folder]]` is your choice to let authors work in it. A refiner,
+reviewer, arbiter or investigator runs in a folder of the daemon's instead, `readers/PROJECT`
+beside the event log, which the daemon makes before such an agent starts and never empties.
+Before each agent starts in a folder, the `claude` runtime marks the folder trusted
 (`hasTrustDialogAccepted`) in Claude Code's own user file, `.claude.json` in the folder
 `CLAUDE_CONFIG_DIR` names, else in your home folder. It changes only that folder's entry
 and leaves a folder already trusted alone. For a folder on another machine this happens
@@ -398,6 +401,14 @@ Any other nonzero exit ends with the first line the command wrote to standard er
 `temet-work exited 1 on mac: /Users/me/.claude.json is not a JSON object`. The daemon tries
 the start again each round, and the line goes once it succeeds.
 
+A refiner, reviewer, arbiter or investigator on another machine runs in the daemon's folder for
+its project at the same path as on the daemon's machine (`readers/PROJECT` beside the event
+log), so that machine's user must be able to make that path. Before such an agent starts,
+herdr-core runs `sh -c 'mkdir -p -- "$1" && shift && { [ $# -eq 0 ] || exec "$@"; }' sh PATH`
+there, followed by the trust command when the runtime has one. It makes the folder, then
+trusts it. A folder already there is left as it is. The program is `sh`, so a failure line
+names `sh`, and ends with the first line the failing step wrote to standard error.
+
 The daemon does not answer Claude Code's other first-run prompt, "Allow this read outside
 the working directories?". On a new machine, start `claude --permission-mode auto` once in
 the work folder and answer it with "Yes, and keep allowing": an unattended agent stops at
@@ -427,8 +438,8 @@ To send one command from your own shell the same way: `TEMET_WORK_DAEMON=ssh://o
 ## Sending work to one machine
 
 The `machine` setting (`docs/settings.md`) names the machine whose work folders an issue's
-agents may be given. This project has a checkout on the daemon's own machine (`local`) and
-one on a Mac. Agents for the issues in the milestone run on the Mac, and their reviewers
+authors may be given, and the machine its other agents run on. This project has a checkout
+on the daemon's own machine (`local`) and one on a Mac. Agents for the issues in the milestone run on the Mac, and their reviewers
 stay on the daemon's machine:
 
 ```toml
@@ -470,9 +481,10 @@ When no folder on that machine is free, the issue stays ready, even while a fold
 another machine is free, and its author starts when a folder on that machine is released.
 `temet-work status` lists it as `radar#44 waiting for a work folder on mac`.
 
-`machine` picks which `[[folder]]` an agent is given, and so which machine it runs on. The
-folder's own `machine` field still says where that folder is. The daemon's own machine is
-`local`, whatever its host name.
+`machine` picks which `[[folder]]` an author is given, and so which machine it runs on. The
+folder's own `machine` field still says where that folder is. A refiner, reviewer, arbiter or
+investigator runs on the machine `machine` names, in the daemon's folder for its project, and
+never waits for a work folder. The daemon's own machine is `local`, whatever its host name.
 
 ## temet-work deploying itself
 

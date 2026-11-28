@@ -2468,10 +2468,14 @@ mod tests {
             }
             let folder = &world.folders[&FolderId::new("f1")];
             assert_eq!(folder.holder.is_some(), held);
+            world.readers = Some(PathBuf::from("/var/lib/temet-work/readers"));
             let launch = world
                 .launch_investigator(&GroupId::new("watch"))
                 .expect("launch");
-            assert_eq!(launch.brief.folder, Some(PathBuf::from("/srv/ankh/1")));
+            assert_eq!(
+                launch.brief.folder,
+                Some(PathBuf::from("/var/lib/temet-work/readers/ankh"))
+            );
             let task = launch.brief.task;
             // The lines that name a path give it as a place to fetch in.
             let named: Vec<&str> = task.lines().filter(|l| l.contains("/srv/")).collect();

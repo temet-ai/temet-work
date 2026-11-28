@@ -276,7 +276,8 @@ pub const SPECS: [Spec; 17] = [
     Spec {
         key: "machine",
         kind: Kind::Text,
-        about: "the machine of the work folder an agent is given; any machine when none is set",
+        about: "the machine an agent runs on, whose work folders an author may take; when none \
+                is set, any machine for an author and the daemon's for any other agent",
         agents: Agents::May,
         per_role: true,
         levels: EVERY_LEVEL,

@@ -3473,28 +3473,32 @@ fn reader_launch(w: &World, role: Role, key: &str) -> crate::launch::Brief {
 }
 
 #[test]
-fn a_reviewer_in_a_folder_an_author_is_then_given_was_told_to_leave_it_alone() {
+fn a_reviewer_runs_in_the_readers_folder_and_is_told_to_leave_it_alone() {
     let mut w = in_review_with_a_second_folder();
+    w.readers = Some("/srv/readers".into());
     let leave = "Do not switch its branch or change any file in it.";
     let before = reader_launch(&w, Role::Reviewer, "1");
-    assert_eq!(before.folder, Some("/srv/ankh/f2".into()));
+    assert_eq!(before.folder, Some("/srv/readers/ankh".into()));
     assert!(before.task.contains(leave), "{}", before.task);
 
+    // The free folder goes to an author; the reviewer's folder stays the same.
     assert_eq!(w.apply(&planned("2")), vec![author("2", "f2")]);
     let after = reader_launch(&w, Role::Reviewer, "1");
+    assert_eq!(after.folder, Some("/srv/readers/ankh".into()));
     assert!(after.task.contains(leave), "{}", after.task);
 }
 
 #[test]
-fn readers_in_every_free_folder_do_not_keep_a_ready_issue_from_its_author() {
+fn running_readers_do_not_keep_a_ready_issue_from_its_author() {
     let mut w = in_review_with_a_second_folder();
+    w.readers = Some("/srv/readers".into());
     w.apply(&sync("3", "m1", 3, &[]));
     w.apply(&started("refiner-3", Role::Refiner, "3"));
-    // f2 is the only free folder, and both running readers are in it.
+    // f2 is the only free folder; both running readers are in the readers' folder.
     for (role, key) in [(Role::Reviewer, "1"), (Role::Refiner, "3")] {
         assert_eq!(
             reader_launch(&w, role, key).folder,
-            Some("/srv/ankh/f2".into())
+            Some("/srv/readers/ankh".into())
         );
         assert!(w.running(&issue(key), role).is_some());
     }
@@ -3506,3 +3510,6 @@ mod scope;
 
 #[path = "world_hold_tests.rs"]
 mod hold;
+
+#[path = "world_readers_tests.rs"]
+mod readers;

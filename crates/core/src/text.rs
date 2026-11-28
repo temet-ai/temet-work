@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::IssueText;
-use crate::model::{AgentState, Issue, PointState, Review, Role, Stage};
+use crate::model::{AgentState, Issue, PointState, Review, Stage};
 use crate::placement::{Hold, StartWait, Unlisted, Why};
 use crate::world::World;
 
@@ -263,9 +263,9 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     out
 }
 
-/// The issues waiting for a work folder on the machine a setting names, then the
-/// ready ones that would not start once a folder is free, with each reason; no
-/// section when there are neither.
+/// The ready issues whose authors wait for a work folder on the machine a setting
+/// names, then the ready ones that would not start once a folder is free, with
+/// each reason; no section when there are neither.
 fn waiting(out: &mut String, world: &World) {
     let machines = world.machine_waits();
     let starts: Vec<StartWait> = world
@@ -280,17 +280,12 @@ fn waiting(out: &mut String, world: &World) {
     }
     let _ = writeln!(out, "Waiting");
     for w in machines {
-        let agent = if w.role == Role::Author {
-            String::new()
-        } else {
-            format!(" for its {}", w.role.name())
-        };
         let none = w.none_in.map_or_else(String::new, |repo| {
             format!(" ({repo} has no work folder there)")
         });
         let _ = writeln!(
             out,
-            "  {} waiting for a work folder on {}{agent}{none}",
+            "  {} waiting for a work folder on {}{none}",
             w.issue, w.machine
         );
     }
@@ -630,6 +625,7 @@ mod settings {
     use super::*;
     use crate::event::Event;
     use crate::ids::{IssueId, ProjectId};
+    use crate::model::Role;
     use crate::settings::{Choice, Scope, Target, Value};
 
     fn world() -> World {
@@ -930,10 +926,10 @@ Problems
             replies: Vec::new(),
         });
         let status = text(&w, &BTreeMap::new());
+        // Only authors wait: the reviewer runs in the readers' folder on mac2.
         assert!(
             status.contains(
                 "Waiting\n  \
-                 radar#1 waiting for a work folder on mac2 for its reviewer (radar has no work folder there)\n  \
                  radar#2 waiting for a work folder on mac2 (radar has no work folder there)\n  \
                  radar#3 waiting on radar#2, not done (ready)\nAgents\n"
             ),
@@ -1390,7 +1386,7 @@ mod review_rounds {
     use crate::brief;
     use crate::event::{Event, Verdict};
     use crate::ids::{AgentId, FolderId, GroupId, IssueId, MachineId, ProjectId};
-    use crate::model::{Check, Plan};
+    use crate::model::{Check, Plan, Role};
 
     fn watch12() -> IssueId {
         IssueId::new("watch", "12")
