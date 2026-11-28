@@ -19,7 +19,10 @@ use temet_work_app::composites::check_list::{CheckList, PlanCheck};
 use temet_work_app::composites::decision_row::{
     Decision, DecisionOption, DecisionRow, OverturnChoice, UndoCost,
 };
-use temet_work_app::composites::issue_pane::IssueTab;
+use temet_work_app::components::input_group::InputGroup;
+use temet_work_app::components::property_list::PropertyItem;
+use temet_work_app::components::stage_tag::Stage;
+use temet_work_app::composites::issue_pane::{IssuePane, IssueTab};
 use temet_work_app::composites::refine_dialog::{RefineCheck, RefineDialog};
 use temet_work_app::pages::project::{Grouping, Project, ViewMode};
 use temet_work_app::{assets, sample, theme};
@@ -620,4 +623,58 @@ fn refine_edits_the_title_and_checks_and_hands_them_back() {
     assert_eq!(refined.borrow().saves.len(), 2, "the title is blank again");
     click(vcx, "refine-close");
     assert_eq!(refined.borrow().closes, 2);
+}
+
+/// An issue's pane with a close handler, beside a text field: q typed in the field is text.
+struct PaneBesideAField {
+    closed: Rc<RefCell<bool>>,
+}
+
+impl gpui::Render for PaneBesideAField {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        let closed = self.closed.clone();
+        div()
+            .flex()
+            .size_full()
+            .child(div().w(px(300.)).child(InputGroup::new("note").fill(true)))
+            .child(
+                div().w(px(440.)).child(
+                    IssuePane::new("clacks#219", "Night lamps switch on by the clock", Stage::Ready)
+                        .facts(vec![PropertyItem::new("Group", "grand-trunk")])
+                        .on_close(move |_, _| *closed.borrow_mut() = true),
+                ),
+            )
+    }
+}
+
+#[test]
+fn q_typed_into_a_text_field_leaves_the_pane_open() {
+    let text = Arc::new(gpui_wgpu::CosmicTextSystem::new("Archivo"));
+    let cx: &'static mut TestAppContext = Box::leak(Box::new(
+        TestAppContext::build_with_text_system(TestDispatcher::new(0), None, text),
+    ));
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        cx.text_system()
+            .add_fonts(assets::faces())
+            .expect("the faces load");
+        theme::apply(cx, "dark").expect("the dark theme");
+    });
+    let closed = Rc::new(RefCell::new(false));
+    let shown = closed.clone();
+    let (_, vcx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|_| PaneBesideAField { closed: shown });
+        Root::new(view, window, cx)
+    });
+    draw(vcx);
+    click(vcx, "note");
+    vcx.simulate_keystrokes("q");
+    draw(vcx);
+    assert!(!*closed.borrow(), "q went into the field");
+    // Out of the field, q closes the pane.
+    vcx.update(|window, cx| window.blur(cx));
+    draw(vcx);
+    vcx.simulate_keystrokes("q");
+    draw(vcx);
+    assert!(*closed.borrow());
 }
