@@ -54,7 +54,7 @@ which is the one in effect.
 | `runtime` | yes | every level | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
 | `model` | yes | every level | the runtime's own default | the agent's brief, so the runtime adapter. A model belongs to one runtime: `model.<runtime>` (`model.codex`) names it, and a plain `model` is recorded as the global runtime's when it is written ("A model belongs to a runtime", below) |
 | `runner` | yes | every level | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
-| `machine` | yes | every level | none: any machine | the loop, per issue and role, when it picks a work folder (below) |
+| `machine` | yes | every level | none: an author takes a folder on any machine, any other agent runs on the daemon's | the loop, per issue and role, when it picks an author's work folder or where another agent runs (below) |
 | `permission` | yes | every level | `auto` (or `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`) | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
 | `review_rounds` | no | every level | 3 | the loop, per issue |
 | `ci` | no | every level | true | the code-host family, per issue |
@@ -129,10 +129,11 @@ value of one of the other settings reaches no investigator.
 
 ## Which machine an agent runs on
 
-`machine` takes the name a `[[folder]]` entry has in its own `machine` field, and limits an
-agent to those entries. The daemon's own machine is `local`. Unset, it limits nothing. It
-picks the checkout, and the entry's own field still says where that checkout is
-(`docs/configuration.md`).
+`machine` takes the name a `[[folder]]` entry has in its own `machine` field. It limits an
+author to those entries, and names the machine any other agent runs on. The daemon's own
+machine is `local`. Unset, it limits nothing, and an agent other than an author runs on the
+daemon's machine. It picks an author's checkout, and the entry's own field still says where
+that checkout is (`docs/configuration.md`).
 
 - An author takes a free folder on its machine. With none free, the issue stays ready and
   holds no folder, and its author starts when one is released. A free folder on another
@@ -147,20 +148,23 @@ picks the checkout, and the entry's own field still says where that checkout is
   Pinned issues of every group count, since a folder serves every group that works its
   project. An unpinned issue never waits because of this: with one folder free, the
   higher-ranked of the two takes it.
-- A refiner, reviewer or arbiter holds no checkout of its own and may share a held one on
-  its machine. If the project has none there, the agent waits. It is not moved to another
-  machine. An issue whose refiner cannot start stays new and takes no refining slot. An
-  author can also be given the folder such an agent already runs in, since that folder is
-  not recorded and does not count as held. So each of the three is told in its brief,
-  whether or not the folder is held, and a reviewer again on each later round, not to
-  switch the folder's branch or change any file in it. It reads a pull request's changes
-  from its code host. To run checks it makes a separate checkout of the pull request (with
-  none, of the commit it needs) outside the folder, and removes it afterwards. That way
-  each folder stays as its last author left it. A folder's files may then be on another
-  issue's branch or an older one, so a refiner is told to read the code its issue touches
-  at the current head of the repository's default branch, in each of an area's repositories
-  the change may touch: it fetches, which moves no branch and changes no file an author
-  works on, then reads with `git show` or in a separate checkout outside the folder.
+- A refiner, reviewer, arbiter or investigator holds no checkout and never waits for a
+  work folder, so an author that holds every folder of the project keeps none of them from
+  starting. It runs on its machine in an empty folder of the daemon's for its project,
+  `readers/PROJECT` beside the event log. An investigator's project is its group's first
+  repository. That folder is no checkout, and no author is given it. On another machine
+  the daemon makes it there, at the same path, before the agent starts, so that machine's
+  user must be able to make that path. The agents of one project share the folder, and the
+  daemon never empties it. A machine the terminal service cannot reach fails the start,
+  which is listed under Problems and tried again each round.
+- A refiner, reviewer or arbiter is told in its brief, and a reviewer again on each later
+  round, not to switch the folder's branch or change any file in it. It reads a pull
+  request's changes from its code host. To run checks it makes a separate checkout of the
+  pull request (with none, of the commit it needs) outside the folder, and removes it
+  afterwards. A refiner is told to read the code its issue touches at the current head of
+  the repository's default branch, in each of an area's repositories the change may touch:
+  it fetches, which moves no branch and changes no file an author works on, then reads with
+  `git show` or in a separate checkout outside the folder.
 - An author that already holds a folder keeps it when the setting changes. The new value
   applies the next time a folder is picked.
 - A name no folder uses is accepted, because a folder may be listed later. An empty value
@@ -177,10 +181,10 @@ A value for every role at a nearer level, such as `temet-work set radar#44 machi
 moves that issue's reviewer too, because the task is asked before the project (Roles,
 above).
 
-`temet-work status` lists each issue that waits for this under Waiting, as
-`radar#44 waiting for a work folder on mac`. The line names the agent when it is not the
-author, and says when the project has no work folder on that machine at all, which is how a
-misspelt name shows.
+`temet-work status` lists each issue whose author waits for this under Waiting, as
+`radar#44 waiting for a work folder on mac`. Only authors wait for a folder. The line says
+when the project has no work folder on that machine at all, which is how a misspelt name
+shows.
 
 ## Setting them
 

@@ -84,6 +84,12 @@ pub struct World {
     /// Each project's and area's web addresses, put in by the host each round
     /// from what the parts give. It is not built from events.
     pub addresses: BTreeMap<ProjectId, Addresses>,
+    /// The daemon's folder that readers run in, beside its event log: a
+    /// refiner, reviewer, arbiter or investigator runs in its subfolder for its
+    /// project ([`World::readers_folder`]), which is no checkout and which no
+    /// author is given. Put in by the daemon at start; it is not built from
+    /// events. None runs readers in no folder.
+    pub readers: Option<std::path::PathBuf>,
     /// When each issue last changed, from the times events were applied at.
     pub updated: Updated,
     /// Whether a person has held the daemon (`temet-work hold`, or
@@ -1142,7 +1148,6 @@ impl World {
         out.retain(|e| !self.waits_for_scope(e));
         self.follow_scope();
         out.extend(self.place());
-        out.retain(|e| !self.waits_for_machine(e));
         out
     }
 
@@ -1459,7 +1464,6 @@ impl World {
                 out.start.push(effect);
             }
         }
-        out.start.retain(|e| !self.waits_for_machine(e));
         out
     }
 
@@ -1516,31 +1520,32 @@ impl World {
         }
     }
 
-    /// The folder an agent of `role` on `issue` runs in: its own, else (for a
-    /// reader) a free one of the issue's project when there is one, so it does not
-    /// work in a folder an author is changing. Only folders on the role's
-    /// `machine` count, when one is set.
-    pub fn folder_for(
-        &self,
-        issue: &Issue,
-        role: Role,
-        folder: Option<&FolderId>,
-    ) -> Option<&Folder> {
-        match folder {
-            Some(f) => self.folders.get(f),
-            None => self
-                .usable_folders(issue, role)
-                .find(|f| f.holder.is_none())
-                .or_else(|| self.usable_folders(issue, role).next()),
+    /// The folder `agent` runs in: the work folder it was started in, else, for
+    /// a reader, its readers' folder, made on the agent's machine.
+    pub fn folder_of(&self, agent: &Agent) -> Option<std::path::PathBuf> {
+        if let Some(f) = agent.folder.as_ref().and_then(|f| self.folders.get(f)) {
+            return Some(std::path::PathBuf::from(&f.path));
+        }
+        match agent.role {
+            Role::Author => None,
+            Role::Investigator => self
+                .groups
+                .get(&agent.group)
+                .and_then(|g| self.investigator_place(g).1),
+            role => agent
+                .issue
+                .as_ref()
+                .and_then(|i| self.issues.get(i))
+                .and_then(|i| self.reader_place(i, role).1),
         }
     }
 
     /// What starting an agent takes: its id, the machine and folder it runs in,
     /// and its brief. The id is its role and a number, counting every agent of
-    /// that role this world has started (`author-3`). An agent with no work
-    /// folder of its own runs in a folder of its project without holding it.
-    /// `None` when the issue is unknown, or when such an agent has no folder on
-    /// the machine its `machine` setting names. An investigator works for its
+    /// that role this world has started (`author-3`). An author runs in the work
+    /// folder it holds; a refiner, reviewer or arbiter runs in the readers'
+    /// folder of the issue's project on its `machine`, and never waits for a work
+    /// folder. `None` when the issue is unknown. An investigator works for its
     /// group, not on an issue: it starts through [`World::launch_investigator`].
     pub fn launch(
         &self,
@@ -1553,13 +1558,13 @@ impl World {
             return None;
         }
         let i = self.issues.get(issue)?;
-        if folder.is_none() && !self.has_place(i, role) {
-            return None;
-        }
         let n = self.agents.values().filter(|a| a.role == role).count() + 1;
-        let place = self.folder_for(i, role, folder);
-        let path = place.map(|f| std::path::PathBuf::from(&f.path));
-        let shared = folder.is_none() && place.is_some_and(|f| f.holder.is_some());
+        let (machine, path) = match folder.and_then(|f| self.folders.get(f)) {
+            Some(f) => (f.machine.clone(), Some(std::path::PathBuf::from(&f.path))),
+            // An author runs only in the folders it holds.
+            None if role == Role::Author => (MachineId::new(LOCAL), None),
+            None => self.reader_place(i, role),
+        };
         // An author holding folders in several repositories is told each one.
         let held: Vec<brief::Held> = if role == Role::Author {
             i.folder
@@ -1581,7 +1586,7 @@ impl World {
         Some(Launch {
             agent: AgentId::new(format!("{}-{n}", role.name())),
             group: group.clone(),
-            machine: place.map_or_else(|| MachineId::new(LOCAL), |f| f.machine.clone()),
+            machine,
             folder: folder.cloned(),
             brief: crate::launch::Brief {
                 model: self.setting_text(issue, Some(role), "model"),
@@ -1595,7 +1600,7 @@ impl World {
                     &self.area_repos(issue),
                     brief::Workplace {
                         folder: path,
-                        shared,
+                        shared: false,
                         held,
                     },
                     &self.pulled(i),
@@ -1932,8 +1937,6 @@ impl World {
                 .issues
                 .values()
                 .filter(|i| i.stage == Stage::New && i.group.is_none() && self.in_scope(group, i))
-                // One whose refiner has no folder on its machine takes no slot.
-                .filter(|i| self.has_place(i, Role::Refiner))
                 .collect();
             new.sort_by_key(|i| Self::rank(group, i));
             let take: Vec<IssueId> = new

@@ -237,7 +237,8 @@ fn a_synced_issue_starts_a_refiner_through_the_parts_and_logs_it() {
         .get(&AgentId::new("refiner-1"))
         .expect("refiner-1");
     assert_eq!(agent.issue, Some(IssueId::new("ankh", "1")));
-    assert_eq!(agent.machine, MachineId::new("morpork"));
+    // A reader with no `machine` setting runs on this machine.
+    assert_eq!(agent.machine, MachineId::new(crate::world::LOCAL));
     assert!(h.problems().is_empty(), "{:?}", h.problems());
     let logged = journal.0.lock().expect("journal").clone();
     assert_eq!(logged.len(), 5);
@@ -269,7 +270,7 @@ fn a_tick_starts_one_investigator_for_a_group_short_of_work_and_logs_its_start_a
                 group: GroupId::new("watch"),
                 role: Role::Investigator,
                 issue: None,
-                machine: MachineId::new("morpork"),
+                machine: MachineId::new(crate::world::LOCAL),
                 folder: None,
                 secret_digest: None,
                 runtime: None,
@@ -409,8 +410,11 @@ fn a_part_that_keeps_asking_for_more_is_stopped() {
 }
 
 #[test]
-fn an_author_runs_in_its_folder_and_a_refiner_in_any_folder_of_the_project() {
-    let mut w = World::default();
+fn an_author_runs_in_its_folder_and_a_refiner_in_the_readers_folder_of_the_project() {
+    let mut w = World {
+        readers: Some("/srv/readers".into()),
+        ..World::default()
+    };
     for e in setup(1) {
         w.apply(&e);
     }
@@ -446,7 +450,7 @@ fn an_author_runs_in_its_folder_and_a_refiner_in_any_folder_of_the_project() {
     assert_eq!(refiner.folder, None, "a refiner holds no folder");
     assert_eq!(
         refiner.brief.folder.as_deref(),
-        Some(std::path::Path::new("/srv/ankh/f1"))
+        Some(std::path::Path::new("/srv/readers/ankh"))
     );
     assert!(refiner.brief.task.contains("issue 1 of city/ankh"));
     assert!(

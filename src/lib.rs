@@ -119,9 +119,11 @@ pub fn trust_folder(runtime: &str, folder: &Path) -> Result<(), String> {
 
 /// The daemon's host: the event log at `path` replayed onto a world that
 /// already holds what `parts` offer, so an older log's plain model is bound to
-/// the build's default runtime where the log set no global one.
+/// the build's default runtime where the log set no global one. Readers run in
+/// `readers`, beside the log.
 pub fn start(path: &Path, parts: Vec<Box<dyn Part>>) -> Result<Host, String> {
-    let (journal, world) = journal(path, temet_work_core::host::catalog(&parts))?;
+    let (journal, mut world) = journal(path, temet_work_core::host::catalog(&parts))?;
+    world.readers = Some(path.with_file_name("readers"));
     Ok(Host::new(world, parts, journal))
 }
 

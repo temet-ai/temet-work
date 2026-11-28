@@ -661,8 +661,14 @@ fn machines(folders: &[(&str, &str)]) -> World {
         order: key.parse().unwrap_or_default(),
         closed: false,
     }));
-    World::replay(&events).0
+    World {
+        readers: Some(READERS.into()),
+        ..World::replay(&events).0
+    }
 }
+
+/// The daemon's readers' folder in the worlds of [`machines`].
+const READERS: &str = "/srv/readers";
 
 fn work_folder(folder: &str, machine: &str) -> Event {
     Event::FolderAdded {
@@ -722,6 +728,11 @@ fn place_of(w: &World, role: Role, key: &str) -> Option<(String, String)> {
 
 fn at(machine: &str, folder: &str) -> Option<(String, String)> {
     Some((machine.into(), format!("/srv/{folder}")))
+}
+
+/// The readers' folder of ankh, on `machine`.
+fn readers_on(machine: &str) -> Option<(String, String)> {
+    Some((machine.into(), format!("{READERS}/ankh")))
 }
 
 #[test]
@@ -862,7 +873,6 @@ fn an_unpinned_issue_still_takes_the_only_free_folder() {
         w.machine_waits(),
         vec![crate::placement::Waiting {
             issue: id("watch", "WATCH-13"),
-            role: Role::Author,
             machine: MachineId::new("mac"),
             none_in: None,
         }]
@@ -876,31 +886,30 @@ fn a_machine_for_one_role_or_one_task_wins_where_the_chain_says() {
     machine(&mut w, ankh(), Some(Role::Reviewer), "local");
     // The author reads the value for every role, the reviewer its own.
     assert_eq!(plan(&mut w, "1"), vec![author("1", "b-mac")]);
-    assert_eq!(place_of(&w, Role::Reviewer, "1"), at("local", "a-local"));
-    assert_eq!(place_of(&w, Role::Arbiter, "1"), at("mac", "b-mac"));
+    assert_eq!(place_of(&w, Role::Reviewer, "1"), readers_on("local"));
+    assert_eq!(place_of(&w, Role::Arbiter, "1"), readers_on("mac"));
     // A value on the task is nearer than the project's, whatever its role.
     machine(&mut w, task("1"), None, "mac");
-    assert_eq!(place_of(&w, Role::Reviewer, "1"), at("mac", "b-mac"));
+    assert_eq!(place_of(&w, Role::Reviewer, "1"), readers_on("mac"));
     let r = w
         .setting(&id("ankh", "1"), Some(Role::Reviewer), "machine")
         .expect("set");
     assert_eq!(r.level, Level::Task);
-    // A role's value for the author alone leaves the reviewer anywhere: it reads
-    // from the folder that is free.
+    // A role's value for the author alone leaves the reviewer on this machine.
     let mut w = machines(&BOTH);
     machine(&mut w, ankh(), Some(Role::Author), "mac");
     assert_eq!(plan(&mut w, "1"), vec![author("1", "b-mac")]);
     assert_eq!(w.machine_for(&id("ankh", "1"), Role::Reviewer), None);
-    assert_eq!(place_of(&w, Role::Reviewer, "1"), at("local", "a-local"));
+    assert_eq!(place_of(&w, Role::Reviewer, "1"), readers_on("local"));
 }
 
 #[test]
-fn a_reader_shares_a_held_folder_on_its_machine_before_a_free_one_elsewhere() {
+fn a_reader_runs_in_the_readers_folder_on_its_machine_not_in_the_authors_folder_there() {
     let mut w = machines(&BOTH);
     machine(&mut w, ankh(), None, "mac");
     assert_eq!(plan(&mut w, "1"), vec![author("1", "b-mac")]);
-    assert_eq!(place_of(&w, Role::Reviewer, "1"), at("mac", "b-mac"));
-    assert_eq!(w.machine_waits(), vec![], "it can share the folder");
+    assert_eq!(place_of(&w, Role::Reviewer, "1"), readers_on("mac"));
+    assert_eq!(w.machine_waits(), vec![]);
 }
 
 #[test]
@@ -925,7 +934,6 @@ fn an_issue_waits_ready_for_a_folder_on_its_machine_and_starts_when_one_is_relea
         w.machine_waits(),
         vec![crate::placement::Waiting {
             issue: id("ankh", "2"),
-            role: Role::Author,
             machine: MachineId::new("mac"),
             none_in: None,
         }]
@@ -946,9 +954,9 @@ fn an_issue_waits_ready_for_a_folder_on_its_machine_and_starts_when_one_is_relea
 }
 
 #[test]
-fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
+fn a_machine_no_folder_is_on_keeps_the_author_waiting_and_starts_its_readers_there() {
     let mut w = machines(&BOTH);
-    // The refiner: the issue is not taken, and takes no refining slot.
+    // The refiner: the issue is taken, and its refiner runs on that machine.
     let mut fresh = machines(&BOTH);
     let milestone = Scope::Milestone {
         of: ProjectId::new("ankh"),
@@ -963,13 +971,22 @@ fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
         order: 3,
         closed: false,
     });
-    assert_eq!(effects, vec![]);
-    assert_eq!(fresh.issues[&id("ankh", "3")].stage, Stage::New);
-    let waits = fresh.machine_waits();
-    let third = waits.iter().find(|w| w.issue == id("ankh", "3"));
+    assert_eq!(
+        effects,
+        vec![Effect::StartAgent {
+            group: GroupId::new("watch"),
+            role: Role::Refiner,
+            issue: id("ankh", "3"),
+            folder: None,
+        }]
+    );
+    assert_eq!(fresh.issues[&id("ankh", "3")].stage, Stage::Refining);
+    assert_eq!(place_of(&fresh, Role::Refiner, "3"), readers_on("mac2"));
     assert!(
-        third.is_some_and(|w| w.role == Role::Refiner && w.none_in.is_some()),
-        "{waits:?}"
+        fresh
+            .machine_waits()
+            .iter()
+            .all(|w| w.issue != id("ankh", "3"))
     );
 
     // The author.
@@ -978,15 +995,15 @@ fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
     assert_eq!(w.issues[&id("ankh", "1")].stage, Stage::Ready);
     let waits = w.machine_waits();
     assert!(
-        matches!(&waits[..], [w] if w.role == Role::Author && w.none_in.is_some()),
+        matches!(&waits[..], [w] if w.issue == id("ankh", "1") && w.none_in.is_some()),
         "{waits:?}"
     );
 
-    // The reviewer and the arbiter: the stage moves on, and no agent starts.
+    // The reviewer and the arbiter start on that machine, in the readers' folder.
     let mut w = machines(&BOTH);
     set(&mut w, task("1"), None, "review_rounds", Value::Number(1));
     machine(&mut w, task("1"), Some(Role::Reviewer), "mac2");
-    machine(&mut w, task("1"), Some(Role::Arbiter), "mac2");
+    machine(&mut w, task("1"), Some(Role::Arbiter), "klatch");
     plan(&mut w, "1");
     let issue = id("ankh", "1");
     let review = w.apply(&Event::PullRequestReady {
@@ -995,31 +1012,15 @@ fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
         pulls: Default::default(),
         replies: Vec::new(),
     });
-    assert_eq!(review, vec![]);
-    assert_eq!(place_of(&w, Role::Reviewer, "1"), None);
-    let starts_for = |w: &World| -> Vec<Effect> {
-        w.missing()
-            .start
-            .into_iter()
-            .filter(|e| match e {
-                Effect::StartReview { issue: i, .. } | Effect::StartAgent { issue: i, .. } => {
-                    i == &issue
-                }
-                _ => false,
-            })
-            .collect()
-    };
-    assert_eq!(starts_for(&w), vec![]);
-    assert_eq!(w.machine_waits()[0].role, Role::Reviewer);
-    // A folder on that machine arrives, and the reviewer is asked for.
-    w.apply(&work_folder("c-mac2", "mac2"));
-    assert!(matches!(
-        &starts_for(&w)[..],
-        [Effect::StartReview { round: 1, .. }]
-    ));
-    assert_eq!(place_of(&w, Role::Reviewer, "1"), at("mac2", "c-mac2"));
-    // Gone to another machine again: the arbiter waits the same way.
-    machine(&mut w, task("1"), Some(Role::Arbiter), "klatch");
+    assert_eq!(
+        review,
+        vec![Effect::StartReview {
+            issue: issue.clone(),
+            round: 1,
+        }]
+    );
+    assert_eq!(place_of(&w, Role::Reviewer, "1"), readers_on("mac2"));
+    assert_eq!(w.machine_waits(), vec![]);
     let ruled = w.apply(&Event::ReviewFinished {
         issue: issue.clone(),
         round: 1,
@@ -1030,11 +1031,16 @@ fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
         open: None,
     });
     assert!(
-        !ruled.iter().any(|e| matches!(e, Effect::StartAgent { .. })),
+        ruled.contains(&Effect::StartAgent {
+            group: GroupId::new("watch"),
+            role: Role::Arbiter,
+            issue,
+            folder: None,
+        }),
         "{ruled:?}"
     );
-    assert_eq!(starts_for(&w), vec![]);
-    assert_eq!(w.machine_waits()[0].role, Role::Arbiter);
+    assert_eq!(place_of(&w, Role::Arbiter, "1"), readers_on("klatch"));
+    assert_eq!(w.machine_waits(), vec![]);
 }
 
 #[test]
@@ -1057,28 +1063,6 @@ fn an_issue_waiting_for_something_else_is_not_waiting_for_a_machine() {
     machine(&mut w, task("2"), None, "mac2");
     machine(&mut w, task("2"), Some(Role::Refiner), "mac");
     plan(&mut w, "2");
-    assert_eq!(w.machine_waits(), vec![]);
-}
-
-#[test]
-fn an_approved_issue_waits_for_its_checks_not_for_a_reviewers_machine() {
-    let mut w = working();
-    let issue = id("ankh", "1");
-    machine(&mut w, task("1"), Some(Role::Reviewer), "klatch");
-    w.apply(&Event::PullRequestReady {
-        issue: issue.clone(),
-        pull: Some("1".into()),
-        pulls: Default::default(),
-        replies: Vec::new(),
-    });
-    assert_eq!(w.machine_waits()[0].role, Role::Reviewer);
-    w.apply(&Event::ReviewFinished {
-        issue,
-        round: 1,
-        verdict: Verdict::Approve,
-        failed: None,
-        open: None,
-    });
     assert_eq!(w.machine_waits(), vec![]);
 }
 
@@ -1165,7 +1149,7 @@ fn an_issue_across_repositories_takes_all_its_folders_on_its_machine_or_none() {
 }
 
 #[test]
-fn a_project_with_no_folder_runs_a_reader_here_unless_another_machine_is_named() {
+fn a_project_with_no_folder_runs_a_reader_here_or_on_the_machine_named() {
     let mut w = machines(&[]);
     let launch = |w: &World| {
         w.launch(
@@ -1180,7 +1164,8 @@ fn a_project_with_no_folder_runs_a_reader_here_unless_another_machine_is_named()
     machine(&mut w, ankh(), None, "local");
     assert_eq!(launch(&w).as_deref(), Some("local"));
     machine(&mut w, ankh(), None, "mac");
-    assert_eq!(launch(&w), None);
+    assert_eq!(launch(&w).as_deref(), Some("mac"));
+    assert_eq!(place_of(&w, Role::Refiner, "1"), readers_on("mac"));
 }
 
 /// ankh#44 in milestone "Clocks" of ankh, which is in the area guild, being

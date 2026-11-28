@@ -406,15 +406,11 @@ impl Host {
     fn report_blocked(&mut self) {
         self.problems.retain(|k, _| !of_a_stopped_agent(k));
         for agent in self.world.agents.values() {
+            // A reader's place is its readers' folder, made on its machine.
             let place = || {
-                agent
-                    .issue
-                    .as_ref()
-                    .and_then(|i| self.world.issues.get(i))
-                    .and_then(|i| self.world.folder_for(i, agent.role, agent.folder.as_ref()))
-                    // A reader's folder is not recorded: name none on another machine.
-                    .filter(|f| f.machine == agent.machine)
-                    .map_or_else(String::new, |f| format!(" in {}", f.path))
+                self.world
+                    .folder_of(agent)
+                    .map_or_else(String::new, |f| format!(" in {}", f.display()))
             };
             if let Some((key, line)) = stopped(agent, place) {
                 self.problems.insert(key, line);

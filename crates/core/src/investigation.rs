@@ -14,7 +14,7 @@ use crate::effect::Effect;
 use crate::event::Event;
 use crate::ids::{AgentId, GroupId, IssueId, MachineId, MilestoneId, ProjectId};
 use crate::launch::Launch;
-use crate::model::{AgentState, Folder, Group, Investigation, Issue, Role, Stage};
+use crate::model::{AgentState, Group, Investigation, Issue, Role, Stage};
 use crate::settings::Scope;
 use crate::world::{LOCAL, World};
 
@@ -235,26 +235,21 @@ impl World {
             .unwrap_or(Scope::Global)
     }
 
-    /// The folder a group's investigator runs in without holding it: a free one
-    /// of the group's first repository, else one an author holds, on the machine
-    /// its `machine` setting names when one does.
-    fn investigator_folder(&self, group: &Group) -> Option<&Folder> {
-        let first = self.group_repos(group).into_iter().next()?;
+    /// The machine and folder a group's investigator runs in: the readers'
+    /// folder of the group's first repository, on the machine its `machine`
+    /// setting names there, else this one. It holds no work folder and never
+    /// waits for one.
+    pub(crate) fn investigator_place(&self, group: &Group) -> (MachineId, Option<PathBuf>) {
+        let scope = self.agent_scope(&group.id, None);
         let machine = self
-            .text_at(
-                &Scope::Project(first.clone()),
-                Some(Role::Investigator),
-                "machine",
-            )
-            .map(MachineId::new);
-        let usable = || {
-            self.folders
-                .values()
-                .filter(|f| f.project == first && machine.as_ref().is_none_or(|m| &f.machine == m))
-        };
-        usable()
-            .find(|f| f.holder.is_none())
-            .or_else(|| usable().next())
+            .text_at(&scope, Some(Role::Investigator), "machine")
+            .map_or_else(|| MachineId::new(LOCAL), MachineId::new);
+        let folder = self
+            .group_repos(group)
+            .into_iter()
+            .next()
+            .and_then(|first| self.readers_folder(&first));
+        (machine, folder)
     }
 
     /// The milestone an investigator's issue gets when it names none: the last of
@@ -264,13 +259,14 @@ impl World {
     }
 
     /// What starting `group`'s investigator takes: the id its investigation
-    /// recorded, the machine and folder it runs in (holding none) and its brief.
+    /// recorded, the machine and readers' folder it runs in (holding none) and
+    /// its brief.
     /// `None` when the group runs no investigation.
     pub fn launch_investigator(&self, group: &GroupId) -> Option<Launch> {
         let g = self.groups.get(group)?;
         let investigation = self.investigating(group)?;
         let scope = self.agent_scope(group, None);
-        let place = self.investigator_folder(g);
+        let (machine, folder) = self.investigator_place(g);
         let sources = self.group_sources(g);
         let covered = sources.iter().map(|source| self.covered(source)).collect();
         let mut closed: Vec<&Issue> = self
@@ -291,7 +287,7 @@ impl World {
         Some(Launch {
             agent: investigation.agent.clone(),
             group: group.clone(),
-            machine: place.map_or_else(|| MachineId::new(LOCAL), |f| f.machine.clone()),
+            machine,
             folder: None,
             brief: crate::launch::Brief {
                 model: self.text_at(&scope, Some(Role::Investigator), "model"),
@@ -308,8 +304,8 @@ impl World {
                         since: investigation.window(),
                     },
                     brief::Workplace {
-                        folder: place.map(|f| PathBuf::from(&f.path)),
-                        shared: place.is_some_and(|f| f.holder.is_some()),
+                        folder,
+                        shared: false,
                         held: Vec::new(),
                     },
                     &self.kept_rules(),

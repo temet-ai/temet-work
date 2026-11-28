@@ -519,7 +519,13 @@ fn a_refiners_plan_naming_runtime_is_refused_and_the_author_runs_claude_in_plan_
 
 #[test]
 fn a_folder_on_another_machine_needs_daemon_host_before_an_agent_starts_there() {
-    let config = CONFIG.replace("path = \".\"", "machine = \"mac\"\npath = \"/work/ankh\"");
+    // The project's agents are sent to mac, where its folder is.
+    let config = CONFIG
+        .replace("path = \".\"", "machine = \"mac\"\npath = \"/work/ankh\"")
+        .replace(
+            "deploy = \"make deploy\"\n",
+            "deploy = \"make deploy\"\n\n[project.settings]\nmachine = \"mac\"\n",
+        );
     let (mut host, _) = host_on(Box::new(Memory::default()), fake_runtimes(), &config, None);
     host.tick(0).expect("tick");
     assert!(host.world().agents.is_empty(), "no agent started");
@@ -2708,6 +2714,7 @@ mod senders {
     }
 
     /// Two projects, ankh here and klatch on the machine mac, refined at once.
+    /// klatch's `machine` sends its refiner to mac too.
     const TWO: &str = r#"
 daemon_host = "omit"
 
@@ -2720,6 +2727,9 @@ name = "city/ankh"
 id = "klatch"
 tracker = "fake"
 name = "city/klatch"
+
+[project.settings]
+machine = "mac"
 
 [[folder]]
 id = "ankh-1"

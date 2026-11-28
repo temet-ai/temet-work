@@ -102,7 +102,8 @@ pub enum Effect {
         program: Program,
         /// A program run to its end on the agent's machine before its program
         /// starts: the one that marks its folder trusted there, for a folder on
-        /// another machine. When it fails, the agent does not start.
+        /// another machine, which first makes the folder for an agent that holds
+        /// no work folder. When it fails, the agent does not start.
         before: Option<Program>,
     },
 }

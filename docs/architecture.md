@@ -205,8 +205,11 @@ needs: its author or reviewer while it is in review, being fixed or merging, its
 is refining, and the investigator of a running investigation. An author holds its issue's work
 folders, one in each repository the issue changes. A merge or a close in the tracker takes them
 from the issue, and no author is placed in one while an agent that held it still runs, since that
-session may still change the folder. A reviewer, refiner, arbiter or investigator runs in a folder
-without holding it, so it keeps no folder from the next author.
+session may still change the folder. A refiner, reviewer, arbiter or investigator holds no folder.
+It runs in an empty folder of the daemon's for its project, `readers/PROJECT` beside the event log,
+which is made on the agent's machine before it starts. That folder is no checkout, and no author
+is given it. Such an agent never waits for a work folder. An author holds its issue's folders all
+through review, so a reviewer that waited for a free one would never start.
 
 A group has no coordinator agent: in the research fleet the standing seat waited 25 of its 28
 minutes, and in mike's larger runs such seats were where the token and turn costs came from
@@ -239,8 +242,9 @@ message about a paused issue until it is no longer paused. Agents at work finish
 turn, for the reason above, and an issue with a pull request merged is not paused: it
 merges, deploys and is verified, with the agents that takes.
 
-When a group's work queue runs short, the daemon starts one investigator for it, which holds
-no folder, reads the group's projects and files the next issues through `temet-work file`
+When a group's work queue runs short, the daemon starts one investigator for it. It holds no
+work folder and runs in the daemon's empty folder for the group's first repository. It reads
+the group's projects and files the next issues through `temet-work file`
 (`docs/configuration.md`). The daemon counts the queue, keeps to one investigator per group
 and waits `investigate_every` between investigations; the clock comes into the core as the
 time `Host::tick` takes, and each investigation's start and end times are on its events.
@@ -254,9 +258,11 @@ an effect leads to is handled before the next effect.
 
 Starting an agent shows the path. The loop decides to start a refiner on an issue. The
 runtime family asks the loop for the agent's id, folder and brief (`World::launch`),
-makes the program with its runtime, and asks for it to run (`Effect::Run`). For a folder
-on another machine the runtime also gives the program that trusts the folder there, and the
-runner family runs that on the machine first (`Runner::exec`). The runner family starts the
+makes the refiner's folder when it is on this machine, makes the program with its runtime,
+and asks for it to run (`Effect::Run`). For a folder on another machine the runtime also
+gives the program that trusts the folder there, which first makes the folder for an agent
+that holds no work folder, such as this refiner. The runner family runs that program on the
+machine first (`Runner::exec`). The runner family starts the
 agent's program in a terminal labelled with the agent, group, issue and role, and reports
 `AgentStarted`. From then on the runner family turns the terminal's updates into the
 agent's state. Neither family names the other.

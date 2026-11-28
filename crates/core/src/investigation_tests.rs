@@ -1033,16 +1033,19 @@ fn queue_low_defaults_to_twice_the_groups_work_folders() {
 
 #[test]
 fn the_investigator_holds_no_folder() {
-    let mut w = short(Some(5));
+    let mut w = World {
+        readers: Some("/srv/readers".into()),
+        ..short(Some(5))
+    };
     let started = tick(&mut w, 0);
     let launch = &started[0];
     assert_eq!(launch.folder, None);
     assert_eq!(
         launch.brief.folder,
-        Some(std::path::PathBuf::from("/srv/ankh/f1")),
-        "it runs in a free folder of the group's first project"
+        Some(std::path::PathBuf::from("/srv/readers/ankh")),
+        "it runs in the readers' folder of the group's first project"
     );
-    assert_eq!(launch.machine, MachineId::new("morpork"));
+    assert_eq!(launch.machine, MachineId::new(crate::world::LOCAL));
     assert_eq!(w.folders[&FolderId::new("f1")].holder, None);
     // So an author still gets the folder.
     w.apply(&sync("1", Some("First")));
