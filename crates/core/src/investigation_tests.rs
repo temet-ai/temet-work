@@ -1733,27 +1733,23 @@ fn a_person_closed_issue_stays_refused_in_later_investigations() {
     );
 }
 
-/// Keeps 20 rules of `bytes` bytes each, and returns their texts.
-fn keep_rules(w: &mut World, bytes: usize) -> Vec<String> {
-    (1..=20)
-        .map(|n| {
-            let text = format!("{:x<bytes$}", format!("Prefer rule {n:02} "));
-            let id = RuleId(n);
-            w.rules.insert(
+/// Keeps `texts` as the rules numbered from 1.
+fn keep_rules(w: &mut World, texts: &[String]) {
+    for (n, text) in (1..).zip(texts) {
+        let id = RuleId(n);
+        w.rules.insert(
+            id,
+            Rule {
                 id,
-                Rule {
-                    id,
-                    decision: DecisionId(n),
-                    issue: ankh_issue("1"),
-                    decided_by: AgentId::new("refiner-1"),
-                    overturned_by: "person".into(),
-                    text: text.clone(),
-                    state: RuleState::Kept,
-                },
-            );
-            text
-        })
-        .collect()
+                decision: DecisionId(n),
+                issue: ankh_issue("1"),
+                decided_by: AgentId::new("refiner-1"),
+                overturned_by: "person".into(),
+                text: text.clone(),
+                state: RuleState::Kept,
+            },
+        );
+    }
 }
 
 #[test]
@@ -1776,37 +1772,56 @@ fn a_long_closed_list_leaves_the_kept_rules_their_room() {
             entry
         })
         .collect();
-    for (bytes, printed) in [(2048, 1000), (900, 900)] {
-        let rules = keep_rules(&mut w, bytes);
+    let ascii = |bytes: usize| -> Vec<String> {
+        (1..=20)
+            .map(|n| format!("{:x<bytes$}", format!("Prefer rule {n:02} ")))
+            .collect()
+    };
+    // A brief cuts a rule by its characters, so one of 2 KB in 692 of them is
+    // printed whole.
+    let wide: Vec<String> = (1..=20)
+        .map(|n| format!("Prefer rule {n:02}{}", "\u{2713}".repeat(678)))
+        .collect();
+    assert!(wide.iter().all(|r| r.len() == 2048));
+    for (case, rules, cut) in [
+        ("2 KB of ASCII", ascii(2048), true),
+        ("900 bytes", ascii(900), false),
+        ("2 KB in 692 characters", wide, false),
+    ] {
+        keep_rules(&mut w, &rules);
         let brief = brief_of(&w);
-        assert!(brief.len() <= crate::fit::LIMIT, "{} bytes", brief.len());
+        assert!(
+            brief.len() <= crate::fit::LIMIT,
+            "{case}: {} bytes",
+            brief.len()
+        );
 
         let (_, kept) = brief
             .split_once("Rules from overturned decisions:\n")
             .expect("the rules");
-        let pointer = if printed < bytes {
-            " (cut here; temet-work status prints it whole, under Rules)"
-        } else {
-            ""
-        };
         for rule in &rules {
-            let line = format!("- {}{pointer}\n", &rule[..printed]);
-            assert!(kept.contains(&line), "{bytes}: missing {line:?}");
+            let line = if cut {
+                let pointer = "(cut here; temet-work status prints it whole, under Rules)";
+                format!("- {} {pointer}\n", &rule[..1000])
+            } else {
+                format!("- {rule}\n")
+            };
+            assert!(kept.contains(&line), "{case}: missing {line:?}");
         }
         for left in ["earlier rules are left out", "earlier rule is left out"] {
-            assert!(!brief.contains(left), "{bytes}: {left}");
+            assert!(!brief.contains(left), "{case}: {left}");
         }
 
         // The first entries that fit, each whole, and then the line counting
         // the others.
         let listed = closed_list(&brief).expect("the list");
         let n = listed.len();
-        assert!(n > 0 && n < entries.len(), "{bytes}: {n} listed");
-        assert_eq!(listed, entries[..n], "{bytes}");
+        assert!(n > 0 && n < entries.len(), "{case}: {n} listed");
+        assert_eq!(listed, entries[..n], "{case}");
         assert_eq!(
             brief.lines().filter(|l| l.starts_with("- ankh#")).count(),
             n,
-            "{bytes}"
+            "{case}"
         );
         let next = brief.lines().skip_while(|l| *l != listed[n - 1]).nth(1);
         let left = format!(
@@ -1814,11 +1829,11 @@ fn a_long_closed_list_leaves_the_kept_rules_their_room() {
              every one.",
             entries.len() - n
         );
-        assert_eq!(next, Some(left.as_str()), "{bytes}");
+        assert_eq!(next, Some(left.as_str()), "{case}");
         // No room for another entry is left unused.
         assert!(
             brief.len() + entries[n].len() >= crate::fit::LIMIT,
-            "{bytes}: {} bytes",
+            "{case}: {} bytes",
             brief.len()
         );
     }
