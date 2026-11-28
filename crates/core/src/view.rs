@@ -170,6 +170,11 @@ pub struct Issue {
     /// Its plan's checks, in the plan's order; none before it has a plan.
     #[serde(default)]
     pub checks: Vec<Check>,
+    /// The checks a person holds it to, given with `temet-work refine` and kept
+    /// apart from the plan, in the order given; none in a view from a daemon
+    /// that has no refine.
+    #[serde(default)]
+    pub person_checks: Vec<PersonCheck>,
     /// Its review rounds, in the order they finished.
     #[serde(default)]
     pub reviews: Vec<Review>,
@@ -179,6 +184,16 @@ pub struct Issue {
     /// has no `move`.
     #[serde(default)]
     pub moves: Vec<StageWord>,
+}
+
+/// One of the checks a person holds an issue to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonCheck {
+    /// What is true when the issue is done.
+    pub done_when: String,
+    /// What proves it; empty when the person named nothing.
+    #[serde(default)]
+    pub proven_by: String,
 }
 
 /// One of a plan's checks.
@@ -672,6 +687,14 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
                 state: c.state,
             })
             .collect(),
+        person_checks: i
+            .person_checks
+            .iter()
+            .map(|c| PersonCheck {
+                done_when: without_paths(world, &c.done_when),
+                proven_by: without_paths(world, &c.proven_by),
+            })
+            .collect(),
         reviews: i
             .reviews
             .iter()
@@ -1001,6 +1024,15 @@ mod tests {
         at(watch("6"), Stage::Done, 1);
         at(watch("7"), Stage::Done, 0);
         at(IssueId::new("unseen", "1"), Stage::Ready, 0);
+        // A person holds watch#3 to checks of their own, one with nothing named
+        // to prove it.
+        w.issues.get_mut(&watch("3")).expect("synced").person_checks = vec![
+            model::Check::new(
+                "the clock keeps time through the night",
+                "comparing it with the Patrician's at dawn",
+            ),
+            model::Check::new("the key hangs by the door", ""),
+        ];
         // Within one round the loop moves all of an issue's checks together, so
         // watch#5's four states are put in the world directly.
         let check = |done_when: &str, proven_by: &str, state| model::Check {
@@ -1279,6 +1311,9 @@ mod tests {
         assert!(view.issues.iter().all(|i| i.checks.is_empty()));
         let view = without(SNAPSHOT, "reviews");
         assert!(view.issues.iter().all(|i| i.reviews.is_empty()));
+        // A daemon from before refine sends no person's checks.
+        let view = without(SNAPSHOT, "person_checks");
+        assert!(view.issues.iter().all(|i| i.person_checks.is_empty()));
         // Only a daemon from before #161 sends `replies`.
         let view = without(BEFORE_161, "replies");
         let mut points = view

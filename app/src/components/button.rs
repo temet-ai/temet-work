@@ -1,14 +1,17 @@
 //! Button (`blueprint-button`): an action, as text, an icon, or both, in a variant, an intent
-//! and a size.
+//! and a size. A disabled button takes no click; a loading one is disabled and draws a Spinner
+//! over its content, which keeps its place.
 
 use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder;
 use gpui::{
-    App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, Styled, Window, div,
+    App, ClickEvent, CursorStyle, ElementId, FocusHandle, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
 };
 
 use super::icon::{Icon, IconName};
+use super::spinner::Spinner;
 use super::{Class, apply, box_of, type_of};
 use crate::theme::look::{self, Look, State};
 use crate::theme::{Intent, colour, size};
@@ -41,6 +44,9 @@ pub struct Button {
     variant: Variant,
     size: Size,
     class_name: Option<Class>,
+    disabled: bool,
+    loading: bool,
+    focus: Option<FocusHandle>,
     on_click: Option<OnClick>,
 }
 
@@ -55,6 +61,9 @@ impl Button {
             variant: Variant::Solid,
             size: Size::Medium,
             class_name: None,
+            disabled: false,
+            loading: false,
+            focus: None,
             on_click: None,
         }
     }
@@ -92,6 +101,26 @@ impl Button {
         self
     }
 
+    /// A disabled button is drawn muted and takes no click.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// A loading button is disabled, and a Spinner turns over its content, as while the
+    /// button's action is sent.
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
+        self
+    }
+
+    /// The focus the button holds when the person moves to it, so the focus can be put back on
+    /// it, as on the button that opened a menu once the dialog its item opened has closed.
+    pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
+        self.focus = Some(focus.clone());
+        self
+    }
+
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -116,6 +145,27 @@ fn button_look(cx: &App, variant: Variant, intent: Intent, size: Size, state: St
                 ..look
             }
         }
+    }
+}
+
+/// A disabled button's look: the primary button's measured disabled look; any other solid
+/// button in Blueprint's disabled fill, and a minimal or outlined one with no fill, each with
+/// the disabled word and no shadow (`.bp6-button:not([class*=bp6-intent-]):disabled`,
+/// `.bp6-button.bp6-minimal:disabled`).
+fn disabled_look(cx: &App, variant: Variant, intent: Intent, size: Size) -> Look {
+    if variant == Variant::Solid && intent == Intent::Primary {
+        return button_look(cx, variant, intent, size, State::Disabled);
+    }
+    let rest = button_look(cx, variant, intent, size, State::Rest);
+    let fill = match variant {
+        Variant::Solid => colour::disabled_fill(cx),
+        Variant::Minimal | Variant::Outlined => gpui::transparent_black(),
+    };
+    Look {
+        background: fill,
+        text: colour::disabled_text(cx),
+        shadow: Vec::new(),
+        ..rest
     }
 }
 
@@ -158,7 +208,12 @@ fn variant_look(cx: &App, variant: Variant, intent: Intent, state: State) -> Loo
 
 impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let rest = button_look(cx, self.variant, self.intent, self.size, State::Rest);
+        let disabled = self.disabled || self.loading;
+        let rest = if disabled {
+            disabled_look(cx, self.variant, self.intent, self.size)
+        } else {
+            button_look(cx, self.variant, self.intent, self.size, State::Rest)
+        };
         let hover = button_look(cx, self.variant, self.intent, self.size, State::Hover);
         let active = button_look(cx, self.variant, self.intent, self.size, State::Active);
         let selector = format!("{}", self.id);
@@ -166,23 +221,40 @@ impl RenderOnce for Button {
         // `.bp6-button .bp6-icon` is muted; an intent's button draws its icon in its text colour.
         let intent = self.intent;
         let icon = self.icon.map(|icon| match intent {
+            _ if disabled => Icon::new(icon),
             Intent::None => Icon::new(icon).color(colour::muted(cx)),
             _ => Icon::new(icon),
         });
+        // `.bp6-button.bp6-loading > :not(.bp6-button-spinner) { visibility: hidden }`: the
+        // content keeps the button's width under the spinner.
+        let content = div()
+            .flex()
+            .items_center()
+            .gap(size::tag_gap(cx))
+            .when(self.loading, |content| content.invisible())
+            .children(icon)
+            .children(self.text);
         let mut button = box_of(type_of(div().id(self.id), &rest), &rest)
             .debug_selector(|| selector)
+            .relative()
             .flex()
             .flex_none()
             .items_center()
             .justify_center()
-            .gap(size::tag_gap(cx))
             .h(rest.height)
             .min_w(rest.height)
-            .cursor_pointer()
-            .hover(move |style| style.bg(hover.background).text_color(hover.text))
-            .active(move |style| style.bg(active.background))
-            .children(icon)
-            .children(self.text);
+            .child(content);
+        if self.loading {
+            button = button.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(Spinner::new().size(size::spinner_small(cx))),
+            );
+        }
         if icon_only {
             // An icon alone sits in a square button, `.bp6-button:empty`.
             button = button.px(gpui::Pixels::ZERO);
@@ -190,6 +262,16 @@ impl RenderOnce for Button {
         if let Some(class) = self.class_name {
             button = apply(button, class, cx);
         }
+        if let Some(focus) = &self.focus {
+            button = button.track_focus(focus);
+        }
+        if disabled {
+            return button.cursor(CursorStyle::OperationNotAllowed);
+        }
+        button = button
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover.background).text_color(hover.text))
+            .active(move |style| style.bg(active.background));
         if let Some(handler) = self.on_click {
             button = button.on_click(move |event, window, cx| handler(event, window, cx));
         }

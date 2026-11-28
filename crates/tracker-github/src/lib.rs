@@ -236,6 +236,11 @@ impl Tracker for GitHub {
         }
     }
 
+    fn retitle(&mut self, project: &str, key: &str, title: &str) -> Result<(), TrackerError> {
+        self.run(&["issue", "edit", key, "--repo", project, "--title", title])
+            .map(|_| ())
+    }
+
     fn create(
         &mut self,
         project: &str,
@@ -549,6 +554,123 @@ mod tests {
         assert!(matches!(
             gh.reopen("temet-ai/radar", "19"),
             Err(TrackerError::Denied(_))
+        ));
+    }
+
+    /// The recorded output, with `gh issue edit`, `comment`, `close` and
+    /// `reopen` answered as gh answers them and each change listed afterwards,
+    /// and every call that writes noted.
+    #[derive(Clone, Default)]
+    struct Writing {
+        state: std::sync::Arc<std::sync::Mutex<Written>>,
+    }
+
+    #[derive(Default)]
+    struct Written {
+        titles: std::collections::BTreeMap<String, String>,
+        closed: std::collections::BTreeSet<String>,
+        sent: Vec<Vec<String>>,
+    }
+
+    impl Transport for Writing {
+        fn gh(&mut self, args: &[&str]) -> Result<String, String> {
+            let mut state = self.state.lock().map_err(|e| e.to_string())?;
+            let listed = ["11", "12", "19", "43", "44"];
+            let key = args.get(2).copied().unwrap_or_default();
+            let unknown = || {
+                format!(
+                    "GraphQL: Could not resolve to an issue or pull request with the number of \
+                     {key}. (repository.issue)"
+                )
+            };
+            let verb = args.get(1).copied().unwrap_or_default();
+            if args.first() == Some(&"issue")
+                && ["edit", "comment", "close", "reopen"].contains(&verb)
+            {
+                state
+                    .sent
+                    .push(args.iter().map(ToString::to_string).collect());
+                if !listed.contains(&key) {
+                    return Err(unknown());
+                }
+                match verb {
+                    "edit" => {
+                        let title = args
+                            .iter()
+                            .position(|a| *a == "--title")
+                            .and_then(|i| args.get(i + 1))
+                            .ok_or("no title")?;
+                        state.titles.insert(key.into(), (*title).to_string());
+                    }
+                    "close" => {
+                        state.closed.insert(key.into());
+                    }
+                    "reopen" if !state.closed.remove(key) => {
+                        return Err(format!("! Issue temet-ai/radar#{key} is already open"));
+                    }
+                    _ => {}
+                }
+                return Ok(format!("https://github.com/temet-ai/radar/issues/{key}\n"));
+            }
+            let out = Recorded.gh(args)?;
+            if verb != "list" {
+                return Ok(out);
+            }
+            let mut list: Value = serde_json::from_str(&out).map_err(|e| e.to_string())?;
+            if let Some(items) = list.as_array_mut() {
+                items.retain(|i| !state.closed.contains(&i["number"].to_string()));
+                for i in items.iter_mut() {
+                    if let Some(t) = state.titles.get(&i["number"].to_string()) {
+                        i["title"] = t.clone().into();
+                    }
+                }
+            }
+            Ok(list.to_string())
+        }
+    }
+
+    struct MayWrite;
+
+    impl temet_work_tracker::contract::Harness for MayWrite {
+        fn project(&self) -> String {
+            "temet-ai/radar".into()
+        }
+        fn writable_issue(&self) -> Option<String> {
+            Some("44".into())
+        }
+        fn may_create(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn retitles_with_gh_issue_edit_and_passes_the_contracts_writes_on_recorded_output() {
+        let writing = Writing::default();
+        let mut gh = GitHub::with(Box::new(writing.clone()));
+        assert_eq!(
+            temet_work_tracker::contract::check(&mut gh, &MayWrite),
+            Ok(())
+        );
+        let sent = writing.state.lock().expect("lock").sent.clone();
+        assert_eq!(
+            sent.first().map(Vec::as_slice),
+            Some(
+                [
+                    "issue",
+                    "edit",
+                    "44",
+                    "--repo",
+                    "temet-ai/radar",
+                    "--title",
+                    "Contract check: a new title"
+                ]
+                .map(String::from)
+                .as_slice()
+            )
+        );
+        assert!(matches!(
+            gh.retitle("temet-ai/radar", "999999999", "A lamp"),
+            Err(TrackerError::NotFound(_))
         ));
     }
 

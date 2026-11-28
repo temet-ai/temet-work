@@ -187,8 +187,28 @@ fn host_tracking(
     daemon_host: Option<&str>,
     tracker: FakeTracker,
 ) -> (Host, Starts) {
+    host_with_tracker(
+        world,
+        journal,
+        runtimes,
+        config,
+        daemon_host,
+        Box::new(tracker),
+    )
+}
+
+/// A host on `world`, with every family's fake but the tracker, which is
+/// `tracker`.
+fn host_with_tracker(
+    world: World,
+    journal: Box<dyn temet_work_core::Journal>,
+    runtimes: temet_work_runtime::Runtimes,
+    config: &str,
+    daemon_host: Option<&str>,
+    tracker: Box<dyn temet_work_tracker::Tracker>,
+) -> (Host, Starts) {
     let mut trackers = temet_work_tracker::Trackers::default();
-    trackers.add(Box::new(tracker));
+    trackers.add(tracker);
     let mut runners = temet_work_runner::Runners::default();
     let fake = FakeRunner::default();
     let starts = fake.starts();
@@ -3849,4 +3869,280 @@ mod moves {
             (StageWord::New, &[][..])
         );
     }
+}
+
+/// The fake tracker, still in the test's reach once the host has it, which
+/// refuses every retitle with the reason in `refuse` while it holds one.
+#[derive(Clone, Default)]
+struct Titled {
+    fake: std::sync::Arc<std::sync::Mutex<FakeTracker>>,
+    refuse: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl Titled {
+    fn title(&self, key: &str) -> String {
+        let fake = self.fake.lock().expect("fake");
+        let found = fake.issues.iter().find(|(_, i)| i.key == key);
+        found.map(|(_, i)| i.title.clone()).unwrap_or_default()
+    }
+}
+
+impl temet_work_tracker::Tracker for Titled {
+    fn id(&self) -> &'static str {
+        "fake"
+    }
+    fn issues(
+        &mut self,
+        project: &str,
+    ) -> Result<Vec<TrackedIssue>, temet_work_tracker::TrackerError> {
+        self.fake.lock().expect("fake").issues(project)
+    }
+    fn milestones(
+        &mut self,
+        project: &str,
+    ) -> Result<Vec<temet_work_tracker::TrackedMilestone>, temet_work_tracker::TrackerError> {
+        self.fake.lock().expect("fake").milestones(project)
+    }
+    fn address(&self, project: &str) -> Option<String> {
+        self.fake.lock().expect("fake").address(project)
+    }
+    fn closed(
+        &mut self,
+        project: &str,
+        key: &str,
+    ) -> Result<bool, temet_work_tracker::TrackerError> {
+        self.fake.lock().expect("fake").closed(project, key)
+    }
+    fn comment(
+        &mut self,
+        project: &str,
+        key: &str,
+        text: &str,
+    ) -> Result<(), temet_work_tracker::TrackerError> {
+        self.fake.lock().expect("fake").comment(project, key, text)
+    }
+    fn close(&mut self, project: &str, key: &str) -> Result<(), temet_work_tracker::TrackerError> {
+        self.fake.lock().expect("fake").close(project, key)
+    }
+    fn reopen(&mut self, project: &str, key: &str) -> Result<(), temet_work_tracker::TrackerError> {
+        self.fake.lock().expect("fake").reopen(project, key)
+    }
+    fn retitle(
+        &mut self,
+        project: &str,
+        key: &str,
+        title: &str,
+    ) -> Result<(), temet_work_tracker::TrackerError> {
+        if let Some(why) = self.refuse.lock().expect("refuse").clone() {
+            return Err(temet_work_tracker::TrackerError::Denied(why));
+        }
+        self.fake.lock().expect("fake").retitle(project, key, title)
+    }
+    fn create(
+        &mut self,
+        project: &str,
+        title: &str,
+        body: &str,
+        milestone: Option<&str>,
+    ) -> Result<TrackedIssue, temet_work_tracker::TrackerError> {
+        self.fake
+            .lock()
+            .expect("fake")
+            .create(project, title, body, milestone)
+    }
+}
+
+/// A host whose tracker is a [`Titled`] fake listing ankh#1, synced once so a
+/// refiner works on ankh#1; the log it keeps, and the fake.
+fn titled() -> (Host, Starts, Kept, Titled) {
+    let kept = Kept::default();
+    let titled = Titled::default();
+    titled.fake.lock().expect("fake").issues = vec![tracked("city/ankh", "1", 1)];
+    let (mut host, starts) = host_with_tracker(
+        World::default(),
+        Box::new(kept.clone()),
+        fake_runtimes(),
+        CONFIG,
+        None,
+        Box::new(titled.clone()),
+    );
+    host.tick(0).expect("sync");
+    assert_eq!(
+        host.world().issues[&IssueId::new("ankh", "1")].stage,
+        Stage::Refining
+    );
+    (host, starts, kept, titled)
+}
+
+fn refine_ankh_1(title: Option<&str>, checks: &[(&str, &str)], send: bool) -> Command {
+    Command::Refine {
+        issue: IssueId::new("ankh", "1"),
+        title: title.map(String::from),
+        checks: (!checks.is_empty()).then(|| {
+            checks
+                .iter()
+                .map(|(d, p)| temet_work_core::model::Check::new(*d, *p))
+                .collect()
+        }),
+        send,
+    }
+}
+
+#[test]
+fn a_persons_refine_writes_the_title_to_the_tracker_first_and_status_and_the_view_show_it() {
+    use temet_work::socket::{Reply, answer};
+
+    let (mut host, starts, kept, titled) = titled();
+    let ask = |host: &mut Host, by: Option<&str>, command| {
+        answer(host, 1, &from(&starts, by, command), &Peer::Unchecked).expect("answer")
+    };
+    let reply = ask(
+        &mut host,
+        None,
+        refine_ankh_1(
+            Some("Mend the clock by dusk"),
+            &[("the clock strikes six at dusk", "listening at dusk")],
+            false,
+        ),
+    );
+    assert_eq!(
+        reply,
+        Reply::Done {
+            text: "ankh#1: its title is now \"Mend the clock by dusk\" in its tracker; it has 1 \
+                   person's check"
+                .into()
+        }
+    );
+    assert_eq!(
+        titled.title("1"),
+        "Mend the clock by dusk",
+        "written to the tracker"
+    );
+    let Reply::Done { text } = ask(&mut host, None, Command::Status) else {
+        panic!("status refused");
+    };
+    assert!(
+        text.contains("\n  ankh#1  refining  Mend the clock by dusk\n"),
+        "{text}"
+    );
+    let Reply::Done { text } = ask(
+        &mut host,
+        None,
+        Command::Issue {
+            issue: IssueId::new("ankh", "1"),
+        },
+    ) else {
+        panic!("issue refused");
+    };
+    assert!(
+        text.starts_with("ankh#1  Mend the clock by dusk\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "Person's checks:\n  - the clock strikes six at dusk (shown by: listening at dusk)\n"
+        ),
+        "{text}"
+    );
+    let Reply::View { view } = ask(&mut host, None, Command::View) else {
+        panic!("view refused");
+    };
+    // As `status --json` prints it.
+    let json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string_pretty(&view).expect("json")).expect("reads");
+    assert_eq!(json["issues"][0]["title"], "Mend the clock by dusk");
+    assert_eq!(
+        json["issues"][0]["person_checks"],
+        serde_json::json!([{
+            "done_when": "the clock strikes six at dusk",
+            "proven_by": "listening at dusk"
+        }])
+    );
+    // The next sync lists the written title: nothing changes.
+    host.tick(120_000).expect("sync");
+    assert_eq!(
+        host.world().issues[&IssueId::new("ankh", "1")].title,
+        "Mend the clock by dusk"
+    );
+    assert_eq!(kept.replayed(host.world()).issues, host.world().issues);
+}
+
+#[test]
+fn a_tracker_that_refuses_the_title_refuses_the_refine_and_nothing_is_logged() {
+    use temet_work::socket::{Reply, answer};
+
+    let (mut host, starts, kept, titled) = titled();
+    *titled.refuse.lock().expect("refuse") = Some("HTTP 403: the guild says no".into());
+    let logged = kept.0.lock().expect("log").len();
+    let request = from(
+        &starts,
+        None,
+        refine_ankh_1(Some("Mend the clock by dusk"), &[("a check", "")], true),
+    );
+    let reply = answer(&mut host, 1, &request, &Peer::Unchecked).expect("answer");
+    let Reply::Refused { why } = reply else {
+        panic!("taken: {reply:?}");
+    };
+    assert!(
+        why.contains("did not take the title") && why.contains("HTTP 403: the guild says no"),
+        "{why}"
+    );
+    assert_eq!(
+        kept.0.lock().expect("log").len(),
+        logged,
+        "the log gets no new line"
+    );
+    let i = &host.world().issues[&IssueId::new("ankh", "1")];
+    assert_eq!(i.title, "Mend the clock");
+    assert!(i.person_checks.is_empty());
+    assert_eq!(titled.title("1"), "Mend the clock");
+}
+
+#[test]
+fn a_send_through_the_daemon_stops_the_refiner_and_starts_one_with_the_persons_checks() {
+    use temet_work::socket::{Reply, answer};
+
+    let (mut host, starts, _, _) = titled();
+    let request = from(
+        &starts,
+        None,
+        refine_ankh_1(None, &[("the clock strikes six at dusk", "")], true),
+    );
+    let reply = answer(&mut host, 1, &request, &Peer::Unchecked).expect("answer");
+    assert_eq!(
+        reply,
+        Reply::Done {
+            text: "ankh#1: it has 1 person's check; it is refining, and a refiner starts with a \
+                   new brief; refiner-1 is stopped"
+                .into()
+        }
+    );
+    let started = starts
+        .lock()
+        .expect("starts")
+        .last()
+        .cloned()
+        .expect("a start");
+    assert_eq!(
+        started.labels.get("agent").map(String::as_str),
+        Some("refiner-2")
+    );
+    let brief = format!("{:?}", started.program);
+    assert!(
+        brief.contains("The person's checks, each a point your plan must hold:")
+            && brief.contains("the clock strikes six at dusk"),
+        "{brief}"
+    );
+    // A refine that changes nothing logs nothing and says so.
+    let same = from(
+        &starts,
+        None,
+        refine_ankh_1(Some("Mend the clock"), &[], false),
+    );
+    assert_eq!(
+        answer(&mut host, 1, &same, &Peer::Unchecked).expect("answer"),
+        Reply::Done {
+            text: "nothing changed on ankh#1".into()
+        }
+    );
 }

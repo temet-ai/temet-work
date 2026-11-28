@@ -561,6 +561,9 @@ pub fn answer(
     if let temet_work_core::Command::File { .. } = &request.command {
         return file(host, now_ms, request);
     }
+    if let temet_work_core::Command::Refine { .. } = &request.command {
+        return refine(host, now_ms, request);
+    }
     match host.world().events(request.by.as_ref(), &request.command) {
         Err(why) => Ok(Reply::Refused { why }),
         Ok(events) if events.is_empty() => Ok(match &request.command {
@@ -686,6 +689,52 @@ pub fn request_line(request: &Request, reply: &Reply) -> Option<String> {
         request.by.as_ref().map_or("none", |a| a.0.as_str()),
         debug.split([' ', '{', '(']).next().unwrap_or_default(),
     ))
+}
+
+/// Carries out a person's refine: a new title is written to the issue in its
+/// tracker before anything is logged, and a tracker that refuses it or cannot be
+/// reached refuses the whole refine with its reason. The reply says what changed,
+/// and for a send which agents were stopped and which pull requests stay open on
+/// the code host.
+fn refine(host: &mut Host, now_ms: u64, request: &Request) -> Result<Reply, String> {
+    use temet_work_core::{Effect, Event};
+    let events = match host.world().events(request.by.as_ref(), &request.command) {
+        Ok(events) => events,
+        Err(why) => return Ok(Reply::Refused { why }),
+    };
+    let Some(issue) = request.command.issue().cloned() else {
+        return Ok(Reply::Refused {
+            why: "refine names no issue".into(),
+        });
+    };
+    if events.is_empty() {
+        return Ok(Reply::Done {
+            text: format!("nothing changed on {issue}"),
+        });
+    }
+    for event in &events {
+        if let Event::Refined {
+            issue,
+            title: Some(title),
+            ..
+        } = event
+        {
+            let retitle = Effect::Retitle {
+                issue: issue.clone(),
+                title: title.clone(),
+            };
+            if let Err(why) = host.perform(now_ms, &retitle)? {
+                return Ok(Reply::Refused { why });
+            }
+        }
+    }
+    let before = host.world().clone();
+    for event in events {
+        host.handle(now_ms, event)?;
+    }
+    Ok(Reply::Done {
+        text: temet_work_core::text::refined(&before, host.world(), &issue),
+    })
 }
 
 /// Files an issue for an investigator through the tracker, and answers with the

@@ -182,6 +182,24 @@ pub enum Command {
         /// The group.
         group: GroupId,
     },
+    /// A person's change to an issue's title and to the checks they hold it to,
+    /// and whether to send it to a refiner now. A new title is written to the
+    /// issue in its tracker before anything is logged.
+    Refine {
+        /// The issue.
+        issue: IssueId,
+        /// The new title; none keeps it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// The person's checks, replacing those the issue has; an empty list
+        /// removes them all, and none keeps them. Each is a done_when and a
+        /// proven_by, which may be empty.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checks: Option<Vec<crate::model::Check>>,
+        /// Whether to send it to a refiner now.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        send: bool,
+    },
     /// A person holds the daemon: nothing new starts, and agents at work finish
     /// their turn ([`World::held`]).
     Hold,
@@ -209,6 +227,12 @@ pub const VIEW_PERIOD: Duration = Duration::from_secs(1);
 /// busy or stuck.
 pub const VIEW_DEADLINE: Duration = Duration::from_secs(5);
 
+/// How long a front end waits for the daemon's answer to a person's command that changes
+/// something, such as `move` or `refine`, before it counts the command as unanswered. A refine
+/// that changes the title waits for the issue's tracker to take it before the daemon answers, and
+/// a tracker can take seconds, so this is longer than [`VIEW_DEADLINE`].
+pub const COMMAND_DEADLINE: Duration = Duration::from_secs(30);
+
 impl Command {
     /// The issue the command is about; `None` for `Status`.
     pub fn issue(&self) -> Option<&IssueId> {
@@ -232,7 +256,8 @@ impl Command {
             | Self::Retry { issue }
             | Self::Rule { issue, .. }
             | Self::Choose { issue, .. }
-            | Self::Move { issue, .. } => Some(issue),
+            | Self::Move { issue, .. }
+            | Self::Refine { issue, .. } => Some(issue),
         }
     }
 }
@@ -1186,6 +1211,10 @@ impl World {
                 }
                 Event::Resumed
             }
+            Command::Refine { .. } => match self.refined(by, command)? {
+                Some(event) => event,
+                None => return Ok(None),
+            },
             // A choice moves no work: its agent carries on at once.
             Command::Choose { .. } => Event::DecisionMade {
                 decision: self.choice(by, command)?,

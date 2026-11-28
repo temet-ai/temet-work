@@ -32,7 +32,8 @@ only crate that may use a UI library (`tests/parts.rs`). Each part is one file n
 StatusTag is `app/src/components/status_tag.rs`, declaring `pub struct StatusTag`. The theme
 module, `app/src/theme.rs`, is the one file that reads `temet-work-style`. Every other file
 outside the layer folders is plumbing and draws nothing: `app/src/daemon.rs` reads the
-daemon's view once a second into an entity the window observes, and `app/src/view_map.rs` maps
+daemon's view once a second into an entity the window observes and sends the person's commands,
+such as RefineDialog's `refine`, over the same socket, and `app/src/view_map.rs` maps
 that view into the Project page's props; the page's notice about the daemon (no answer, a stale
 view) is a Callout.
 
@@ -141,21 +142,22 @@ is closed.
 | KeyComboTag | `blueprint-keycombotag` | | `kbd` |
 | Tooltip | `blueprint-tooltip` | `compact`; `placement` | `tooltip` |
 | ProgressBar | `blueprint-progressbar` | `intent` primary; `stripes` off; `animate` off | `progress` |
-| Spinner | `blueprint-spinner` | | `spinner` |
+| Spinner | `blueprint-spinner` | `size`; in a loading Button at `SpinnerSize.SMALL`. The head stands still: no motion token holds Blueprint's 500 ms turn | `canvas` |
 | Divider | `blueprint-divider` | | `separator` |
-| InputGroup | `temet-inputgroup` | `leftIcon` (search); `size` small, medium | `input` |
-| TextArea | `blueprint-textarea` | | `input` |
+| InputGroup | `temet-inputgroup` | `leftIcon` (search); `size` small, medium; `fill`; `disabled`. It draws a `FieldState`, the text a page keeps while the person edits it | `input` |
+| TextArea | `blueprint-textarea` | `fill`; `autoResize`, always on; `disabled`; `className` `tm-mono` for a proven-by in the code face | `input` (`Textarea`) |
+| FormGroup | `blueprint-formgroup` | `label` | |
 | HTMLSelect | `blueprint-htmlselect` | | `select` |
 | Switch | `blueprint-switch` | | `switch` |
 | Checkbox | `blueprint-checkbox` | | `checkbox` |
 | SegmentedControl | `blueprint-segmentedcontrol` | `intent` primary; `size` small | `button` (ToggleGroup) |
 | Tabs, Tab | `blueprint-tabs` | `renderActiveTabPanelOnly` | `tab` |
-| Menu, MenuItem, MenuDivider | `blueprint-menu` | MenuItem `icon`, `text`, children as a submenu with its caret, opened by a click and to the item's left, since the pane that holds IssueActions is at the window's right edge. No look is measured for a menu: it is the raised surface with the overlay edge measured on the Dialog, padded and sized by Blueprint's rules in spacing steps. MenuDivider is not built yet | |
+| Menu, MenuItem, MenuDivider | `blueprint-menu` | MenuItem `icon`, `text`, children as a submenu with its caret, opened by a click and to the item's left, since the pane that holds IssueActions is at the window's right edge. No look is measured for a menu: it is the raised surface with the overlay edge measured on the Dialog, padded and sized by Blueprint's rules in spacing steps. MenuDivider is a rule between groups, as IssueActions puts one between Refine and Move to | |
 | Navbar, NavbarGroup, NavbarHeading, NavbarDivider | `blueprint-navbar` | NavbarGroup `align` right | `title_bar` |
 | Popover | `blueprint-popover` | `placement` bottom-end; `isOpen` and `onInteraction`, so the page holds whether it is open; no arrow, one menu padding from its target. A press outside it asks to close it | |
 | ContextMenu | `blueprint-contextmenu` | | `menu` |
 | Alert | `blueprint-alert` | `intent` primary; `cancelButtonText`, `confirmButtonText` | `dialog` |
-| Dialog | `blueprint-dialog` | | `dialog` |
+| Dialog, DialogBody, DialogFooter | `blueprint-dialog` | `isOpen`, `title`, `icon`, `onClose` (close button, Escape, backdrop), `className` `tm-refine`; DialogFooter `actions` | |
 | Toast, OverlayToaster | `blueprint-toast` | `icon`; `position` bottom-right; no `timeout` (no duration token) | `notification` |
 | Callout | `blueprint-callout` | `intent`; `compact` | `alert` |
 | NonIdealState | `blueprint-nonidealstate` | | `empty` |
@@ -186,7 +188,8 @@ is closed.
 | MilestonePanel | one milestone: name, done of total, due date, progress, and its issues | CutPanel, Section, ProgressBar, IssueTable | `temet-milestonepanel` |
 | IssueTable | issues as rows: key, title, stage, agent, updated; optional group rows; one set of column widths in every panel | HTMLTable, TableRow, StageTag | `temet-issuetable` |
 | IssuePane | the side pane for an issue: title, key, stage, its actions menu behind a small minimal button with More at the right of its head, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Button, Popover, IssueActions, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
-| IssueActions | what a person can do to an issue, as one menu. The design system's has Open, Refine, Move to, Assign and Unassign, each shown only when its handler is given; the daemon has a command for Move to alone (`temet-work move`), so the window gives that one. Move to's submenu lists the stages the daemon says the issue may move to, each with its stage's icon and name (`move_to`), and a pick sends the move. Story: In Pane | Menu, MenuItem, Icon | `temet-issueactions` |
+| IssueActions | what a person can do to an issue, as one menu. The design system's has Open, Refine, Move to, Assign and Unassign, each shown only when its handler is given; the daemon has commands for Refine (`temet-work refine`) and Move to (`temet-work move`), so the window gives those two, Refine first with a divider after it. Refine opens RefineDialog. Move to's submenu lists the stages the daemon says the issue may move to, each with its stage's icon and name (`move_to`), and a pick sends the move. Story: In Pane | Menu, MenuItem, MenuDivider, Icon | `temet-issueactions` |
+| RefineDialog | an issue's title and its checks for the person to edit, each check a done-when and a proven-by with Delete, then Add check; Cancel, Save and "Save and send to refiner", the last two disabled while the title is empty and busy while their `refine` is answered; a refusal's reason over the fields | Dialog, DialogBody, DialogFooter, FormGroup, InputGroup, TextArea, Button, Callout | `temet-refinedialog` |
 | CheckList | a plan's checks: a line counting them by status, then for each what is done when, what proves it and its status, if it has run. A done-when over three lines and a proven-by over two show their first lines, and plus opens the row whole, minus closes it. Stories: Default, Failed And Timed, No Checks, Not Run Yet, Long Checks | ListRow, StatusTag, Button | `temet-checklist` |
 | ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points, the author's reply and each point's status | Disclosure, ListRow, StatusTag | `temet-reviewrounds` |
 | AgentPane | the side pane for an agent: its role, state, terminal and decisions | Heading, StatusTag, TerminalView, DecisionRow | gap |
@@ -195,7 +198,7 @@ is closed.
 
 | Page | What it shows | Built from | Design system |
 |---|---|---|---|
-| Project | one project: the nav bar, groups, machines and limits on the left (a list the view has no data for is left out); the project's milestones and issues in the middle; the selected issue or agent on the right (`docs/objects.md`) | AppShell, SideNav, GroupList, MeterList, PageHeader, NeedsYou, MilestonePanel, IssueTable, IssuePane, AgentPane, Callout, Alert, Toast | `pages-temet-work-radar` (RadarScreen) |
+| Project | one project: the nav bar, groups, machines and limits on the left (a list the view has no data for is left out); the project's milestones and issues in the middle; the selected issue or agent on the right (`docs/objects.md`); RefineDialog over it, opened from the issue's actions | AppShell, SideNav, GroupList, MeterList, PageHeader, NeedsYou, MilestonePanel, IssueTable, IssuePane, IssueActions, RefineDialog, AgentPane, Callout, Alert, Toast | `pages-temet-work-radar` (RadarScreen) |
 | Area | one area: its projects' milestones as a list, its tracker and code-host groups in the page header (`docs/areas.md`) | AppShell, SideNav, PageHeader, MilestonePanel | gap |
 | Settings | the settings chain, global down to one task (`docs/settings.md`) | not defined yet | gap |
 | Rules | rules with where they came from, their state and what measures them (`docs/objects.md`) | not defined yet | gap |
@@ -231,5 +234,5 @@ request, beside the main workspace's job. Run the app's tests locally with
 | A part uses no layer above its own; a composite sets no colour, type, shape or motion and uses the UI library only through components; a page and the plumbing draw nothing of their own | `review` | built |
 | Every design-system id in this map is in the design system's part list, and each component and composite has that part's name | `review`, against `tokens::PARTS` | built |
 | Every `look::get` the app makes names a look both themes measured | `app/src/theme.rs` tests | built |
-| The window as the design system draws it: each theme at 1440, 1280 and 1700 px wide, each tab of the issue pane, the issues grouped by stage and by group, and nothing waiting on the person, drawn offscreen with GPUI's headless renderer, with no window or compositor, beside the design system's story shots | `cargo run --example shots --features shots -- DIR` in `app/` | built; compared by eye |
-| StageTag, Tag, CheckList and CutPanel as their stories draw them, in each theme at 1440 px: the `part-` shots, named after each story's id (`part-temet-stagetag--all-stages-dark`) | the same command | built; compared by eye |
+| The window as the design system draws it: each theme at 1440, 1280 and 1700 px wide, each tab of the issue pane, the issues grouped by stage and by group, nothing waiting on the person, and RefineDialog open and with a refusal, drawn offscreen with GPUI's headless renderer, with no window or compositor, beside the design system's story shots | `cargo run --example shots --features shots -- DIR` in `app/` | built; compared by eye |
+| StageTag, Tag, CheckList, CutPanel and RefineDialog as their stories draw them, in each theme at 1440 px: the `part-` shots, named after each story's id (`part-temet-stagetag--all-stages-dark`) | the same command | built; compared by eye |

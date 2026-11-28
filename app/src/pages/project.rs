@@ -1,14 +1,18 @@
 //! Project (`pages-temet-work-radar`): one project: the areas, projects, agent groups, machines
 //! and limits on the left; what needs the person and the project's issues in the middle; the
 //! selected issue on the right, with its actions menu, whose Move to sends `temet-work move` to
-//! the daemon as a person's request and shows the daemon's answer in a toast.
+//! the daemon as a person's request and shows the daemon's answer in a toast, and whose Refine
+//! opens RefineDialog, whose Save sends `temet-work refine` and shows a refusal in the dialog.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use gpui::{App, Context, IntoElement, ParentElement, Render, SharedString, Task, Window};
+use gpui::{
+    App, Context, FocusHandle, IntoElement, ParentElement, Render, SharedString, Task, Window,
+};
 use temet_work_core::Command;
 use temet_work_core::ids::IssueId;
+use temet_work_core::model::Check;
 use temet_work_core::view::StageWord;
 
 use crate::components::Intent;
@@ -29,6 +33,7 @@ use crate::composites::meter_list::{MeterList, MeterListItem};
 use crate::composites::milestone_panel::MilestonePanel;
 use crate::composites::needs_you::{NeedsYou, NeedsYouDecision};
 use crate::composites::page_header::{PageFact, PageHeader};
+use crate::composites::refine_dialog::{RefineCheck, RefineDialog, RefineDraft, Sending};
 use crate::composites::review_rounds::ReviewRound;
 use crate::composites::side_nav::{SideNav, SideNavArea};
 
@@ -93,6 +98,8 @@ pub struct IssueDetail {
     pub pull: Option<IssuePullRequest>,
     pub rounds: Option<Vec<ReviewRound>>,
     pub decisions: Option<Vec<IssueDecision>>,
+    /// The checks the person holds the issue to, apart from the plan's.
+    pub person_checks: Vec<RefineCheck>,
 }
 
 /// How the middle column groups the issues: a panel per milestone, or one table grouped by
@@ -233,6 +240,71 @@ impl Ask {
     }
 }
 
+/// A check as `refine` sends it: its done-when and proven-by trimmed. A row whose done-when is
+/// empty is no check, as RefineDialog's Save leaves it out.
+fn sent_checks(checks: &[RefineCheck]) -> Vec<(String, String)> {
+    checks
+        .iter()
+        .map(|c| {
+            (
+                c.done_when.trim().to_string(),
+                c.proven_by.trim().to_string(),
+            )
+        })
+        .filter(|(done_when, _)| !done_when.is_empty())
+        .collect()
+}
+
+/// The `refine` command a Save sends for `issue`, from what the dialog opened with and what the
+/// person has typed. The title goes when it differs from the one the dialog opened with, both
+/// trimmed; the checks go when they differ as a list of done-when and proven-by. So a title edit
+/// alone does not copy the plan's checks, which the dialog opens with, into the person's. With
+/// nothing changed a Save sends nothing (`None`), while "Save and send to refiner" (`send`) still
+/// sends `refine` with `send` and neither.
+pub fn refine_command(
+    issue: IssueId,
+    opened: (&str, &[RefineCheck]),
+    typed: (&str, &[RefineCheck]),
+    send: bool,
+) -> Option<Command> {
+    let title = typed.0.trim();
+    let title = (title != opened.0.trim()).then(|| title.to_string());
+    let checks = sent_checks(typed.1);
+    let checks = (checks != sent_checks(opened.1)).then(|| {
+        checks
+            .into_iter()
+            .map(|(done_when, proven_by)| Check::new(done_when, proven_by))
+            .collect()
+    });
+    (title.is_some() || checks.is_some() || send).then_some(Command::Refine {
+        issue,
+        title,
+        checks,
+        send,
+    })
+}
+
+/// What a Save says when the window shows sample data, with no daemon to send to.
+pub const NO_DAEMON: &str = "no daemon to send the refine to: the window shows sample data";
+
+/// An issue's RefineDialog while it is open: what it opened with, the draft, and what is being
+/// sent.
+pub struct Refining {
+    /// The issue's key, as the dialog's title names it.
+    pub key: SharedString,
+    /// The issue as the daemon's commands name it.
+    pub issue: IssueId,
+    /// The title and checks the dialog opened with.
+    pub opened: (String, Vec<RefineCheck>),
+    pub draft: RefineDraft,
+    /// Which button's refine is being answered.
+    pub sending: Option<Sending>,
+    /// Why the last one was not done: the daemon's refusal word for word, or why the daemon
+    /// could not be asked.
+    pub not_done: Option<SharedString>,
+    focus: FocusHandle,
+}
+
 /// The note that replaces an overturned decision's action.
 pub const OVERTURNED: &str = "Overturned just now";
 
@@ -288,6 +360,10 @@ pub struct Project {
     actions_open: bool,
     /// How a command reaches the daemon; none on sample data.
     sender: Option<Sender>,
+    /// The focus of the selected issue's actions button.
+    actions_focus: Option<FocusHandle>,
+    /// The RefineDialog, while it is open.
+    refining: Option<Refining>,
 }
 
 impl Project {
@@ -306,6 +382,8 @@ impl Project {
             toast: None,
             actions_open: false,
             sender: None,
+            actions_focus: None,
+            refining: None,
         }
     }
 
@@ -577,6 +655,162 @@ impl Project {
     pub fn set_tab(&mut self, tab: IssueTab) {
         self.tab = Some(tab);
     }
+
+    /// The RefineDialog, while it is open.
+    pub fn refining(&self) -> Option<&Refining> {
+        self.refining.as_ref()
+    }
+
+    /// The focus of the selected issue's actions button.
+    pub fn actions_focus(&mut self, cx: &mut App) -> FocusHandle {
+        self.actions_focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone()
+    }
+
+    /// Opens RefineDialog for the issue `key`, with its title, and the person's checks when it
+    /// has any, else its plan's. The actions menu closes. Nothing opens for an issue the daemon
+    /// gave no id.
+    pub fn open_refine(&mut self, key: &SharedString, window: &mut Window, cx: &mut App) {
+        self.actions_open = false;
+        let Some(issue) = self
+            .view
+            .milestones
+            .iter()
+            .flat_map(|m| m.issues.iter())
+            .find(|i| &i.key == key)
+        else {
+            return;
+        };
+        let Some(detail) = self.view.details.get(key) else {
+            return;
+        };
+        let Some(id) = detail.id.clone() else {
+            return;
+        };
+        let checks: Vec<RefineCheck> = if detail.person_checks.is_empty() {
+            detail
+                .plan
+                .iter()
+                .flat_map(|p| p.checks.iter())
+                .map(|c| RefineCheck::new(c.done_when.clone(), c.proven_by.clone()))
+                .collect()
+        } else {
+            detail.person_checks.clone()
+        };
+        let title = issue.title.to_string();
+        let draft = RefineDraft::new(&title, &checks, window, cx);
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.refining = Some(Refining {
+            key: key.clone(),
+            issue: id,
+            opened: (title, checks),
+            draft,
+            sending: None,
+            not_done: None,
+            focus,
+        });
+    }
+
+    /// Closes RefineDialog without saving, unless what it sent is being answered; the focus goes
+    /// back to the actions button.
+    pub fn close_refine(&mut self, window: &mut Window, cx: &mut App) {
+        if self.refining.as_ref().is_some_and(|r| r.sending.is_some()) {
+            return;
+        }
+        self.refining = None;
+        let focus = self.actions_focus(cx);
+        window.focus(&focus, cx);
+    }
+
+    /// Adds an empty check to the open dialog.
+    pub fn add_refine_check(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(r) = &mut self.refining {
+            r.draft.add(window, cx);
+        }
+    }
+
+    /// Deletes the check in row `n` of the open dialog.
+    pub fn delete_refine_check(&mut self, n: usize) {
+        if let Some(r) = &mut self.refining {
+            r.draft.delete(n);
+        }
+    }
+
+    /// Shows `why` in the open dialog, as a refused refine leaves it; for drawing that state
+    /// without a daemon.
+    pub fn set_refine_not_done(&mut self, why: impl Into<SharedString>) {
+        if let Some(r) = &mut self.refining {
+            r.not_done = Some(why.into());
+        }
+    }
+
+    /// Save, or "Save and send to refiner" with `send`: sends what changed as a person's `refine`
+    /// with the page's sender, and keeps the buttons busy until the answer. Done closes the
+    /// dialog and puts the focus back on the actions button; a refusal or a failure shows its
+    /// reason in the dialog and keeps the draft. With nothing to send, the dialog closes.
+    pub fn save_refine(&mut self, send: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(r) = &self.refining else {
+            return;
+        };
+        if r.sending.is_some() {
+            return;
+        }
+        let typed = (r.draft.title(cx), r.draft.checks(cx));
+        if typed.0.trim().is_empty() {
+            return;
+        }
+        let command = refine_command(
+            r.issue.clone(),
+            (&r.opened.0, &r.opened.1),
+            (&typed.0, &typed.1),
+            send,
+        );
+        let Some(command) = command else {
+            self.close_refine(window, cx);
+            return;
+        };
+        let Some(sender) = self.sender.clone() else {
+            self.set_refine_not_done(NO_DAEMON);
+            return;
+        };
+        if let Some(r) = &mut self.refining {
+            r.sending = Some(if send {
+                Sending::SaveAndSend
+            } else {
+                Sending::Save
+            });
+            r.not_done = None;
+        }
+        let task = sender(command, cx);
+        cx.spawn_in(window, async move |page, cx| {
+            let answer = task.await;
+            page.update_in(cx, |page, window, cx| {
+                page.refine_answered(answer, window, cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The daemon's answer to the refine the open dialog sent.
+    fn refine_answered(
+        &mut self,
+        answer: Result<String, String>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(r) = &mut self.refining else {
+            return;
+        };
+        r.sending = None;
+        match answer {
+            Ok(_) => self.close_refine(window, cx),
+            Err(why) => r.not_done = Some(why.into()),
+        }
+    }
 }
 
 impl Render for Project {
@@ -736,6 +970,8 @@ impl Render for Project {
             }
         }
 
+        let actions_focus = self.actions_focus(cx);
+        let view = &self.view;
         let found = selected.as_ref().and_then(|key| {
             view.milestones
                 .iter()
@@ -743,18 +979,34 @@ impl Render for Project {
         });
         if let Some((milestone, issue)) = found {
             let detail = view.details.get(&issue.key).cloned().unwrap_or_default();
-            // Move to offers what the daemon takes; with nothing to offer there is no menu.
-            let actions = (detail.id.is_some() && !detail.moves.is_empty()).then(|| {
-                let page = page.clone();
-                IssueActions::new(issue.stage)
-                    .move_to(detail.moves.clone())
-                    .on_move(move |stage, _: &mut Window, cx: &mut App| {
-                        page.update(cx, |p, cx| {
-                            p.move_to(stage, cx);
-                            cx.notify();
-                        })
-                        .ok();
-                    })
+            // Refine and Move to need the issue's id from the daemon; Move to offers what the
+            // daemon takes, and is left out with nothing to offer.
+            let actions = detail.id.is_some().then(|| {
+                let refine_page = page.clone();
+                let key = issue.key.clone();
+                let mut actions = IssueActions::new(issue.stage).on_refine(
+                    move |window: &mut Window, cx: &mut App| {
+                        refine_page
+                            .update(cx, |p, cx| {
+                                p.open_refine(&key, window, cx);
+                                cx.notify();
+                            })
+                            .ok();
+                    },
+                );
+                if !detail.moves.is_empty() {
+                    let page = page.clone();
+                    actions = actions.move_to(detail.moves.clone()).on_move(
+                        move |stage, _: &mut Window, cx: &mut App| {
+                            page.update(cx, |p, cx| {
+                                p.move_to(stage, cx);
+                                cx.notify();
+                            })
+                            .ok();
+                        },
+                    );
+                }
+                actions
             });
             let mut pane = IssuePane::new(issue.key.clone(), issue.title.clone(), issue.stage)
                 .round(Some(detail.round))
@@ -780,6 +1032,7 @@ impl Render for Project {
                 let page = page.clone();
                 pane = pane
                     .actions(actions)
+                    .actions_focus(&actions_focus)
                     .actions_open(self.actions_open)
                     .on_actions(move |open, _: &mut Window, cx: &mut App| {
                         page.update(cx, |p, cx| {
@@ -816,6 +1069,48 @@ impl Render for Project {
                     .on_dismiss(update(Project::dismiss_toast)),
             );
         }
-        shell.child(alert).child(toaster).into_any_element()
+        let refine = self.refining.as_ref().map(|r| {
+            let in_window = |f: fn(&mut Project, &mut Window, &mut App)| {
+                let page = page.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    page.update(cx, |p, cx| {
+                        f(p, window, cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            };
+            RefineDialog::new(r.key.clone(), &r.draft)
+                .sending(r.sending)
+                .not_done(r.not_done.clone())
+                .track_focus(&r.focus)
+                .on_close(in_window(Project::close_refine))
+                .on_add(in_window(Project::add_refine_check))
+                .on_delete({
+                    let page = page.clone();
+                    move |n, _: &mut Window, cx: &mut App| {
+                        page.update(cx, |p, cx| {
+                            p.delete_refine_check(n);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                })
+                .on_save({
+                    let page = page.clone();
+                    move |send, window: &mut Window, cx: &mut App| {
+                        page.update(cx, |p, cx| {
+                            p.save_refine(send, window, cx);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                })
+        });
+        shell
+            .child(alert)
+            .children(refine)
+            .child(toaster)
+            .into_any_element()
     }
 }

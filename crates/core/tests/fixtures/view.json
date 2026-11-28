@@ -74,6 +74,7 @@
       "agents": [],
       "updated_ms": 1795000900000,
       "checks": [],
+      "person_checks": [],
       "reviews": [],
       "moves": [
         "new"
@@ -94,6 +95,7 @@
       "agents": [],
       "updated_ms": 1795000480000,
       "checks": [],
+      "person_checks": [],
       "reviews": [],
       "moves": []
     },
@@ -114,6 +116,7 @@
       ],
       "updated_ms": 1795000540000,
       "checks": [],
+      "person_checks": [],
       "reviews": [],
       "moves": [
         "new"
@@ -136,6 +139,16 @@
       ],
       "updated_ms": 1795000600000,
       "checks": [],
+      "person_checks": [
+        {
+          "done_when": "the clock keeps time through the night",
+          "proven_by": "comparing it with the Patrician's at dawn"
+        },
+        {
+          "done_when": "the key hangs by the door",
+          "proven_by": ""
+        }
+      ],
       "reviews": [],
       "moves": [
         "new",
@@ -171,6 +184,7 @@
           "state": "running"
         }
       ],
+      "person_checks": [],
       "reviews": [
         {
           "round": 1,
@@ -251,6 +265,7 @@
           "state": "failed"
         }
       ],
+      "person_checks": [],
       "reviews": [],
       "moves": [
         "new",

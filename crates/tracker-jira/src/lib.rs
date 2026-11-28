@@ -15,7 +15,7 @@ use temet_work_tracker::{
 /// One call to the Jira REST API.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
-    /// `GET` or `POST`.
+    /// `GET`, `POST` or `PUT`.
     pub method: &'static str,
     /// The path and query after the site, such as `/rest/api/3/issue/KEY-1`.
     pub path: String,
@@ -563,6 +563,19 @@ impl Tracker for Jira {
         self.transition(key, |c| c != "done", "out of a Done status")
     }
 
+    /// Sets the issue's summary, Jira's name for its title. Jira answers 204
+    /// with no body.
+    fn retitle(&mut self, project: &str, key: &str, title: &str) -> Result<(), TrackerError> {
+        let _ = project;
+        valid_key(key)?;
+        self.call(
+            "PUT",
+            format!("/rest/api/3/issue/{key}"),
+            Some(json!({"fields": {"summary": title}})),
+        )
+        .map(|_| ())
+    }
+
     /// Files a task with the milestone as its fix version.
     fn create(
         &mut self,
@@ -710,6 +723,118 @@ mod tests {
                 _ => reply(500, ""),
             }
         }
+    }
+
+    /// [`Recorded`], with a PUT of an issue's summary and the transitions of a
+    /// close and a reopen answered as Jira answers them, each change shown by
+    /// later reads and searches.
+    #[derive(Clone, Default)]
+    struct Writing {
+        recorded: Recorded,
+        titles: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+        closed: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    }
+
+    impl Transport for Writing {
+        fn send(&mut self, r: &Request) -> Result<Reply, TrackerError> {
+            let key = r
+                .path
+                .strip_prefix("/rest/api/3/issue/")
+                .and_then(|rest| rest.split(['/', '?']).next())
+                .unwrap_or_default()
+                .to_string();
+            let known = ["DEMO-41", "DEMO-12", "DEMO-20"].contains(&key.as_str());
+            let closed = self.closed.lock().expect("lock").contains(&key);
+            match (r.method, r.path.as_str()) {
+                ("PUT", _) => {
+                    self.recorded.sent.lock().expect("lock").push(r.clone());
+                    if !known {
+                        return reply(
+                            404,
+                            r#"{"errorMessages":["Issue does not exist or you do not have permission to see it."],"errors":{}}"#,
+                        );
+                    }
+                    let body: Value =
+                        serde_json::from_str(r.body.as_deref().unwrap_or("{}")).expect("json");
+                    let summary = body["fields"]["summary"].as_str().unwrap_or_default();
+                    self.titles
+                        .lock()
+                        .expect("lock")
+                        .insert(key, summary.into());
+                    reply(204, "")
+                }
+                ("GET", p) if closed && p.ends_with("?fields=status") => reply(
+                    200,
+                    r#"{"fields":{"status":{"statusCategory":{"key":"done"}}}}"#,
+                ),
+                ("POST", p) if known && p.ends_with("/transitions") => {
+                    let mut set = self.closed.lock().expect("lock");
+                    if !set.remove(&key) {
+                        set.insert(key);
+                    }
+                    reply(204, "")
+                }
+                ("POST", "/rest/api/3/search/jql") => {
+                    let found = self.recorded.send(r)?;
+                    let mut page: Value = serde_json::from_str(&found.body).expect("json");
+                    let titles = self.titles.lock().expect("lock");
+                    let closed = self.closed.lock().expect("lock");
+                    if let Some(issues) = page["issues"].as_array_mut() {
+                        issues.retain(|i| !closed.contains(i["key"].as_str().unwrap_or_default()));
+                        for i in issues.iter_mut() {
+                            if let Some(t) = titles.get(i["key"].as_str().unwrap_or_default()) {
+                                i["fields"]["summary"] = t.clone().into();
+                            }
+                        }
+                    }
+                    reply(200, &page.to_string())
+                }
+                _ => self.recorded.send(r),
+            }
+        }
+    }
+
+    struct MayWrite;
+
+    impl temet_work_tracker::contract::Harness for MayWrite {
+        fn project(&self) -> String {
+            "DEMO".into()
+        }
+        fn writable_issue(&self) -> Option<String> {
+            Some("DEMO-12".into())
+        }
+        fn may_create(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn retitles_with_a_put_of_the_summary_and_passes_the_contracts_writes_on_recorded_output() {
+        let writing = Writing::default();
+        let sent = writing.recorded.sent.clone();
+        let mut jira = Jira::with(Box::new(writing)).site("https://demo.invalid");
+        assert_eq!(
+            temet_work_tracker::contract::check(&mut jira, &MayWrite),
+            Ok(())
+        );
+        let put = sent
+            .lock()
+            .expect("lock")
+            .iter()
+            .find(|r| r.method == "PUT")
+            .cloned()
+            .expect("a PUT");
+        assert_eq!(put.path, "/rest/api/3/issue/DEMO-12");
+        let body: Value = serde_json::from_str(put.body.as_deref().expect("body")).expect("json");
+        assert_eq!(
+            body,
+            json!({"fields": {"summary": "Contract check: a new title"}})
+        );
+        assert!(matches!(
+            jira.retitle("DEMO", "DEMO-999", "A lamp"),
+            Err(TrackerError::NotFound(_))
+        ));
+        assert!(jira.retitle("DEMO", "not a key", "A lamp").is_err());
     }
 
     struct ReadOnly;

@@ -156,10 +156,14 @@ impl World {
             || format!("no {} is working on it now", agent.role.name()),
             |a| format!("{} is working on it now", a.id),
         );
+        let what = if to == Stage::Refining {
+            format!("sent {issue} to a refiner")
+        } else {
+            format!("moved {issue} to {}", text::stage(to))
+        };
         Some(format!(
-            "{step} for {issue} is refused: a person moved {issue} to {} after {} started, so \
-             its step is over and its session is being stopped; {now}",
-            text::stage(to),
+            "{step} for {issue} is refused: a person {what} after {} started, so its step is \
+             over and its session is being stopped; {now}",
             agent.id
         ))
     }
@@ -177,18 +181,12 @@ impl World {
     }
 
     /// Applies a person's move of `issue` to `stage`, when [`World::may_move`]
-    /// takes it. Every agent on the issue that has not ended is stopped, and its
-    /// step is over for good, also once a fresh agent works on the issue. Every
-    /// work folder it held is released, though no author is placed in one while
-    /// an agent that held it runs ([`World::in_use`]). Its pull requests,
-    /// branches and closed-pull notes, fix points, approval, check results,
-    /// review waiver and review rounds go, so its next change starts at round 1.
-    /// Back to new it has no group and no plan, and is taken for refining in its
-    /// turn; back to ready it keeps both, with each check waiting, and a new
-    /// author starts once a folder is free. Its decisions, its issue-level
-    /// settings and what a failed verify left stay. While the daemon is held the
-    /// stops and releases are made at once, and nothing starts on it until a
-    /// person resumes it.
+    /// takes it, through [`World::take_back`]. Back to new it has no group and
+    /// no plan, and is taken for refining in its turn; back to ready it keeps
+    /// both, with each check waiting, and a new author starts once a folder is
+    /// free. Its decisions, its issue-level settings and what a failed verify
+    /// left stay. While the daemon is held the stops and releases are made at
+    /// once, and nothing starts on it until a person resumes it.
     pub(crate) fn apply_move(&mut self, issue: &IssueId, stage: Stage, out: &mut Vec<Effect>) {
         let Some(i) = self.issues.get(issue) else {
             return;
@@ -196,6 +194,29 @@ impl World {
         if self.may_move(i, stage.into()).is_err() {
             return;
         }
+        self.take_back(issue, stage, out);
+        let Some(i) = self.issues.get_mut(issue) else {
+            return;
+        };
+        i.stage = stage;
+        if stage == Stage::New {
+            i.group = None;
+            i.plan = None;
+        } else {
+            i.set_checks(CheckState::Waiting);
+        }
+    }
+
+    /// What a person's move and a person's send to a refiner
+    /// (`temet-work refine --send`) do alike to `issue`, which goes to `to`.
+    /// Every agent on the issue that has not ended is stopped, and its step is
+    /// over for good, also once a fresh agent works on the issue
+    /// ([`World::before_move`]). Every work folder it held is released, though
+    /// no author is placed in one while an agent that held it runs
+    /// ([`World::in_use`]). Its pull requests, branches and closed-pull notes,
+    /// fix points, approval, check results, review waiver and review rounds go,
+    /// so its next change starts at round 1. The caller sets the stage.
+    pub(crate) fn take_back(&mut self, issue: &IssueId, to: Stage, out: &mut Vec<Effect>) {
         out.extend(
             self.agents
                 .values()
@@ -209,13 +230,6 @@ impl World {
             return;
         };
         let folders = i.take_folders();
-        i.stage = stage;
-        if stage == Stage::New {
-            i.group = None;
-            i.plan = None;
-        } else {
-            i.set_checks(CheckState::Waiting);
-        }
         i.review_ok = false;
         i.checks_ok = None;
         i.pulls.clear();
@@ -228,7 +242,7 @@ impl World {
         i.round = 0;
         i.review_waived = false;
         i.reviews.clear();
-        i.moved = Some(Moved { at, to: stage });
+        i.moved = Some(Moved { at, to });
         self.release(folders, out);
     }
 }

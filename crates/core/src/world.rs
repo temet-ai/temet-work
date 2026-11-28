@@ -170,6 +170,7 @@ fn mark(i: &Issue) -> u64 {
         r.states.hash(&mut h);
     }
     (i.verify_failed, i.reopen_due, i.moved).hash(&mut h);
+    i.person_checks.hash(&mut h);
     h.finish()
 }
 
@@ -442,6 +443,7 @@ impl World {
                     review_waived: false,
                     reviews: Vec::new(),
                     moved: None,
+                    person_checks: Vec::new(),
                 });
                 entry.title = title.clone();
                 entry.milestone = milestone.clone();
@@ -597,6 +599,24 @@ impl World {
                     i.plan = Some(plan.clone());
                     i.stage = Stage::Ready;
                     out.extend(done);
+                }
+            }
+            Event::Refined {
+                issue,
+                title,
+                checks,
+                send,
+            } => {
+                if let Some(i) = self.issues.get_mut(issue) {
+                    if let Some(title) = title {
+                        i.title.clone_from(title);
+                    }
+                    if let Some(checks) = checks {
+                        i.person_checks.clone_from(checks);
+                    }
+                }
+                if *send {
+                    self.send_to_refiner(issue, &mut out);
                 }
             }
             Event::PullRequestReady {
@@ -1442,11 +1462,14 @@ impl World {
             // the loop stopped because the issue went back to its author. One
             // whose program was lost, as to a reboot, counts toward a limit of
             // its own, so a program lost at the same point every run is not
-            // started forever.
+            // started forever. Those started before a person moved the issue or
+            // sent it to a refiner worked on what that replaced, and count no more.
             let of_role: Vec<&Agent> = self
                 .agents
                 .values()
-                .filter(|a| a.issue.as_ref() == Some(&i.id) && a.role == role)
+                .filter(|a| {
+                    a.issue.as_ref() == Some(&i.id) && a.role == role && !self.before_move(a)
+                })
                 .collect();
             let tried = of_role.iter().filter(|a| a.ended_waited_on).count();
             let lost = of_role.iter().filter(|a| a.lost_waited_on).count();

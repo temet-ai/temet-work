@@ -4,7 +4,9 @@
 
 use std::rc::Rc;
 
-use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
+use gpui::{
+    App, FocusHandle, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
+};
 
 use super::check_list::{CheckList, PlanCheck};
 use super::decision_row::{Decision, DecisionRow};
@@ -106,6 +108,7 @@ pub struct IssuePane {
     actions: Option<IssueActions>,
     actions_open: bool,
     on_actions: Option<OnActions>,
+    actions_focus: Option<FocusHandle>,
 }
 
 impl IssuePane {
@@ -130,6 +133,7 @@ impl IssuePane {
             actions: None,
             actions_open: false,
             on_actions: None,
+            actions_focus: None,
         }
     }
 
@@ -149,6 +153,13 @@ impl IssuePane {
     /// `onInteraction`.
     pub fn on_actions(mut self, handler: impl Fn(bool, &mut Window, &mut App) + 'static) -> Self {
         self.on_actions = Some(Rc::new(handler));
+        self
+    }
+
+    /// The focus the actions button holds, so the focus can go back to it once what its menu
+    /// opened, such as RefineDialog, has closed.
+    pub fn actions_focus(mut self, focus: &FocusHandle) -> Self {
+        self.actions_focus = Some(focus.clone());
         self
     }
 
@@ -244,17 +255,20 @@ impl RenderOnce for IssuePane {
             );
         // The design system's head buttons: a small minimal button with More, opening the menu
         // below it, its right edge on the button's.
+        let actions_focus = self.actions_focus;
         let actions = self.actions.map(|menu| {
+            let mut button = Button::new("issue-actions")
+                .icon(IconName::More)
+                .variant(Variant::Minimal)
+                .size(Size::Small);
+            if let Some(focus) = &actions_focus {
+                button = button.track_focus(focus);
+            }
             let mut popover = Popover::new("issue-actions-popover")
                 .placement(Placement::BottomEnd)
                 .is_open(self.actions_open)
                 .content(menu)
-                .child(
-                    Button::new("issue-actions")
-                        .icon(IconName::More)
-                        .variant(Variant::Minimal)
-                        .size(Size::Small),
-                );
+                .child(button);
             if let Some(handler) = self.on_actions {
                 popover = popover.on_interaction(move |open, window, cx| handler(open, window, cx));
             }
