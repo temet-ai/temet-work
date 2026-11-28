@@ -127,11 +127,12 @@ fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, St
         (true, _) => "Push your fixes to each pull request's branch.",
         (false, _) => "Push your fixes to the branch of each one not marked (merged already).",
     };
-    // A merged pull request's repository may need a new one for a further fix.
-    let no_other = if none_merged && lacking.is_empty() {
+    // Merged or not: `ready` with no number for a repository keeps the one on
+    // record, so the loop would not follow a second one.
+    let no_other = if lacking.is_empty() {
         "Do not open another pull request."
     } else {
-        "Do not open another pull request in a repository whose pull request has not merged."
+        "Do not open another pull request in a repository that has one, merged or not."
     };
     let open = if lacking.is_empty() {
         String::new()
@@ -705,7 +706,7 @@ mod tests {
     use super::*;
     use crate::event::Event;
     use crate::ids::{AgentId, FolderId, GroupId, MachineId, MilestoneId, ProjectId};
-    use crate::model::{Check, Plan};
+    use crate::model::{Check, Plan, Stage};
     use crate::world::World;
 
     #[test]
@@ -1127,15 +1128,31 @@ mod tests {
     }
 
     /// The author's task on an issue of `held` folders and `pulls` pull requests,
-    /// with one check in its plan.
+    /// with one check in its plan: an issue being fixed when it has pull requests,
+    /// else one being worked on.
     fn author_task(held: &[(&str, &str)], pulls: &[(&str, &str, &str, bool)]) -> String {
+        let stage = if pulls.is_empty() {
+            Stage::Working
+        } else {
+            Stage::Fixing { round: 1 }
+        };
+        author_task_in(stage, held, pulls)
+    }
+
+    /// [`author_task`] on an issue in `stage`, with a point to fix when that is
+    /// `Fixing`.
+    fn author_task_in(
+        stage: Stage,
+        held: &[(&str, &str)],
+        pulls: &[(&str, &str, &str, bool)],
+    ) -> String {
         let mut issue = lamp_issue();
         issue.plan = Some(Plan {
             checks: vec![Check::new("a dry lamp is refused", "the dry lamp test")],
             ..Plan::default()
         });
-        if !pulls.is_empty() {
-            issue.stage = crate::model::Stage::Fixing { round: 1 };
+        issue.stage = stage;
+        if matches!(issue.stage, Stage::Fixing { .. }) {
             issue.fix = vec!["CI check tests failed".into()];
             issue.fix_keeps_round = true;
         }
@@ -1254,7 +1271,7 @@ mod tests {
                  - watch (ankh-morpork/watch): pull request 57 (merged already)\n\
                  - clacks (ankh-morpork/clacks): pull request 12\n\
                  Push your fixes to the branch of each one not marked (merged already). Do not open \
-                 another pull request in a repository whose pull request has not merged.\n"
+                 another pull request.\n"
             ),
             "{task}"
         );
@@ -1288,7 +1305,7 @@ mod tests {
             task.contains(
                 "- watch (ankh-morpork/watch): pull request 57\n\
                  Push your fixes to that pull request's branch. Do not open another pull request in a \
-                 repository whose pull request has not merged.\n\
+                 repository that has one, merged or not.\n\
                  Open a pull request only where the issue has none yet: clacks \
                  (ankh-morpork/clacks). Use the same branch name there as in the other \
                  repositories.\n"
@@ -1300,6 +1317,47 @@ mod tests {
             task.ends_with("run: temet-work ready watch#31 clacks=<pull request number>"),
             "{task}"
         );
+
+        // The one on record merged: no other there either.
+        let task = author_task(&TWO_HELD, &[("watch", "ankh-morpork/watch", "57", true)]);
+        assert!(
+            task.contains(
+                "- watch (ankh-morpork/watch): pull request 57 (merged already)\n\
+                 Push your fixes to the branch of each one not marked (merged already). Do not open \
+                 another pull request in a repository that has one, merged or not.\n"
+            ),
+            "{task}"
+        );
+    }
+
+    #[test]
+    fn the_pull_requests_not_the_stage_decide_what_an_author_is_told_to_open() {
+        let pulls = [("watch", "ankh-morpork/watch", "57", false)];
+        let task = author_task_in(Stage::Working, &TWO_HELD[..1], &pulls);
+        assert!(
+            task.contains(
+                "The issue already has a pull request:\n\
+                 - watch (ankh-morpork/watch): pull request 57\n\
+                 Push your fixes to that pull request's branch. Do not open another pull request.\n"
+            ),
+            "{task}"
+        );
+        assert!(!task.contains("open a pull request"), "{task}");
+        assert!(task.ends_with("run: temet-work ready watch#31"), "{task}");
+
+        // Being fixed with none: the first author's text, with the point to fix.
+        for held in [&TWO_HELD[..1], &TWO_HELD[..]] {
+            let first = author_task_in(Stage::Working, held, &[]);
+            assert_eq!(
+                author_task_in(Stage::Fixing { round: 1 }, held, &[]),
+                first.replace(
+                    "The plan's checks,",
+                    "Earlier work on it came back with these to fix first:\n\
+                     - CI check tests failed\n\
+                     The plan's checks,"
+                )
+            );
+        }
     }
 
     #[test]
