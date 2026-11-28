@@ -491,6 +491,11 @@ pub struct Trackers {
     /// The issues waiting on their reopen after a failed verify that a sync has
     /// tried to reopen. A source with one not tried yet syncs at once.
     tried: BTreeSet<IssueId>,
+    /// The issues waiting on their reopen that a reopen call has reopened, and
+    /// that no sync has listed since. The sync after the first such call comes
+    /// at once; later ones wait for `sync_every`, so a tracker slow to list a
+    /// reopened issue is not asked again at every poll.
+    reopened: BTreeSet<IssueId>,
 }
 
 /// An issue's text, as a sync read it.
@@ -777,8 +782,9 @@ impl Part for Trackers {
 
     fn poll(&mut self, world: &World, now_ms: u64) -> Polled {
         let mut events = Vec::new();
-        self.tried
-            .retain(|id| world.issues.get(id).is_some_and(|i| i.reopen_due));
+        let waiting = |id: &IssueId| world.issues.get(id).is_some_and(|i| i.reopen_due);
+        self.tried.retain(waiting);
+        self.reopened.retain(waiting);
         let sources = sources(world);
         for (source, tracker_id, name) in sources.iter().cloned() {
             let every = self
@@ -821,8 +827,10 @@ impl Part for Trackers {
                         }
                     }
                     // Sent back by a failed verify and not listed: the merge closed it,
-                    // or the last reopen failed. Reopened, its text is read at each
-                    // sync, and a close there is a person's.
+                    // the last reopen failed, or the tracker does not list the reopen
+                    // yet. The reopen counts once a sync lists the issue (`changes`
+                    // passes that on); until then a close of it stays held. After that,
+                    // its text is read at each sync, and a close there is a person's.
                     let listed: BTreeSet<&str> = open.iter().map(|t| t.key.as_str()).collect();
                     for i in reopen
                         .iter()
@@ -830,16 +838,12 @@ impl Part for Trackers {
                     {
                         match tracker.reopen(&name, &i.id.key) {
                             Ok(()) => {
-                                events.push(Event::IssueSynced {
-                                    issue: i.id.clone(),
-                                    title: i.title.clone(),
-                                    milestone: i.milestone.clone(),
-                                    depends_on: i.depends_on.clone(),
-                                    order: i.order,
-                                    closed: false,
-                                });
-                                // Listed at the next poll, with its text as it is now.
-                                self.synced_at.remove(&source);
+                                // Not news yet: a search such as Jira's may list the
+                                // issue only seconds or minutes after the write. The
+                                // first reopen brings the next sync forward.
+                                if self.reopened.insert(i.id.clone()) {
+                                    self.synced_at.remove(&source);
+                                }
                             }
                             Err(e) => unsure.push(format!(
                                 "{} failed its verify and cannot be reopened: {e}",
@@ -1317,13 +1321,87 @@ mod tests {
         }
     }
 
+    /// [`Shared`], except that the first listing after the first reopen still
+    /// leaves the reopened issue out, as Jira's search can for seconds or
+    /// minutes after a write.
+    struct Lagging {
+        shared: Shared,
+        /// The issue the next listing leaves out.
+        lag: Option<String>,
+        /// Whether an issue has been reopened.
+        reopened: bool,
+    }
+
+    impl Lagging {
+        fn boxed(shared: Shared) -> Box<dyn Tracker> {
+            Box::new(Self {
+                shared,
+                lag: None,
+                reopened: false,
+            })
+        }
+    }
+
+    impl Tracker for Lagging {
+        fn id(&self) -> &'static str {
+            "fake"
+        }
+        fn issues(&mut self, project: &str) -> Result<Vec<TrackedIssue>, TrackerError> {
+            let mut listed = self.shared.issues(project)?;
+            if let Some(key) = self.lag.take() {
+                listed.retain(|t| t.key != key);
+            }
+            Ok(listed)
+        }
+        fn milestones(&mut self, project: &str) -> Result<Vec<TrackedMilestone>, TrackerError> {
+            self.shared.milestones(project)
+        }
+        fn address(&self, project: &str) -> Option<String> {
+            self.shared.address(project)
+        }
+        fn closed(&mut self, project: &str, key: &str) -> Result<bool, TrackerError> {
+            self.shared.closed(project, key)
+        }
+        fn comment(&mut self, project: &str, key: &str, text: &str) -> Result<(), TrackerError> {
+            self.shared.comment(project, key, text)
+        }
+        fn close(&mut self, project: &str, key: &str) -> Result<(), TrackerError> {
+            self.shared.close(project, key)
+        }
+        fn reopen(&mut self, project: &str, key: &str) -> Result<(), TrackerError> {
+            self.shared.reopen(project, key)?;
+            if !self.reopened {
+                self.reopened = true;
+                self.lag = Some(key.to_string());
+            }
+            Ok(())
+        }
+        fn create(
+            &mut self,
+            project: &str,
+            title: &str,
+            body: &str,
+            milestone: Option<&str>,
+        ) -> Result<TrackedIssue, TrackerError> {
+            self.shared.create(project, title, body, milestone)
+        }
+    }
+
     const WIND: &str = "Wind the clock.\nDone is a clock that strikes thirteen.";
 
     /// Issue 1 of `tracker`, whose text is [`WIND`], taken through review, the
     /// merge (which closes it in the fake), a sync while it deploys, and a failed
     /// verify, with author-2 started on its fix. Issue 2 depends on it. Returns
     /// the world, the part, which has made no sync since the verify, and the fake.
-    fn failed_verify(mut tracker: FakeTracker) -> (World, Trackers, Shared) {
+    fn failed_verify(tracker: FakeTracker) -> (World, Trackers, Shared) {
+        failed_verify_through(tracker, |shared| Box::new(shared))
+    }
+
+    /// [`failed_verify`], with the part reaching the fake through `wrap`.
+    fn failed_verify_through(
+        mut tracker: FakeTracker,
+        wrap: impl FnOnce(Shared) -> Box<dyn Tracker>,
+    ) -> (World, Trackers, Shared) {
         let ankh = ProjectId::new("ankh");
         let (one, two) = (IssueId::new("ankh", "1"), IssueId::new("ankh", "2"));
         let group = GroupId::new("watch");
@@ -1332,7 +1410,7 @@ mod tests {
         tracker.issues[1].1.depends_on = vec!["1".into()];
         let shared = Shared(std::sync::Arc::new(std::sync::Mutex::new(tracker)));
         let mut part = Trackers::default().every(0);
-        part.add(Box::new(shared.clone()));
+        part.add(wrap(shared.clone()));
         let mut w = configured();
         for f in ["f1", "f2"] {
             w.apply(&Event::FolderAdded {
@@ -1429,16 +1507,19 @@ mod tests {
     }
 
     /// The world, part and fake of [`failed_verify`] on the plain fake, after the
-    /// sync that reopens issue 1 and the one after it.
+    /// sync that reopens issue 1, the one that lists it, and one more.
     fn reopened() -> (World, Trackers, Shared) {
         let (mut w, mut part, shared) = failed_verify(fake());
-        let (events, effects) = sync_and_apply(&mut part, &mut w, 2);
+        // The reopen is not news until a sync lists the issue.
+        assert_eq!(sync_and_apply(&mut part, &mut w, 2), (vec![], vec![]));
+        assert!(w.issues[&IssueId::new("ankh", "1")].reopen_due);
+        let (events, effects) = sync_and_apply(&mut part, &mut w, 3);
         assert!(
             matches!(events.as_slice(), [Event::IssueSynced { issue, closed: false, .. }] if issue.key == "1"),
             "{events:?}"
         );
         assert_eq!(effects, []);
-        assert_eq!(sync_and_apply(&mut part, &mut w, 3), (vec![], vec![]));
+        assert_eq!(sync_and_apply(&mut part, &mut w, 4), (vec![], vec![]));
         (w, part, shared)
     }
 
@@ -1488,7 +1569,7 @@ mod tests {
         let (mut w, mut part, shared) = reopened();
         let folder = w.issues[&one].folder.clone().expect("a folder for the fix");
         shared.set_closed("1", true);
-        let (events, effects) = sync_and_apply(&mut part, &mut w, 4);
+        let (events, effects) = sync_and_apply(&mut part, &mut w, 5);
         assert!(
             matches!(events.as_slice(), [Event::IssueSynced { issue, closed: true, .. }] if issue == &one),
             "{events:?}"
@@ -1559,15 +1640,61 @@ mod tests {
 
         shared.fake().reopen_refused = None;
         let polled = part.poll(&w, 4);
-        assert!(
-            matches!(polled.events.as_slice(), [Event::IssueSynced { issue, closed: false, .. }] if issue == &one),
-            "{:?}",
-            polled.events
-        );
+        assert_eq!(polled.events, []);
         assert_eq!(polled.problem, None);
         assert_eq!(shared.fake().closed("ankh/morpork", "1"), Ok(false));
-        apply(&mut w, &polled.events);
+        // The next sync lists it: the reopen.
+        let (events, _) = sync_and_apply(&mut part, &mut w, 5);
+        assert!(
+            matches!(events.as_slice(), [Event::IssueSynced { issue, closed: false, .. }] if issue == &one),
+            "{events:?}"
+        );
         assert!(!w.issues[&one].reopen_due);
+    }
+
+    #[test]
+    fn a_close_in_a_listing_that_does_not_show_the_reopen_yet_stays_held() {
+        let ankh = ProjectId::new("ankh");
+        let (one, two) = (IssueId::new("ankh", "1"), IssueId::new("ankh", "2"));
+        let (mut w, mut part, shared) = failed_verify_through(fake(), Lagging::boxed);
+        // Synced every minute: the last sync was at 1.
+        part.every_ms = Some(60_000);
+        // Reopened at once after the failed verify, and not news yet.
+        assert_eq!(sync_and_apply(&mut part, &mut w, 2), (vec![], vec![]));
+        assert_eq!(shared.fake().closed("ankh/morpork", "1"), Ok(false));
+
+        // The next sync comes at once, and its listing still leaves issue 1 out.
+        let (events, effects) = sync_and_apply(&mut part, &mut w, 3);
+        assert_eq!(part.synced_at[&ankh], 3);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::IssueSynced { closed: true, .. })),
+            "{events:?}"
+        );
+        assert_eq!(effects, []);
+        let i = &w.issues[&one];
+        assert_ne!(i.stage, Stage::Done);
+        assert!(i.reopen_due && i.has_merged);
+        assert!(i.fix[0].ends_with("the clock struck twelve"), "{:?}", i.fix);
+        assert_eq!(w.issues[&two].stage, Stage::Ready);
+        let read = part.issue_text(&w, &one).expect("the tracker part answers");
+        assert_eq!(read.map(|t| t.text), Ok(WIND.to_string()));
+
+        // A tracker slow to list the reopen is not asked again before the next sync.
+        part.poll(&w, 4);
+        assert_eq!(part.synced_at[&ankh], 3);
+
+        // The next listing shows it: the reopen.
+        let (events, effects) = sync_and_apply(&mut part, &mut w, 60_003);
+        assert!(
+            matches!(events.as_slice(), [Event::IssueSynced { issue, closed: false, .. }] if issue == &one),
+            "{events:?}"
+        );
+        assert_eq!(effects, []);
+        let i = &w.issues[&one];
+        assert!(!i.reopen_due && !i.has_merged);
+        assert!(i.fix[0].ends_with("the clock struck twelve"), "{:?}", i.fix);
     }
 
     #[test]
