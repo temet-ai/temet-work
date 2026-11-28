@@ -76,25 +76,36 @@ impl Origin {
         message: &str,
         to: &str,
     ) -> String {
-        let n = self.made.get() + 1;
-        self.made.set(n);
-        let when = 1_700_000_000 + u64::from(n) * 60;
-        let mut stream = format!(
-            "commit {to}\nmark :1\nauthor Sam Vimes <vimes@example.com> {when} +0000\n\
-             committer Sam Vimes <vimes@example.com> {when} +0000\ndata {}\n{message}\n",
-            message.len()
-        );
-        if let Some(parent) = from {
-            stream.push_str(&format!("from {parent}\n"));
-        }
-        for (path, text) in files {
+        self.import(&[(from, files, message, to)]).remove(0)
+    }
+
+    /// Makes each commit as [`Origin::commit`] does, all in one `fast-import`,
+    /// and gives their ids in order. A `from` of `:N` is the Nth commit of this
+    /// list, counted from 1.
+    fn import(&self, commits: &[(Option<&str>, &[(&str, &str)], &str, &str)]) -> Vec<String> {
+        let mut stream = String::new();
+        for (i, (from, files, message, to)) in commits.iter().enumerate() {
+            let n = self.made.get() + 1;
+            self.made.set(n);
+            let when = 1_700_000_000 + u64::from(n) * 60;
             stream.push_str(&format!(
-                "M 100644 inline {path}\ndata {}\n{text}\n",
-                text.len()
+                "commit {to}\nmark :{}\nauthor Sam Vimes <vimes@example.com> {when} +0000\n\
+                 committer Sam Vimes <vimes@example.com> {when} +0000\ndata {}\n{message}\n",
+                i + 1,
+                message.len()
             ));
+            if let Some(parent) = from {
+                stream.push_str(&format!("from {parent}\n"));
+            }
+            for (path, text) in *files {
+                stream.push_str(&format!(
+                    "M 100644 inline {path}\ndata {}\n{text}\n",
+                    text.len()
+                ));
+            }
+            stream.push('\n');
         }
-        stream.push('\n');
-        let marks = self.bare.join(format!("marks-{n}"));
+        let marks = self.bare.join(format!("marks-{}", self.made.get()));
         let mut child = Git::new("git")
             .arg("-C")
             .arg(&self.bare)
@@ -112,17 +123,18 @@ impl Origin {
                 .write_all(stream.as_bytes())
                 .expect("stream");
         }
-        assert!(
-            child.wait().expect("waits").success(),
-            "fast-import of {message}"
-        );
+        assert!(child.wait().expect("waits").success(), "fast-import");
         let marked = std::fs::read_to_string(&marks).expect("marks");
         let _ = std::fs::remove_file(&marks);
-        marked
-            .split_whitespace()
-            .nth(1)
-            .expect("a commit id")
-            .to_string()
+        let mut ids: Vec<(usize, String)> = marked
+            .lines()
+            .filter_map(|l| {
+                let (mark, id) = l.split_once(' ')?;
+                Some((mark.trim_start_matches(':').parse().ok()?, id.to_string()))
+            })
+            .collect();
+        ids.sort();
+        ids.into_iter().map(|(_, id)| id).collect()
     }
 }
 
@@ -265,42 +277,44 @@ struct Watch {
 
 fn watch(dir: &Path) -> Watch {
     let origin = Origin::new(dir, "watch");
-    let first = origin.commit(
-        None,
-        &[
-            ("README.md", "The Night Watch\n"),
-            ("src/rota.rs", "pub fn rota() -> &'static str { \"day\" }\n"),
-            ("src/bell.rs", "pub fn ring() {}\n"),
-        ],
-        "The watch house",
-        "refs/heads/main",
-    );
-    let rota = origin.commit(
-        Some(&first),
-        &[(
-            "src/rota.rs",
-            "pub fn rota() -> &'static str { \"night\" }\n",
-        )],
-        "A night shift on the rota",
-        "refs/pull/57/head",
-    );
-    let night = origin.commit(
-        Some(&rota),
-        &[("src/lamp.rs", "pub fn light() {}\n")],
-        "A lamp for the night",
-        "refs/pull/57/head",
-    );
-    let moved = origin.commit(
-        Some(&first),
-        &[("README.md", "The City Watch\n")],
-        "Rename the watch",
-        "refs/heads/main",
-    );
+    let ids = origin.import(&[
+        (
+            None,
+            &[
+                ("README.md", "The Night Watch\n"),
+                ("src/rota.rs", "pub fn rota() -> &'static str { \"day\" }\n"),
+                ("src/bell.rs", "pub fn ring() {}\n"),
+            ],
+            "The watch house",
+            "refs/heads/main",
+        ),
+        (
+            Some(":1"),
+            &[(
+                "src/rota.rs",
+                "pub fn rota() -> &'static str { \"night\" }\n",
+            )],
+            "A night shift on the rota",
+            "refs/pull/57/head",
+        ),
+        (
+            Some(":2"),
+            &[("src/lamp.rs", "pub fn light() {}\n")],
+            "A lamp for the night",
+            "refs/pull/57/head",
+        ),
+        (
+            Some(":1"),
+            &[("README.md", "The City Watch\n")],
+            "Rename the watch",
+            "refs/heads/main",
+        ),
+    ]);
     Watch {
         origin,
-        first,
-        night,
-        moved,
+        first: ids[0].clone(),
+        night: ids[2].clone(),
+        moved: ids[3].clone(),
     }
 }
 
