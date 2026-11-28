@@ -26,6 +26,44 @@ pub fn stage(stage: Stage) -> String {
     }
 }
 
+/// The reply to a person's accepted move of `issue`: the stage it is at now,
+/// which is the next one when the loop took it at once (refining, or working),
+/// and each pull request the move dropped, left open on the code host for the
+/// person to close or reuse. `dropped` is what [`World::open_pulls`] gave for
+/// the issue before the move.
+pub fn moved(
+    world: &World,
+    issue: &crate::ids::IssueId,
+    dropped: &[(crate::ids::ProjectId, String)],
+) -> String {
+    let at = world
+        .issues
+        .get(issue)
+        .map_or_else(|| "gone".to_string(), |i| issue_stage(world, i));
+    let head = format!("{issue} is {at}");
+    let named = |(repo, number): &(crate::ids::ProjectId, String)| {
+        if dropped.len() > 1 || *repo != issue.project {
+            format!("{number} in {repo}")
+        } else {
+            number.clone()
+        }
+    };
+    match dropped {
+        [] => head,
+        [one] => format!(
+            "{head}; the move dropped its pull request {}, which is left open on the code host \
+             for you to close or reuse",
+            named(one)
+        ),
+        [first @ .., last] => format!(
+            "{head}; the move dropped its pull requests {} and {}, which are left open on the \
+             code host for you to close or reuse",
+            first.iter().map(named).collect::<Vec<_>>().join(", "),
+            named(last)
+        ),
+    }
+}
+
 /// An issue's stage, and "out of scope" when its group no longer covers it.
 pub(crate) fn issue_stage(world: &World, issue: &Issue) -> String {
     let at = stage(issue.stage);

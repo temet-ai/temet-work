@@ -7,7 +7,7 @@
 use gpui::{AppContext, TitlebarOptions, WindowOptions};
 use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
-use temet_work_app::daemon::Daemon;
+use temet_work_app::daemon::{self, Daemon};
 use temet_work_app::pages::project::Project;
 use temet_work_app::{install, launch, sample, theme, view_map};
 use temet_work_core::command::VIEW_PERIOD;
@@ -92,6 +92,19 @@ fn main() {
                     let page = cx.new(|_| Project::blank(None));
                     let daemon = cx.new(Daemon::new);
                     page.update(cx, |page, cx| view_map::sync(page, daemon.read(cx)));
+                    // A person's commands go to the socket the view is read from.
+                    let socket = daemon.read(cx).path().to_path_buf();
+                    page.update(cx, |page, _| {
+                        page.set_sender(move |command, cx| {
+                            let path = socket.clone();
+                            let executor = cx.background_executor().clone();
+                            cx.spawn(async move |_| {
+                                daemon::send(path, command, &executor)
+                                    .await
+                                    .map_err(|problem| problem.reason())
+                            })
+                        })
+                    });
                     let shown = page.clone();
                     // The observer holds the reader for as long as the window lives. An entity
                     // nobody holds is dropped, and its loop of asks with it, so the page would

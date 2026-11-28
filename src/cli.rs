@@ -5,6 +5,7 @@ use std::path::Path;
 use temet_work_core::ids::{AgentId, DecisionId, GroupId, IssueId, ProjectId, RuleId};
 use temet_work_core::model::{Plan, Role};
 use temet_work_core::settings::Target;
+use temet_work_core::view::StageWord;
 use temet_work_core::{At, Command, Request, Verdict};
 
 pub use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
@@ -54,6 +55,11 @@ temet-work hold                             a person's: hold the daemon, so no i
                                             gets no new agent, fix, review or merge; agents at
                                             work finish their turn
 temet-work resume                           a person's: lift the hold, so work starts again
+temet-work move ISSUE STAGE                 a person's: move an issue back to new, to be refined
+                                            again, or to ready, for a new author; STAGE is one of
+                                            new, refining, ready, working, in_review, fixing,
+                                            arbitration, merging, deploying, verifying, done, and
+                                            any other move is refused with its reason
 temet-work file PROJECT TITLE BODY [--milestone M]
                                             an investigator's: file an issue in a project or area its
                                             group takes; BODY - reads it from standard input; the
@@ -394,6 +400,10 @@ pub fn request(
             }
         }
         "retry" => Command::Retry { issue: issue()? },
+        "move" => Command::Move {
+            issue: issue()?,
+            stage: StageWord::parse(arg(2, "STAGE")?)?,
+        },
         "hold" => Command::Hold,
         "resume" => Command::Resume,
         "rule" => Command::Rule {
@@ -550,6 +560,40 @@ pub(crate) mod tests {
             let why = read(words).expect_err("refused");
             assert!(why.contains(refused), "{words:?}: {why}");
         }
+    }
+
+    #[test]
+    fn move_reads_an_issue_and_one_of_the_views_stage_words() {
+        let read = |line: &str| request(&args(line), None, no_files).map(|r| r.command);
+        assert_eq!(
+            read("move radar#1 ready"),
+            Ok(Command::Move {
+                issue: IssueId::new("radar", "1"),
+                stage: StageWord::Ready,
+            })
+        );
+        assert_eq!(
+            read("move radar#1 in_review"),
+            Ok(Command::Move {
+                issue: IssueId::new("radar", "1"),
+                stage: StageWord::InReview,
+            })
+        );
+        assert_eq!(
+            read("move radar#1 sideways"),
+            Err(
+                "no stage sideways; the stages are new, refining, ready, working, in_review, \
+                 fixing, arbitration, merging, deploying, verifying, done"
+                    .into()
+            )
+        );
+        assert!(read("move radar#1").is_err_and(|e| e.starts_with("missing STAGE")));
+        assert!(read("move radar ready").is_err_and(|e| e.contains("not an issue")));
+        assert!(
+            read("move radar#1 new --json").is_err(),
+            "--json goes with status only"
+        );
+        assert!(USAGE.contains("temet-work move ISSUE STAGE"));
     }
 
     #[test]

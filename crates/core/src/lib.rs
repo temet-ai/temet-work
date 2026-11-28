@@ -15,6 +15,7 @@ pub mod ids;
 pub mod investigation;
 pub mod launch;
 pub mod model;
+mod moves;
 pub mod placement;
 pub mod reply;
 pub mod sender;

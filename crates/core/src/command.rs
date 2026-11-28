@@ -17,6 +17,7 @@ use crate::model::{
 };
 use crate::settings::{self, Agents, Scope, Target};
 use crate::text::{clean, stage};
+use crate::view::StageWord;
 use crate::world::World;
 
 /// One command.
@@ -228,6 +229,15 @@ pub enum Command {
     Hold,
     /// A person lifts the hold, so work starts again.
     Resume,
+    /// A person moves an issue to another stage: back to new, to be refined
+    /// again, or back to ready, for a new author ([`World::may_move`]).
+    Move {
+        /// The issue.
+        issue: IssueId,
+        /// The stage, as one of the view's words; a word this build does not
+        /// know reads as [`StageWord::Unknown`] and is refused.
+        stage: StageWord,
+    },
 }
 
 /// The point of a repository that [`Command::Show`] and [`Command::Search`] read
@@ -293,7 +303,8 @@ impl Command {
             | Self::Review { issue, .. }
             | Self::Retry { issue }
             | Self::Rule { issue, .. }
-            | Self::Choose { issue, .. } => Some(issue),
+            | Self::Choose { issue, .. }
+            | Self::Move { issue, .. } => Some(issue),
         }
     }
 }
@@ -437,6 +448,9 @@ impl World {
             Scope::Task(issue)
                 if agent.role == Role::Refiner && agent.issue.as_ref() == Some(issue) =>
             {
+                if let Some(why) = self.moved_past(agent, "set") {
+                    return Err(why);
+                }
                 match self.issues.get(issue).map(|i| i.stage) {
                     Some(Stage::Refining) => match role {
                         Some(other) if agents == Agents::ForAuthor && other != Role::Author => {
@@ -623,7 +637,8 @@ impl World {
             ));
         };
         if agent.role == role && agent.issue.as_ref() == Some(issue) {
-            return Ok(());
+            // A person moved the issue after it started: its step is over.
+            return self.moved_past(agent, step).map_or(Ok(()), Err);
         }
         let working = self
             .agents
@@ -683,6 +698,9 @@ impl World {
         }
         if !self.issues.contains_key(issue) {
             return Err(format!("there is no issue {issue}"));
+        }
+        if let Some(why) = self.moved_past(agent, "choose") {
+            return Err(why);
         }
         let one_line = |text: &str| clean(text).split_whitespace().collect::<Vec<_>>().join(" ");
         let question = one_line(question);
@@ -1233,6 +1251,25 @@ impl World {
                     ));
                 }
                 Event::Held
+            }
+            Command::Move { issue, stage } => {
+                if let Some(by) = by {
+                    return Err(format!(
+                        "move is a person's: {by} is an agent; an agent finishes its step, and a \
+                         person moves an issue from a shell outside any agent's terminal"
+                    ));
+                }
+                let i = self
+                    .issues
+                    .get(issue)
+                    .ok_or_else(|| format!("there is no issue {issue}"))?;
+                self.may_move(i, *stage)?;
+                let stage = World::move_target(*stage)
+                    .ok_or_else(|| format!("{issue} is not moved to {}", stage.name()))?;
+                Event::Moved {
+                    issue: issue.clone(),
+                    stage,
+                }
             }
             Command::Resume => {
                 if let Some(by) = by {
@@ -2017,6 +2054,56 @@ mod tests {
         );
         assert_eq!(w.issues[&issue()].stage, Stage::Working);
         w
+    }
+
+    #[test]
+    fn move_is_a_persons_and_refused_from_an_agent() {
+        let w = working();
+        let back = Command::Move {
+            issue: issue(),
+            stage: StageWord::Ready,
+        };
+        for agent in ["author-1", "reviewer-1", "refiner-1"] {
+            let why = w
+                .check(Some(&AgentId::new(agent)), &back)
+                .expect_err("refused");
+            assert!(
+                why.starts_with(&format!("move is a person's: {agent} is an agent")),
+                "{why}"
+            );
+        }
+        assert_eq!(
+            w.check(None, &back),
+            Ok(Some(Event::Moved {
+                issue: issue(),
+                stage: Stage::Ready
+            }))
+        );
+    }
+
+    #[test]
+    fn move_reads_back_from_its_line_with_the_views_stage_word() {
+        let request = Request::new(
+            None,
+            Command::Move {
+                issue: issue(),
+                stage: StageWord::InReview,
+            },
+        );
+        let line = serde_json::to_string(&request).expect("json");
+        let value: serde_json::Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(value["by"], serde_json::Value::Null);
+        assert_eq!(value["command"]["command"], "move");
+        assert_eq!(value["command"]["stage"], "in_review");
+        assert_eq!(
+            serde_json::from_str::<Request>(&line).expect("a request"),
+            request
+        );
+        // A word this build does not know is read, and refused by the loop.
+        let line = line.replace("in_review", "sideways");
+        let read: Request = serde_json::from_str(&line).expect("a request");
+        let why = working().check(None, &read.command).expect_err("refused");
+        assert!(why.contains("new, refining, ready"), "{why}");
     }
 
     #[test]

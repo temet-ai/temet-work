@@ -3935,3 +3935,236 @@ mod reads {
         assert!(refused(8).contains("there is no issue ankh#2"));
     }
 }
+
+/// A person's move through the daemon: its reply, and a second `temet-workd`
+/// that keeps it through a restart.
+mod moves {
+    use super::*;
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::view::StageWord;
+
+    #[test]
+    fn a_moves_reply_says_the_stage_and_names_the_pull_request_left_open() {
+        let (mut host, starts) = host();
+        host.tick(0).expect("sync");
+        let issue = IssueId::new("ankh", "1");
+        let ask = |host: &mut Host, by: Option<&str>, command: Command| match answer(
+            host,
+            1,
+            &from(&starts, by, command),
+            &Peer::Unchecked,
+        )
+        .expect("answer")
+        {
+            Reply::Done { text } => text,
+            Reply::Refused { why } => panic!("refused: {why}"),
+            Reply::View { view } => panic!("a view: {view:?}"),
+        };
+        plan_one_check(&mut host, &starts);
+        let ready = Command::Ready {
+            issue: issue.clone(),
+            pull: Some("57".into()),
+            pulls: Default::default(),
+            replies: Vec::new(),
+        };
+        ask(&mut host, Some("author-1"), ready);
+        let back = |stage| Command::Move {
+            issue: issue.clone(),
+            stage,
+        };
+        // author-1's stop works at once, so a new author takes ankh-1 in the
+        // same round: the issue is working again, with no pull request.
+        assert_eq!(
+            ask(&mut host, None, back(StageWord::Ready)),
+            "ankh#1 is working; the move dropped its pull request 57, which is left open on \
+             the code host for you to close or reuse"
+        );
+        assert_eq!(
+            host.world().agents[&AgentId::new("author-1")].state,
+            temet_work_core::model::AgentState::Ended
+        );
+        assert!(host.world().agents.contains_key(&AgentId::new("author-2")));
+        // Nothing dropped: the stage alone. Back to new it is taken for
+        // refining again at once, by a fresh refiner.
+        assert_eq!(
+            ask(&mut host, None, back(StageWord::New)),
+            "ankh#1 is refining"
+        );
+        assert!(host.world().agents.contains_key(&AgentId::new("refiner-2")));
+        // A refused move says why, and an agent's is refused as overturn is.
+        let refused = answer(
+            &mut host,
+            1,
+            &from(&starts, None, back(StageWord::Merging)),
+            &Peer::Unchecked,
+        )
+        .expect("answer");
+        assert!(
+            matches!(&refused, Reply::Refused { why } if why.contains("a step the loop or an agent owns")),
+            "{refused:?}"
+        );
+        let refused = answer(
+            &mut host,
+            1,
+            &from(&starts, Some("refiner-2"), back(StageWord::New)),
+            &Peer::Unchecked,
+        )
+        .expect("answer");
+        assert!(
+            matches!(&refused, Reply::Refused { why } if why.starts_with("move is a person's: refiner-2 is an agent")),
+            "{refused:?}"
+        );
+    }
+
+    /// A folder of the test's own under the target folder, emptied first, for
+    /// a second daemon's configuration, log and socket.
+    fn real_run(name: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a folder");
+        dir
+    }
+
+    /// A `temet-workd` on the configuration and log in `dir`, answering on
+    /// its own socket there, once that socket answers.
+    fn daemon(dir: &std::path::Path) -> std::process::Child {
+        let socket = dir.join("d.sock");
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_temet-workd"))
+            .arg("--config")
+            .arg(dir.join("config.toml"))
+            .arg("--log")
+            .arg(dir.join("events.jsonl"))
+            .env("TEMET_WORK_SOCKET", &socket)
+            .env("TEMET_WORK_SANDBOX", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the daemon runs");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the daemon did not answer"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        child
+    }
+
+    /// `temet-work ARGS` against the daemon in `dir`, as a person: its
+    /// standard output, after a success.
+    fn cli(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+            .args(args)
+            .env("TEMET_WORK_SOCKET", dir.join("d.sock"))
+            .env_remove("TEMET_WORK_DAEMON")
+            .env_remove("TEMET_WORK_AGENT")
+            .env_remove(SECRET_VAR)
+            .output()
+            .expect("runs");
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[cfg(all(feature = "store", feature = "tracker-github"))]
+    #[test]
+    fn a_move_through_a_second_daemon_outlasts_its_restart() {
+        use temet_work_core::Event;
+        use temet_work_core::ids::{GroupId, ProjectId};
+        use temet_work_core::model::{Check, Plan};
+
+        let dir = real_run("daemon-move");
+        std::fs::write(
+            dir.join("config.toml"),
+            "[[project]]\nid = \"ankh\"\ntracker = \"github\"\nname = \"ankh-morpork/watch\"\n\
+             [[group]]\nid = \"watch\"\nname = \"Night watch\"\nprojects = [\"ankh\"]\n",
+        )
+        .expect("a config");
+        // ankh#1 planned and ready, with no folder for an author; ankh#2 holds
+        // the group's one refining slot, so ankh#1 stays at new once moved.
+        let (mut log, _) = temet_work_store::Log::open(&dir.join("events.jsonl")).expect("a log");
+        let synced = |key: &str, order| Event::IssueSynced {
+            issue: IssueId::new("ankh", key),
+            title: format!("Mend clock {key}"),
+            milestone: None,
+            depends_on: vec![],
+            order,
+            closed: false,
+        };
+        for event in [
+            Event::LogStarted { id: "lamp".into() },
+            Event::ProjectAdded {
+                project: ProjectId::new("ankh"),
+                tracker: "github".into(),
+                name: "ankh-morpork/watch".into(),
+                code_host: Some("github".into()),
+                repo: Some("ankh-morpork/watch".into()),
+            },
+            Event::GroupCreated {
+                group: GroupId::new("watch"),
+                name: "Night watch".into(),
+                projects: vec![ProjectId::new("ankh")],
+                areas: vec![],
+                milestones: vec![],
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+            synced("1", 1),
+            Event::PlanWritten {
+                issue: IssueId::new("ankh", "1"),
+                plan: Plan {
+                    checks: vec![Check::new("it strikes on time", "listening at noon")],
+                    ..Plan::default()
+                },
+            },
+            synced("2", 2),
+        ] {
+            log.append(1, &event).expect("logged");
+        }
+        // The daemon takes the log's lock.
+        drop(log);
+
+        let mut first = daemon(&dir);
+        let moved = cli(&dir, &["move", "ankh#1", "new"]);
+        let refused = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+            .args(["move", "ankh#1", "sideways"])
+            .env("TEMET_WORK_SOCKET", dir.join("d.sock"))
+            .output()
+            .expect("runs");
+        first.kill().expect("stopped");
+        first.wait().expect("ended");
+        assert_eq!(moved.trim_end(), "ankh#1 is new");
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr)
+                .contains("no stage sideways; the stages are new"),
+            "{refused:?}"
+        );
+        let log = std::fs::read_to_string(dir.join("events.jsonl")).expect("the log");
+        assert_eq!(log.matches(r#""Moved""#).count(), 1, "{log}");
+
+        // Restarted on the same log, the daemon has it at new.
+        let mut again = daemon(&dir);
+        let status = cli(&dir, &["status"]);
+        let json = cli(&dir, &["status", "--json"]);
+        again.kill().expect("stopped");
+        again.wait().expect("ended");
+        let line = status
+            .lines()
+            .find(|l| l.contains("ankh#1"))
+            .unwrap_or_else(|| panic!("no ankh#1 in {status}"));
+        assert!(line.contains("new") && !line.contains("ready"), "{line}");
+        let view: temet_work_core::View = serde_json::from_str(&json).expect("a view");
+        let shown = view
+            .issues
+            .iter()
+            .find(|i| i.id == "ankh#1")
+            .expect("listed");
+        assert_eq!(
+            (shown.stage, shown.moves.as_slice()),
+            (StageWord::New, &[][..])
+        );
+    }
+}

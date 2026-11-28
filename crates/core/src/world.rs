@@ -175,7 +175,7 @@ fn mark(i: &Issue) -> u64 {
     for r in &i.reviews {
         r.states.hash(&mut h);
     }
-    (i.verify_failed, i.reopen_due).hash(&mut h);
+    (i.verify_failed, i.reopen_due, i.moved).hash(&mut h);
     h.finish()
 }
 
@@ -447,6 +447,7 @@ impl World {
                     reopen_due: false,
                     review_waived: false,
                     reviews: Vec::new(),
+                    moved: None,
                 });
                 entry.title = title.clone();
                 entry.milestone = milestone.clone();
@@ -1083,6 +1084,7 @@ impl World {
                 }
             }
             Event::Held => self.held = true,
+            Event::Moved { issue, stage } => self.apply_move(issue, *stage, &mut out),
             Event::Resumed => {
                 self.held = false;
                 self.held_since = None;
@@ -1308,12 +1310,18 @@ impl World {
     }
 
     /// The agent of `role` working on `issue` whose session has not ended; the
-    /// one started last when there are several.
+    /// one started last when there are several. One started before a person
+    /// moved the issue ([`Self::before_move`]) is not working on it, though it
+    /// may still run while its stop fails: a fresh one takes its place and
+    /// hears what the issue's stage needs.
     pub fn running(&self, issue: &IssueId, role: Role) -> Option<&Agent> {
         self.agents
             .values()
             .filter(|a| {
-                a.issue.as_ref() == Some(issue) && a.role == role && a.state != AgentState::Ended
+                a.issue.as_ref() == Some(issue)
+                    && a.role == role
+                    && a.state != AgentState::Ended
+                    && !self.before_move(a)
             })
             .max_by_key(|a| a.started)
     }
@@ -1484,15 +1492,16 @@ impl World {
 
     /// Whether nothing will need `agent` again: an agent on an issue that is
     /// done, deploying or verifying, or back to new or ready, as after a reopen
-    /// in the tracker or a failed verify; any but the refiner on an issue being
-    /// refined; a refiner whose issue's plan is in; an author whose issue holds
-    /// other folders than the ones it held; an investigator whose investigation
-    /// has ended. An author or reviewer on an issue in review, being fixed or
-    /// merging, a refiner while its issue is refining and the investigator of a
-    /// running investigation are still needed. An arbiter that has ruled is
-    /// asked to stop by [`Self::missing`] once its issue waits on an arbiter
-    /// again.
-    fn over_for_good(&self, agent: &Agent) -> bool {
+    /// in the tracker, a failed verify or a person's move; one started before a
+    /// person last moved its issue, at any stage the issue has reached since;
+    /// any but the refiner on an issue being refined; a refiner whose issue's
+    /// plan is in; an author whose issue holds other folders than the ones it
+    /// held; an investigator whose investigation has ended. An author or
+    /// reviewer on an issue in review, being fixed or merging, a refiner while
+    /// its issue is refining and the investigator of a running investigation
+    /// are still needed. An arbiter that has ruled is asked to stop by
+    /// [`Self::missing`] once its issue waits on an arbiter again.
+    pub fn over_for_good(&self, agent: &Agent) -> bool {
         if agent.role == Role::Investigator && agent.issue.is_none() {
             return self
                 .investigating(&agent.group)
@@ -1501,6 +1510,9 @@ impl World {
         let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
             return false;
         };
+        if self.before_move(agent) {
+            return true;
+        }
         match i.stage {
             // Back to new or ready, every agent on it is from before: a reopen
             // in the tracker or a failed verify ended their steps.
@@ -1754,7 +1766,7 @@ impl World {
     }
 
     /// Frees work folders for the next issue.
-    fn release(&mut self, folders: Vec<FolderId>, out: &mut Vec<Effect>) {
+    pub(crate) fn release(&mut self, folders: Vec<FolderId>, out: &mut Vec<Effect>) {
         for id in folders {
             if let Some(f) = self.folders.get_mut(&id) {
                 f.holder = None;
@@ -2011,3 +2023,7 @@ mod states;
 #[cfg(test)]
 #[path = "world_stops_tests.rs"]
 mod stops;
+
+#[cfg(test)]
+#[path = "world_moves_tests.rs"]
+mod moves;

@@ -5,6 +5,7 @@
 pub mod check_list;
 pub mod decision_row;
 pub mod group_list;
+pub mod issue_actions;
 pub mod issue_pane;
 pub mod issue_table;
 pub mod meter_list;

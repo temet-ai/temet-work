@@ -13,6 +13,7 @@ session_id:
   - ba3664be-ec7f-4b51-af6a-b1c20c80634d
   - 4fdc790b-4921-4d0a-9032-f3a83dbaf0ef
   - 3ee4a4e0-4c22-4ed9-ad8f-7d0dd362241c
+  - 7d4c9131-a05c-43ac-ba6d-09406c95b2c6
 ---
 
 # temet-work architecture
@@ -196,7 +197,10 @@ once the agent has ended, whatever ended it.
 A replay at start drops effects, so a stop that failed or was lost to a restart is asked for again:
 each round the daemon asks to stop every running agent whose step is over for good. That is any
 agent on an issue that is done, deploying or verifying, or back to new or ready after a reopen in
-the tracker or a failed verify; any but the refiner on an issue being refined; a refiner whose
+the tracker, a failed verify or a person's move; any agent started before a person last moved its
+issue (`temet-work move`, `docs/commands.md`), whatever stage the issue has reached since, so a
+fresh agent takes its role and the runner family types nothing more into it; any but the refiner
+on an issue being refined; a refiner whose
 issue's plan is in; an author whose issue holds other folders than the ones it held, as after a
 failed verify while that author's stop kept failing; and an investigator whose investigation has
 ended. It asks on a paused issue too, since a stop starts no work. Nothing waits on such an agent:

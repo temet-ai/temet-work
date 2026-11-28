@@ -744,6 +744,16 @@ impl Runners {
         let mut keep = Vec::new();
         let mut told = Vec::new();
         for m in std::mem::take(&mut self.outbox) {
+            // A person moved the agent's issue after it started: its step is over
+            // and the loop asks its stop each round. A fix or a round queued for
+            // it before the move would put it back to work, so it is dropped.
+            if world
+                .agents
+                .get(&AgentId::new(m.agent.clone()))
+                .is_some_and(|a| world.before_move(a))
+            {
+                continue;
+            }
             let Some((i, terminal)) = self.terminals.get(&m.agent).cloned() else {
                 keep.push(m);
                 continue;
@@ -801,9 +811,12 @@ impl Runners {
         seen: &mut BTreeMap<AgentId, AgentState>,
         now_ms: u64,
     ) -> Vec<Event> {
+        // Not one started before a person moved its issue: `continue` would put
+        // it back to work on a step the issue has left.
         let due: Vec<(AgentId, u64)> = world
             .agents
             .values()
+            .filter(|a| !world.before_move(a))
             .filter_map(|a| {
                 let at = limit_reset(a, seen)?;
                 (now_ms >= at.saturating_add(CONTINUE_AFTER_MS)).then(|| (a.id.clone(), at))
@@ -2815,6 +2828,64 @@ mod tests {
         assert_eq!(authors.len(), 1);
         assert_eq!(authors[0].id, author);
         assert_ne!(authors[0].state, AgentState::Ended);
+    }
+
+    /// Marks ankh#1 as moved back to ready by a person now, after every agent
+    /// started so far.
+    fn moved_back(w: &mut World) {
+        let at = w.applied + 1;
+        let i = w.issues.get_mut(&IssueId::new("ankh", "1")).expect("there");
+        i.moved = Some(temet_work_core::model::Moved {
+            at,
+            to: temet_work_core::model::Stage::Ready,
+        });
+    }
+
+    #[test]
+    fn a_fix_queued_for_an_author_before_a_move_is_dropped_not_typed() {
+        let fix = Effect::RequestFix {
+            issue: IssueId::new("ankh", "1"),
+            points: vec!["no test for a stopped clock".into()],
+        };
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Fixing { round: 1 });
+        let mut part = runners();
+        let asking = run(&mut part, &mut w, &[fake::PROMPT_PROGRAM]);
+        part.carry_out(&fix, &w);
+        assert_eq!(
+            part.waiting(),
+            1,
+            "it waits while the author is at a prompt"
+        );
+        moved_back(&mut w);
+        step(&mut part, &mut w, 0);
+        assert_eq!(part.waiting(), 0, "dropped once the issue is moved");
+        assert!(
+            !part
+                .screen(&asking.0)
+                .expect("screen")
+                .contains("stopped clock")
+        );
+    }
+
+    #[test]
+    fn an_author_started_before_a_move_is_not_continued_after_its_limit() {
+        use temet_work_core::Host;
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let fake = handle.fake;
+        run(&mut part, &mut w, &["claude"]);
+        moved_back(&mut w);
+        let kept = Kept::default();
+        let mut host = Host::new(w, vec![Box::new(part)], Box::new(kept.clone()));
+        fake.lock()
+            .expect("lock")
+            .end_in_error(&TerminalId("t1".into()), LIMIT);
+        host.tick(nov27(16, 50)).expect("tick");
+        host.tick(nov27(17, 41)).expect("tick");
+        host.tick(nov27(17, 45)).expect("tick");
+        assert_eq!(continues(&fake), 0);
     }
 
     #[test]

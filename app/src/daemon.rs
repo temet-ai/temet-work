@@ -6,6 +6,10 @@
 //! next ask starts [`VIEW_PERIOD`] after the last one ended, so asks never overlap. A failed ask
 //! keeps the last view and marks it stale; the next good one clears the mark.
 //!
+//! A command the person gives in the window, such as moving an issue, goes the same way: one
+//! `Request { by: None, command }` line, as a person's request, and one `Reply` line back within
+//! [`VIEW_DEADLINE`] ([`send`]): the daemon's text when it did it, or why it was not done.
+//!
 //! The `Reply` match has no wildcard arm: a reply the core adds stops this file compiling until
 //! the app says what it does with it. A reply line of a kind this build's core lacks, as a newer
 //! daemon sends, is [`Problem::Unreadable`] with the parser's message.
@@ -47,6 +51,17 @@ pub enum Problem {
         /// How long the ask waited.
         within: Duration,
     },
+}
+
+impl Problem {
+    /// Why it went wrong, for a person: the daemon's reason word for word when it refused, else
+    /// what failed.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::Refused { why } => why.clone(),
+            other => other.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for Problem {
@@ -151,6 +166,24 @@ impl Daemon {
     }
 }
 
+/// Sends `command` to the daemon at `path` as a person's request, and gives the daemon's text
+/// when it did it, or why it was not done: its refusal, no socket, or no answer once
+/// [`VIEW_DEADLINE`] has passed on `executor`'s clock.
+pub async fn send(
+    path: PathBuf,
+    command: Command,
+    executor: &BackgroundExecutor,
+) -> Result<String, Problem> {
+    let reply = over_socket(path, command, executor).await?;
+    match reply {
+        Reply::Done { text } => Ok(text),
+        Reply::Refused { why } => Err(Problem::Refused { why }),
+        Reply::View { .. } => Err(Problem::Unreadable {
+            why: "a view in place of the command's answer".into(),
+        }),
+    }
+}
+
 /// One ask: a `View` request to the socket at `path` and the view it answers, or
 /// [`Problem::NoAnswer`] once [`VIEW_DEADLINE`] has passed on `executor`'s clock.
 ///
@@ -159,10 +192,26 @@ impl Daemon {
 /// The read's own timeout is the same deadline in real time: it gives the same answer and ends
 /// the thread, which under a fake clock is all it does.
 async fn ask(path: PathBuf, executor: &BackgroundExecutor) -> Result<View, Problem> {
+    match over_socket(path, Command::View, executor).await? {
+        Reply::View { view } => Ok(view),
+        Reply::Refused { why } => Err(Problem::Refused { why }),
+        Reply::Done { text } => Err(Problem::Unreadable {
+            why: format!("a done reply in place of a view: {text}"),
+        }),
+    }
+}
+
+/// One request: `command` as a person's to the socket at `path`, and the reply line read, or
+/// [`Problem::NoAnswer`] once [`VIEW_DEADLINE`] has passed on `executor`'s clock.
+async fn over_socket(
+    path: PathBuf,
+    command: Command,
+    executor: &BackgroundExecutor,
+) -> Result<Reply, Problem> {
     let (answer, answered) = oneshot::channel();
     let reader = std::thread::Builder::new()
         .name("temet-work-view".into())
-        .spawn(move || read(&path, answer));
+        .spawn(move || read(&path, &command, answer));
     if let Err(e) = reader {
         return Err(Problem::Unreadable { why: e.to_string() });
     }
@@ -180,10 +229,10 @@ async fn ask(path: PathBuf, executor: &BackgroundExecutor) -> Result<View, Probl
 /// The reading thread: connects to the socket at `path`, hands the answer over, and only then
 /// closes the connection, so whoever waits for the connection to end (the app's tests do) finds
 /// the answer already handed over.
-fn read(path: &Path, answer: oneshot::Sender<Result<View, Problem>>) {
+fn read(path: &Path, command: &Command, answer: oneshot::Sender<Result<Reply, Problem>>) {
     match UnixStream::connect(path) {
         Ok(stream) => {
-            let _ = answer.send(exchange(&stream));
+            let _ = answer.send(exchange(&stream, command));
             drop(stream);
         }
         Err(_) => {
@@ -194,9 +243,9 @@ fn read(path: &Path, answer: oneshot::Sender<Result<View, Problem>>) {
     }
 }
 
-/// Writes the `View` request to `stream` and reads the reply, waiting at most [`VIEW_DEADLINE`]
-/// on each write and read.
-fn exchange(stream: &UnixStream) -> Result<View, Problem> {
+/// Writes `command` to `stream` as a person's request and reads the reply, waiting at most
+/// [`VIEW_DEADLINE`] on each write and read.
+fn exchange(stream: &UnixStream, command: &Command) -> Result<Reply, Problem> {
     let failed = |e: io::Error| match e.kind() {
         io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => Problem::NoAnswer {
             within: VIEW_DEADLINE,
@@ -209,7 +258,7 @@ fn exchange(stream: &UnixStream) -> Result<View, Problem> {
     stream
         .set_read_timeout(Some(VIEW_DEADLINE))
         .map_err(failed)?;
-    let request = Request::new(None, Command::View);
+    let request = Request::new(None, command.clone());
     let line =
         serde_json::to_string(&request).map_err(|e| Problem::Unreadable { why: e.to_string() })?;
     writeln!(&*stream, "{line}").map_err(failed)?;
@@ -222,12 +271,5 @@ fn exchange(stream: &UnixStream) -> Result<View, Problem> {
             why: "the socket closed without a reply".into(),
         });
     }
-    match serde_json::from_str(&reply) {
-        Ok(Reply::View { view }) => Ok(view),
-        Ok(Reply::Refused { why }) => Err(Problem::Refused { why }),
-        Ok(Reply::Done { text }) => Err(Problem::Unreadable {
-            why: format!("a done reply in place of a view: {text}"),
-        }),
-        Err(e) => Err(Problem::Unreadable { why: e.to_string() }),
-    }
+    serde_json::from_str(&reply).map_err(|e| Problem::Unreadable { why: e.to_string() })
 }

@@ -349,6 +349,14 @@ fn detail(view: &View, issue: &Issue) -> IssueDetail {
         })
         .collect();
     IssueDetail {
+        id: temet_work_core::ids::IssueId::parse(&issue.id),
+        // A word this build does not know names no stage the window can offer.
+        moves: issue
+            .moves
+            .iter()
+            .filter(|w| **w != StageWord::Unknown)
+            .map(|w| stage(*w))
+            .collect(),
         round: usize::from(issue.round),
         plan,
         pull,

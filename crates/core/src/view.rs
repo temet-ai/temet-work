@@ -173,6 +173,12 @@ pub struct Issue {
     /// Its review rounds, in the order they finished.
     #[serde(default)]
     pub reviews: Vec<Review>,
+    /// The stages a person may move it to with `move`, in the loop's order:
+    /// those [`World::may_move`] takes, the rule the command is checked by.
+    /// Empty when the rule refuses every move, and in a view from a daemon that
+    /// has no `move`.
+    #[serde(default)]
+    pub moves: Vec<StageWord>,
 }
 
 /// One of a plan's checks.
@@ -317,6 +323,54 @@ pub enum StageWord {
     /// A word this build lacks, from a newer daemon. It sorts after the others.
     #[serde(other)]
     Unknown,
+}
+
+impl StageWord {
+    /// Every word this build knows, in the loop's order.
+    pub const ALL: [StageWord; 11] = [
+        Self::New,
+        Self::Refining,
+        Self::Ready,
+        Self::Working,
+        Self::InReview,
+        Self::Fixing,
+        Self::Arbitration,
+        Self::Merging,
+        Self::Deploying,
+        Self::Verifying,
+        Self::Done,
+    ];
+
+    /// The word as the view, `move` and the command line spell it (`in_review`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Refining => "refining",
+            Self::Ready => "ready",
+            Self::Working => "working",
+            Self::InReview => "in_review",
+            Self::Fixing => "fixing",
+            Self::Arbitration => "arbitration",
+            Self::Merging => "merging",
+            Self::Deploying => "deploying",
+            Self::Verifying => "verifying",
+            Self::Done => "done",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Every word this build knows, as `move` lists them in a refusal.
+    pub fn listed() -> String {
+        Self::ALL.map(Self::name).join(", ")
+    }
+
+    /// Reads a word as [`StageWord::name`] spells it, or says which words there are.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|w| w.name() == s)
+            .ok_or_else(|| format!("no stage {s}; the stages are {}", Self::listed()))
+    }
 }
 
 impl From<Stage> for StageWord {
@@ -607,6 +661,7 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
             .map(|a| a.id.clone())
             .collect(),
         updated_ms: world.updated.at(&i.id),
+        moves: world.moves_of(i),
         checks: i
             .plan
             .iter()
