@@ -364,7 +364,7 @@ pub const SPECS: [Spec; 17] = [
     Spec {
         key: "starts",
         kind: Kind::Count(1),
-        about: "agents of one role that end while one issue waits on them before the loop gives up",
+        about: "agents of one role that end while one issue waits on them, not counting any whose program was lost, before the loop gives up",
         agents: Agents::May,
         per_role: true,
         levels: EVERY_LEVEL,

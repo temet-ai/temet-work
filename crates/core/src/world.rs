@@ -529,7 +529,7 @@ impl World {
                     i.told = true;
                 }
             }
-            Event::AgentChanged { agent, state } => {
+            Event::AgentChanged { agent, state, lost } => {
                 let waited_on = self.agents.get(agent).is_some_and(|a| self.waiting_on(a));
                 // An ended session stays ended: an update already on its way when it
                 // was stopped must not bring it back.
@@ -537,7 +537,7 @@ impl World {
                     && a.state != AgentState::Ended
                 {
                     a.state = state.clone();
-                    a.ended_waited_on = *state == AgentState::Ended && waited_on;
+                    a.ended_waited_on = *state == AgentState::Ended && waited_on && !lost;
                 }
             }
             Event::Continued { agent, resets_ms } => {
@@ -1271,7 +1271,8 @@ impl World {
                 continue;
             }
             // Only agents that ended while the issue waited on them count: not one
-            // the loop stopped because the issue went back to its author.
+            // the loop stopped because the issue went back to its author, nor one
+            // whose program was lost.
             let tried = self
                 .agents
                 .values()

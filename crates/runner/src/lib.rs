@@ -84,9 +84,11 @@ pub enum Status {
         /// What the runner says about the error, when it says anything.
         message: Option<String>,
     },
-    /// The program has ended, or another has taken its place in the
-    /// terminal, as the shell herdr-core puts in place of a lost program.
+    /// The program ended by itself, or the terminal was stopped or removed.
     Gone,
+    /// The program was lost, as to a signal or a reboot, and a shell has taken
+    /// or is taking its place in the terminal.
+    Lost,
     /// The program reports no status, as a plain shell does.
     Unknown,
 }
@@ -245,8 +247,9 @@ enum Saw {
 /// It starts each agent's program in a labelled terminal with the runner its `runner`
 /// setting names (the build's default when none does), turns runner updates into agent events, and delivers text to an
 /// agent between its turns, holding it while the agent is working. A terminal
-/// reported gone ends its agent, and is stopped so nothing stays under the
-/// agent's labels, such as the shell herdr-core puts in place of a lost program.
+/// reported gone or lost ends its agent, and is stopped so nothing stays under
+/// the agent's labels, such as the shell herdr-core puts in place of a lost
+/// program. Only the end of a lost one says its program was lost.
 #[derive(Default)]
 pub struct Runners {
     adapters: Vec<Box<dyn Runner>>,
@@ -463,6 +466,7 @@ impl Runners {
             events.push(Event::AgentChanged {
                 agent: a.id.clone(),
                 state: AgentState::Ended,
+                lost: false,
             });
         }
         events
@@ -571,6 +575,7 @@ impl Runners {
                     told.push(Event::AgentChanged {
                         agent: AgentId::new(m.agent),
                         state: AgentState::Ended,
+                        lost: false,
                     });
                 }
                 // Busy, at a prompt, or the runner could not be reached: try again.
@@ -624,6 +629,7 @@ impl Runners {
                     events.push(Event::AgentChanged {
                         agent,
                         state: AgentState::Ended,
+                        lost: false,
                     });
                 }
                 Err(_) => {}
@@ -742,7 +748,7 @@ fn state_of(status: &Status, doing: Option<&str>) -> Option<AgentState> {
         Status::Blocked { kind } => Some(AgentState::Blocked {
             reason: doing.map_or_else(|| kind.clone(), String::from),
         }),
-        Status::Gone => Some(AgentState::Ended),
+        Status::Gone | Status::Lost => Some(AgentState::Ended),
         // An error's state needs its screen and the time: `errored` makes it.
         Status::Error { .. } | Status::Unknown => None,
     }
@@ -800,10 +806,10 @@ impl Part for Runners {
                     .is_some_and(|a| a.state == AgentState::Ended)
                     || seen.get(&id) == Some(&AgentState::Ended);
                 if ended {
-                    // A gone terminal of an agent that has ended, which this
-                    // daemon has not stopped, as when a restart lost the stop
-                    // of a shell herdr-core put in place of its program.
-                    if u.status == Status::Gone
+                    // A gone or lost terminal of an agent that has ended, which
+                    // this daemon has not stopped, as when a restart lost the
+                    // stop of a shell herdr-core put in place of its program.
+                    if matches!(u.status, Status::Gone | Status::Lost)
                         && !self.stopped.contains(&agent)
                         && !self.unstopped.contains_key(&agent)
                     {
@@ -811,7 +817,7 @@ impl Part for Runners {
                     }
                     continue;
                 }
-                if u.status == Status::Gone {
+                if matches!(u.status, Status::Gone | Status::Lost) {
                     // Nothing more is sent to it: text typed now would go to
                     // whatever holds the terminal, such as a shell.
                     self.terminals.remove(&agent);
@@ -820,6 +826,7 @@ impl Part for Runners {
                     events.push(Event::AgentChanged {
                         agent: id,
                         state: AgentState::Ended,
+                        lost: u.status == Status::Lost,
                     });
                     stops.insert(agent, (i, u.terminal.clone()));
                     continue;
@@ -847,7 +854,11 @@ impl Part for Runners {
                     continue;
                 }
                 seen.insert(id.clone(), state.clone());
-                events.push(Event::AgentChanged { agent: id, state });
+                events.push(Event::AgentChanged {
+                    agent: id,
+                    state,
+                    lost: false,
+                });
             }
         }
         // A full list from a runner: an agent of this log whose terminal that runner
@@ -883,6 +894,7 @@ impl Part for Runners {
                     events.push(Event::AgentChanged {
                         agent: a.id.clone(),
                         state: AgentState::Ended,
+                        lost: false,
                     });
                 }
             }
@@ -1076,6 +1088,7 @@ impl Part for Runners {
                         events: vec![Event::AgentChanged {
                             agent: agent.clone(),
                             state: AgentState::Ended,
+                            lost: false,
                         }],
                         effects: Vec::new(),
                     },
@@ -1092,7 +1105,7 @@ mod tests {
     use super::*;
     use crate::fake::FakeRunner;
 
-    use temet_work_core::ids::{FolderId, GroupId, IssueId, MachineId, ProjectId};
+    use temet_work_core::ids::{FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId};
     use temet_work_core::launch::Program;
 
     /// A world with issue ankh#1 and a work folder for it.
@@ -1222,7 +1235,8 @@ mod tests {
                 agent,
                 state: AgentState::Blocked {
                     reason: "question".into()
-                }
+                },
+                lost: false,
             }]
         );
     }
@@ -1343,7 +1357,8 @@ mod tests {
             Outcome::Done {
                 events: vec![Event::AgentChanged {
                     agent,
-                    state: AgentState::Ended
+                    state: AgentState::Ended,
+                    lost: false,
                 }],
                 effects: vec![]
             }
@@ -1417,7 +1432,8 @@ mod tests {
             part.poll(&w, 0).events,
             vec![Event::AgentChanged {
                 agent: gone,
-                state: AgentState::Ended
+                state: AgentState::Ended,
+                lost: false,
             }],
             "{fresh} started after the list was taken"
         );
@@ -1466,7 +1482,8 @@ mod tests {
             events,
             vec![Event::AgentChanged {
                 agent: author,
-                state: AgentState::Ended
+                state: AgentState::Ended,
+                lost: false,
             }]
         );
     }
@@ -1489,7 +1506,7 @@ mod tests {
             .events
             .into_iter()
             .filter_map(|e| match e {
-                Event::AgentChanged { agent, state } if agent == author => Some(state),
+                Event::AgentChanged { agent, state, .. } if agent == author => Some(state),
                 _ => None,
             })
             .collect();
@@ -1520,7 +1537,8 @@ mod tests {
         let ended = part.poll(&w, at(3)).events;
         assert!(ended.contains(&Event::AgentChanged {
             agent: author,
-            state: AgentState::Ended
+            state: AgentState::Ended,
+            lost: false,
         }));
     }
 
@@ -1612,7 +1630,8 @@ mod tests {
         assert!(
             ended.ends_with(&[Event::AgentChanged {
                 agent: agent.clone(),
-                state: AgentState::Ended
+                state: AgentState::Ended,
+                lost: false,
             }]),
             "stopped a minute after its one reminder: {ended:?}"
         );
@@ -1660,6 +1679,7 @@ mod tests {
             let ended = Event::AgentChanged {
                 agent: reviewer.clone(),
                 state: AgentState::Ended,
+                lost: false,
             };
             assert!(!polled.contains(&ended), "stopped at {n}0 minutes");
             apply(&mut w, &polled);
@@ -1792,7 +1812,8 @@ mod tests {
             part.poll(&w, 60_000).events,
             vec![Event::AgentChanged {
                 agent,
-                state: AgentState::Ended
+                state: AgentState::Ended,
+                lost: false,
             }]
         );
     }
@@ -2490,7 +2511,8 @@ mod tests {
                 state: AgentState::Errored {
                     line: "API Error: 529 overloaded".into(),
                     resets_ms: None
-                }
+                },
+                lost: false,
             }]
         );
         let minute = |n: u64| n * 60_000;
@@ -2505,7 +2527,8 @@ mod tests {
         assert!(
             ended.contains(&Event::AgentChanged {
                 agent: author,
-                state: AgentState::Ended
+                state: AgentState::Ended,
+                lost: false,
             }),
             "{ended:?}"
         );
@@ -2658,7 +2681,8 @@ mod tests {
         assert!(
             step(&mut part, &mut w, nov27(18, 12)).contains(&Event::AgentChanged {
                 agent: author,
-                state: AgentState::Ended
+                state: AgentState::Ended,
+                lost: false,
             })
         );
 
@@ -2815,6 +2839,16 @@ mod tests {
         events.contains(&Event::AgentChanged {
             agent: agent.clone(),
             state: AgentState::Ended,
+            lost: false,
+        })
+    }
+
+    /// Whether `events` end `agent` as one whose program was lost.
+    fn ended_lost(events: &[Event], agent: &AgentId) -> bool {
+        events.contains(&Event::AgentChanged {
+            agent: agent.clone(),
+            state: AgentState::Ended,
+            lost: true,
         })
     }
 
@@ -3230,7 +3264,8 @@ mod tests {
             polled,
             vec![Event::AgentChanged {
                 agent: author.clone(),
-                state: AgentState::Ended
+                state: AgentState::Ended,
+                lost: true,
             }]
         );
         assert!(starts_an_author(&w), "{:?}", w.missing());
@@ -3294,7 +3329,7 @@ mod tests {
             fake.fail_next_stop(RunnerError::Other("t1 is still live after kill".into()));
         }
         let polled = step(&mut part, &mut w, 1_000);
-        assert!(ended(&polled, &author), "{polled:?}");
+        assert!(ended_lost(&polled, &author), "{polled:?}");
         assert_eq!(stops(&handle), 1);
         for at in [2_000, 30_000, 60_999] {
             step(&mut part, &mut w, at);
@@ -3336,7 +3371,7 @@ mod tests {
         for at in polls {
             let polled = step(&mut part, &mut w, at);
             if at == tries[0] {
-                assert!(ended(&polled, &author), "{polled:?}");
+                assert!(ended_lost(&polled, &author), "{polled:?}");
             } else {
                 assert_eq!(polled, vec![], "at {at} ms");
             }
@@ -3377,9 +3412,10 @@ mod tests {
         w.apply(&Event::AgentChanged {
             agent: author.clone(),
             state: AgentState::Ended,
+            lost: true,
         });
         drop(before);
-        // This daemon connects, and the runner lists the terminal, gone.
+        // This daemon connects, and the runner lists the terminal, lost.
         let mut part = Runners::default();
         part.add(Box::new(handle.clone()));
         handle.fake.lock().expect("lock").reconnect();
@@ -3390,5 +3426,114 @@ mod tests {
             assert_eq!(step(&mut part, &mut w, minute * 60_000), vec![]);
         }
         assert_eq!(stops(&handle), 1, "stopped once");
+    }
+
+    #[test]
+    fn an_author_whose_program_ends_by_itself_is_ended_not_lost_and_its_terminal_removed() {
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = working_author(0);
+        handle.fake.lock().expect("lock").end_program(&t1);
+        assert_eq!(
+            step(&mut part, &mut w, 60_000),
+            vec![Event::AgentChanged {
+                agent: author.clone(),
+                state: AgentState::Ended,
+                lost: false,
+            }]
+        );
+        assert!(w.agents[&author].ended_waited_on, "it counts");
+        assert!(starts_an_author(&w), "{:?}", w.missing());
+        assert_eq!(stops(&handle), 1);
+    }
+
+    #[test]
+    fn an_author_lost_to_a_shell_three_times_still_leaves_a_fourth_to_start() {
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        for n in 1..=3 {
+            let author = run(&mut part, &mut w, &["claude"]);
+            step(&mut part, &mut w, n * 60_000);
+            let terminal = TerminalId(format!("t{n}"));
+            handle.fake.lock().expect("lock").lose_to_shell(&terminal);
+            let polled = step(&mut part, &mut w, n * 60_000 + 1_000);
+            assert!(ended_lost(&polled, &author), "{polled:?}");
+        }
+        assert!(starts_an_author(&w), "{:?}", w.missing());
+        assert_eq!(w.missing().given_up, Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_author_lost_to_a_shell_three_times_with_the_daemon_restarting_each_time_leaves_a_fourth()
+    {
+        // As on a reboot: herdr-core and the daemon both come back, and the
+        // daemon has only its log.
+        let mut log = vec![
+            Event::GroupCreated {
+                group: GroupId::new("watch"),
+                name: "Night watch".into(),
+                projects: vec![ProjectId::new("ankh")],
+                areas: vec![],
+                milestones: vec![MilestoneId::new("m1")],
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+            Event::FolderAdded {
+                folder: FolderId::new("f1"),
+                project: ProjectId::new("ankh"),
+                machine: MachineId::new(LOCAL),
+                path: ".".into(),
+            },
+            Event::IssueSynced {
+                issue: IssueId::new("ankh", "1"),
+                title: "Mend the clock".into(),
+                milestone: Some(MilestoneId::new("m1")),
+                depends_on: vec![],
+                order: 1,
+                closed: false,
+            },
+            Event::PlanWritten {
+                issue: IssueId::new("ankh", "1"),
+                plan: temet_work_core::model::Plan::default(),
+            },
+        ];
+        let handle = Shared::default();
+        let daemon = || {
+            let mut part = Runners::default();
+            part.add(Box::new(handle.clone()));
+            part
+        };
+        for n in 1..=3 {
+            let mut w = World::replay(&log).0;
+            let mut part = daemon();
+            log.extend(run_events(&mut part, &mut w, &["claude"]));
+            log.extend(step(&mut part, &mut w, 0));
+            drop(part);
+            let author = AgentId::new(format!("author-{n}"));
+            {
+                // The reboot: nothing reaches the daemon that was running.
+                let mut fake = handle.fake.lock().expect("lock");
+                fake.lose_to_shell(&TerminalId(format!("t{n}")));
+                fake.updates();
+                fake.reconnect();
+            }
+            let mut w = World::replay(&log).0;
+            assert!(w.waiting_on(&w.agents[&author]), "running in the log");
+            let polled = step(&mut daemon(), &mut w, 0);
+            assert_eq!(
+                polled,
+                vec![Event::AgentChanged {
+                    agent: author,
+                    state: AgentState::Ended,
+                    lost: true,
+                }]
+            );
+            log.extend(polled);
+        }
+        let w = World::replay(&log).0;
+        assert!(starts_an_author(&w), "{:?}", w.missing());
+        assert_eq!(w.missing().given_up, Vec::<String>::new());
     }
 }

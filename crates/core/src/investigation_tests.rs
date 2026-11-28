@@ -101,6 +101,7 @@ fn end(w: &mut World, now_ms: u64) {
     w.apply(&Event::AgentChanged {
         agent,
         state: AgentState::Ended,
+        lost: false,
     });
     for e in w.investigation_events(now_ms, false) {
         w.apply(&e);
@@ -789,6 +790,7 @@ fn an_ended_investigator_ends_the_investigation() {
     w.apply(&Event::AgentChanged {
         agent: AgentId::new("investigator-1"),
         state: AgentState::Ended,
+        lost: false,
     });
     assert_eq!(
         w.investigation_events(7, false),

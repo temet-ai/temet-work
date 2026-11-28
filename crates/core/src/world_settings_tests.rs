@@ -486,6 +486,7 @@ fn starts_changes_how_many_agents_of_a_role_are_tried_on_one_issue() {
                 _ => unreachable!(),
             },
             state: crate::model::AgentState::Ended,
+            lost: false,
         });
     }
     // ankh#2 has had none and starts one; ankh#1 gave up after one.

@@ -291,6 +291,56 @@ fn an_agent_started_before_secrets_reads_with_no_digest_runtime_or_model_and_eac
 }
 
 #[test]
+fn replaying_the_log_keeps_whether_an_ended_agent_had_lost_its_program() {
+    use temet_work_core::ids::AgentId;
+    use temet_work_core::model::{AgentState, Role, Stage};
+    let p = path("agent-lost");
+    let author = AgentId::new("author-1");
+    let mut events = events();
+    events.push(Event::AgentStarted {
+        agent: author.clone(),
+        group: GroupId::new("watch"),
+        role: Role::Author,
+        issue: Some(IssueId::new("ankh", "1")),
+        machine: MachineId::new("morpork"),
+        folder: Some(FolderId::new("f1")),
+        secret_digest: None,
+        runtime: None,
+        model: None,
+    });
+    let working = applied(0, &events);
+    assert_eq!(
+        working.issues[&IssueId::new("ankh", "1")].stage,
+        Stage::Working
+    );
+    assert!(working.waiting_on(&working.agents[&author]));
+
+    for lost in [true, false] {
+        let end = Event::AgentChanged {
+            agent: author.clone(),
+            state: AgentState::Ended,
+            lost,
+        };
+        let _ = std::fs::remove_file(&p);
+        let (mut log, _) = Log::open(&p).expect("open");
+        for e in events.iter().chain([&end]) {
+            log.append(0, e).expect("append");
+        }
+        drop(log);
+        // An end by the program itself is written as it was before the flag, so
+        // a line from an older log reads as one.
+        let text = std::fs::read_to_string(&p).expect("the log");
+        let line = text.lines().last().expect("a line");
+        assert_eq!(line.contains("\"lost\""), lost, "{line}");
+        let entries = Log::read(&p).expect("read");
+        assert_eq!(entries.last().expect("the end").event, end);
+        let agent = &replay(&entries).agents[&author];
+        assert_eq!(agent.state, AgentState::Ended);
+        assert_eq!(agent.ended_waited_on, !lost, "lost {lost}");
+    }
+}
+
+#[test]
 fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after() {
     use temet_work_core::ids::AgentId;
     use temet_work_core::model::{AgentState, Role};
@@ -302,6 +352,7 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
             line: "You've hit your 5-hour limit · resets 5:40pm".into(),
             resets_ms: Some(1_796_060_400_000),
         },
+        lost: false,
     };
     let mut events = events();
     events.extend([

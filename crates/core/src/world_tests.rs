@@ -706,6 +706,7 @@ fn ended(agent: &str) -> Event {
     Event::AgentChanged {
         agent: AgentId::new(agent),
         state: crate::model::AgentState::Ended,
+        lost: false,
     }
 }
 
@@ -1309,6 +1310,73 @@ fn an_issue_missing_its_agent_gets_one_until_three_have_ended() {
         gave_up.given_up,
         ["ankh#1: 3 refiners ended before it moved on; no more are started"]
     );
+}
+
+/// Which ends of an issue's agents count toward its `starts` limit.
+mod lost_to_a_shell {
+    use super::*;
+
+    /// An end of `agent` whose program was lost.
+    fn lost(agent: &str) -> Event {
+        Event::AgentChanged {
+            agent: AgentId::new(agent),
+            state: crate::model::AgentState::Ended,
+            lost: true,
+        }
+    }
+
+    /// A world whose issue 1 is worked on by author-1, which it waits on, after
+    /// each of `ends` in turn has ended the author running and the one `missing`
+    /// asks for in its place has started: author-2, author-3 and so on. The last
+    /// end is followed by no start.
+    fn authors_ending(ends: &[fn(&str) -> Event]) -> World {
+        let mut w = working_on_one();
+        w.apply(&started("author-1", Role::Author, "1"));
+        for (n, end) in (1..).zip(ends) {
+            if n > 1 {
+                assert_eq!(w.missing().start, vec![author("1", "f1")]);
+                w.apply(&started(&format!("author-{n}"), Role::Author, "1"));
+            }
+            let agent = AgentId::new(format!("author-{n}"));
+            assert!(w.waiting_on(&w.agents[&agent]), "{agent}");
+            w.apply(&end(&agent.0));
+        }
+        w
+    }
+
+    /// What `missing` says once three authors of issue 1 have given up on it.
+    const THREE_AUTHORS: &str = "ankh#1: 3 authors ended before it moved on; no more are started";
+
+    #[test]
+    fn an_author_lost_to_a_shell_three_times_still_gets_a_fourth_start() {
+        let w = authors_ending(&[lost, lost, lost]);
+        for n in 1..=3 {
+            let a = &w.agents[&AgentId::new(format!("author-{n}"))];
+            assert_eq!(a.state, crate::model::AgentState::Ended);
+            assert!(!a.ended_waited_on, "{}", a.id);
+        }
+        let missing = w.missing();
+        assert_eq!(missing.start, vec![author("1", "f1")]);
+        assert_eq!(missing.given_up, Vec::<String>::new());
+    }
+
+    #[test]
+    fn authors_that_end_by_themselves_still_use_up_the_starts() {
+        let missing = authors_ending(&[ended, ended, ended]).missing();
+        assert_eq!(missing.start, vec![]);
+        assert_eq!(missing.given_up, [THREE_AUTHORS]);
+    }
+
+    #[test]
+    fn only_the_authors_not_lost_to_a_shell_use_up_the_starts() {
+        let missing = authors_ending(&[lost, ended, lost, ended]).missing();
+        assert_eq!(missing.start, vec![author("1", "f1")], "a fifth");
+        assert_eq!(missing.given_up, Vec::<String>::new());
+
+        let missing = authors_ending(&[lost, ended, lost, ended, ended]).missing();
+        assert_eq!(missing.start, vec![]);
+        assert_eq!(missing.given_up, [THREE_AUTHORS]);
+    }
 }
 
 #[test]
@@ -2096,6 +2164,7 @@ fn an_ended_agent_stays_ended_when_a_late_update_arrives() {
         state: crate::model::AgentState::Working {
             doing: "sending the plan".into(),
         },
+        lost: false,
     });
     assert_eq!(
         w.agents[&AgentId::new("author-1")].state,
