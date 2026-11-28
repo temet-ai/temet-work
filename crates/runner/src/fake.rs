@@ -2,7 +2,9 @@
 //! text onto the screen and runs one turn, and tests can put a terminal at a
 //! prompt, end its turn in an error, once or after every send, keep it in the
 //! turn a send starts, have it report no status, lose its program to a shell,
-//! let its program end by itself, make its next stop fail, or stop it.
+//! let its program end by itself, make its next stop fail, or stop it. Each
+//! terminal counts the turns it has finished, as herdr-core does: a launch
+//! turn that has ended at once, and one more each time it leaves working.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +25,9 @@ struct Term {
     /// Whether a shell holds it in place of its lost program: it is reported
     /// lost, still listed, and takes typed text until it is stopped.
     shell: bool,
+    /// The turns it has finished: one for its launch turn, unless the runner
+    /// misses launch turns, and one more each time its status leaves working.
+    finished: u64,
 }
 
 /// How the turn a send starts goes.
@@ -59,6 +64,9 @@ pub struct FakeRunner {
     stop_errors: std::collections::VecDeque<RunnerError>,
     /// What every send fails with, typing nothing.
     send_error: Option<RunnerError>,
+    /// Whether the terminals it starts report idle at turn 0, their launch
+    /// turn unseen.
+    miss_launches: bool,
 }
 
 /// Every [`Start`] a fake runner was given, shared so a test can read them after
@@ -104,6 +112,7 @@ impl FakeRunner {
             exec_error: None,
             stop_errors: std::collections::VecDeque::new(),
             send_error: None,
+            miss_launches: false,
         }
     }
 
@@ -140,6 +149,15 @@ impl FakeRunner {
         self.send_error = Some(error);
     }
 
+    /// Makes each terminal started from now on report idle at turn 0, as
+    /// herdr-core did for sessions that were working through a launch turn it
+    /// never saw (`docs/findings/herdr-core.md`, "How agent state shows up"):
+    /// it reports no working and no finished turn until a send, or a test,
+    /// starts and ends a turn in it.
+    pub fn miss_launch_turns(&mut self) {
+        self.miss_launches = true;
+    }
+
     fn update(&mut self, terminal: &TerminalId, doing: Option<String>) {
         if let Some(t) = self.terms.get(terminal) {
             self.pending.push(Update {
@@ -147,13 +165,18 @@ impl FakeRunner {
                 labels: t.labels.clone(),
                 status: t.status.clone(),
                 doing,
+                turns: Some(t.finished),
             });
         }
     }
 
     /// Reports a terminal's new status. A turn that was going to fail will not.
+    /// Leaving working finishes a turn.
     fn set(&mut self, terminal: &TerminalId, status: Status) {
         if let Some(t) = self.terms.get_mut(terminal) {
+            if t.status == Status::Working && status != Status::Working {
+                t.finished += 1;
+            }
             t.status = status;
             t.failing = None;
             self.update(terminal, None);
@@ -303,6 +326,7 @@ impl Runner for FakeRunner {
                 turns: Turns::End,
                 failing: None,
                 shell: false,
+                finished: u64::from(!self.miss_launches),
             },
         );
         self.update(&id, None);

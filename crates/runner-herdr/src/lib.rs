@@ -427,11 +427,25 @@ fn lost(t: &Value, labels: &BTreeMap<String, String>) -> bool {
     }
 }
 
+/// What herdr-core last reported of one terminal, which a `turn` event, carrying
+/// no status of its own, is reported with.
+#[derive(Clone, Debug)]
+struct Last {
+    status: Status,
+    doing: Option<String>,
+    /// The turns it has finished: `turn` in its listing and in its `created`
+    /// and `turn` events. herdr-core counts one each time the status leaves
+    /// working, and sends no turn with a status.
+    turns: Option<u64>,
+}
+
 /// What the event reader shares with the client.
 #[derive(Default)]
 struct Shared {
     updates: Vec<Update>,
     labels: BTreeMap<String, BTreeMap<String, String>>,
+    /// What each known terminal last reported.
+    last: BTreeMap<String, Last>,
     alive: bool,
     /// The last full list of terminals, with their labels, until it is asked for.
     listed: Option<Vec<Update>>,
@@ -475,11 +489,13 @@ fn take_snapshot(terminals: &Value, s: &mut Shared, list: List) {
         .collect();
     for addr in vanished {
         let labels = s.labels.remove(&addr).unwrap_or_default();
+        let turns = s.last.remove(&addr).and_then(|l| l.turns);
         s.updates.push(Update {
             terminal: TerminalId(addr),
             labels,
             status: left_out.clone(),
             doing: None,
+            turns,
         });
     }
     let first = s.updates.len();
@@ -503,21 +519,48 @@ fn take_snapshot(terminals: &Value, s: &mut Shared, list: List) {
                 t.pointer("/status/msg").and_then(Value::as_str),
             )
         };
-        s.updates.push(Update {
-            terminal: TerminalId(addr.to_string()),
-            labels,
-            status,
-            doing: t
-                .pointer("/status/msg")
-                .and_then(Value::as_str)
-                .map(String::from),
-        });
+        let doing = t
+            .pointer("/status/msg")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let turns = t.get("turn").and_then(Value::as_u64);
+        report(s, addr, labels, status, doing, turns);
     }
     s.listed = Some(s.updates[first..].to_vec());
 }
 
-/// Turns one event into its terminal's update, when it changes one's status,
-/// and keeps the labels the later events of that terminal are read with.
+/// Records what a terminal reports and adds it to the updates.
+fn report(
+    s: &mut Shared,
+    terminal: &str,
+    labels: BTreeMap<String, String>,
+    status: Status,
+    doing: Option<String>,
+    turns: Option<u64>,
+) {
+    s.last.insert(
+        terminal.to_string(),
+        Last {
+            status: status.clone(),
+            doing: doing.clone(),
+            turns,
+        },
+    );
+    s.updates.push(Update {
+        terminal: TerminalId(terminal.to_string()),
+        labels,
+        status,
+        doing,
+        turns,
+    });
+}
+
+/// Turns one event into its terminal's update, when it changes one's status or
+/// its turn count, and keeps the labels the later events of that terminal are
+/// read with. A `turn` event gives the new count with the status the terminal
+/// last reported, which it does not change: it follows the status the turn
+/// ended in, and says nothing of a later one. A terminal that has ended takes
+/// no turn.
 fn take_event(p: &Value, s: &mut Shared) {
     let Some(t) = p.get("terminal").and_then(Value::as_str) else {
         return;
@@ -530,35 +573,53 @@ fn take_event(p: &Value, s: &mut Shared) {
             s.labels.insert(t.to_string(), labels);
         }
     }
-    let status = match kind {
-        "created" => Some(Status::Unknown),
-        "status" => Some(status_of(
-            data.pointer("/status/state").and_then(Value::as_str),
-            data.pointer("/status/kind").and_then(Value::as_str),
-            data.pointer("/status/msg").and_then(Value::as_str),
-        )),
-        "finished" | "removed" => Some(Status::Gone),
-        "lost" => Some(Status::Lost),
-        _ => None,
+    let last = s.last.get(t).cloned();
+    let doing = || {
+        data.pointer("/status/msg")
+            .and_then(Value::as_str)
+            .map(String::from)
     };
-    if let Some(status) = status {
-        // A removed terminal is not known any more, so a later list that
-        // leaves it out does not report it again.
-        let labels = if kind == "removed" {
-            s.labels.remove(t)
-        } else {
-            s.labels.get(t).cloned()
+    let turns = last.as_ref().and_then(|l| l.turns);
+    let (status, doing, turns) = match kind {
+        "created" => (
+            Status::Unknown,
+            doing(),
+            data.get("turn").and_then(Value::as_u64),
+        ),
+        "status" => (
+            status_of(
+                data.pointer("/status/state").and_then(Value::as_str),
+                data.pointer("/status/kind").and_then(Value::as_str),
+                data.pointer("/status/msg").and_then(Value::as_str),
+            ),
+            doing(),
+            turns,
+        ),
+        "turn" => {
+            let Some(turns) = data.get("turn").and_then(Value::as_u64) else {
+                return;
+            };
+            let (status, doing) = last.map_or((Status::Unknown, None), |l| (l.status, l.doing));
+            if matches!(status, Status::Gone | Status::Lost) {
+                return;
+            }
+            (status, doing, Some(turns))
         }
-        .unwrap_or_default();
-        s.updates.push(Update {
-            terminal: TerminalId(t.to_string()),
-            labels,
-            status,
-            doing: data
-                .pointer("/status/msg")
-                .and_then(Value::as_str)
-                .map(String::from),
-        });
+        "finished" | "removed" => (Status::Gone, doing(), turns),
+        "lost" => (Status::Lost, doing(), turns),
+        _ => return,
+    };
+    // A removed terminal is not known any more, so a later list that leaves it
+    // out does not report it again.
+    let labels = if kind == "removed" {
+        s.labels.remove(t)
+    } else {
+        s.labels.get(t).cloned()
+    }
+    .unwrap_or_default();
+    report(s, t, labels, status, doing, turns);
+    if kind == "removed" {
+        s.last.remove(t);
     }
 }
 
@@ -1250,6 +1311,115 @@ mod tests {
             .map(|u| u.terminal.0.as_str())
             .collect();
         assert_eq!(gone, ["t3", "t5", "t6"]);
+    }
+
+    /// Each update's terminal, status and turn count.
+    fn turns_of(s: &Shared) -> Vec<(&str, Status, Option<u64>)> {
+        s.updates
+            .iter()
+            .map(|u| (u.terminal.0.as_str(), u.status.clone(), u.turns))
+            .collect()
+    }
+
+    #[test]
+    fn a_snapshot_terminal_carries_its_turn_count() {
+        let mut s = Shared::default();
+        // t7 is idle at turn 0, as herdr-core reported refiners working on
+        // their launch turn on 28 November: no finished turn, so the runner
+        // family holds it as starting. t8 has finished two turns.
+        let snapshot = json!([
+            {"address": "t7", "labels": {"agent": "refiner-1"}, "turn": 0,
+             "status": {"app": "claude-code", "state": "idle"}},
+            {"address": "t8", "labels": {"agent": "author-1"}, "turn": 2,
+             "status": {"app": "claude-code", "state": "idle"}},
+            {"address": "t9", "labels": {"agent": "author-2"},
+             "status": {"app": "claude-code", "state": "idle"}}
+        ]);
+        take_snapshot(&snapshot, &mut s, List::Subscribed);
+        assert_eq!(
+            turns_of(&s),
+            [
+                ("t7", Status::Between, Some(0)),
+                ("t8", Status::Between, Some(2)),
+                ("t9", Status::Between, None),
+            ]
+        );
+        assert_eq!(
+            s.listed
+                .as_ref()
+                .map(|l| l.iter().map(|u| u.turns).collect()),
+            Some(vec![Some(0), Some(2), None])
+        );
+        // After a missed stretch the list gives each terminal's count afresh.
+        s.updates.clear();
+        take_snapshot(
+            &json!([{"address": "t7", "labels": {"agent": "refiner-1"}, "turn": 1,
+                     "status": {"state": "done"}}]),
+            &mut s,
+            List::Missed,
+        );
+        assert_eq!(
+            turns_of(&s),
+            [
+                ("t8", Status::Gone, Some(2)),
+                ("t9", Status::Gone, None),
+                ("t7", Status::Between, Some(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_event_gives_its_count_with_the_status_the_terminal_last_reported() {
+        let mut s = Shared::default();
+        let event = |kind: &str, data: Value| json!({"type": kind, "terminal": "t7", "data": data});
+        for e in [
+            event("created", json!({"labels": agent_labels(true), "turn": 0})),
+            event(
+                "status",
+                json!({"status": {"app": "claude-code", "state": "idle"}}),
+            ),
+            event(
+                "status",
+                json!({"status": {"app": "claude-code", "state": "working"}}),
+            ),
+            event(
+                "status",
+                json!({"status": {"app": "claude-code", "state": "done"}}),
+            ),
+            event("turn", json!({"state": "done", "turn": 1})),
+            event(
+                "status",
+                json!({"status": {"app": "claude-code", "state": "done", "msg": "mended"}}),
+            ),
+            event(
+                "status",
+                json!({"status": {"app": "claude-code", "state": "working"}}),
+            ),
+            // A turn event that comes after a newer status leaves it as it is.
+            event("turn", json!({"state": "done", "turn": 2})),
+        ] {
+            take_event(&e, &mut s);
+        }
+        assert_eq!(
+            turns_of(&s),
+            [
+                ("t7", Status::Unknown, Some(0)),
+                ("t7", Status::Between, Some(0)),
+                ("t7", Status::Working, Some(0)),
+                ("t7", Status::Between, Some(0)),
+                ("t7", Status::Between, Some(1)),
+                ("t7", Status::Between, Some(1)),
+                ("t7", Status::Working, Some(1)),
+                ("t7", Status::Working, Some(2)),
+            ]
+        );
+        assert_eq!(s.updates[5].doing.as_deref(), Some("mended"));
+        assert!(s.updates.iter().all(|u| u.labels["agent"] == "author-1"));
+        // An ended terminal takes no turn.
+        s.updates.clear();
+        take_event(&event("finished", json!({})), &mut s);
+        take_event(&event("turn", json!({"state": "done", "turn": 3})), &mut s);
+        assert_eq!(turns_of(&s), [("t7", Status::Gone, Some(2))]);
     }
 
     #[test]
