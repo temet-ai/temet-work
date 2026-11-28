@@ -52,6 +52,9 @@ pub struct Pull {
     pub checks: Checks,
     /// Whether it conflicts with the branch it merges into.
     pub conflicting: bool,
+    /// Whether it is a draft, which its code host will not merge until its author
+    /// marks it ready for review.
+    pub draft: bool,
 }
 
 /// Why a code-host call failed.
@@ -542,6 +545,12 @@ impl CodeHosts {
                     PullState::Open if pull.conflicting => Ok(Some(format!(
                         "pull request {number} conflicts with the branch it merges into"
                     ))),
+                    // Asking to merge it would only fail, every time. The command is
+                    // `gh`'s: no other adapter reports drafts yet.
+                    PullState::Open if pull.draft => Ok(Some(format!(
+                        "pull request {number} is a draft: mark it ready for review with \
+                         `gh pr ready {number} -R {name}`"
+                    ))),
                     PullState::Open => match host.merge(&name, &number, &how) {
                         Ok(()) => Ok(None),
                         Err(e)
@@ -675,6 +684,7 @@ mod tests {
             state: PullState::Open,
             checks,
             conflicting: false,
+            draft: false,
         }
     }
 
@@ -828,6 +838,46 @@ mod tests {
             part.carry_out(&merge, &w),
             Outcome::Done { events, .. } if matches!(events.as_slice(), [Event::MergeRefused { reason, .. }] if reason.contains("conflicts"))
         ));
+    }
+
+    #[test]
+    fn a_draft_pull_request_goes_back_to_its_author_with_gh_pr_ready() {
+        let mut w = in_review();
+        let issue = IssueId::new("ankh", "1");
+        if let Some(i) = w.issues.get_mut(&issue) {
+            i.stage = Stage::Merging;
+        }
+        let mut host = fake();
+        host.pulls[0].1.draft = true;
+        let merges = host.merges.clone();
+        let mut part = CodeHosts::default();
+        part.add(Box::new(host));
+        let merge = Effect::Merge {
+            issue: issue.clone(),
+        };
+        // The second try comes at once: a draft is not held back like a failed merge.
+        let refusals = [(); 2].map(|()| part.carry_out(&merge, &w));
+        for outcome in &refusals {
+            let Outcome::Done { events, .. } = outcome else {
+                panic!("expected a refusal, got {outcome:?}");
+            };
+            assert!(
+                matches!(events.as_slice(), [Event::MergeRefused { reason, .. }] if reason.contains("57") && reason.contains("gh pr ready")),
+                "{events:?}"
+            );
+            for e in events {
+                w.apply(e);
+            }
+        }
+        assert!(merges.lock().expect("lock").is_empty(), "never asked");
+        let i = &w.issues[&issue];
+        assert!(matches!(i.stage, Stage::Fixing { .. }));
+        assert!(
+            i.fix[0].starts_with("the pull request cannot merge:")
+                && i.fix[0].contains("gh pr ready"),
+            "{:?}",
+            i.fix
+        );
     }
 
     fn set(w: &mut World, scope: Scope, key: &str, value: Value) {

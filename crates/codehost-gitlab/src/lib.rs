@@ -229,6 +229,8 @@ impl CodeHost for GitLab {
             state,
             checks,
             conflicting: v.get("has_conflicts").and_then(Value::as_bool) == Some(true),
+            // Draft merge requests are not read yet.
+            draft: false,
         })
     }
 

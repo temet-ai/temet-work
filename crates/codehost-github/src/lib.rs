@@ -148,6 +148,7 @@ fn parse_pull(json: &str) -> Result<Pull, CodeHostError> {
         state,
         checks: checks_of(rollup),
         conflicting: v.get("mergeable").and_then(Value::as_str) == Some("CONFLICTING"),
+        draft: v.get("isDraft").and_then(Value::as_bool) == Some(true),
     })
 }
 
@@ -191,7 +192,7 @@ impl CodeHost for GitHub {
             "-R",
             repo,
             "--json",
-            "number,state,statusCheckRollup,mergeable",
+            "number,state,statusCheckRollup,mergeable,isDraft",
         ])?;
         parse_pull(&out)
     }
@@ -322,6 +323,28 @@ mod tests {
                 "{mergeable}"
             );
         }
+    }
+
+    #[test]
+    fn reads_whether_a_pull_request_is_a_draft() {
+        for (draft, want) in [(Some(true), true), (Some(false), false), (None, false)] {
+            let mut json = json!({"number": 1, "state": "OPEN"});
+            if let Some(draft) = draft {
+                json["isDraft"] = draft.into();
+            }
+            let pull = parse_pull(&json.to_string()).expect("parses");
+            assert_eq!(pull.draft, want, "{draft:?}");
+        }
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // The Spy prints nothing, so only what it was asked matters.
+        let _ = GitHub::with(Box::new(Spy(seen.clone()))).pull("temet-ai/radar", "46");
+        let ran = seen.lock().expect("lock").clone();
+        let fields = ran[0]
+            .iter()
+            .skip_while(|a| *a != "--json")
+            .nth(1)
+            .expect("a --json field list");
+        assert!(fields.split(',').any(|f| f == "isDraft"), "{fields}");
     }
 
     #[test]

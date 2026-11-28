@@ -9,6 +9,7 @@ session_id:
   - edd1e649-f07a-4d7c-b5c6-ff74b0021fbb
   - c14f6d16-7688-4e50-99d4-32021f0e29db
   - dbf1ab25-b936-427b-b27c-7106d8e0575d
+  - fc025b57-8c0b-49dd-916e-cbc98c3f9cf3
 ---
 
 # temet-work architecture
@@ -87,8 +88,8 @@ What exists today:
 | `temet-work-tracker` | the contract (issues, milestones with due dates, the address of a project's issues, comment, close, create), a fake, contract tests, and reading "Depends on" lines. The family syncs each project once a minute, reports only changes to issues and to the open milestones and their due dates, keeps each open issue's text from the last sync in memory for `temet-work issue`, and closes verified issues. A close in the tracker is not passed to the loop while the issue has merged work and is not done, so a failed verify keeps the issue open to the loop even when the merge closed it in the tracker |
 | `temet-work-tracker-github` | issues and milestones through `gh`, and issues filed with `gh issue create`; passes the tracker contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-tracker-jira` | issues, fix versions as milestones, comments, new issues and Done transitions through the Jira Cloud REST API with `curl`, signed in from `JIRA_URL`, `JIRA_USER` and `JIRA_TOKEN`; same contract, live test reads one project (`--features live`) |
-| `temet-work-codehost` | the contract, a fake and contract tests. The family reads each pull request in review every 30 seconds, reports a conflict, and reports CI finished once it has on all of an issue's pull requests, with the names of failing checks; a pull request in review that still shows no run at a later read, while its repository's `ci` is true, is listed as a problem until it has one; it merges them when the loop asks, in the plan's order, each after the previous repository's main pipeline passed |
-| `temet-work-codehost-github` | pull requests through `gh`, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
+| `temet-work-codehost` | the contract, a fake and contract tests. The family reads each pull request in review every 30 seconds, reports a conflict, and reports CI finished once it has on all of an issue's pull requests, with the names of failing checks; a pull request in review that still shows no run at a later read, while its repository's `ci` is true, is listed as a problem until it has one; it merges them when the loop asks, in the plan's order, each after the previous repository's main pipeline passed, and sends a draft back to its author in place of merging it |
+| `temet-work-codehost-github` | pull requests through `gh`, with whether each is a draft, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-codehost-gitlab` | merge requests through `glab` and its sign-in, merged with `--squash`, `--rebase` or neither; a pipeline reads as failed once a job that may not fail has failed; passes the contract on recorded output and, read only, against GitLab (`--features live`) |
 | `temet-work-deploy` | runs the deploy command after a merge and the verify command after a deploy, each on its own thread, one at a time per project and `run_in` folder; a failed deploy is listed as a problem, a failed verify sends the issue back to ready; a handoff line naming a build other than the daemon's runs the deploy again, up to three times, then waits for `temet-work retry ISSUE` |
 | `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |

@@ -203,6 +203,7 @@ fn host_tracking(
                 state: PullState::Open,
                 checks: Checks::Passed,
                 conflicting: false,
+                draft: false,
             },
         )],
         ..FakeCodeHost::default()
@@ -1818,6 +1819,7 @@ areas = ["guild"]
             state: PullState::Open,
             checks,
             conflicting: false,
+            draft: false,
         }
     }
 
@@ -2090,6 +2092,7 @@ projects = ["ankh"]
                 state: PullState::Open,
                 checks: Checks::Passed,
                 conflicting: false,
+                draft: false,
             },
         )
     };
