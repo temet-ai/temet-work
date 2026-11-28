@@ -9,6 +9,7 @@ pub mod brief;
 pub mod command;
 pub mod effect;
 pub mod event;
+mod fit;
 pub mod host;
 pub mod ids;
 pub mod investigation;

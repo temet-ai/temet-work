@@ -24,7 +24,7 @@ reports its step done.
 | Command | Who runs it | Accepted when the issue is |
 |---|---|---|
 | `temet-work status [--json]` | anyone; `--json` prints the state as data (below) | any |
-| `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes, review rounds and agents. The review rounds are every finished round in the order they finished: its number and whether it approved or blocked, and for a block each point with the author's reply to it, or "none on record", and whether the next round kept it open or resolved it, naming that round; a point no later round judged, or whose state an older log does not hold, says so. Each later line of a point or reply is indented under it. An arbiter's brief holds the latest of these rounds that fit in 48 KiB, each whole, and the last one always, with a line counting the earlier ones it leaves out; a last round that alone is over 48 KiB is cut there, with a line saying so. `temet-work issue` still holds every round whole. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise). An issue that is merging, deploying, being verified or waiting to be reopened after a failed verify keeps the text of the last sync that listed it | any |
+| `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes, review rounds and agents. The review rounds are every finished round in the order they finished: its number and whether it approved or blocked, and for a block each point with the author's reply to it, or "none on record", and whether the next round kept it open or resolved it, naming that round; a point no later round judged, or whose state an older log does not hold, says so. Each later line of a check, point to fix, point or reply is indented under it, and no control character is printed. An arbiter's brief holds the last of these rounds always, and as many of the earlier ones as fit in the room the rest of the brief leaves, with a line counting those it leaves out; a last round too long for the room is cut there, with a line saying so (see "What a brief holds"). `temet-work issue` still holds every check, point to fix, round, point and reply whole. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise). An issue that is merging, deploying, being verified or waiting to be reopened after a failed verify keeps the text of the last sync that listed it | any |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work plan ISSUE FILE` | only the refiner working on ISSUE, with the plan as YAML; `-` reads it from standard input | refining |
 | `temet-work ready ISSUE PULL`, or `ready ISSUE REPO=PULL ...`, with `--reply TEXT` for each point of the block it answers | only the author working on ISSUE, once the pull requests are open and the plan's checks hold; `PULL` is a number, needed the first time, and again in a repository where a person closed the pull request on record without merging, since a read in review or the merge then drops it; an issue that changes several repositories names each as `REPO=PULL`. The first ready after a block (from the review, or from an arbiter's fix ruling, where the replies answer the reviewer's last block) carries one `--reply` for each of the block's points, in their order: what the author did about it, or why not. A ready without exactly one reply for each point is refused, and the refusal lists the points and the form to use; any other ready takes no `--reply`. Each reply is kept on its point and shown with it by `temet-work issue` and `status --json`. A ready that starts a review round sets each of the plan's checks to running, since the author reports that every check holds; after a person's overturn has waived the review, the checks keep their state | working, or fixing |
@@ -216,6 +216,45 @@ which it is once the issue is deploying, verifying or done. It gives the point n
 since nothing in temet-work knows when a merge will happen. A choice that is not a ruling
 has neither, nor has a ruling recorded before rulings kept them.
 
+## What a brief holds
+
+Every brief, next-round message and fix message is held to 100 KiB (102,400 bytes). A
+brief is one argument of the command that starts its agent, and Linux refuses one over
+128 KiB; the two messages reach a running agent through herdr-core and add to its context.
+
+A plan check (its done_when and proven_by together), kept rule, review point, point to fix
+or author's reply of more than 1,000 characters is printed as its first 1,000 characters,
+followed by `(cut here; temet-work issue ISSUE prints it whole)`, or for a rule
+`(cut here; temet-work status prints it whole, under Rules)`. One of 1,000 characters or
+fewer is printed whole. Each later line of one is indented under it, so that none reads as
+another item of its list.
+
+The parts of a brief take the room in this order:
+
+1. The role's own text, its commands and the pull requests, whole.
+2. The checks and the points it judges or answers, with the author's replies. When they
+   do not fit at 1,000 characters each, each is cut shorter, to no less than 200 bytes;
+   when they do not fit at that, the last are left out, and a line counts them and names
+   `temet-work issue`.
+3. For an arbiter, the latest review round, cut with a line saying so when it alone is too
+   long. The checks before it leave it at least 16 KiB.
+4. The latest kept rules that fit, after a line counting the others and naming
+   `temet-work status`, which lists every kept rule whole under Rules.
+5. For an arbiter, the latest earlier review rounds that fit, each whole, after a line
+   counting the others and naming `temet-work issue`.
+
+A next-round or fix message takes its room the same way, without rules. When the plain
+parts alone would take a text over the limit, as a long list of the issues a person closed
+can in an investigator's brief, the longest is cut, with a line saying so. The command the
+agent reports with is never cut.
+
+`plan`, `review`, `ready`, `rule` and `overturn` store their text with every control
+character dropped but the line feed and the tab: ESC, NUL, VT, FF, BS, DEL and the C1
+controls among them. A carriage return, alone or before a line feed, NEL (U+0085) and the
+line and paragraph separators (U+2028 and U+2029) are stored as a line feed. Briefs,
+messages and `temet-work issue` print text the same way when it was logged before this,
+and the text a code host gives a point to fix.
+
 ## Overturning a decision
 
 Agents decide and carry on; a person reads the decisions in `status` and can overturn one
@@ -241,7 +280,8 @@ option now preferred and the reason. `status` lists proposed and kept rules unde
 each with its decision, issue, the agent that decided and who overturned it. `proposal
 RULE keep` or `proposal RULE drop` answers it (`proposal`, because `rule` is the
 arbiter's ruling). A kept rule ends every brief written afterwards, for every role, under
-"Rules from overturned decisions". Agents already running keep their old brief: new
+"Rules from overturned decisions"; when not all fit, it holds the latest that do (see
+"What a brief holds"). Agents already running keep their old brief: new
 rules apply from the next start, so nothing waits on a person.
 
 A review from an agent that has not yet heard of the round under review is refused: it
