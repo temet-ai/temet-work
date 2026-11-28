@@ -469,3 +469,59 @@ fn no_answer_in_time_marks_it_stale(cx: &mut TestAppContext) {
     answered(cx, &socket);
     assert_eq!(state(cx, &daemon), (Some(second), None, false));
 }
+
+/// Runs `send` on the test's executor to its answer, waiting in real time for the socket's
+/// thread.
+fn sent(cx: &mut TestAppContext, path: PathBuf, command: Command) -> Result<String, Problem> {
+    cx.executor().allow_parking();
+    let answer: Rc<std::cell::RefCell<Option<Result<String, Problem>>>> = Rc::default();
+    let into = answer.clone();
+    let executor = cx.executor();
+    cx.foreground_executor()
+        .spawn(async move {
+            let got = temet_work_app::daemon::send(path, command, &executor).await;
+            *into.borrow_mut() = Some(got);
+        })
+        .detach();
+    until(cx, |_| answer.borrow().is_some());
+    answer.take().expect("an answer")
+}
+
+fn refine_command() -> Command {
+    Command::Refine {
+        issue: temet_work_core::ids::IssueId::new("watch", "WATCH-12"),
+        title: Some("Sam Vimes keeps the night watch's keys".into()),
+        checks: None,
+        send: true,
+    }
+}
+
+#[gpui::test]
+fn a_command_is_sent_as_a_persons_request_and_done_is_its_answer(cx: &mut TestAppContext) {
+    let socket = Socket::serve(vec![line(&Reply::Done {
+        text: "refined watch#WATCH-12".into(),
+    })]);
+    let answer = sent(cx, socket.path.clone(), refine_command());
+    assert_eq!(answer, Ok("refined watch#WATCH-12".into()));
+    let seen = socket.next_seen();
+    let request: Request = serde_json::from_str(&seen.request).expect("a request");
+    assert_eq!(request, Request::new(None, refine_command()));
+    assert_eq!(seen.rest, "", "the send wrote more than one line");
+}
+
+#[gpui::test]
+fn a_refused_command_gives_the_reason_word_for_word(cx: &mut TestAppContext) {
+    let why = "watch#WATCH-12 is merging: a merge is not undone".to_string();
+    let socket = Socket::serve(vec![line(&Reply::Refused { why: why.clone() })]);
+    let answer = sent(cx, socket.path.clone(), refine_command());
+    assert_eq!(answer, Err(Problem::Refused { why: why.clone() }));
+    assert_eq!(answer.unwrap_err().reason(), why);
+}
+
+#[gpui::test]
+fn a_command_with_no_socket_says_where_it_looked(cx: &mut TestAppContext) {
+    let folder = Folder::new();
+    let missing = folder.join("daemon.sock");
+    let answer = sent(cx, missing.clone(), refine_command());
+    assert_eq!(answer, Err(Problem::NoSocket { path: missing }));
+}

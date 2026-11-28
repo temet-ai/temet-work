@@ -1,17 +1,24 @@
 //! IssuePane (`temet-issuepane`): the right column: the selected issue's title, key and stage,
 //! its facts, then its plan, pull request, review rounds and decisions as tabs. A tab shows only
-//! when its data is given.
+//! when its data is given. With actions, a small actions button beside the title opens them,
+//! such as IssueActions, below it.
 
 use std::rc::Rc;
 
-use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
+use gpui::{
+    AnyElement, App, FocusHandle, IntoElement, ParentElement, RenderOnce, SharedString, Styled,
+    Window, div,
+};
 
 use super::check_list::{CheckList, PlanCheck};
 use super::decision_row::{Decision, DecisionRow};
 use super::review_rounds::{ReviewRound, ReviewRounds};
+use crate::components::button::{Button, Size, Variant};
 use crate::components::cut_panel::CutPanel;
 use crate::components::heading::{Heading, HeadingSize};
+use crate::components::icon::IconName;
 use crate::components::list_row::ListRow;
+use crate::components::popover::Popover;
 use crate::components::property_list::{PropertyItem, PropertyList};
 use crate::components::stage_tag::{Stage, StageTag};
 use crate::components::status_tag::{Status, StatusTag};
@@ -98,6 +105,7 @@ pub struct IssuePane {
     tab: Option<IssueTab>,
     on_tab_change: Option<OnTabChange>,
     on_overturn: Option<OnOverturn>,
+    actions: Option<(AnyElement, Option<FocusHandle>)>,
 }
 
 impl IssuePane {
@@ -119,6 +127,7 @@ impl IssuePane {
             tab: None,
             on_tab_change: None,
             on_overturn: None,
+            actions: None,
         }
     }
 
@@ -179,6 +188,15 @@ impl IssuePane {
     }
 }
 
+impl IssuePane {
+    /// The issue's actions menu, such as IssueActions, behind a button beside the title. The
+    /// button holds `focus`, so the focus can go back to it once what its menu opened has closed.
+    pub fn actions(mut self, actions: impl IntoElement, focus: Option<&FocusHandle>) -> Self {
+        self.actions = Some((actions.into_any_element(), focus.cloned()));
+        self
+    }
+}
+
 /// The tabs an issue shows, in order: one for each part of its data that is given.
 pub fn tabs_shown(plan: bool, pull: bool, rounds: bool, decisions: bool) -> Vec<IssueTab> {
     [
@@ -200,7 +218,9 @@ impl RenderOnce for IssuePane {
             self.rounds.is_some(),
             self.decisions.is_some(),
         );
-        let head = div()
+        let title = div()
+            .flex_1()
+            .min_w_0()
             .child(Heading::new(self.title).size(HeadingSize::Pane))
             .child(
                 div()
@@ -210,6 +230,28 @@ impl RenderOnce for IssuePane {
                     .child(classed(Class::Mono, cx).child(self.issue_key.clone()))
                     .child(StageTag::new(self.stage).round(self.round)),
             );
+        // `.tm-issue-head`: the title and its key line at the left, the buttons at the right.
+        let buttons = self.actions.map(|(menu, focus)| {
+            let mut button = Button::new("issue-actions")
+                .size(Size::Small)
+                .variant(Variant::Minimal)
+                .icon(IconName::More);
+            if let Some(focus) = &focus {
+                button = button.track_focus(focus);
+            }
+            div()
+                .flex()
+                .flex_none()
+                .gap(space::s1(cx))
+                .child(Popover::new("issue-actions-popover", button, menu))
+        });
+        let head = div()
+            .flex()
+            .justify_between()
+            .items_start()
+            .gap(space::s4(cx))
+            .child(title)
+            .children(buttons);
         let facts = self.facts.map(|facts| {
             let items = facts
                 .into_iter()

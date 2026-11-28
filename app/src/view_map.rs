@@ -29,6 +29,7 @@ use crate::composites::issue_pane::{IssueDecision, IssuePlan, IssuePullRequest};
 use crate::composites::issue_table::IssueSummary;
 use crate::composites::needs_you::NeedsYouDecision;
 use crate::composites::page_header::PageFact;
+use crate::composites::refine_dialog::RefineCheck;
 use crate::composites::review_rounds::{ReviewPoint, ReviewRound};
 use crate::composites::side_nav::{SideNavArea, SideNavProject};
 use crate::daemon::{Daemon, Problem};
@@ -354,6 +355,11 @@ fn detail(view: &View, issue: &Issue) -> IssueDetail {
         pull,
         rounds,
         decisions: (!decisions.is_empty()).then_some(decisions),
+        person_checks: issue
+            .person_checks
+            .iter()
+            .map(|c| RefineCheck::new(c.done_when.clone(), c.proven_by.clone()))
+            .collect(),
     }
 }
 
@@ -529,8 +535,9 @@ pub fn notice(view: Option<&View>, problem: Option<&Problem>, path: &Path) -> Op
 }
 
 /// Puts the daemon's last answer on the page: the mapped view, kept through a failed ask as a
-/// stale one, and the notice. Without a view the page is blank and draws its notice alone. The
-/// person's choices stay (`Project::set_view`).
+/// stale one, and the notice; and the socket at `path` as where the person's commands go.
+/// Without a view the page is blank and draws its notice alone. The person's choices stay
+/// (`Project::set_view`).
 pub fn show(
     page: &mut Project,
     view: Option<&View>,
@@ -540,6 +547,7 @@ pub fn show(
 ) {
     page.set_view(view.and_then(|v| project_view(v, None, now_ms)));
     page.set_notice(notice(view, problem, path));
+    page.set_socket(Some(path.to_path_buf()));
     // With nothing selected the pane would be empty: select the first issue listed.
     if page.selected().is_none() {
         let first = page

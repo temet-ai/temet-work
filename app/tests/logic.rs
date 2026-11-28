@@ -1,5 +1,6 @@
 //! The app's logic, without a window: the sample data in the parts' props, the selected row,
-//! the issue table's column choice, a milestone's subtitle, and the icons the parts need.
+//! the issue table's column choice, a milestone's subtitle, the icons the parts need, and the
+//! `refine` a RefineDialog's Save sends.
 
 use std::collections::HashSet;
 
@@ -12,12 +13,17 @@ use temet_work_app::composites::check_list::{PlanCheck, count_line};
 use temet_work_app::composites::issue_pane::{IssueTab, tabs_shown};
 use temet_work_app::composites::issue_table::{GroupBy, agent_fits, colgroup, count, grouped};
 use temet_work_app::composites::milestone_panel::{progress, subtitle};
+use temet_work_app::composites::refine_dialog::{NotDone, RefineCheck};
+use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{
-    Grouping, Project, Selection, all_issues_summary, issue_facts,
+    Grouping, Project, Selection, all_issues_summary, issue_facts, not_done, refine_command,
 };
 use temet_work_app::sample;
 use temet_work_app::theme;
 use temet_work_app::theme::size::IssueColumns;
+use temet_work_core::Command;
+use temet_work_core::ids::IssueId;
+use temet_work_core::model::Check;
 
 fn columns() -> IssueColumns {
     IssueColumns {
@@ -460,5 +466,109 @@ fn the_count_line_counts_the_checks_by_status_in_order() {
     assert_eq!(
         count_line(&[check(None), check(None)]).as_deref(),
         Some("2 checks: 2 not run yet")
+    );
+}
+
+fn check(done_when: &str, proven_by: &str) -> RefineCheck {
+    RefineCheck::new(done_when.to_string(), proven_by.to_string())
+}
+
+/// The plan's checks a RefineDialog opens with.
+fn plan() -> Vec<RefineCheck> {
+    vec![
+        check(
+            "Signing in stores a token in the keyring",
+            "cargo nextest run -p watch-house sign_in",
+        ),
+        check("A revoked token sends the constable back to sign-in", ""),
+    ]
+}
+
+#[test]
+fn a_title_edit_alone_sends_the_title_and_no_checks() {
+    let title = "Store the constable's token";
+    let command = refine_command(
+        "watch#WATCH-44",
+        (title, &plan()),
+        ("Keep the token  ", &plan()),
+        false,
+    );
+    assert_eq!(
+        command,
+        Some(Command::Refine {
+            issue: IssueId::new("watch", "WATCH-44"),
+            title: Some("Keep the token".into()),
+            checks: None,
+            send: false,
+        })
+    );
+}
+
+#[test]
+fn changed_checks_are_sent_whole_and_empty_rows_are_left_out() {
+    let title = "Store the constable's token";
+    let mut typed = plan();
+    typed[1].proven_by = "cargo nextest run -p watch-house revoked\n".into();
+    typed.push(check("  ", "left empty"));
+    let command = refine_command("watch#WATCH-44", (title, &plan()), (title, &typed), false);
+    assert_eq!(
+        command,
+        Some(Command::Refine {
+            issue: IssueId::new("watch", "WATCH-44"),
+            title: None,
+            checks: Some(vec![
+                Check::new(
+                    "Signing in stores a token in the keyring",
+                    "cargo nextest run -p watch-house sign_in"
+                ),
+                Check::new(
+                    "A revoked token sends the constable back to sign-in",
+                    "cargo nextest run -p watch-house revoked"
+                ),
+            ]),
+            send: false,
+        })
+    );
+    // Deleting every check sends an empty list, which removes the person's checks.
+    let command = refine_command("watch#WATCH-44", (title, &plan()), (title, &[]), false);
+    assert!(matches!(command, Some(Command::Refine { checks: Some(c), .. }) if c.is_empty()));
+}
+
+#[test]
+fn nothing_changed_sends_nothing_unless_it_is_sent_to_a_refiner() {
+    let title = "Store the constable's token";
+    let padded = vec![
+        check(
+            " Signing in stores a token in the keyring ",
+            "cargo nextest run -p watch-house sign_in",
+        ),
+        plan()[1].clone(),
+    ];
+    assert_eq!(
+        refine_command("watch#WATCH-44", (title, &plan()), (title, &padded), false),
+        None
+    );
+    assert_eq!(
+        refine_command("watch#WATCH-44", (title, &plan()), (title, &plan()), true),
+        Some(Command::Refine {
+            issue: IssueId::new("watch", "WATCH-44"),
+            title: None,
+            checks: None,
+            send: true,
+        })
+    );
+}
+
+#[test]
+fn a_refusal_shows_its_reason_word_for_word() {
+    let why = "watch#WATCH-44 is merging: a merge is not undone";
+    assert_eq!(
+        not_done(&Problem::Refused { why: why.into() }),
+        NotDone::Refused(why.into())
+    );
+    let path = std::path::PathBuf::from("/run/user/1000/temet-work.sock");
+    assert_eq!(
+        not_done(&Problem::NoSocket { path }),
+        NotDone::Failed("no socket at /run/user/1000/temet-work.sock".into())
     );
 }
