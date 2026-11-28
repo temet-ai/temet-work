@@ -48,56 +48,81 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// A code host's repository: a bare origin, and a working clone the test makes
-/// commits in and pushes from, as an author would.
+/// A code host's repository: a bare origin the test writes commits into
+/// straight, as pushes would land, with `git fast-import`: one git command per
+/// commit.
 struct Origin {
     bare: PathBuf,
-    work: PathBuf,
+    made: std::cell::Cell<u32>,
 }
 
 impl Origin {
     fn new(dir: &Path, name: &str) -> Self {
         let bare = dir.join(format!("{name}.git"));
-        let work = dir.join(format!("{name}-work"));
         std::fs::create_dir_all(&bare).expect("bare");
         git(&bare, &["init", "--bare", "--quiet", "-b", "main"]);
-        std::fs::create_dir_all(&work).expect("work");
-        git(&work, &["init", "--quiet", "-b", "main"]);
-        git(&work, &["remote", "add", "origin", &bare.to_string_lossy()]);
-        Self { bare, work }
-    }
-
-    /// Writes each file, commits them with `message`, and gives the commit id.
-    fn commit(&self, files: &[(&str, &str)], message: &str) -> String {
-        for (path, text) in files {
-            let at = self.work.join(path);
-            std::fs::create_dir_all(at.parent().expect("parent")).expect("dirs");
-            std::fs::write(&at, text).expect("write");
-            git(&self.work, &["add", path]);
+        Self {
+            bare,
+            made: std::cell::Cell::new(0),
         }
-        git(&self.work, &["commit", "--quiet", "-m", message]);
-        git(&self.work, &["rev-parse", "HEAD"])
     }
 
-    fn push(&self, to: &str) {
-        git(
-            &self.work,
-            &[
-                "push",
-                "--quiet",
-                "--force",
-                "origin",
-                &format!("HEAD:{to}"),
-            ],
+    /// Commits `files` with `message` on top of `from` (none for a first
+    /// commit), points the ref `to` at it, and gives its id.
+    fn commit(
+        &self,
+        from: Option<&str>,
+        files: &[(&str, &str)],
+        message: &str,
+        to: &str,
+    ) -> String {
+        let n = self.made.get() + 1;
+        self.made.set(n);
+        let when = 1_700_000_000 + u64::from(n) * 60;
+        let mut stream = format!(
+            "commit {to}\nmark :1\nauthor Sam Vimes <vimes@example.com> {when} +0000\n\
+             committer Sam Vimes <vimes@example.com> {when} +0000\ndata {}\n{message}\n",
+            message.len()
         );
-    }
-
-    fn switch(&self, branch: &str) {
-        git(&self.work, &["switch", "--quiet", "-C", branch]);
-    }
-
-    fn checkout(&self, commit: &str) {
-        git(&self.work, &["switch", "--quiet", "--detach", commit]);
+        if let Some(parent) = from {
+            stream.push_str(&format!("from {parent}\n"));
+        }
+        for (path, text) in files {
+            stream.push_str(&format!(
+                "M 100644 inline {path}\ndata {}\n{text}\n",
+                text.len()
+            ));
+        }
+        stream.push('\n');
+        let marks = self.bare.join(format!("marks-{n}"));
+        let mut child = Git::new("git")
+            .arg("-C")
+            .arg(&self.bare)
+            .args(["fast-import", "--quiet", "--force"])
+            .arg(format!("--export-marks={}", marks.display()))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("fast-import");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(stream.as_bytes())
+                .expect("stream");
+        }
+        assert!(
+            child.wait().expect("waits").success(),
+            "fast-import of {message}"
+        );
+        let marked = std::fs::read_to_string(&marks).expect("marks");
+        let _ = std::fs::remove_file(&marks);
+        marked
+            .split_whitespace()
+            .nth(1)
+            .expect("a commit id")
+            .to_string()
     }
 }
 
@@ -241,30 +266,36 @@ struct Watch {
 fn watch(dir: &Path) -> Watch {
     let origin = Origin::new(dir, "watch");
     let first = origin.commit(
+        None,
         &[
             ("README.md", "The Night Watch\n"),
             ("src/rota.rs", "pub fn rota() -> &'static str { \"day\" }\n"),
             ("src/bell.rs", "pub fn ring() {}\n"),
         ],
         "The watch house",
+        "refs/heads/main",
     );
-    origin.push("refs/heads/main");
-    origin.switch("watch-12-night-shift");
-    origin.commit(
+    let rota = origin.commit(
+        Some(&first),
         &[(
             "src/rota.rs",
             "pub fn rota() -> &'static str { \"night\" }\n",
         )],
         "A night shift on the rota",
+        "refs/pull/57/head",
     );
     let night = origin.commit(
+        Some(&rota),
         &[("src/lamp.rs", "pub fn light() {}\n")],
         "A lamp for the night",
+        "refs/pull/57/head",
     );
-    origin.push("refs/pull/57/head");
-    origin.checkout(&first);
-    let moved = origin.commit(&[("README.md", "The City Watch\n")], "Rename the watch");
-    origin.push("refs/heads/main");
+    let moved = origin.commit(
+        Some(&first),
+        &[("README.md", "The City Watch\n")],
+        "Rename the watch",
+        "refs/heads/main",
+    );
     Watch {
         origin,
         first,
@@ -417,18 +448,18 @@ fn a_read_at_a_head_shows_a_commit_pushed_just_before_it() {
         Ok("The City Watch\n")
     );
     // The author pushes to the pull request, and someone merges to main.
-    repo.origin.checkout(&repo.night);
     repo.origin.commit(
+        Some(&repo.night),
         &[("src/lamp.rs", "pub fn light() { trim() }\n")],
         "Trim the lamp",
+        "refs/pull/57/head",
     );
-    repo.origin.push("refs/pull/57/head");
-    repo.origin.checkout(&repo.moved);
     repo.origin.commit(
+        Some(&repo.moved),
         &[("README.md", "The City Watch, Pseudopolis Yard\n")],
         "Move house",
+        "refs/heads/main",
     );
-    repo.origin.push("refs/heads/main");
     assert_eq!(
         lamp(&mut part).as_deref(),
         Ok("pub fn light() { trim() }\n")
@@ -467,11 +498,12 @@ fn a_read_at_a_commit_the_copy_holds_fetches_nothing() {
         "nothing fetched for a held commit"
     );
     // One the copy does not hold yet is fetched.
-    repo.origin.checkout(&repo.moved);
-    let later = repo
-        .origin
-        .commit(&[("src/bell.rs", "pub fn ring() { clang() }\n")], "Clang");
-    repo.origin.push("refs/heads/main");
+    let later = repo.origin.commit(
+        Some(&repo.moved),
+        &[("src/bell.rs", "pub fn ring() { clang() }\n")],
+        "Clang",
+        "refs/heads/main",
+    );
     assert_eq!(
         read(
             &mut part,
@@ -532,8 +564,7 @@ fn search_prints_at_most_its_limit_of_lines_and_counts_the_rest() {
     let many: String = (0..temet_work_codehost::read::MOST_LINES + 5)
         .map(|n| format!("constable {n}\n"))
         .collect();
-    origin.commit(&[("roll.txt", &many)], "The roll");
-    origin.push("refs/heads/main");
+    origin.commit(None, &[("roll.txt", &many)], "The roll", "refs/heads/main");
     let w = world(&[("watch", "ankh-morpork/watch")]);
     let mut part = family(&dir, &[("ankh-morpork/watch", &origin)]);
     let text = read(&mut part, &w, search("constable", None)).expect("found");
@@ -593,14 +624,18 @@ fn change_prints_each_repository_under_its_name_and_a_project_picks_one() {
     let dir = scratch("change-two");
     let watch = watch(&dir);
     let guild = Origin::new(&dir, "guild");
-    guild.commit(&[("charter.md", "The Guild\n")], "Charter");
-    guild.push("refs/heads/main");
-    guild.switch("watch-12");
+    let charter = guild.commit(
+        None,
+        &[("charter.md", "The Guild\n")],
+        "Charter",
+        "refs/heads/main",
+    );
     guild.commit(
+        Some(&charter),
         &[("charter.md", "The Guild of Watchmen\n")],
         "Rename the guild",
+        "refs/pull/57/head",
     );
-    guild.push("refs/pull/57/head");
     let w = city();
     let mut part = family(
         &dir,
