@@ -7,8 +7,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use gpui::{
     AppContext, Entity, InteractiveElement, IntoElement, Modifiers, ParentElement, Styled,

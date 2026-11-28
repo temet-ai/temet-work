@@ -80,7 +80,8 @@
         "new"
       ],
       "stopped": null,
-      "stopped_since": null
+      "stopped_since": null,
+      "assignable": []
     },
     {
       "id": "watch#1",
@@ -101,7 +102,8 @@
       "reviews": [],
       "moves": [],
       "stopped": null,
-      "stopped_since": null
+      "stopped_since": null,
+      "assignable": []
     },
     {
       "id": "watch#2",
@@ -126,7 +128,8 @@
         "new"
       ],
       "stopped": "refiner-1",
-      "stopped_since": 1795001860000
+      "stopped_since": 1795001860000,
+      "assignable": []
     },
     {
       "id": "watch#3",
@@ -161,7 +164,8 @@
         "ready"
       ],
       "stopped": null,
-      "stopped_since": null
+      "stopped_since": null,
+      "assignable": []
     },
     {
       "id": "watch#4",
@@ -229,7 +233,8 @@
         "ready"
       ],
       "stopped": null,
-      "stopped_since": null
+      "stopped_since": null,
+      "assignable": []
     },
     {
       "id": "watch#5",
@@ -282,7 +287,8 @@
         "ready"
       ],
       "stopped": null,
-      "stopped_since": null
+      "stopped_since": null,
+      "assignable": []
     }
   ],
   "done": 2,
@@ -300,7 +306,9 @@
       "runtime": "hex",
       "model": "anthill",
       "stopped_by_person": false,
-      "stopped_at": null
+      "stopped_at": null,
+      "assigned": false,
+      "unassigned": false
     },
     {
       "id": "author-4",
@@ -315,7 +323,9 @@
       "runtime": "hex",
       "model": "anthill",
       "stopped_by_person": false,
-      "stopped_at": null
+      "stopped_at": null,
+      "assigned": false,
+      "unassigned": false
     },
     {
       "id": "author-5",
@@ -330,7 +340,9 @@
       "runtime": null,
       "model": null,
       "stopped_by_person": false,
-      "stopped_at": null
+      "stopped_at": null,
+      "assigned": false,
+      "unassigned": false
     },
     {
       "id": "refiner-1",
@@ -345,7 +357,9 @@
       "runtime": "hex",
       "model": null,
       "stopped_by_person": true,
-      "stopped_at": 1795001860000
+      "stopped_at": 1795001860000,
+      "assigned": false,
+      "unassigned": false
     },
     {
       "id": "reviewer-3",
@@ -360,7 +374,9 @@
       "runtime": "hex",
       "model": "anthill",
       "stopped_by_person": false,
-      "stopped_at": null
+      "stopped_at": null,
+      "assigned": false,
+      "unassigned": false
     }
   ],
   "decisions": [

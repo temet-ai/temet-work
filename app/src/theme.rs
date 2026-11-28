@@ -817,22 +817,6 @@ pub mod size {
     pub fn section_subtitle_gap(cx: &App) -> Pixels {
         steps(cx, 0.5)
     }
-    /// A menu's padding, the space a divider keeps above and below it, and how far a submenu
-    /// sits up so its first item meets the item that opened it: `.bp6-menu { padding:
-    /// var(--bp-surface-spacing) }`, `.bp6-menu-divider { margin: var(--bp-surface-spacing)
-    /// calc(var(--bp-surface-spacing) * -1) }`.
-    pub fn menu_pad(cx: &App) -> Pixels {
-        steps(cx, 1.)
-    }
-    /// A menu's narrowest: `.bp6-menu { min-width: calc(var(--bp-surface-spacing) * 45) }`.
-    pub fn menu_width(cx: &App) -> Pixels {
-        steps(cx, 45.)
-    }
-    /// The space after each part of a menu item but its last: `.bp6-menu-item > * {
-    /// margin-right: calc(var(--bp-surface-spacing) * 2) }`.
-    pub fn menu_item_gap(cx: &App) -> Pixels {
-        steps(cx, 2.)
-    }
 
     /// A wide dialog, such as RefineDialog: `--tm-dialog-wide`, at most the window less
     /// `--tm-space-6` at each side.

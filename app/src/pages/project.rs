@@ -38,7 +38,6 @@ use crate::composites::page_header::{PageFact, PageHeader};
 use crate::composites::refine_dialog::{RefineCheck, RefineDialog, RefineDraft, Sending};
 use crate::composites::review_rounds::ReviewRound;
 use crate::composites::side_nav::{SideNav, SideNavArea};
-use crate::daemon::{self, Problem};
 
 /// What the Project page shows, in the shape of its parts' props.
 #[derive(Clone, Debug, Default, PartialEq)]

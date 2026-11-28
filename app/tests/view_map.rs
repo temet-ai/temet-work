@@ -13,7 +13,7 @@ use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{Grouping, Project, ProjectView};
 use temet_work_app::view_map::{self, ago, due, notice, project_view, show};
 use temet_work_core::View;
-use temet_work_core::ids::ProjectId;
+use temet_work_core::ids::{IssueId, ProjectId};
 
 const CURRENT: &str = include_str!("../../crates/core/tests/fixtures/view.json");
 const BEFORE_COSTS: &str = include_str!("../../crates/core/tests/fixtures/view-156.json");
@@ -621,7 +621,7 @@ fn listed(agents: &[IssueActionsAgent]) -> Vec<(String, String)> {
 fn assign_lists_the_assignable_agents_with_the_issue_each_is_on() {
     let page = watch(&with_assignments());
     let detail = &page.details["4"];
-    assert_eq!(detail.id.as_ref(), "watch#4");
+    assert_eq!(detail.id, IssueId::parse("watch#4"));
     assert_eq!(
         listed(&detail.assignable),
         [
