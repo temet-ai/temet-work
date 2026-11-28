@@ -42,6 +42,11 @@ pub const CONTINUE_AFTER_MS: u64 = 60_000;
 /// that has not ended is listed under Problems while it keeps failing.
 pub const STOP_AGAIN_MS: u64 = 60_000;
 
+/// How many times `remind_after` an idle agent is held as starting before it
+/// is listed under Problems as never reported working: thirty minutes at the
+/// default ten. See [`Runners::remind`].
+const STARTING_FOR: u64 = 3;
+
 /// A terminal, by the id its runner gave it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TerminalId(pub String);
@@ -105,6 +110,12 @@ pub struct Update {
     pub status: Status,
     /// What the agent says it is doing, when it says.
     pub doing: Option<String>,
+    /// How many turns the terminal has finished, as its runner counts them;
+    /// `None` from a runner that does not count them. herdr-core's `turn` goes
+    /// up each time the status leaves working. One or more says a turn has
+    /// ended even when no update said working, as after a daemon restart: the
+    /// count is the runner's, so it outlives the daemon's memory of what it saw.
+    pub turns: Option<u64>,
 }
 
 /// Why a runner call failed.
@@ -254,6 +265,15 @@ struct Count {
     nudges: u32,
     /// What the latest poll saw the agent doing.
     saw: Saw,
+    /// Whether the agent is held as starting: idle, and neither seen working
+    /// by this daemon nor reported by its runner to have finished a turn. Such
+    /// a count is never reminded or stopped, and gives way to a fresh one once
+    /// the agent is past starting.
+    starting: bool,
+    /// Whether it has been held as starting for `remind_after` ×
+    /// [`STARTING_FOR`] or longer, so it is listed under Problems as never
+    /// reported working.
+    never_worked: bool,
     /// When the stop after the last reminder last failed. It is tried again
     /// [`STOP_AGAIN_MS`] later.
     last_try_ms: Option<u64>,
@@ -331,6 +351,13 @@ pub struct Runners {
     started_here: std::collections::BTreeSet<String>,
     /// The reminder count of each idle or errored agent its issue waits on.
     counts: BTreeMap<String, Count>,
+    /// Whether each agent whose terminal has reported to this daemon is past
+    /// starting: the terminal has reported working or an error, or its runner
+    /// a finished turn. One that is not is held as starting while idle
+    /// ([`Runners::remind`]). An agent missing here has had no report since
+    /// this daemon started, as just after a restart before its runner
+    /// connects, and is timed by its state on record.
+    begun: BTreeMap<String, bool>,
     /// Agents whose terminal this daemon has stopped, so the update saying
     /// it is gone is not taken for a terminal left behind.
     stopped: std::collections::BTreeSet<String>,
@@ -444,6 +471,25 @@ impl Runners {
     /// turn that ends in an error counts toward the stop, timed from the last
     /// reminder. Returns the agents it stopped, as ended.
     ///
+    /// An agent is counted idle here only once it is past starting: its
+    /// terminal has reported working, or its runner reports a finished turn
+    /// (a turn count of one or more, or an error). herdr-core can report a
+    /// working session idle at turn 0 and never report it working
+    /// (`docs/findings/herdr-core.md`), which reads the same as an agent that
+    /// finished and stopped. An idle agent not past starting is held as
+    /// starting for `remind_after` × [`STARTING_FOR`] (thirty minutes at the
+    /// default ten), timed like the reminders from the first poll that saw it
+    /// idle, and is neither reminded nor stopped. After that it is listed
+    /// under Problems as never reported working, and is still neither
+    /// reminded nor stopped: the daemon cannot tell such an agent working from
+    /// stuck, so a person decides. `temet-work status` still shows it idle.
+    /// Once it reports working or a finished turn its count starts afresh, so
+    /// an agent that leaves starting by working and then goes idle is reminded
+    /// `remind_after` after it went idle. The line goes then too, and when the
+    /// agent ends or its issue stops waiting on it. An agent whose runner has
+    /// reported nothing since this daemon started, as just after a restart, is
+    /// timed by its state on record until the first report.
+    ///
     /// An agent ends here only once its stop works, or its runner says the
     /// terminal is gone or unknown. After any other error it may still be
     /// running: it is not ended, so no fresh agent starts beside it, it keeps
@@ -510,12 +556,15 @@ impl Runners {
                 }
                 _ => continue,
             };
+            let starting = saw == Saw::Idle && self.begun.get(agent) == Some(&false);
             // An investigator works on no issue: its group's settings answer.
             let scope = world.agent_scope(&a.group, issue);
             let after_ms = world.number_at(&scope, Some(a.role), "remind_after") * 60_000;
             // A retry that ends between turns, or that worked for `remind_after`
-            // before its error, has left the old error behind.
+            // before its error, has left the old error behind. An agent that
+            // has left starting is timed from now.
             let mut count = before
+                .filter(|c| c.starting == starting)
                 .filter(|c| match c.saw {
                     Saw::Retrying { from } => saw != Saw::Idle && now_ms < from + after_ms,
                     Saw::Idle | Saw::Errored => true,
@@ -524,11 +573,18 @@ impl Runners {
                     since: now_ms,
                     nudges: 0,
                     saw,
+                    starting,
+                    never_worked: false,
                     last_try_ms: None,
                     refusal: None,
                     may_have_stopped: false,
                 });
             count.saw = saw;
+            if starting {
+                count.never_worked = now_ms >= count.since.saturating_add(after_ms * STARTING_FOR);
+                self.counts.insert(agent.clone(), count);
+                continue;
+            }
             let reminders = world.number_at(&scope, Some(a.role), "reminders");
             if now_ms < count.since + after_ms {
                 self.counts.insert(agent.clone(), count);
@@ -600,6 +656,24 @@ impl Runners {
             let (_, terminal) = self.terminals.get(agent)?;
             Some(format!("cannot stop {agent}'s terminal {terminal}: {why}"))
         })
+    }
+
+    /// A line for each agent held as starting for its limit or longer, in
+    /// agent order ([`Runners::remind`]). As with [`Runners::stop_problems`],
+    /// a count that is dropped or starts afresh takes its line with it, and an
+    /// agent whose terminal is gone has none.
+    fn starting_problems(&self) -> impl Iterator<Item = String> {
+        self.counts
+            .iter()
+            .filter(|(_, count)| count.never_worked)
+            .filter_map(|(agent, _)| {
+                let (_, terminal) = self.terminals.get(agent)?;
+                Some(format!(
+                    "{agent}'s terminal {terminal} is idle and never reported working: it may \
+                     be working unseen or stuck, so it is neither reminded nor stopped; read \
+                     it with temet-work screen {agent}"
+                ))
+            })
     }
 
     /// Stops the terminal of an agent that has not ended. Once it is stopped, or
@@ -1028,6 +1102,10 @@ impl Part for Runners {
                     stops.insert(agent, (i, u.terminal.clone()));
                     continue;
                 }
+                // Working, an error or a finished turn: past starting.
+                let past = matches!(u.status, Status::Working | Status::Error { .. })
+                    || u.turns.is_some_and(|n| n > 0);
+                *self.begun.entry(agent.clone()).or_default() |= past;
                 self.terminals.insert(agent, (i, u.terminal.clone()));
                 let before = seen
                     .get(&id)
@@ -1107,11 +1185,20 @@ impl Part for Runners {
         events.extend(self.continue_after_reset(world, &mut seen, now_ms));
         events.extend(self.deliver(world, &seen));
         events.extend(self.remind(world, &seen, now_ms));
+        self.begun.retain(|agent, _| {
+            let id = AgentId::new(agent.clone());
+            seen.get(&id) != Some(&AgentState::Ended)
+                && world
+                    .agents
+                    .get(&id)
+                    .is_some_and(|a| a.state != AgentState::Ended)
+        });
         let problems: Vec<String> = self
             .adapters
             .iter()
             .filter_map(|a| a.problem())
             .chain(self.stop_problems())
+            .chain(self.starting_problems())
             .collect();
         Polled {
             events,
@@ -1773,6 +1860,7 @@ mod tests {
             labels,
             status: Status::Between,
             doing: None,
+            turns: None,
         }]);
         assert_eq!(part.poll(&w, 0).events, vec![], "{live} is on the list");
     }
@@ -4455,5 +4543,196 @@ mod tests {
         let w = World::replay(&log).0;
         assert!(starts_an_author(&w), "{:?}", w.missing());
         assert_eq!(w.missing().given_up, Vec::<String>::new());
+    }
+
+    /// An author on ankh#1, waited on, whose terminal t1 reports idle at turn
+    /// 0 from its start and never reports working, as herdr-core did on 28
+    /// November for refiners working on their launch turn.
+    fn unseen_author() -> (World, Runners, Shared, AgentId) {
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        handle.fake.lock().expect("lock").miss_launch_turns();
+        let author = run(&mut part, &mut w, &["claude"]);
+        (w, part, handle, author)
+    }
+
+    /// Polls at `now_ms`, applies the events, and returns the poll.
+    fn step_polled(part: &mut Runners, w: &mut World, now_ms: u64) -> Polled {
+        let polled = part.poll(w, now_ms);
+        apply(w, &polled.events);
+        polled
+    }
+
+    /// Whether the poll's problem lists an agent as never reported working.
+    fn never_worked(polled: &Polled) -> bool {
+        polled
+            .problem
+            .as_deref()
+            .is_some_and(|p| p.contains("never reported working"))
+    }
+
+    #[test]
+    fn an_agent_idle_at_turn_0_that_never_reported_working_is_held_as_starting_then_listed() {
+        let (mut w, mut part, handle, author) = unseen_author();
+        let minute = |n: u64| n * 60_000;
+        for n in [0, 10, 20, 29] {
+            let polled = step_polled(&mut part, &mut w, minute(n));
+            assert!(!ended(&polled.events, &author), "at {n} min: {polled:?}");
+            assert!(!never_worked(&polled), "at {n} min: {polled:?}");
+            let screen = screen_of(&handle.fake);
+            assert!(!screen.contains("is still waiting on you"), "{screen}");
+        }
+        for n in [30, 40] {
+            let polled = step_polled(&mut part, &mut w, minute(n));
+            assert!(!ended(&polled.events, &author), "at {n} min: {polled:?}");
+            assert_eq!(
+                polled.problem.as_deref(),
+                Some(
+                    "author-1's terminal t1 is idle and never reported working: it may be \
+                     working unseen or stuck, so it is neither reminded nor stopped; read it \
+                     with temet-work screen author-1"
+                ),
+                "at {n} min"
+            );
+            assert_eq!(reminders(&handle), 0, "at {n} min");
+        }
+        assert_eq!(stops(&handle), 0);
+        assert_eq!(
+            w.agents[&author].state,
+            AgentState::Idle,
+            "status shows it idle"
+        );
+        assert!(!starts_an_author(&w), "{:?}", w.missing());
+    }
+
+    #[test]
+    fn an_agent_listed_as_never_reported_working_that_works_then_idles_is_reminded_after_remind_after()
+     {
+        let t1 = TerminalId("t1".into());
+        let minute = |n: u64| n * 60_000;
+        // Working and idle reported in separate polls, then in one.
+        for separate in [true, false] {
+            let (mut w, mut part, handle, author) = unseen_author();
+            step(&mut part, &mut w, 0);
+            assert!(never_worked(&step_polled(&mut part, &mut w, minute(30))));
+            {
+                let mut fake = handle.fake.lock().expect("lock");
+                if separate {
+                    fake.keep_working(&t1);
+                }
+                fake.send(&t1, "Mend the clock", false).expect("send");
+            }
+            if separate {
+                let polled = step_polled(&mut part, &mut w, minute(31));
+                assert!(working(&w.agents[&author].state), "{polled:?}");
+                assert!(!never_worked(&polled), "{polled:?}");
+                handle.fake.lock().expect("lock").unblock(&t1);
+            }
+            let idle_at = 32;
+            let polled = step_polled(&mut part, &mut w, minute(idle_at));
+            assert_eq!(w.agents[&author].state, AgentState::Idle);
+            assert!(!never_worked(&polled), "separate {separate}: {polled:?}");
+            step(&mut part, &mut w, minute(idle_at + 9));
+            assert_eq!(reminders(&handle), 0, "separate {separate}");
+            let polled = step_polled(&mut part, &mut w, minute(idle_at + 10));
+            assert_eq!(reminders(&handle), 1, "separate {separate}");
+            assert!(!never_worked(&polled), "separate {separate}: {polled:?}");
+        }
+    }
+
+    #[test]
+    fn a_never_reported_working_line_goes_when_the_agent_ends_or_its_issue_stops_waiting() {
+        let t1 = TerminalId("t1".into());
+        let minute = |n: u64| n * 60_000;
+        let (mut w, mut part, _handle, _author) = unseen_author();
+        step(&mut part, &mut w, 0);
+        assert!(never_worked(&step_polled(&mut part, &mut w, minute(30))));
+        at_stage(&mut w, temet_work_core::model::Stage::InReview { round: 1 });
+        assert!(!never_worked(&step_polled(&mut part, &mut w, minute(31))));
+
+        let (mut w, mut part, handle, author) = unseen_author();
+        step(&mut part, &mut w, 0);
+        assert!(never_worked(&step_polled(&mut part, &mut w, minute(30))));
+        handle.fake.lock().expect("lock").end_program(&t1);
+        let polled = step_polled(&mut part, &mut w, minute(31));
+        assert!(ended(&polled.events, &author), "{polled:?}");
+        assert!(!never_worked(&polled), "{polled:?}");
+    }
+
+    #[test]
+    fn an_agent_that_worked_then_went_idle_at_turn_1_is_reminded_twice_then_stopped() {
+        let t1 = TerminalId("t1".into());
+        let minute = |n: u64| n * 60_000;
+        let (mut w, mut part, handle, author) = unseen_author();
+        {
+            let mut fake = handle.fake.lock().expect("lock");
+            fake.keep_working(&t1);
+            fake.send(&t1, "Mend the clock", false).expect("send");
+        }
+        step(&mut part, &mut w, 0);
+        assert!(working(&w.agents[&author].state));
+        handle.fake.lock().expect("lock").unblock(&t1);
+        step(&mut part, &mut w, 0);
+        assert_eq!(w.agents[&author].state, AgentState::Idle);
+        for (n, reminded) in [(9, 0), (10, 1), (19, 1), (20, 2)] {
+            let polled = step(&mut part, &mut w, minute(n));
+            assert_eq!(reminders(&handle), reminded, "at {n} min");
+            assert!(!ended(&polled, &author), "at {n} min: {polled:?}");
+        }
+        let polled = step(&mut part, &mut w, minute(30));
+        assert!(ended(&polled, &author), "{polled:?}");
+    }
+
+    #[test]
+    fn after_a_restart_an_agent_idle_at_turn_1_never_seen_working_is_reminded_at_remind_after() {
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        // A daemon before this one started the author, whose launch turn
+        // ended: its terminal is idle at turn 1.
+        let (mut before, handle) = shared();
+        let author = run(&mut before, &mut w, &["claude"]);
+        drop(before);
+        handle.fake.lock().expect("lock").updates();
+        // This daemon's runner lists it on connecting, idle at turn 1, and
+        // never sees it working.
+        let mut part = Runners::default();
+        part.add(Box::new(handle.clone()));
+        handle.fake.lock().expect("lock").reconnect();
+        let minute = |n: u64| n * 60_000;
+        for (n, reminded) in [(0, 0), (9, 0), (10, 1)] {
+            let polled = step_polled(&mut part, &mut w, minute(n));
+            assert_eq!(reminders(&handle), reminded, "at {n} min");
+            assert!(!never_worked(&polled), "at {n} min: {polled:?}");
+            assert!(!ended(&polled.events, &author), "at {n} min: {polled:?}");
+        }
+    }
+
+    #[test]
+    fn the_fake_counts_a_finished_launch_turn_and_each_turn_that_leaves_working() {
+        let t1 = TerminalId("t1".into());
+        let turns = |updates: Vec<Update>| -> Vec<(Status, Option<u64>)> {
+            updates.into_iter().map(|u| (u.status, u.turns)).collect()
+        };
+        let start = Start {
+            program: Program {
+                argv: vec!["claude".into()],
+                env: vec![],
+            },
+            ..Start::default()
+        };
+        let mut fake = FakeRunner::default();
+        fake.start(&start).expect("start");
+        assert_eq!(turns(fake.updates()), [(Status::Between, Some(1))]);
+        fake.send(&t1, "Mend the clock", false).expect("send");
+        assert_eq!(
+            turns(fake.updates()),
+            [(Status::Working, Some(1)), (Status::Between, Some(2))]
+        );
+
+        let mut fake = FakeRunner::default();
+        fake.miss_launch_turns();
+        fake.start(&start).expect("start");
+        assert_eq!(turns(fake.updates()), [(Status::Between, Some(0))]);
     }
 }

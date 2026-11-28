@@ -60,7 +60,7 @@ which is the one in effect.
 | `ci` | no | every level | true | the code-host family, per issue |
 | `deploy`, `verify`, `run_in` | no | every level | none | the deploy part, per issue |
 | `merge` | no | every level | `squash` (or `merge`, `rebase`) | the code host's merge |
-| `remind_after`, `reminders` | yes | every level | 10 minutes, 2 | the runner family, per agent's issue and role |
+| `remind_after`, `reminders` | yes | every level | 10 minutes, 2. An idle agent that has never reported working or a finished turn is held as starting for three times `remind_after` (30 minutes), then listed under Problems, and is not reminded or stopped | the runner family, per agent's issue and role |
 | `starts` | yes | every level | 3 agents of one role that ended while one issue waited on them. Ends whose program was lost, as on a reboot, count separately, up to three times `starts`, and give up with a problem line of their own | the loop, per issue and role |
 | `sync_every` | no | project, area, global | 60 s | the tracker family for each project or area |
 | `ci_every` | no | every level | 30 s | the code-host family for each issue |

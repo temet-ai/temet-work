@@ -4,6 +4,7 @@ session_id:
   - e4a814a9-1735-455e-9162-778decf89d5b
   - d1ccda48-cbb5-44cc-9ea0-c03999c970e9
   - 5f41cf37-1dfb-4f78-9ef2-71a08ce4fa61
+  - 4e6fd45b-32fd-4c90-b785-91ce253f784e
 ---
 
 # herdr-core: what a daemon can rely on
@@ -174,6 +175,25 @@ After `esc` the status went `working` then `idle`. A permission prompt was not t
 ran in auto mode), and `error` was never seen.
 
 A plain shell reports no status at all, only `foreground` and `turn: 0`.
+
+**`turn` counts the turns herdr-core saw end.** In this run the count went up each time the status
+left `working`: to `done` (turns 1 to 4, 6 and 8), to `idle` (5, 7 and 10) and to `blocked` (9).
+Each `turn` event came within a millisecond of the `status` event it ended on, and a `status` event
+carries no turn. A terminal's `created` event, the terminals in a subscription's snapshot and the
+replies to `terminal.get` and `terminal.list` carry the count as `turn`. Turn 0 means herdr-core has
+not seen a turn end.
+
+**`idle` at turn 0 for a session that is working.** Seen live on 28 November 2026, outside this
+probe. refiner-110 on temet-work#228 (started 09:20:34 SAST, terminal `t28t`) and refiner-111 on
+temet-work#229 (started 09:21:35, terminal `t28v`) were working on their launch turns: their screens
+showed Claude Code's spinner, `Ionizing… 9m 23s` and `Cascading… 8m 24s`. herdr-core reported both
+terminals as `status: idle, turn: 0`, and temet-work's event log recorded no `AgentChanged` for
+either, so no change to `working` reached the daemon. At ten minutes the daemon typed its reminder
+into both, and the spinner started again on it. A launch normally goes from `idle` to `working`
+within a few seconds (above), so herdr-core missed or never sent that change for turns that ran for
+minutes. An `idle` at turn 0 that never went `working` then looks the same as an agent that
+finished and stopped. temet-work holds such an agent as starting, and neither reminds nor stops it
+(temet-work#231).
 
 ### Reading: `terminal.read`
 
