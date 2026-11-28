@@ -95,17 +95,49 @@ fn tick(w: &mut World, now_ms: u64) -> Vec<Launch> {
     started
 }
 
+/// Has the running investigator say it is done, as `temet-work investigated`.
+fn investigated(w: &mut World) {
+    let agent = w.investigating(&watch()).expect("running").agent.clone();
+    w.apply(&Event::Investigated {
+        group: watch(),
+        agent,
+    });
+}
+
 /// Ends the running investigation as its session ending would, at `now_ms`.
 fn end(w: &mut World, now_ms: u64) {
+    end_session(w, now_ms, false);
+}
+
+/// Ends the running investigation by its session ending, at `now_ms`, with its
+/// program `lost` or not.
+fn end_session(w: &mut World, now_ms: u64, lost: bool) {
     let agent = w.investigating(&watch()).expect("running").agent.clone();
     w.apply(&Event::AgentChanged {
         agent,
         state: AgentState::Ended,
-        lost: false,
+        lost,
     });
     for e in w.investigation_events(now_ms, false) {
         w.apply(&e);
     }
+}
+
+/// The one investigator `tick` starts at `now_ms`.
+fn next(w: &mut World, now_ms: u64) -> Launch {
+    let mut started = tick(w, now_ms);
+    assert_eq!(started.len(), 1, "{started:?}");
+    started.remove(0)
+}
+
+/// The line of an investigator's brief that names its pull request window.
+fn window_line(launch: &Launch) -> &str {
+    launch
+        .brief
+        .task
+        .lines()
+        .find(|l| l.starts_with("3. "))
+        .expect("line 3")
 }
 
 #[test]
@@ -1073,6 +1105,7 @@ fn no_investigator_within_investigate_every_of_the_last_end() {
 fn one_starts_again_after_investigate_every_when_still_short() {
     let mut w = short(None);
     tick(&mut w, 0);
+    investigated(&mut w);
     end(&mut w, 10 * MINUTE);
     let started = tick(&mut w, 130 * MINUTE);
     assert_eq!(
@@ -1088,6 +1121,62 @@ fn one_starts_again_after_investigate_every_when_still_short() {
         Some(0),
         "the last one's start"
     );
+}
+
+#[test]
+fn an_unfinished_investigation_keeps_the_window_of_the_last_finished_one() {
+    let mut w = short(None);
+    next(&mut w, 0);
+    investigated(&mut w);
+    end(&mut w, 10 * MINUTE);
+    next(&mut w, 130 * MINUTE);
+    end_session(&mut w, 140 * MINUTE, true);
+    let third = next(&mut w, 260 * MINUTE);
+    assert_eq!(third.agent, AgentId::new("investigator-3"));
+    assert_eq!(w.investigations[&watch()].since_ms, Some(0));
+    assert_eq!(
+        window_line(&third),
+        "3. The pull requests merged since 1970-01-01 00:00 UTC, when the group's last \
+         finished investigation started, for defects you can show in that work."
+    );
+}
+
+#[test]
+fn two_unfinished_investigations_in_a_row_do_not_move_the_window() {
+    let mut w = short(None);
+    next(&mut w, 0);
+    investigated(&mut w);
+    end(&mut w, 10 * MINUTE);
+    next(&mut w, 130 * MINUTE);
+    end_session(&mut w, 140 * MINUTE, true);
+    next(&mut w, 260 * MINUTE);
+    // Stopped, as an idle investigator is.
+    end_session(&mut w, 270 * MINUTE, false);
+    let fourth = next(&mut w, 390 * MINUTE);
+    assert_eq!(fourth.agent, AgentId::new("investigator-4"));
+    assert_eq!(w.investigations[&watch()].since_ms, Some(0));
+    assert_eq!(
+        window_line(&fourth),
+        "3. The pull requests merged since 1970-01-01 00:00 UTC, when the group's last \
+         finished investigation started, for defects you can show in that work."
+    );
+}
+
+#[test]
+fn an_unfinished_first_investigation_keeps_its_seven_days() {
+    // 2026-11-27 13:05 UTC.
+    let first = 1_795_784_700_000;
+    let line = "3. The pull requests merged since 2026-11-20 13:05 UTC, 7 days before the \
+                group's first investigation started, as none has finished yet, for defects you \
+                can show in that work.";
+    let mut w = short(None);
+    next(&mut w, first);
+    end(&mut w, first + 10 * MINUTE);
+    let second = next(&mut w, first + 130 * MINUTE);
+    assert_eq!(window_line(&second), line);
+    end(&mut w, first + 140 * MINUTE);
+    let third = next(&mut w, first + 260 * MINUTE);
+    assert_eq!(window_line(&third), line);
 }
 
 #[test]
@@ -1616,6 +1705,7 @@ fn a_person_closed_issue_stays_refused_in_later_investigations() {
     let mut w = short(None);
     close_by_person(&mut w, "ankh", "3", "Wind the clock", 3);
     tick(&mut w, 0);
+    investigated(&mut w);
     end(&mut w, 10 * MINUTE);
     let started = tick(&mut w, 130 * MINUTE);
     let [second] = started.as_slice() else {

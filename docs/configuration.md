@@ -208,28 +208,29 @@ radar#44 reaches it through radar#47. The issue counts again once nothing holds 
 dependency is done or back in scope, its "Depends on" line is gone, or the issue is back in its
 group's lists.
 
-When the queue holds fewer than `queue_low` issues, the daemon starts one
-investigator for the group. Left out, `queue_low` is twice the work folders of the group's
-projects and of the projects in its areas, or 2 when they have none; 0 starts no
-investigator. The investigator holds no work folder and changes no file: it runs in a
-free folder of the group's first project, or in one an author holds when none is free. It
-reads each project's docs for planned work that is not built, the open issues, and the pull
-requests merged since the group's last investigation started (the last 7 days for its
-first), and files an issue for each planned item no open issue covers and for each defect
-it can show (`temet-work file`, `docs/commands.md`). It reads docs and code at the current
-head of each repository's default branch, not as a checkout's files stand: it fetches, then
-reads with `git show` or in a separate checkout outside the checkouts its brief names and
-the folder it runs in. Each issue it files goes in the last milestone of the
-group's list unless it names another the group takes, and is in the loop as soon as it is
-filed. A project's `investigate` setting adds lines to the investigator's brief
-(`docs/settings.md`). Closing an issue is how a person says no to it: the brief lists the
-issues a person closed in the group's projects and areas, and the investigator files none of
-them again. The list holds issues the daemon saw open while syncing. A close in the tracker
-counts as a person's unless the daemon made it after verifying the issue, or one of the
-issue's pull requests had merged before it, since a pull request can close its issue as it
-merges. For the same reason the daemon ignores a close while the issue merges, deploys or is
-verified. Reopening a done issue clears the merge. A person who wants a listed issue built
-reopens it.
+When the queue holds fewer than `queue_low` issues, the daemon starts one investigator for
+the group. Left out, `queue_low` is twice the work folders of the group's projects and of
+the projects in its areas, or 2 when they have none; 0 starts no investigator. The
+investigator holds no work folder and changes no file: it runs in a free folder of the
+group's first project, or in one an author holds when none is free. It reads each project's
+docs for planned work that is not built, the open issues, and the pull requests merged since
+the group's last finished investigation started: one is finished when its investigator ran
+`temet-work investigated`. While none has finished, it reads those merged in the 7 days
+before the group's first investigation started. It files an issue for each planned item no
+open issue covers and for each defect it can show (`temet-work file`, `docs/commands.md`).
+It reads docs and code at the current head of each repository's default branch, not as a
+checkout's files stand: it fetches, then reads with `git show` or in a separate checkout
+outside the checkouts its brief names and the folder it runs in. Each issue it files goes in
+the last milestone of the group's list unless it names another the group takes, and is in
+the loop as soon as it is filed. A project's `investigate` setting adds lines to the
+investigator's brief (`docs/settings.md`). Closing an issue is how a person says no to it:
+the brief lists the issues a person closed in the group's projects and areas, and the
+investigator files none of them again. The list holds issues the daemon saw open while
+syncing. A close in the tracker counts as a person's unless the daemon made it after
+verifying the issue, or one of the issue's pull requests had merged before it, since a pull
+request can close its issue as it merges. For the same reason the daemon ignores a close
+while the issue merges, deploys or is verified. Reopening a done issue clears the merge. A
+person who wants a listed issue built reopens it.
 
 When the verify check fails, the issue goes back to its author to be fixed, and the daemon
 reopens it in its tracker, since the merge may have closed it there: GitHub through

@@ -748,8 +748,22 @@ pub struct Investigating<'a> {
     pub notes: Vec<(ProjectId, String)>,
     /// The milestone its issues get when it names none.
     pub milestone: Option<crate::ids::MilestoneId>,
-    /// When the group's last investigation started, in words; none for its first.
-    pub since: Option<String>,
+    /// Which merged pull requests it reads: those merged since the group's last
+    /// finished investigation started. While none has finished, those merged in
+    /// the 7 days before the group's first investigation started.
+    pub since: Since,
+}
+
+/// Where the window of merged pull requests an investigator reads begins.
+#[derive(Debug)]
+pub enum Since {
+    /// The group's first investigation: 7 days before its own start.
+    First,
+    /// No investigation of the group has finished: the time 7 days before its
+    /// first started, in words.
+    BeforeFirst(String),
+    /// When the group's last finished investigation started, in words.
+    Finished(String),
 }
 
 /// Writes the brief for a group's investigator, run in `place`. It names no tool
@@ -807,15 +821,17 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
         }
         (None, _) => "The group takes issues of every milestone; file them with none.\n".into(),
     };
-    let since = what.since.as_ref().map_or_else(
-        || {
-            format!(
-                "in the last {} days",
-                crate::investigation::FIRST_SINCE_DAYS
-            )
-        },
-        |s| format!("since {s}, when the group's last investigation started"),
-    );
+    let days = crate::investigation::FIRST_SINCE_DAYS;
+    let since = match &what.since {
+        Since::First => format!("in the last {days} days"),
+        Since::BeforeFirst(s) => format!(
+            "since {s}, {days} days before the group's first investigation started, as none has \
+             finished yet"
+        ),
+        Since::Finished(s) => {
+            format!("since {s}, when the group's last finished investigation started")
+        }
+    };
     let notes: String = what
         .notes
         .iter()
@@ -2373,7 +2389,7 @@ mod tests {
 
     /// A world where the group watch, over ankh and the area guild (whose tracker
     /// holds its repositories' issues), investigates; `since_ms` is when its last
-    /// investigation started, if it had one.
+    /// finished investigation started, if it had one.
     fn investigating(since_ms: Option<u64>) -> World {
         let mut events = vec![
             Event::ProjectAdded {
@@ -2422,6 +2438,10 @@ mod tests {
         };
         if let Some(at) = since_ms {
             events.push(start(at));
+            events.push(Event::Investigated {
+                group: GroupId::new("watch"),
+                agent: AgentId::new("investigator-1"),
+            });
             events.push(Event::InvestigationEnded {
                 group: GroupId::new("watch"),
                 at_ms: at + 1,
@@ -2453,7 +2473,7 @@ mod tests {
             "1. Each project's docs at that head, for work they plan that is not built yet.",
             "2. The open issues of each project, so you know what is covered already.",
             "3. The pull requests merged since 2026-11-27 13:05 UTC, when the group's last \
-             investigation started, for defects you can show in that work.",
+             finished investigation started, for defects you can show in that work.",
             "Then file one issue for each planned item no open issue covers, and one for each \
              defect you can show in merged work:\ntemet-work file PROJECT \"<title>\" - <<'BODY'\n",
             "the Depends on line an issue that waits for it carries",
@@ -2533,7 +2553,7 @@ mod tests {
             closed: Vec::new(),
             notes: Vec::new(),
             milestone: None,
-            since: None,
+            since: Since::First,
         };
         let investigator = investigate(&looking, Workplace::default(), &rules).task;
 
@@ -2733,7 +2753,7 @@ mod tests {
             closed: Vec::new(),
             notes: Vec::new(),
             milestone: None,
-            since: None,
+            since: Since::First,
         };
         for text in [
             brief(Role::Refiner, &issue),

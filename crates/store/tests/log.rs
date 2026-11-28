@@ -476,6 +476,69 @@ fn an_older_logs_group_replays_with_the_default_queue_low_and_investigate_every(
 }
 
 #[test]
+fn an_older_log_replays_to_the_last_finished_investigations_window() {
+    /// The brief's window line after replaying `events`, each one raw line.
+    fn replayed(name: &str, events: &[&str]) -> (Option<u64>, String) {
+        let p = path(name);
+        let lines: String = events
+            .iter()
+            .enumerate()
+            .map(|(i, e)| format!("{{\"seq\":{},\"at_ms\":0,\"event\":{e}}}\n", i + 1))
+            .collect();
+        std::fs::write(&p, lines).expect("write");
+        let (_, entries) = Log::open(&p).expect("open");
+        let world = replay(&entries);
+        let watch = GroupId::new("watch");
+        let launch = world.launch_investigator(&watch).expect("running");
+        let line = launch.brief.task.lines().find(|l| l.starts_with("3. "));
+        (
+            world.investigations[&watch].since_ms,
+            line.expect("line 3").to_string(),
+        )
+    }
+    let group = r#"{"GroupCreated":{"group":"watch","name":"Night watch","projects":["ankh"],"milestones":[],"refining_at_once":1}}"#;
+
+    let (since_ms, line) = replayed(
+        "older-investigations",
+        &[
+            group,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-1","at_ms":0}}"#,
+            r#"{"Investigated":{"group":"watch","agent":"investigator-1"}}"#,
+            r#"{"InvestigationEnded":{"group":"watch","at_ms":600000,"filed":0}}"#,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-2","at_ms":7800000}}"#,
+            r#"{"InvestigationEnded":{"group":"watch","at_ms":8400000,"filed":0}}"#,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-3","at_ms":15600000}}"#,
+        ],
+    );
+    assert_eq!(since_ms, Some(0));
+    assert!(
+        line.contains(
+            "since 1970-01-01 00:00 UTC, when the group's last finished investigation started"
+        ),
+        "{line}"
+    );
+
+    // 2026-11-27 13:05 UTC, and the group's first investigation ends unfinished.
+    let (since_ms, line) = replayed(
+        "older-unfinished-first",
+        &[
+            group,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-1","at_ms":1795784700000}}"#,
+            r#"{"InvestigationEnded":{"group":"watch","at_ms":1795785300000,"filed":0}}"#,
+            r#"{"InvestigationStarted":{"group":"watch","agent":"investigator-2","at_ms":1795792500000}}"#,
+        ],
+    );
+    assert_eq!(since_ms, None);
+    assert!(
+        line.contains(
+            "since 2026-11-20 13:05 UTC, 7 days before the group's first investigation started, \
+             as none has finished yet"
+        ),
+        "{line}"
+    );
+}
+
+#[test]
 fn replaying_the_log_gives_the_same_check_states_replies_and_point_states_as_applying_them() {
     use temet_work_core::Command;
     use temet_work_core::Verdict;

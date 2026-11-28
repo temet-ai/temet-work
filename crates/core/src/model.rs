@@ -503,8 +503,12 @@ pub struct Investigation {
     pub agent: AgentId,
     /// When it started, in milliseconds since the Unix epoch.
     pub started_ms: u64,
-    /// When the group's investigation before it started; none for its first.
+    /// When the group's last finished investigation started, the time it reads
+    /// merged pull requests from; none while none has finished, when it reads
+    /// those merged in the 7 days before `first_started_ms`.
     pub since_ms: Option<u64>,
+    /// When the group's first investigation started: `started_ms` for the first.
+    pub first_started_ms: u64,
     /// When it ended; none while it runs.
     pub ended_ms: Option<u64>,
     /// The issues its investigator filed, in order.
