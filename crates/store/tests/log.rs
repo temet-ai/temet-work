@@ -660,3 +660,45 @@ fn replaying_the_log_gives_the_same_check_states_replies_and_point_states_as_app
     assert_eq!(i.reviews[1].points, ["the face is dusty"]);
     assert_eq!(i.reviews[1].states, [PointState::Open]);
 }
+
+#[test]
+fn a_persons_refine_survives_the_log_and_replays_to_the_same_state() {
+    use temet_work_core::model::{Check, Stage};
+    let p = path("refined");
+    let (mut log, _) = Log::open(&p).expect("open");
+    let mut events = events();
+    // Sent back once its plan is in, with a new title and a check of the person's.
+    events.push(Event::Refined {
+        issue: IssueId::new("ankh", "1"),
+        title: Some("Mend the clock before dusk".into()),
+        checks: Some(vec![
+            Check::new("the clock strikes six at dusk", "listening at dusk"),
+            Check::new("Sam Vimes signs the log", ""),
+        ]),
+        send: true,
+    });
+    // A save that removes the person's checks.
+    events.push(Event::Refined {
+        issue: IssueId::new("ankh", "1"),
+        title: None,
+        checks: Some(vec![]),
+        send: false,
+    });
+    for e in &events {
+        log.append(5, e).expect("append");
+    }
+    drop(log);
+    let entries = Log::read(&p).expect("read");
+    let read: Vec<Event> = entries.iter().map(|e| e.event.clone()).collect();
+    assert_eq!(read, events, "each event reads back as written");
+    let replayed = replay(&entries);
+    assert_eq!(replayed, applied(5, &events));
+    let i = &replayed.issues[&IssueId::new("ankh", "1")];
+    assert_eq!(i.title, "Mend the clock before dusk");
+    assert_eq!(i.stage, Stage::Refining);
+    assert!(i.person_checks.is_empty());
+    // A save writes no `send`, nor a title or checks it does not change.
+    let line = std::fs::read_to_string(&p).expect("log");
+    let last = line.lines().last().expect("a line");
+    assert!(!last.contains("send") && !last.contains("title"), "{last}");
+}
