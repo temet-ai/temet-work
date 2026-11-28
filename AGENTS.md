@@ -9,21 +9,16 @@ before you change code.
 | What | Command |
 |---|---|
 | Test the crate you changed | `cargo nextest run -p <crate>` |
-| Test the workspace | `cargo nextest run --workspace --all-features` |
+| Test the workspace and its time budget | `cargo nextest run --workspace --all-features --profile ci && scripts/test-budget` |
 | Check every mix of parts | `scripts/check-mixes` |
-| Check the test time budget | `cargo nextest run --workspace --all-features --profile ci && scripts/test-budget` |
 | Lint | `cargo clippy --workspace --all-features --all-targets -- -D warnings` |
 | Licences and advisories | `cargo deny check` |
-| Check the desktop app, after a change to `crates/core` or `crates/style` | `(cd app && cargo clippy --all-targets -- -D warnings && cargo nextest run)` |
+| Check the desktop app, a workspace of its own in `app/` | `(cd app && cargo clippy --all-targets -- -D warnings && cargo nextest run)` |
 | See what the desktop app draws, offscreen | `(cd app && cargo run --example shots --features shots -- target/shots)` |
 
-Test the crate you changed as you work. Before you commit, run the workspace tests,
-`scripts/check-mixes` and `scripts/test-budget`. A change to `crates/core`
-(temet-work-core) or `crates/style` (temet-work-style) also runs
-`(cd app && cargo clippy --all-targets -- -D warnings && cargo nextest run)`: the app is a
-workspace of its own that uses both crates, so the workspace tests do not build it, and CI's
-`app` job fails the pull request when the app breaks. When that run changes
-`app/Cargo.lock`, commit it, since the job builds with `--locked`.
+Test the crate you changed as you work. CI runs the rest of the table, apart from the
+shots, on every pull request. It builds with `--locked`, so commit a `Cargo.lock` that
+changed.
 
 ## Rules
 

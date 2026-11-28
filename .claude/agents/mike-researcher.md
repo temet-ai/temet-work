@@ -32,9 +32,9 @@ it in the document. The repo takes several commits a day: once HEAD moves, read 
 
 ## Asking instead of reading
 
-Send wide questions to `ask` with `about: "code"` and the checkout path, or to a haiku
-Explore subagent. Some of their path:line citations do not resolve: open each one you quote with
-`sed -n` at the pinned commit before it goes in the document.
+Give `ask` the temet-proxy checkout path. Some path:line citations from `ask` or an Explore
+subagent do not resolve: open each one you quote with `sed -n` at the pinned commit before
+it goes in the document.
 
 ## Issues
 

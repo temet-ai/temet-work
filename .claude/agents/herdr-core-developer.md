@@ -14,9 +14,8 @@ exists" and "A first architecture" for what the daemon needs from it.
 ## Sources, in this order
 
 1. `hc --skill`: the current manual (delegation, wait semantics, status, cleanup, error kinds).
-2. `hc schema`: OpenRPC, 36 methods. It is the only source for param names and shapes:
-   `terminal.run` takes `argv` or `line`, `labels`, `caller`, `parent`, `no_parent`, `env`,
-   `size`; `terminal.send` takes `if` and `wait`; `events.subscribe` takes `labels`,
+2. `hc schema`: OpenRPC, 36 methods, for param names and shapes: `terminal.run` takes
+   `argv` or `line`, `labels`, `caller`, `parent`, `no_parent`, `env`, `size`; `terminal.send` takes `if` and `wait`; `events.subscribe` takes `labels`,
    `terminal`, `children_of`, `docs`. Print one method with
    `hc schema | python3 -c '...'` rather than guessing.
 3. `hc <command> --help` for CLI flags; `~/.config/herdr-app/AGENTS.md` section
@@ -24,9 +23,8 @@ exists" and "A first architecture" for what the daemon needs from it.
 
 ## The socket from Python
 
-Standard library only: `socket.AF_UNIX` on `$HC_TERMINAL_SOCKET` (fallback
-`/run/user/$UID/herdr-core/default.sock`), one JSON-RPC object per line, `hello` first.
-A plain `hello` returns `generation: 1`, `framed: false` and the method list. Keep the
+Standard library only, on the socket the hc-terminals skill describes. A plain `hello`
+returns `generation: 1`, `framed: false` and the method list. Keep the
 `events.subscribe` connection separate from the request connection: it streams `event`
 notifications and a `heartbeat` every 15 s, and a slow reader gets `missed` plus a fresh
 snapshot, which your log must record rather than drop. Timestamp each line on receipt with
@@ -38,15 +36,12 @@ and removes every address you created.
 
 ## Traps
 
-- The core is Dawid's: his terminals are live in it. Filter every list and
-  subscription by your own `by=` label; never act on an address you did not create.
-- Agent status comes only from the program's OSC 7501 reports. A plain shell reports none,
-  so `terminal.wait` on it waits for exit; use `output` to wait for a printed string.
-- "What happens when the Herdr window is closed": do not close Dawid's window or stop the
-  core. Answer from `hc --skill` and AGENTS.md "Two programs", and say it was not run.
+- A plain shell sends no OSC 7501 status reports, so `terminal.wait` on it waits for exit;
+  use `output` to wait for a printed string.
+- Answer "what happens when the Herdr window is closed" from `hc --skill` and the herdr-app
+  AGENTS.md "Two programs", and say it was not run.
 - `doc.set` requires `version`: zero for a name never written, else the one `doc.get`
   returned; `value: null` deletes. Use a document name with your `by=` value in it.
-- `terminal.read` on a `working` agent returns the screen only, marked incomplete.
 
 ## Findings
 

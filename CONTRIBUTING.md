@@ -13,14 +13,8 @@ licensed under the MIT licence too. There is no contributor licence agreement to
 
 You need Rust 1.98 or later, [cargo-nextest](https://nexte.st) and, for the licence check,
 [cargo-deny](https://github.com/EmbarkStudios/cargo-deny). On Linux the build links with
-mold (`pacman -S mold` or `apt install mold`). From the repository root:
-
-```bash
-cargo build
-cargo nextest run -p <crate>                 # the tests of the crate you changed
-cargo clippy --workspace --all-features --all-targets -- -D warnings
-cargo deny check                             # licences and advisories
-```
+mold (`pacman -S mold` or `apt install mold`). The commands to test, lint and check
+licences are in the Commands table of [`AGENTS.md`](AGENTS.md).
 
 Tests never touch your desktop or accounts: cargo sets `TEMET_WORK_SANDBOX`, so temet-work opens no
 browser, copies nothing, shows no notification and starts no real third-party program
@@ -28,9 +22,7 @@ during a test.
 
 ## Rules every change keeps
 
-The rules in `AGENTS.md` hold for every change, whether a person or an agent makes it,
-including the one on test data: made-up names only, taken from Terry Pratchett's
-Discworld.
+The rules in `AGENTS.md` hold for every change, whether a person or an agent makes it.
 
 ## Pull requests
 
