@@ -40,6 +40,8 @@ changed.
 - A real run goes on a second `temet-workd` started from your branch, with its own
   `--config`, `--log` and `TEMET_WORK_SOCKET`. Never touch the live `temet-workd` service
   or `~/.config/temet-work/config.toml`.
+- Remove a worktree or checkout you made once its branch is merged or abandoned, with its
+  build folder.
 - After a rebase, push your own branch with `git push --force-with-lease`.
 - A change to what temet-work stores or sends updates `docs/privacy.md` in the same
   commit.
