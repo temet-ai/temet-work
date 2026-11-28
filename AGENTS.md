@@ -34,6 +34,9 @@ changed.
   the coupling; never re-record the other crate's snapshots.
 - A test takes milliseconds. Over 2 s is flagged, over 20 s is killed, and a crate's suite
   over 10 s fails CI.
+- What review finds is fixed in the pull request under review, while the fix is cheap.
+  Never file it as a new issue: issues filed on work just done keep the work from ever
+  finishing.
 - Nothing waits on a person. When a choice stops you, take the default you would defend,
   record it as a decision with your reason, and finish your step. Do not stop to ask for
   approval or wait for an answer.

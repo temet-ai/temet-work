@@ -220,12 +220,10 @@ the group. Left out, `queue_low` is twice the work folders of the group's projec
 the projects in its areas, or 2 when they have none; 0 starts no investigator. The
 investigator holds no work folder and changes no file. It runs in the daemon's empty folder
 for the group's first project, as a refiner or reviewer does (`docs/settings.md`, "Which
-machine an agent runs on"). It reads each project's
-docs for planned work that is not built, the open issues, and the pull requests merged since
-the group's last finished investigation started: one is finished when its investigator ran
-`temet-work investigated`. While none has finished, it reads those merged in the 7 days
-before the group's first investigation started. It files an issue for each planned item no
-open issue covers and for each defect it can show (`temet-work file`, `docs/commands.md`).
+machine an agent runs on"). It reads each project's docs for planned work that is not built
+and the open issues, and files an issue for each planned item no open issue covers
+(`temet-work file`, `docs/commands.md`). It files none for a defect in merged work: review
+blocks on a defect a pull request brings in, so the defect is fixed in that pull request.
 It reads docs and code at the current head of each repository's default branch, not as a
 checkout's files stand: it fetches, then reads with `git show` or in a separate checkout
 outside the checkouts its brief names and the folder it runs in. Each issue it files goes in
