@@ -55,11 +55,14 @@ pub enum IconName {
     // RefineDialog's Delete and Add check.
     Trash,
     Add,
+    // IssueActions' Assign and Unassign.
+    Person,
+    Cross,
 }
 
 impl IconName {
     /// Every icon the app embeds.
-    pub const ALL: [IconName; 37] = [
+    pub const ALL: [IconName; 39] = [
         Self::TickCircle,
         Self::Refresh,
         Self::Time,
@@ -97,6 +100,8 @@ impl IconName {
         Self::Search,
         Self::Trash,
         Self::Add,
+        Self::Person,
+        Self::Cross,
     ];
 
     /// Blueprint's name for the icon, such as `tick-circle`.
@@ -139,6 +144,8 @@ impl IconName {
             Self::Search => "search",
             Self::Trash => "trash",
             Self::Add => "add",
+            Self::Person => "person",
+            Self::Cross => "cross",
         }
     }
 

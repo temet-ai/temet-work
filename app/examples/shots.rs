@@ -27,7 +27,7 @@ use temet_work_app::components::stage_tag::{Stage, StageTag};
 use temet_work_app::components::status_tag::{Status, StatusTag};
 use temet_work_app::components::tag::Tag;
 use temet_work_app::composites::check_list::{CheckList, PlanCheck};
-use temet_work_app::composites::issue_actions::IssueActions;
+use temet_work_app::composites::issue_actions::{IssueActions, IssueActionsAgent};
 use temet_work_app::composites::issue_pane::IssueTab;
 use temet_work_app::composites::refine_dialog::{RefineCheck, RefineDialog, RefineDraft};
 use temet_work_app::daemon::Problem;
@@ -663,7 +663,19 @@ impl Render for Gallery {
                     IssueActions::new(Stage::Ready)
                         .on_refine(|_, _| {})
                         .move_to(vec![Stage::New])
-                        .on_move(|_, _, _| {}),
+                        .on_move(|_, _, _| {})
+                        .assignable(vec![IssueActionsAgent {
+                            id: "refiner-82".into(),
+                            label: "refiner-82".into(),
+                            detail: Some("clacks#215".into()),
+                        }])
+                        .on_assign(|_, _, _| {})
+                        .assigned(vec![IssueActionsAgent {
+                            id: "author-71".into(),
+                            label: "author-71".into(),
+                            detail: Some("clacks#219".into()),
+                        }])
+                        .on_unassign(|_, _, _| {}),
                 )
                 .into_any_element(),
             Story::CutPanelPadded => panel(false, false, cx).into_any_element(),

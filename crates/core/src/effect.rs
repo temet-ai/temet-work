@@ -95,6 +95,16 @@ pub enum Effect {
         /// The folder.
         folder: FolderId,
     },
+    /// Send a running agent a person moved onto `issue` the brief a fresh agent
+    /// of its role there would start with, after a line saying it was moved
+    /// ([`crate::World::moved_brief`]). It goes when the agent's turn ends, and
+    /// its arrival is reported as [`crate::Event::Briefed`].
+    Brief {
+        /// The agent.
+        agent: crate::ids::AgentId,
+        /// The issue it was moved to.
+        issue: IssueId,
+    },
     /// Stop an agent's session: its issue was closed while it worked.
     StopAgent {
         /// The agent.
@@ -135,6 +145,7 @@ impl Effect {
             Self::ReleaseFolder { folder } => format!("release folder {folder}"),
             Self::Run { launch, .. } => format!("run {}", launch.agent),
             Self::StopAgent { agent } => format!("stop {agent}"),
+            Self::Brief { agent, issue } => format!("send {agent} its brief for {issue}"),
         }
     }
 

@@ -130,7 +130,8 @@ impl World {
         }
     }
 
-    /// Whether `agent` started before a person last moved its issue. Its step is
+    /// Whether `agent` started, or was assigned to its issue, before a person
+    /// last moved that issue. Its step is
     /// over for good ([`World::over_for_good`]), whatever stage the issue has
     /// reached since, and it is not the issue's agent of its role
     /// ([`World::running`]), so a fresh one starts in its place.
@@ -140,7 +141,7 @@ impl World {
             .as_ref()
             .and_then(|id| self.issues.get(id))
             .and_then(|i| i.moved)
-            .is_some_and(|m| agent.started < m.at)
+            .is_some_and(|m| agent.assigned_at.unwrap_or(agent.started) < m.at)
     }
 
     /// Why `agent` may not run `step` on its issue because a person moved the

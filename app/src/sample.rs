@@ -12,6 +12,7 @@ use crate::components::status_tag::Status;
 use crate::composites::check_list::PlanCheck;
 use crate::composites::decision_row::{Decision, UndoCost};
 use crate::composites::group_list::{GroupListAgent, GroupListGroup};
+use crate::composites::issue_actions::IssueActionsAgent;
 use crate::composites::issue_pane::{IssueDecision, IssuePlan, IssuePullRequest};
 use crate::composites::issue_table::IssueSummary;
 use crate::composites::meter_list::MeterListItem;
@@ -23,6 +24,15 @@ use crate::pages::project::{IssueDetail, Milestone, ProjectView};
 
 fn s(text: &str) -> SharedString {
     SharedString::from(text.to_string())
+}
+
+/// An agent as an issue's actions menu lists it, with the issue it is on, or "free".
+fn actions_agent(id: &str, on: &str) -> IssueActionsAgent {
+    IssueActionsAgent {
+        id: s(id),
+        label: s(id),
+        detail: Some(s(on)),
+    }
 }
 
 fn project(id: &str, icon: IconName, waiting: usize) -> SideNavProject {
@@ -352,6 +362,13 @@ pub fn project_view() -> ProjectView {
     let watch_44 = IssueDetail {
         id: Some(temet_work_core::ids::IssueId::new("watch", "WATCH-44")),
         moves: vec![Stage::New, Stage::Ready],
+        // It is in review, so only a reviewer on another issue of its group and project may be
+        // assigned to it; the author and reviewer on it now may be unassigned.
+        assignable: vec![actions_agent("py-1", "watch#58")],
+        assigned: vec![
+            actions_agent("nw-2", "watch#44"),
+            actions_agent("nw-3", "watch#44"),
+        ],
         round: 2,
         plan: Some(IssuePlan {
             folder: Some(s("omit:~/work/watch-2")),

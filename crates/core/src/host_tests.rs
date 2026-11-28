@@ -931,3 +931,81 @@ fn stop_problem_goes_when_the_agent_ends() {
     assert!(!status.contains("stop author-1"), "{status}");
     assert!(status.contains("stop refiner-1"), "{status}");
 }
+
+#[test]
+fn an_unassigned_agents_failing_stop_is_asked_each_round_and_listed_until_it_ends() {
+    let author_ends = Polled {
+        events: vec![Event::AgentChanged {
+            agent: AgentId::new("author-1"),
+            state: AgentState::Ended,
+            lost: false,
+        }],
+        problem: None,
+    };
+    let unstoppable = Unstoppable {
+        polls: vec![Polled::default(), author_ends],
+        stops: Arc::default(),
+    };
+    let stops = unstoppable.stops.clone();
+    let mut h = host(
+        vec![
+            Box::new(Brains),
+            Box::new(Terms::default()),
+            Box::new(unstoppable),
+        ],
+        Shared::default(),
+    );
+    feed(&mut h, [synced("1"), planned(&ankh_one())]);
+    let author = AgentId::new("author-1");
+    assert_eq!(
+        h.world()
+            .running(&ankh_one(), Role::Author)
+            .map(|a| a.id.clone()),
+        Some(author.clone())
+    );
+    let unassign = crate::command::Command::Unassign {
+        issue: ankh_one(),
+        agent: author.clone(),
+    };
+    for e in h.world().events(None, &unassign).expect("taken") {
+        h.handle(1, e).expect("handle");
+    }
+    let line = |h: &Host| h.problems().get("stop author-1").cloned();
+    assert_eq!(line(&h), Some("the request timed out".to_string()));
+
+    // The next round asks for its stop again and starts no other author.
+    h.tick(2).expect("tick");
+    assert_eq!(line(&h), Some("the request timed out".to_string()));
+    let asked = |author: &AgentId| {
+        stops
+            .lock()
+            .expect("stops")
+            .iter()
+            .filter(|a| *a == author)
+            .count()
+    };
+    assert_eq!(
+        asked(&author),
+        2,
+        "asked at the unassign and again this round"
+    );
+    assert!(!h.world().agents.contains_key(&AgentId::new("author-2")));
+
+    // Once it has ended its line goes, and a fresh author starts in the
+    // issue's folder, with none of `starts` used.
+    h.tick(3).expect("tick");
+    assert_eq!(line(&h), None, "{:?}", h.problems());
+    assert!(!h.world().agents[&author].ended_waited_on);
+    h.tick(4).expect("tick");
+    let fresh = h
+        .world()
+        .running(&ankh_one(), Role::Author)
+        .map(|a| (a.id.clone(), a.folder.clone()));
+    assert_eq!(
+        fresh,
+        Some((
+            AgentId::new("author-2"),
+            h.world().issues[&ankh_one()].folder.clone()
+        ))
+    );
+}

@@ -71,6 +71,8 @@ pub const FILES: &[(&str, &[u8])] = icons![
     "search",
     "trash",
     "add",
+    "person",
+    "cross",
 ];
 
 /// The embedded files as GPUI's asset source.

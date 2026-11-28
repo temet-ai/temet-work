@@ -195,6 +195,10 @@ pub struct Issue {
     /// issue is not stopped, or when the daemon's log does not say.
     #[serde(default)]
     pub stopped_since: Option<u64>,
+    /// The agents a person may assign to it now, by the rule `assign` checks
+    /// ([`World::assignment`]); empty from a daemon that does not send it.
+    #[serde(default)]
+    pub assignable: Vec<AgentId>,
 }
 
 /// One of the checks a person holds an issue to.
@@ -451,6 +455,13 @@ pub struct Agent {
     /// person did, or when the daemon's log does not say.
     #[serde(default)]
     pub stopped_at: Option<u64>,
+    /// Whether a person put it on its issue (`temet-work assign`).
+    #[serde(default)]
+    pub assigned: bool,
+    /// Whether a person took it off `issue` (`temet-work unassign`) and it has
+    /// not ended yet: it no longer works on the issue and is being stopped.
+    #[serde(default)]
+    pub unassigned: bool,
 }
 
 /// What an agent is doing, as one word.
@@ -696,6 +707,7 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
             .collect(),
         updated_ms: world.updated.at(&i.id),
         moves: world.moves_of(i),
+        assignable: world.assignable(&i.id),
         checks: i
             .plan
             .iter()
@@ -760,6 +772,8 @@ fn agent(world: &World, a: &model::Agent) -> Agent {
         model: a.model.clone(),
         stopped_by_person: world.person_stopped(&a.id).is_some(),
         stopped_at: world.person_stopped(&a.id).flatten(),
+        assigned: a.assigned(),
+        unassigned: a.unassigned && a.state != AgentState::Ended,
     }
 }
 
@@ -1298,6 +1312,9 @@ mod tests {
                     .iter()
                     .all(|a| !a.stopped_by_person && a.stopped_at.is_none())
             );
+            // Nor, from before assign, who a person assigned or may assign.
+            assert!(view.issues.iter().all(|i| i.assignable.is_empty()));
+            assert!(view.agents.iter().all(|a| !a.assigned && !a.unassigned));
         }
     }
 

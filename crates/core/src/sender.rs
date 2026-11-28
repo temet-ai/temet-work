@@ -224,6 +224,8 @@ impl Command {
             Self::Move { .. } => "move",
             Self::Stop { .. } => "stop",
             Self::Start { .. } => "start",
+            Self::Assign { .. } => "assign",
+            Self::Unassign { .. } => "unassign",
         }
     }
 

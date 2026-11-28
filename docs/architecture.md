@@ -272,6 +272,17 @@ a stopped agent something is dropped too. The issue's other agents carry on, and
 deploy and verify go ahead, for the reason above. A stopped investigator's investigation ends
 with its session, as any does.
 
+A person can move a running refiner, reviewer or arbiter onto another issue of its group and
+project whose stage needs that role (`temet-work assign`), and take any agent but an
+investigator off its issue (`temet-work unassign`; `docs/commands.md`, "Assigning an agent").
+Each is an event, and the rule both check is `World::assignment` in `crates/core/src/assign.rs`,
+which the view's `assignable` lists use too. An unassigned agent keeps its issue in the record,
+for its stop, but no longer works on it: `World::running` and the step checks skip it,
+`World::waiting_on` is false for it, each round asks for its stop, and no fresh agent of its
+role starts on the issue until it has ended. A moved agent works on its new issue at once. The
+runner family sends it that issue's brief when its turn ends and reports the arrival as
+`Briefed`; until then each round asks for the brief again, so a restart does not lose it.
+
 When a group's work queue runs short, the daemon starts one investigator for it. It holds no
 work folder and runs in the daemon's empty folder for the group's first repository. It reads
 the group's projects and files the next issues through `temet-work file`

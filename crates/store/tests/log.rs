@@ -702,3 +702,64 @@ fn a_persons_refine_survives_the_log_and_replays_to_the_same_state() {
     let last = line.lines().last().expect("a line");
     assert!(!last.contains("send") && !last.contains("title"), "{last}");
 }
+
+#[test]
+fn a_persons_assign_and_unassign_and_a_moved_agents_brief_survive_the_log_and_replay_the_same() {
+    let p = path("assign");
+    let (mut log, _) = Log::open(&p).expect("open");
+    let issue = |key: &str| IssueId::new("ankh", key);
+    let agent = |id: &str| temet_work_core::ids::AgentId::new(id);
+    let reader = |id: &str, role, key: &str| Event::AgentStarted {
+        agent: agent(id),
+        group: GroupId::new("watch"),
+        role,
+        issue: Some(issue(key)),
+        machine: MachineId::new("morpork"),
+        folder: None,
+        secret_digest: None,
+        runtime: None,
+        model: None,
+    };
+    let mut events = events();
+    events.extend([
+        Event::IssueSynced {
+            issue: issue("2"),
+            title: "Ring the bell".into(),
+            milestone: Some(MilestoneId::new("m1")),
+            depends_on: vec![],
+            order: 2,
+            closed: false,
+        },
+        reader("refiner-1", temet_work_core::model::Role::Refiner, "2"),
+        reader("refiner-2", temet_work_core::model::Role::Refiner, "3"),
+    ]);
+    let person = [
+        Event::Assigned {
+            issue: issue("2"),
+            agent: agent("refiner-2"),
+            from: issue("3"),
+        },
+        Event::Briefed {
+            agent: agent("refiner-2"),
+            issue: issue("2"),
+        },
+        Event::Unassigned {
+            issue: issue("2"),
+            agent: agent("refiner-2"),
+        },
+    ];
+    events.extend(person.iter().cloned());
+    let mut live = World::default();
+    for e in &events {
+        log.append(0, e).expect("append");
+        live.apply_at(0, e);
+    }
+    drop(log);
+    let (_, entries) = Log::open(&p).expect("reopen");
+    let read: Vec<&Event> = entries.iter().map(|e| &e.event).collect();
+    assert_eq!(
+        read[read.len() - 3..],
+        person.iter().collect::<Vec<_>>()[..]
+    );
+    assert_eq!(replay(&entries), live);
+}

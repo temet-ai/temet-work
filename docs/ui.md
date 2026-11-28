@@ -125,7 +125,9 @@ GroupList `tm-groups-head`; a class with no measured look follows its rule in `t
 
 Where the radar page and a part's own stories draw a part differently, the window follows the
 radar page, because the page is the screen the window reproduces. Its Alert asks with the primary
-intent and no icon, and its Toast has the Notifications icon and no intent. The page closes the
+intent and no icon, and its Toast has the Notifications icon and no intent. A person's request the
+daemon refuses, or that gets no reply, shows in a Toast with the danger intent and the WarningSign
+icon, naming the action and the agent. The page closes the
 toast after 5000 ms; no motion token holds that duration yet, so the window's toast stays until it
 is closed.
 
@@ -188,7 +190,7 @@ is closed.
 | MilestonePanel | one milestone: name, done of total, due date, progress, and its issues | CutPanel, Section, ProgressBar, IssueTable | `temet-milestonepanel` |
 | IssueTable | issues as rows: key, title, stage, agent, updated; optional group rows; one set of column widths in every panel | HTMLTable, TableRow, StageTag | `temet-issuetable` |
 | IssuePane | the side pane for an issue: title, key, stage, its actions menu behind a small minimal button with More at the right of its head, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Button, Popover, IssueActions, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
-| IssueActions | what a person can do to an issue, as one menu. The design system's has Open, Refine, Move to, Assign and Unassign, each shown only when its handler is given; the daemon has commands for Refine (`temet-work refine`) and Move to (`temet-work move`), so the window gives those two, Refine first with a divider after it. Refine opens RefineDialog. Move to's submenu lists the stages the daemon says the issue may move to, each with its stage's icon and name (`move_to`), and a pick sends the move. Story: In Pane | Menu, MenuItem, MenuDivider, Icon | `temet-issueactions` |
+| IssueActions | what a person can do to an issue, as one menu. The design system's has Open, Refine, Move to, Assign and Unassign, each shown only when its handler is given; the daemon has commands for Refine (`temet-work refine`), Move to (`temet-work move`), Assign (`temet-work assign`) and Unassign (`temet-work unassign`), so the window gives those four, Refine first with a divider after it. Refine opens RefineDialog. Move to's submenu lists the stages the daemon says the issue may move to, each with its stage's icon and name (`move_to`), and a pick sends the move. Assign's submenu lists the agents the daemon says may be assigned to the issue (`assignable`) and Unassign's the agents working on it, each with the issue it is on now, and a pick sends the command. Stories: In Pane, No Agents | Menu, MenuItem, MenuDivider, Icon | `temet-issueactions` |
 | RefineDialog | an issue's title and its checks for the person to edit, each check a done-when and a proven-by with Delete, then Add check; Cancel, Save and "Save and send to refiner", the last two disabled while the title is empty and busy while their `refine` is answered; a refusal's reason over the fields | Dialog, DialogBody, DialogFooter, FormGroup, InputGroup, TextArea, Button, Callout | `temet-refinedialog` |
 | CheckList | a plan's checks: a line counting them by status, then for each what is done when, what proves it and its status, if it has run. A done-when over three lines and a proven-by over two show their first lines, and plus opens the row whole, minus closes it. Stories: Default, Failed And Timed, No Checks, Not Run Yet, Long Checks | ListRow, StatusTag, Button | `temet-checklist` |
 | ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points, the author's reply and each point's status | Disclosure, ListRow, StatusTag | `temet-reviewrounds` |

@@ -3519,3 +3519,6 @@ mod person_stop;
 
 #[path = "world_refine_tests.rs"]
 mod refine;
+
+#[path = "world_assign_tests.rs"]
+mod assign;

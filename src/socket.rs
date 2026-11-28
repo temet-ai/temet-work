@@ -713,6 +713,9 @@ fn answer_here(
                 temet_work_core::Command::Move { issue, .. } => host.world().open_pulls(issue),
                 _ => Vec::new(),
             };
+            // Said from the world before the change, which names the agents
+            // the change takes off and starts.
+            let moved = assignment(host.world(), &request.command);
             let decided = events.iter().find_map(|e| match e {
                 temet_work_core::Event::DecisionMade { decision } => Some(decision.id),
                 _ => None,
@@ -720,7 +723,7 @@ fn answer_here(
             for event in events {
                 host.handle(now_ms, event)?;
             }
-            if let Some(text) = changed {
+            if let Some(text) = changed.or(moved) {
                 return Ok(Reply::Done { text });
             }
             match &request.command {
@@ -854,6 +857,65 @@ fn started_reply(world: &temet_work_core::World, issue: &temet_work_core::ids::I
         )
     };
     format!("started: the next round starts what {issue} needs{after}")
+}
+
+/// What a person's accepted `assign` or `unassign` did, worked out from the world
+/// before it: which agent moved or was taken off, which agent the issue had in
+/// its place, and which issue gets a fresh agent, now or once the stopped one has
+/// ended. `None` for any other command.
+fn assignment(
+    world: &temet_work_core::World,
+    command: &temet_work_core::Command,
+) -> Option<String> {
+    use temet_work_core::{Command, World};
+    let (issue, agent, assign) = match command {
+        Command::Assign { issue, agent } => (issue, agent, true),
+        Command::Unassign { issue, agent } => (issue, agent, false),
+        _ => return None,
+    };
+    let a = world.agents.get(agent)?;
+    let role = a.role.name();
+    let needs = |id| {
+        world
+            .issues
+            .get(id)
+            .and_then(World::stage_needs)
+            .is_some_and(|r| r == a.role)
+    };
+    if !assign {
+        let after = if needs(issue) {
+            format!("once it has ended, {issue} gets a fresh {role}")
+        } else {
+            format!("{issue} needs no {role} now, so none starts")
+        };
+        return Some(format!(
+            "{agent} is unassigned from {issue} and its session is being stopped; {after}"
+        ));
+    }
+    let from = a.issue.as_ref()?;
+    let had: Vec<String> = world
+        .agents
+        .values()
+        .filter(|o| o.id != *agent && o.role == a.role && o.works_on(issue))
+        .map(|o| o.id.to_string())
+        .collect();
+    let had = match had.as_slice() {
+        [] => String::new(),
+        [one] => format!("; {one}, its {role} until now, is unassigned and stopped"),
+        many => format!(
+            "; {}, its {role}s until now, are unassigned and stopped",
+            many.join(", ")
+        ),
+    };
+    let fresh = if needs(from) {
+        format!("; {from} gets a fresh {role}")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "{agent} works on {issue} now, moved from {from}; it hears its brief for {issue} when its \
+         turn ends{had}{fresh}"
+    ))
 }
 
 /// The daemon's request log: who sent a command and what came of it. A command

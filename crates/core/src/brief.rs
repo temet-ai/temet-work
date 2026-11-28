@@ -403,6 +403,44 @@ pub fn write(
     rules: &[String],
 ) -> Brief {
     let Workplace { folder, held, .. } = place;
+    Brief {
+        role,
+        issue: Some(issue.id.clone()),
+        task: with_rules(role_parts(role, issue, source, repos, &held, pulls), rules),
+        model: None,
+        permission: builtin_permission(),
+        folder,
+    }
+}
+
+/// What a running agent a person moved onto `issue` is sent: `line`, which says
+/// so, then the brief a fresh agent of `role` on `issue` would start with, all
+/// held to [`fit::LIMIT`] bytes as every brief is. Only a refiner, reviewer or
+/// arbiter is moved, and none of them holds a folder, so none is named.
+pub fn moved(
+    line: &str,
+    role: Role,
+    issue: &Issue,
+    source: Option<&str>,
+    repos: &[ProjectId],
+    pulls: &[Pulled],
+    rules: &[String],
+) -> String {
+    let mut parts = vec![Part::Whole(line.to_string())];
+    parts.extend(role_parts(role, issue, source, repos, &[], pulls));
+    with_rules(parts, rules)
+}
+
+/// The parts of the brief for an agent of `role` on `issue`, before the
+/// [`STOP`] paragraph and the kept rules ([`with_rules`]).
+fn role_parts(
+    role: Role,
+    issue: &Issue,
+    source: Option<&str>,
+    repos: &[ProjectId],
+    held: &[Held],
+    pulls: &[Pulled],
+) -> Vec<Part> {
     let id = &issue.id;
     let source = source.map_or_else(
         || format!("issue {} of project {}", id.key, id.project),
@@ -446,9 +484,9 @@ pub fn write(
     let replies = issue.block_to_answer().map_or_else(String::new, |block| {
         format!(" {}", reply_flags(block.points.len()))
     });
-    let (work, ready) = authors_work(id, &held, pulls);
+    let (work, ready) = authors_work(id, held, pulls);
     let to_review = to_review(pulls);
-    let parts = match role {
+    match role {
         Role::Refiner => {
             let mut parts = vec![Part::Whole(format!(
                 "Refine {id}: {title}. It is {source}.\n\
@@ -572,14 +610,6 @@ pub fn write(
             "Answer questions about {id}: {title}. It is {source}. Change no file.",
             title = issue.title,
         ))],
-    };
-    Brief {
-        role,
-        issue: Some(id.clone()),
-        task: with_rules(parts, rules),
-        model: None,
-        permission: builtin_permission(),
-        folder,
     }
 }
 

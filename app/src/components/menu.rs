@@ -1,5 +1,5 @@
 //! Menu, MenuItem and MenuDivider (`blueprint-menu`): a list of actions on the raised surface,
-//! each item with its icon and text, and an item with items of its own opening them as a submenu
+//! each item with its icon, its text and an optional muted label at the right, and an item with items of its own opening them as a submenu
 //! beside it, with a caret at its end, as Blueprint's `<MenuItem>` with children does. A divider
 //! is a rule between groups of items.
 //!
@@ -96,6 +96,7 @@ pub struct MenuItem {
     id: SharedString,
     text: SharedString,
     icon: Option<IconName>,
+    label: Option<SharedString>,
     items: Vec<MenuItem>,
     on_click: Option<OnClick>,
 }
@@ -107,6 +108,7 @@ impl MenuItem {
             id: id.into(),
             text: text.into(),
             icon: None,
+            label: None,
             items: Vec::new(),
             on_click: None,
         }
@@ -114,6 +116,12 @@ impl MenuItem {
 
     pub fn icon(mut self, icon: IconName) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Muted text at the right, as Blueprint's `labelElement`, such as the issue an agent is on.
+    pub fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
         self
     }
 
@@ -159,6 +167,9 @@ impl RenderOnce for MenuItem {
                 .h(line)
                 .child(Icon::new(icon).color(muted))
         });
+        let label = self
+            .label
+            .map(|label| div().flex_none().text_color(muted).child(label));
         let caret = submenu.then(|| {
             div()
                 .flex()
@@ -183,6 +194,7 @@ impl RenderOnce for MenuItem {
             .hover(move |style| style.bg(hover))
             .children(icon)
             .child(div().flex_1().min_w_0().child(self.text))
+            .children(label)
             .children(caret);
         if is_open {
             // Blueprint's open submenu item keeps the hover surface.

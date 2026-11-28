@@ -42,6 +42,10 @@ fn issue_field() -> Value {
     json!({"type": "string", "description": "The issue as project#key, such as radar#44."})
 }
 
+fn agent_field() -> Value {
+    json!({"type": "string", "description": "The agent's id, such as author-3."})
+}
+
 fn target_field() -> Value {
     json!({"type": "string", "description": "global, an area or project id, a milestone as project:Milestone name, or an issue as project#key."})
 }
@@ -111,7 +115,7 @@ fn tools() -> Vec<Tool> {
             name: "screen",
             description: "What an agent's terminal shows now.",
             acts: false,
-            schema: json!({"type": "object", "properties": {"agent": {"type": "string", "description": "The agent's id, such as author-3."}}, "required": ["agent"]}),
+            schema: json!({"type": "object", "properties": {"agent": agent_field()}, "required": ["agent"]}),
         },
         Tool {
             name: "settings",
@@ -279,6 +283,18 @@ fn tools() -> Vec<Tool> {
             description: "A person's: let agents start again on an issue whose agent a person stopped. The next round starts what the issue's stage needs. The stopped agent stays stopped, and a fresh one starts once it has ended. Refused from an agent, and on an issue no person stopped.",
             acts: true,
             schema: json!({"type": "object", "properties": {"issue": issue_field()}, "required": ["issue"]}),
+        },
+        Tool {
+            name: "assign",
+            description: "A person's: move a running refiner, reviewer or arbiter of the issue's group, now on another issue of the same project, onto an issue whose stage needs that role now (refining; in review with no approval in; with the arbiter with no ruling in). The agent of that role the issue had is unassigned and stopped, the moved agent hears the issue's brief when its turn ends, and the issue it left gets a fresh agent of that role. An author or investigator, an ended agent, a paused issue and a role the stage does not need are refused with the reason. Refused from an agent.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {"issue": issue_field(), "agent": agent_field()}, "required": ["issue", "agent"]}),
+        },
+        Tool {
+            name: "unassign",
+            description: "A person's: take a running agent off the issue it works on and stop its session at once. Its commands for the issue are refused from then on; once it has ended the issue gets a fresh agent of that role if its stage still needs one (an author in the issue's own folders). Works on a paused issue too. Refused from an agent.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {"issue": issue_field(), "agent": agent_field()}, "required": ["issue", "agent"]}),
         },
         Tool {
             name: "file",
@@ -604,6 +620,14 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
         "start" => Command::Start {
             issue: issue(args)?,
         },
+        "assign" => Command::Assign {
+            issue: issue(args)?,
+            agent: AgentId::new(text(args, "agent")?),
+        },
+        "unassign" => Command::Unassign {
+            issue: issue(args)?,
+            agent: AgentId::new(text(args, "agent")?),
+        },
         other => return Err(format!("no tool {other}")),
     })
 }
@@ -743,7 +767,7 @@ mod tests {
                 "change", "ci", "closed", "issue", "screen", "search", "settings", "show", "status"
             ]
         );
-        assert_eq!(names(Level::Act).len(), 27);
+        assert_eq!(names(Level::Act).len(), 29);
     }
 
     #[test]
@@ -1047,6 +1071,50 @@ mod tests {
             &mut refused,
         );
         assert!(refused.is_empty(), "nothing is sent at read");
+    }
+
+    #[test]
+    fn assign_and_unassign_are_offered_at_act_only_and_become_the_command_lines() {
+        let mut sent = Vec::new();
+        call(
+            Level::Act,
+            "assign",
+            json!({"issue": "watch#12", "agent": "reviewer-4"}),
+            &mut sent,
+        );
+        call(
+            Level::Act,
+            "unassign",
+            json!({"issue": "watch#12", "agent": "author-2"}),
+            &mut sent,
+        );
+        let commands: Vec<_> = sent.iter().map(|r| r.command.clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::Assign {
+                    issue: IssueId::new("watch", "12"),
+                    agent: AgentId::new("reviewer-4"),
+                },
+                Command::Unassign {
+                    issue: IssueId::new("watch", "12"),
+                    agent: AgentId::new("author-2"),
+                }
+            ]
+        );
+        for name in ["assign", "unassign"] {
+            assert!(names(Level::Act).contains(&name.to_string()));
+            assert!(!names(Level::Read).contains(&name.to_string()));
+        }
+        let mut sent = Vec::new();
+        let answer = call(
+            Level::Act,
+            "assign",
+            json!({"issue": "watch#12"}),
+            &mut sent,
+        );
+        assert_eq!(answer["result"]["isError"], true, "no agent");
+        assert!(sent.is_empty());
     }
 
     #[test]

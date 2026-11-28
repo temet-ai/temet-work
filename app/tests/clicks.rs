@@ -1,12 +1,14 @@
 //! Clicks on the Project page, drawn under GPUI's test support with the design system's faces
 //! and no window: a tab, Group by, a row, Overturn with its confirm, a long check's plus and
-//! minus, the issue pane's actions menu moving an issue, and Refine with what its Save and "Save
-//! and send to refiner" send. Run with
+//! minus, the issue pane's actions menu moving an issue and assigning or unassigning an agent,
+//! and Refine with what its Save and "Save and send to refiner" send. Run with
 //! `cargo test --features shots --test clicks`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AppContext, Entity, InteractiveElement, IntoElement, Modifiers, ParentElement, Styled,
@@ -21,7 +23,7 @@ use temet_work_app::composites::refine_dialog::Sending;
 use temet_work_app::pages::project::{Grouping, Project};
 use temet_work_app::{assets, sample, theme};
 use temet_work_core::Command;
-use temet_work_core::ids::IssueId;
+use temet_work_core::ids::{AgentId, IssueId};
 use temet_work_core::view::StageWord;
 
 /// The page in a test window, drawn.
@@ -522,4 +524,64 @@ fn save_with_nothing_changed_or_no_title_sends_nothing() {
     click(vcx, "refine-save");
     assert!(vcx.read_entity(&page, |p, _| p.refining().is_none()));
     assert!(held.borrow().is_empty(), "nothing was sent");
+}
+
+#[test]
+fn assign_sends_the_agent_picked_from_the_actions_menu() {
+    let (page, vcx) = page();
+    let said = "py-1 works on watch#WATCH-44 now, moved from watch#58";
+    let sent = sending(&page, vcx, Ok(said));
+    click(vcx, "issue-actions");
+    // The menu lists only the agents the view says a person may assign: not nw-1, a running
+    // refiner of the group that the issue's review does not need.
+    click(vcx, "issue-actions-assign");
+    assert!(vcx.debug_bounds("assign-py-1").is_some());
+    assert!(vcx.debug_bounds("assign-nw-1").is_none());
+    last_click(vcx, "assign-py-1");
+    assert_eq!(
+        sent.borrow().as_slice(),
+        [Command::Assign {
+            issue: IssueId::new("watch", "WATCH-44"),
+            agent: AgentId::new("py-1"),
+        }]
+    );
+    let (toast, intent, open) = vcx.read_entity(&page, |p, _| {
+        (p.toast().cloned(), p.toast_intent(), p.actions_open())
+    });
+    assert_eq!(toast.as_deref(), Some(said));
+    assert_eq!(intent, Some(Intent::None));
+    assert!(!open, "the menu closes once an agent is picked");
+}
+
+#[test]
+fn unassign_sends_the_agent_picked_from_the_actions_menu() {
+    let (page, vcx) = page();
+    let sent = sending(&page, vcx, Ok("unassigned"));
+    click(vcx, "issue-actions");
+    click(vcx, "issue-actions-unassign");
+    assert!(vcx.debug_bounds("unassign-nw-2").is_some());
+    last_click(vcx, "unassign-nw-3");
+    assert_eq!(
+        sent.borrow().as_slice(),
+        [Command::Unassign {
+            issue: IssueId::new("watch", "WATCH-44"),
+            agent: AgentId::new("nw-3"),
+        }]
+    );
+}
+
+#[test]
+fn a_refused_assign_shows_the_daemon_reply_in_a_danger_toast() {
+    let why = "py-1 is a reviewer, and watch#WATCH-44 is with the author: it needs no reviewer now";
+    let (page, vcx) = page();
+    sending(&page, vcx, Err(why));
+    click(vcx, "issue-actions");
+    click(vcx, "issue-actions-assign");
+    last_click(vcx, "assign-py-1");
+    let (toast, intent) = vcx.read_entity(&page, |p, _| (p.toast().cloned(), p.toast_intent()));
+    assert_eq!(
+        toast.as_deref(),
+        Some(format!("Assign py-1 to watch#WATCH-44: {why}").as_str())
+    );
+    assert_eq!(intent, Some(Intent::Danger));
 }

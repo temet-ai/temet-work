@@ -3,6 +3,8 @@
 //! selected issue on the right, with its actions menu, whose Move to sends `temet-work move` to
 //! the daemon as a person's request and shows the daemon's answer in a toast, and whose Refine
 //! opens RefineDialog, whose Save sends `temet-work refine` and shows a refusal in the dialog.
+//! Assign and Unassign in that menu send `temet-work assign` and `temet-work unassign` the same
+//! way as Move to.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -11,7 +13,7 @@ use gpui::{
     App, Context, FocusHandle, IntoElement, ParentElement, Render, SharedString, Task, Window,
 };
 use temet_work_core::Command;
-use temet_work_core::ids::IssueId;
+use temet_work_core::ids::{AgentId, IssueId};
 use temet_work_core::model::Check;
 use temet_work_core::view::StageWord;
 
@@ -24,7 +26,7 @@ use crate::components::segmented_control::{SegmentedControl, SegmentedControlOpt
 use crate::components::stage_tag::Stage;
 use crate::components::toast::{OverlayToaster, Toast};
 use crate::composites::group_list::{GroupList, GroupListGroup};
-use crate::composites::issue_actions::IssueActions;
+use crate::composites::issue_actions::{IssueActions, IssueActionsAgent};
 use crate::composites::issue_pane::{
     IssueDecision, IssuePane, IssuePlan, IssuePullRequest, IssueTab,
 };
@@ -36,6 +38,7 @@ use crate::composites::page_header::{PageFact, PageHeader};
 use crate::composites::refine_dialog::{RefineCheck, RefineDialog, RefineDraft, Sending};
 use crate::composites::review_rounds::ReviewRound;
 use crate::composites::side_nav::{SideNav, SideNavArea};
+use crate::daemon::{self, Problem};
 
 /// What the Project page shows, in the shape of its parts' props.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -85,13 +88,18 @@ pub struct Milestone {
     pub issues: Vec<IssueSummary>,
 }
 
-/// What an issue has beyond its row: its review round, and the parts of its pane it has so far.
+/// What an issue has beyond its row: its id, its review round, the agents a person may assign
+/// to it or take off it, and the parts of its pane it has so far.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct IssueDetail {
     /// The issue as the daemon's commands name it; none when there is no daemon to send to.
     pub id: Option<IssueId>,
     /// The stages a person may move it to, as the daemon lists them; Move to offers these.
     pub moves: Vec<Stage>,
+    /// The agents a person may assign to it now, each with the issue it is on now.
+    pub assignable: Vec<IssueActionsAgent>,
+    /// The agents on it now, which a person may unassign.
+    pub assigned: Vec<IssueActionsAgent>,
     /// The review round it is in; 0 before its first review.
     pub round: usize,
     pub plan: Option<IssuePlan>,
@@ -336,6 +344,13 @@ fn word(stage: Stage) -> StageWord {
     }
 }
 
+/// What a person asks the daemon to do with an agent from an issue's actions menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verb {
+    Assign,
+    Unassign,
+}
+
 /// The Project page: a window's view, holding what it shows and what the person has chosen.
 pub struct Project {
     view: ProjectView,
@@ -454,6 +469,49 @@ impl Project {
                 intent: Intent::Danger,
             },
         });
+    }
+
+    /// The command that assigns `agent` to the selected issue, or unassigns it, when the daemon
+    /// gave the issue's id.
+    pub fn agent_command(&self, verb: Verb, agent: &str) -> Option<Command> {
+        let key = self.selection.key()?;
+        let issue = self.view.details.get(key)?.id.clone()?;
+        let agent = AgentId::new(agent);
+        Some(match verb {
+            Verb::Assign => Command::Assign { issue, agent },
+            Verb::Unassign => Command::Unassign { issue, agent },
+        })
+    }
+
+    /// Assigns `agent` to the selected issue, or unassigns it: the menu closes, and the command
+    /// goes to the daemon. Its answer shows in a toast, as a move's does; a refusal shows in a
+    /// danger toast that names what was asked: "Assign reviewer-4 to watch#12: ...".
+    pub fn send_agent(&mut self, verb: Verb, agent: &str, cx: &mut Context<Self>) {
+        self.actions_open = false;
+        let Some(command) = self.agent_command(verb, agent) else {
+            return;
+        };
+        let asked = match &command {
+            Command::Assign { issue, agent } => format!("Assign {agent} to {issue}"),
+            Command::Unassign { issue, agent } => format!("Unassign {agent} from {issue}"),
+            _ => String::new(),
+        };
+        let Some(sender) = self.sender.clone() else {
+            self.sent(Err(format!(
+                "{asked}: no daemon to send it to: the window shows sample data"
+            )));
+            return;
+        };
+        let task = sender(command, cx);
+        cx.spawn(async move |page, cx| {
+            let answer = task.await.map_err(|why| format!("{asked}: {why}"));
+            page.update(cx, |page, cx| {
+                page.sent(answer);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A page with no view yet: it draws `notice` alone until [`Project::set_view`] gives it one.
@@ -575,7 +633,7 @@ impl Project {
         self.toast = None;
     }
 
-    /// The toast on show.
+    /// The message of the toast on show.
     pub fn toast(&self) -> Option<&SharedString> {
         self.toast.as_ref().map(|t| &t.message)
     }
@@ -979,8 +1037,9 @@ impl Render for Project {
         });
         if let Some((milestone, issue)) = found {
             let detail = view.details.get(&issue.key).cloned().unwrap_or_default();
-            // Refine and Move to need the issue's id from the daemon; Move to offers what the
-            // daemon takes, and is left out with nothing to offer.
+            // Refine, Move to, Assign and Unassign need the issue's id from the daemon; Move to,
+            // Assign and Unassign offer what the daemon takes, and are left out with nothing to
+            // offer.
             let actions = detail.id.is_some().then(|| {
                 let refine_page = page.clone();
                 let key = issue.key.clone();
@@ -1005,6 +1064,23 @@ impl Render for Project {
                             .ok();
                         },
                     );
+                }
+                for (verb, agents) in [
+                    (Verb::Assign, detail.assignable.clone()),
+                    (Verb::Unassign, detail.assigned.clone()),
+                ] {
+                    let page = page.clone();
+                    let handler = move |agent: &SharedString, _: &mut Window, cx: &mut App| {
+                        page.update(cx, |p, cx| {
+                            p.send_agent(verb, agent, cx);
+                            cx.notify();
+                        })
+                        .ok();
+                    };
+                    actions = match verb {
+                        Verb::Assign => actions.assignable(agents).on_assign(handler),
+                        Verb::Unassign => actions.assigned(agents).on_unassign(handler),
+                    };
                 }
                 actions
             });

@@ -460,6 +460,28 @@ pub struct Agent {
     /// setting while it runs; this stays what it runs.
     #[serde(default)]
     pub model: Option<String>,
+    /// The issue a person last moved it from onto `issue` (`temet-work
+    /// assign`); none for an agent the loop put on its issue. Its terminal keeps
+    /// the labels it started with; this record says which issue it works on.
+    #[serde(default)]
+    pub moved_from: Option<IssueId>,
+    /// When a person last moved it onto `issue`, counted as [`Self::started`]
+    /// is; none for an agent never moved. A person's move of the issue before
+    /// this does not make it one started before that move.
+    #[serde(default)]
+    pub assigned_at: Option<u64>,
+    /// Whether the brief for the issue a person moved it to has reached it.
+    /// Until it has, a moved reviewer's verdict is refused and the loop asks
+    /// each round for the brief to be sent. False for an agent never moved.
+    #[serde(default)]
+    pub briefed: bool,
+    /// Whether a person took it off `issue` (`temet-work unassign`, or an
+    /// assign of another agent in its place). It keeps `issue` for the record
+    /// and its stop, but no longer works on it: its step commands for it are
+    /// refused, nothing waits on it, its stop is asked for each round until it
+    /// has ended, and no fresh agent of its role starts on the issue until then.
+    #[serde(default)]
+    pub unassigned: bool,
 }
 
 impl AgentState {
@@ -483,6 +505,23 @@ impl Agent {
     /// When the limit this agent waits on resets ([`AgentState::limit_reset`]).
     pub fn limit_reset(&self) -> Option<u64> {
         self.state.limit_reset(self.continued)
+    }
+
+    /// Whether it works on `issue`: it is on it, has not ended, and no person
+    /// has taken it off.
+    pub fn works_on(&self, issue: &IssueId) -> bool {
+        self.issue.as_ref() == Some(issue) && self.state != AgentState::Ended && !self.unassigned
+    }
+
+    /// Whether a person put it on its issue (`temet-work assign`).
+    pub fn assigned(&self) -> bool {
+        self.moved_from.is_some()
+    }
+
+    /// Whether a person moved it and the brief for its new issue has not
+    /// reached it yet.
+    pub fn awaits_brief(&self) -> bool {
+        self.assigned() && !self.briefed && !self.unassigned && self.state != AgentState::Ended
     }
 }
 
