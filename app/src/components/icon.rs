@@ -163,6 +163,7 @@ pub struct Icon {
     size: IconSize,
     side: Option<Pixels>,
     color: Option<Hsla>,
+    intent: Option<crate::theme::Intent>,
 }
 
 impl Icon {
@@ -172,6 +173,7 @@ impl Icon {
             size: IconSize::Standard,
             side: None,
             color: None,
+            intent: None,
         }
     }
 
@@ -194,6 +196,13 @@ impl Icon {
         self.color = Some(color);
         self
     }
+
+    /// Draws the icon in an intent's colour, as Blueprint's `Icon intent` does and as
+    /// ProblemList draws its icon (`.tm-problems-title > svg { fill: --bp-intent-danger-rest }`).
+    pub fn intent(mut self, intent: crate::theme::Intent) -> Self {
+        self.intent = Some(intent);
+        self
+    }
 }
 
 impl RenderOnce for Icon {
@@ -202,7 +211,10 @@ impl RenderOnce for Icon {
             IconSize::Standard => theme::size::icon(cx),
             IconSize::Large => theme::size::icon_large(cx),
         });
-        let color = self.color.unwrap_or_else(|| window.text_style().color);
+        let color = self
+            .color
+            .or_else(|| self.intent.map(|i| theme::colour::intent_fill(cx, i)))
+            .unwrap_or_else(|| window.text_style().color);
         svg()
             .path(self.icon.path(self.size))
             .size(side)

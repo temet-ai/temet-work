@@ -207,6 +207,17 @@ pub enum Class {
     /// `.tm-check-toggle-none` on a Button: hidden, it holds the place of the plus a long check
     /// has, so status tags line up whether a row opens or not.
     CheckToggleNone,
+    /// `.tm-issue-head`: IssuePane's head, its padding and the quiet rule under it.
+    IssueHead,
+    /// `.tm-issue-scroll`: the padding of the area under IssuePane's head that scrolls.
+    IssueScroll,
+    /// Blueprint's `.bp6-text-muted` (`Classes.TEXT_MUTED`): muted text, such as the label
+    /// before a second control in a page's head.
+    TextMuted,
+    /// `.tm-problems-head`: the padding around ProblemList's heading.
+    ProblemsHead,
+    /// `.tm-problems-title`: ProblemList's icon and title on one line.
+    ProblemsTitle,
 }
 
 /// The lines a long done-when shows until its row is opened: `.tm-check-clamp {
@@ -531,6 +542,33 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
             padded(type_of(el, &count), &count)
         }
         Class::CheckClamp => el.line_clamp(CHECK_LINES).text_ellipsis(),
+        Class::IssueHead => {
+            let head = look::get(cx, "IssuePane", "tm-issue-head tm-issue-pane", rest);
+            box_of(el, &head)
+        }
+        Class::IssueScroll => padded(
+            el,
+            &look::get(
+                cx,
+                "IssuePane",
+                "tm-issue-pane tm-issue-scroll tm-issue-stack",
+                rest,
+            ),
+        ),
+        Class::TextMuted => el.text_color(colour::muted(cx)),
+        Class::ProblemsHead => padded(
+            el,
+            &look::get(cx, "ProblemList", "tm-cut-body tm-problems-head", rest),
+        ),
+        Class::ProblemsTitle => {
+            let title = look::get(cx, "ProblemList", "tm-heading-text tm-problems-title", rest);
+            type_of(el, &title)
+                .flex()
+                .items_center()
+                .gap(space::s3(cx))
+                .h(title.height)
+                .line_height(browser_line(cx, title.font_size, title.height))
+        }
         Class::CheckToggleNone => el.invisible(),
         Class::Issues | Class::GroupsEmpty | Class::GroupsGroup | Class::NeedsHeading => el,
     }

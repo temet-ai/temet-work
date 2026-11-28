@@ -24,7 +24,7 @@ pub struct PageFact {
 pub struct PageHeader {
     title: SharedString,
     facts: Vec<PageFact>,
-    actions: Option<AnyElement>,
+    actions: Vec<AnyElement>,
     actions_label: Option<SharedString>,
 }
 
@@ -33,15 +33,16 @@ impl PageHeader {
         Self {
             title: title.into(),
             facts: Vec::new(),
-            actions: None,
+            actions: Vec::new(),
             actions_label: None,
         }
     }
 
-    /// Controls for the whole screen, at the right, such as a SegmentedControl. They move under
-    /// the title when the column is too narrow for both.
-    pub fn actions(mut self, actions: impl IntoElement) -> Self {
-        self.actions = Some(actions.into_any_element());
+    /// Controls for the whole screen, at the right, in a row, such as a SegmentedControl, or a
+    /// SegmentedControl, a muted label and another. They move under the title when the column is
+    /// too narrow for both.
+    pub fn actions(mut self, actions: impl IntoIterator<Item = AnyElement>) -> Self {
+        self.actions = actions.into_iter().collect();
         self
     }
 
@@ -93,7 +94,7 @@ impl RenderOnce for PageHeader {
                     .child(Heading::new(self.title).size(HeadingSize::Page))
                     .children(facts),
             )
-            .children(self.actions.map(|actions| {
+            .children((!self.actions.is_empty()).then(|| {
                 div()
                     .flex()
                     .items_center()
@@ -103,7 +104,7 @@ impl RenderOnce for PageHeader {
                         self.actions_label
                             .map(|label| classed(Class::PageheadMuted, cx).child(label)),
                     )
-                    .child(actions)
+                    .children(self.actions)
             }))
     }
 }

@@ -3,9 +3,12 @@
 //!
 //! The mapping is plain functions of the view and the clock. A field the view has no data for is
 //! left empty, and so is a part's row for it, rather than filled with a stand-in: the view holds
-//! no machine slots or limits, a pull request's branch, lines or files, a plan's folder or
-//! merge rule, or the time a decision was made. Where the view has a word the page has no word
-//! for, the choice is made once, in [`stage`] and [`agent_status`].
+//! no machine slots or limits, a pull request's branch, lines or files, a plan's folder or merge
+//! rule, or the time a decision was made. Where the view has a word the page has no word for,
+//! the choice is made once, in [`stage`] and [`agent_status`].
+//!
+//! An issue is named by its whole id, `project#key`, everywhere the page shows it, as the design
+//! system's data and temet-work's commands name it.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,9 +16,9 @@ use std::path::Path;
 use gpui::SharedString;
 use temet_work_core::View;
 use temet_work_core::ids::ProjectId;
-use temet_work_core::model::{CheckState, Cost};
+use temet_work_core::model::{CheckState, Cost, Point};
 use temet_work_core::view::{
-    Agent, Decision, Issue, Milestone as ViewMilestone, StageWord, StateWord, VerdictWord,
+    Agent, Decision, Group, Issue, Milestone as ViewMilestone, StageWord, StateWord, VerdictWord,
 };
 
 use crate::components::Intent;
@@ -23,16 +26,21 @@ use crate::components::icon::IconName;
 use crate::components::stage_tag::Stage;
 use crate::components::status_tag::Status;
 use crate::composites::check_list::PlanCheck;
-use crate::composites::decision_row::{Decision as RowDecision, UndoCost};
+use crate::composites::decision_row::{Decision as RowDecision, DecisionOption, UndoCost};
 use crate::composites::group_list::{GroupListAgent, GroupListGroup};
+use crate::composites::issue_card::IssueCardAgent;
 use crate::composites::issue_pane::{IssueDecision, IssuePlan, IssuePullRequest};
 use crate::composites::issue_table::IssueSummary;
 use crate::composites::needs_you::NeedsYouDecision;
 use crate::composites::page_header::PageFact;
+use crate::composites::problem_list::Problem;
 use crate::composites::review_rounds::{ReviewPoint, ReviewRound};
 use crate::composites::side_nav::{SideNavArea, SideNavProject};
-use crate::daemon::{Daemon, Problem};
-use crate::pages::project::{IssueDetail, Milestone, Notice, Project, ProjectView};
+use crate::composites::stage_board::{BoardIssue, BoardLane};
+use crate::daemon::{Daemon, Problem as DaemonProblem};
+use crate::pages::project::{
+    FactValue, IssueDetail, IssueFact, Milestone, Notice, Project, ProjectView,
+};
 
 fn s(text: impl Into<String>) -> SharedString {
     SharedString::from(text.into())
@@ -90,8 +98,9 @@ pub fn undo_cost(cost: Option<Cost>) -> Option<UndoCost> {
     }
 }
 
-/// The key of an issue id (`project#key`).
-fn key(id: &str) -> &str {
+/// The key of an issue id (`project#key`): what follows the `#`, such as its number in its
+/// tracker.
+fn number(id: &str) -> &str {
     id.split_once('#').map_or(id, |(_, key)| key)
 }
 
@@ -127,8 +136,8 @@ pub fn ago(now_ms: u64, then_ms: u64) -> SharedString {
     })
 }
 
-/// "role · runtime" for the agent `id`, as the page names who decided or reviewed; the agent's
-/// id when the view does not list it, and the role alone when it has no runtime.
+/// "role · runtime" for the agent `id`, as Needs you names who decided; the agent's id when the
+/// view does not list it, and the role alone when it has no runtime.
 fn who(agents: &[Agent], id: &str) -> SharedString {
     match agents.iter().find(|a| a.id.0 == id) {
         Some(a) => match &a.runtime {
@@ -144,126 +153,280 @@ fn address(url: &str) -> SharedString {
     s(url.split_once("://").map_or(url, |(_, rest)| rest))
 }
 
+/// The host of an address, such as github.com.
+fn host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split('/').next().unwrap_or(rest)
+}
+
+/// Where a project's issues are, as the page header says it: the tracker and the tracker's name
+/// for the project ("GitHub grand-trunk/clacks"), else the address.
+fn tracker_fact(url: &str, name: Option<&str>) -> SharedString {
+    let tracker = match host(url) {
+        "github.com" => "GitHub",
+        "gitlab.com" => "GitLab",
+        other => other,
+    };
+    match name {
+        Some(name) => s(format!("{tracker} {name}")),
+        None => address(url),
+    }
+}
+
+/// The option a decision took.
 fn decision_took(d: &Decision) -> SharedString {
     d.options
         .get(d.chosen.wrapping_sub(1))
         .map_or_else(|| s(d.question.clone()), |option| s(option.clone()))
 }
 
-/// The decision as a row draws it. `by` is who made it and `issue` the issue's name on the row,
-/// left out inside the issue's own pane.
-fn row_decision(d: &Decision, agents: &[Agent], issue: Option<SharedString>) -> RowDecision {
-    let overturned = d.overturned_to.map(|option| {
-        let to = d
-            .options
-            .get(option.wrapping_sub(1))
-            .cloned()
-            .unwrap_or_else(|| option.to_string());
-        if d.overturn_reason.is_empty() {
-            s(format!("Overturned to {to}"))
-        } else {
-            s(format!("Overturned to {to}: {}", d.overturn_reason))
-        }
-    });
+/// The point after which overturning a decision costs more, while its issue is not past it.
+fn overturn_before(d: &Decision) -> Option<SharedString> {
+    match &d.point {
+        Some(point) if !point.passed && point.at == Point::Merge => Some(s("merge")),
+        _ => None,
+    }
+}
+
+/// A decision as Needs you draws it, as on main: the short form, the option taken as its title,
+/// who decided as "role · runtime", and the issue it is about.
+fn need_decision(d: &Decision, agents: &[Agent]) -> RowDecision {
     RowDecision {
         question: None,
         took: decision_took(d),
         by: who(agents, &d.by.0),
-        issue,
+        issue: Some(s(d.issue.clone())),
         at: None,
         cost: undo_cost(d.cost),
-        weighed: d.options.iter().map(|o| s(o.clone())).collect(),
-        why: (!d.reason.is_empty()).then(|| s(d.reason.clone())),
+        weighed: Vec::new(),
+        why: None,
+        options: Vec::new(),
         overturn_before: match &d.point {
-            Some(point) if !point.passed && point.at == temet_work_core::model::Point::Merge => {
+            Some(point) if !point.passed && point.at == Point::Merge => {
                 Some(s("its issue's merge"))
             }
             _ => None,
         },
-        overturned,
-        options: Vec::new(),
+        overturned: None,
         overturned_to: None,
         overturn_reason: None,
     }
 }
 
-/// The areas and their projects. A project with no area goes under "No area".
-fn areas(view: &View) -> Vec<SideNavArea> {
+/// A decision as the issue's pane draws it: its question as the title, the option taken, the
+/// others numbered from 1 as the daemon counts them with the taken one left out, why, and once
+/// overturned, what it was switched to and why. Who decided is the agent's id.
+pub fn pane_decision(d: &Decision) -> RowDecision {
+    let options = d
+        .options
+        .iter()
+        .enumerate()
+        .filter(|(n, _)| n + 1 != d.chosen)
+        .map(|(n, label)| DecisionOption {
+            id: s((n + 1).to_string()),
+            label: s(label.clone()),
+        })
+        .collect();
+    let overturned_to = d.overturned_to.map(|option| {
+        d.options
+            .get(option.wrapping_sub(1))
+            .map_or_else(|| s(option.to_string()), |o| s(o.clone()))
+    });
+    RowDecision {
+        question: Some(s(d.question.clone())),
+        took: decision_took(d),
+        by: s(d.by.0.clone()),
+        issue: None,
+        at: None,
+        cost: undo_cost(d.cost),
+        weighed: Vec::new(),
+        why: (!d.reason.is_empty()).then(|| s(d.reason.clone())),
+        options,
+        overturn_before: overturn_before(d),
+        overturned: d.overturned_to.map(|_| s("Overturned")),
+        overturned_to,
+        overturn_reason: (d.overturned_to.is_some() && !d.overturn_reason.is_empty())
+            .then(|| s(d.overturn_reason.clone())),
+    }
+}
+
+/// The rank of a cost, the costliest first, a ruling with no cost last.
+fn rank(cost: Option<UndoCost>) -> u8 {
+    match cost {
+        Some(UndoCost::High) => 0,
+        Some(UndoCost::Medium) => 1,
+        Some(UndoCost::Low) => 2,
+        None => 3,
+    }
+}
+
+/// The decisions that wait on a person, in the order Needs you lists them: those not overturned
+/// on an issue still open and not yet past the point where the loop acts on an overturn, the
+/// costliest to undo first, a ruling with no cost last, and the oldest first among equals.
+pub fn waiting(view: &View) -> Vec<&Decision> {
+    let mut waiting: Vec<&Decision> = view
+        .decisions
+        .iter()
+        .filter(|d| d.overturned_to.is_none())
+        .filter(|d| d.point.as_ref().is_none_or(|p| !p.passed))
+        .filter(|d| view.issues.iter().any(|i| i.id == d.issue))
+        .collect();
+    waiting.sort_by_key(|d| (rank(undo_cost(d.cost)), d.id));
+    waiting
+}
+
+/// How many decisions wait on a person on each issue, by its id.
+fn open_decisions(view: &View) -> HashMap<&str, usize> {
+    let mut open = HashMap::new();
+    for d in waiting(view) {
+        *open.entry(d.issue.as_str()).or_default() += 1;
+    }
+    open
+}
+
+/// The left column's projects: those in an area under it, those in no area at the top level, each
+/// with the count of its decisions that wait on a person.
+fn projects(view: &View) -> (Vec<SideNavArea>, Vec<SideNavProject>) {
+    let waiting = waiting(view);
     let mut areas: Vec<SideNavArea> = Vec::new();
+    let mut loose = Vec::new();
     for project in &view.projects {
-        let (id, name) = match &project.area {
-            Some(area) => (area.id.0.clone(), area.name.clone()),
-            None => ("no-area".to_string(), "No area".to_string()),
-        };
         let item = SideNavProject {
             id: s(project.id.0.clone()),
             name: s(project.id.0.clone()),
-            icon: None,
-            waiting: 0,
+            icon: Some(IconName::GitRepo),
+            waiting: waiting
+                .iter()
+                .filter(|d| project_of(&d.issue) == project.id.0)
+                .count(),
         };
-        match areas.iter_mut().find(|a| a.id.as_ref() == id) {
-            Some(area) => area.projects.push(item),
+        let Some(area) = &project.area else {
+            loose.push(item);
+            continue;
+        };
+        match areas.iter_mut().find(|a| a.id.as_ref() == area.id.0) {
+            Some(known) => known.projects.push(item),
             None => areas.push(SideNavArea {
-                id: s(id),
-                name: s(name),
+                id: s(area.id.0.clone()),
+                name: s(area.name.clone()),
                 projects: vec![item],
             }),
         }
     }
-    areas
+    (areas, loose)
 }
 
-/// The groups that work on `project`, each with its agents that have not ended.
-fn groups(view: &View, project: &ProjectId) -> Vec<GroupListGroup> {
+/// The groups that work on `project`.
+fn groups_of<'a>(view: &'a View, project: &ProjectId) -> Vec<&'a Group> {
     view.groups
         .iter()
         .filter(|g| g.projects.contains(project))
-        .map(|g| GroupListGroup {
-            id: s(g.id.0.clone()),
-            name: s(g.name.clone()),
-            note: (!g.milestones.is_empty()).then(|| {
-                s(g.milestones
-                    .iter()
-                    .map(|m| m.0.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "))
-            }),
-            agents: view
+        .collect()
+}
+
+/// Whether a group works on a milestone: it names it, or names none, which takes every one.
+fn takes(group: &Group, milestone: &str) -> bool {
+    group.milestones.is_empty() || group.milestones.iter().any(|m| m.0 == milestone)
+}
+
+/// The agents that have not ended, in the view's order.
+fn running(view: &View) -> impl Iterator<Item = &Agent> {
+    view.agents.iter().filter(|a| a.state != StateWord::Ended)
+}
+
+/// The agents that have not ended and are on `issue`.
+fn running_on<'a>(view: &'a View, issue: &'a str) -> impl Iterator<Item = &'a Agent> {
+    running(view).filter(move |a| a.issue.as_deref() == Some(issue))
+}
+
+/// The groups that work on `project`, each with its agents that have not ended. An agent's row
+/// reads its id, then the issue it is on (or "free") and its model; its state, machine and model
+/// show on hover. A group with none running says how many have ended.
+fn groups(view: &View, project: &ProjectId) -> Vec<GroupListGroup> {
+    groups_of(view, project)
+        .into_iter()
+        .map(|g| {
+            let ended = view
                 .agents
                 .iter()
-                .filter(|a| a.group == g.id)
-                .filter_map(|a| {
-                    let status = agent_status(a.state)?;
-                    let place = [Some(a.machine.0.as_str()), a.model.as_deref()]
+                .filter(|a| a.group == g.id && a.state == StateWord::Ended)
+                .count();
+            GroupListGroup {
+                id: s(g.id.0.clone()),
+                name: s(g.name.clone()),
+                note: (!g.milestones.is_empty()).then(|| {
+                    s(g.milestones
+                        .iter()
+                        .map(|m| m.0.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                }),
+                agents: running(view)
+                    .filter(|a| a.group == g.id)
+                    .filter_map(|a| {
+                        let status = if a.issue.is_some() {
+                            agent_status(a.state)?
+                        } else {
+                            Status::Idle
+                        };
+                        let place = [
+                            Some(a.issue.as_deref().unwrap_or("free")),
+                            a.model.as_deref(),
+                        ]
                         .into_iter()
                         .flatten()
                         .collect::<Vec<_>>()
                         .join(" \u{b7} ");
-                    Some(GroupListAgent {
-                        id: s(a.id.0.clone()),
-                        role: s(a.role.clone()),
-                        r#where: Some(s(place)),
-                        detail: None,
-                        status,
+                        let runs = [Some(a.machine.0.as_str()), a.model.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" \u{b7} ");
+                        let detail = [a.state_text.as_str(), runs.as_str()]
+                            .into_iter()
+                            .filter(|part| !part.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" \u{b7} ");
+                        Some(GroupListAgent {
+                            id: s(a.id.0.clone()),
+                            role: s(a.id.0.clone()),
+                            r#where: Some(s(place)),
+                            detail: Some(s(detail)),
+                            status,
+                        })
                     })
-                })
-                .collect(),
-            empty: None,
+                    .collect(),
+                empty: Some(s(match ended {
+                    0 => "No agents running".to_string(),
+                    n => format!("No agents running \u{b7} {n} ended"),
+                })),
+            }
         })
         .collect()
 }
 
-/// The agent working on `issue` now: the latest started of its agents that has not ended.
-fn current_agent<'a>(view: &'a View, issue: &Issue) -> Option<&'a Agent> {
-    view.agents
-        .iter()
-        .filter(|a| issue.agents.contains(&a.id) && a.state != StateWord::Ended)
-        .max_by_key(|a| a.started)
+/// How many of the project's issues are at each stage, every stage in the daemon's order; done
+/// is the view's count of done issues, which it does not list.
+fn stage_counts(view: &View, issues: &[&Issue]) -> Vec<(Stage, usize)> {
+    Stage::ALL
+        .into_iter()
+        .map(|st| {
+            let n = if st == Stage::Done {
+                view.done
+            } else {
+                issues.iter().filter(|i| stage(i.stage) == st).count()
+            };
+            (st, n)
+        })
+        .collect()
 }
 
 fn summary(view: &View, issue: &Issue, now_ms: u64) -> IssueSummary {
+    let agents: Vec<&str> = running_on(view, &issue.id)
+        .map(|a| a.id.0.as_str())
+        .collect();
     IssueSummary {
-        key: s(key(&issue.id)),
+        key: s(issue.id.clone()),
         title: s(issue.title.clone()),
         stage: stage(issue.stage),
         group: issue.group.as_ref().map(|group| {
@@ -272,21 +435,96 @@ fn summary(view: &View, issue: &Issue, now_ms: u64) -> IssueSummary {
                 .find(|g| &g.id == group)
                 .map_or_else(|| s(group.0.clone()), |g| s(g.name.clone()))
         }),
-        agent: current_agent(view, issue).map(|a| who(&view.agents, &a.id.0)),
+        milestone: issue.milestone.as_ref().map(|m| s(m.0.clone())),
+        agent: (!agents.is_empty()).then(|| s(agents.join(", "))),
         updated: issue.updated_ms.map_or_else(|| s(""), |t| ago(now_ms, t)),
     }
 }
 
-/// An issue's pane: what the view holds about its plan, pull request, reviews and decisions. A
-/// tab whose data is empty is `None`, so the pane does not show it.
-fn detail(view: &View, issue: &Issue) -> IssueDetail {
-    let folder = current_agent(view, issue).and_then(|a| {
-        a.folder
-            .as_ref()
-            .map(|folder| s(format!("{}:{}", a.machine, folder)))
+/// The facts the pane shows for an issue, the radar page's rows: Milestone (out of scope for its
+/// group when the group does not take it), Group, Waits for, Pull request with its checks,
+/// Agents, Tracker and Updated. A row the view has nothing for is left out.
+pub fn facts(view: &View, issue: &Issue, now_ms: u64) -> Vec<IssueFact> {
+    let fact = |label: &str, value: FactValue| IssueFact {
+        label: s(label),
+        value,
+    };
+    let group = issue
+        .group
+        .as_ref()
+        .map(|id| view.groups.iter().find(|g| &g.id == id).ok_or(id));
+    let group_name = group.map(|g| match g {
+        Ok(g) => s(g.name.clone()),
+        Err(id) => s(id.0.clone()),
     });
+    let milestone = match &issue.milestone {
+        Some(m) => {
+            let out = matches!(group, Some(Ok(g)) if !takes(g, &m.0));
+            match (&group_name, out) {
+                (Some(name), true) => s(format!("{} \u{b7} out of scope for {name}", m.0)),
+                _ => s(m.0.clone()),
+            }
+        }
+        None => s("No milestone"),
+    };
+    let mut out = vec![
+        fact("Milestone", FactValue::Text(milestone)),
+        fact(
+            "Group",
+            FactValue::Text(group_name.unwrap_or_else(|| s("None yet"))),
+        ),
+    ];
+    if !issue.depends_on.is_empty() {
+        out.push(fact(
+            "Waits for",
+            FactValue::Keys(issue.depends_on.iter().map(|k| s(k.clone())).collect()),
+        ));
+    }
+    if let Some(number) = issue.pulls.first().and_then(|p| p.number.parse().ok()) {
+        out.push(fact(
+            "Pull request",
+            FactValue::Pull {
+                number,
+                checks: issue.checks_ok,
+            },
+        ));
+    }
+    let agents: Vec<&str> = running_on(view, &issue.id)
+        .map(|a| a.id.0.as_str())
+        .collect();
+    out.push(fact(
+        "Agents",
+        FactValue::Text(if agents.is_empty() {
+            s("None running")
+        } else {
+            s(agents.join(", "))
+        }),
+    ));
+    let project = view
+        .projects
+        .iter()
+        .find(|p| p.id.0 == project_of(&issue.id));
+    let key = number(&issue.id);
+    let text = match project.and_then(|p| p.tracker_name.as_deref()) {
+        Some(name) => s(format!("{name}#{key}")),
+        None => s(issue.id.clone()),
+    };
+    let url = project
+        .and_then(|p| p.issues_url.as_deref())
+        .map(|base| s(format!("{}/{key}", base.trim_end_matches('/'))));
+    out.push(fact("Tracker", FactValue::Link { text, url }));
+    if let Some(t) = issue.updated_ms {
+        out.push(fact("Updated", FactValue::Text(ago(now_ms, t))));
+    }
+    out
+}
+
+/// An issue's pane: its facts, and what the view holds about its plan, pull request, reviews
+/// and decisions. A tab whose data is empty is `None`, so the pane does not show it. Its
+/// decisions come costliest to undo first.
+fn detail(view: &View, issue: &Issue, now_ms: u64) -> IssueDetail {
     let plan = (!issue.checks.is_empty()).then(|| IssuePlan {
-        folder,
+        folder: None,
         merge: None,
         checks: issue
             .checks
@@ -327,7 +565,7 @@ fn detail(view: &View, issue: &Issue) -> IssueDetail {
                 by: r
                     .reviewer
                     .as_ref()
-                    .map_or_else(|| s("reviewer"), |id| who(&view.agents, &id.0)),
+                    .map_or_else(|| s("reviewer"), |id| s(id.0.clone())),
                 status: match r.verdict {
                     VerdictWord::Approve => Status::Passed,
                     VerdictWord::Block => Status::Blocked,
@@ -345,13 +583,17 @@ fn detail(view: &View, issue: &Issue) -> IssueDetail {
             })
             .collect()
     });
-    let decisions: Vec<IssueDecision> = view
+    let mut own: Vec<&Decision> = view
         .decisions
         .iter()
         .filter(|d| d.issue == issue.id)
+        .collect();
+    own.sort_by_key(|d| (rank(undo_cost(d.cost)), d.id));
+    let decisions: Vec<IssueDecision> = own
+        .into_iter()
         .map(|d| IssueDecision {
             id: s(d.id.to_string()),
-            decision: row_decision(d, &view.agents, None),
+            decision: pane_decision(d),
             draft: None,
             pending: false,
             error: None,
@@ -359,6 +601,7 @@ fn detail(view: &View, issue: &Issue) -> IssueDetail {
         .collect();
     IssueDetail {
         round: usize::from(issue.round),
+        facts: facts(view, issue, now_ms),
         plan,
         pull,
         rounds,
@@ -366,13 +609,48 @@ fn detail(view: &View, issue: &Issue) -> IssueDetail {
     }
 }
 
-/// The milestones of `project` with their open issues, then one for the issues that name none.
+/// For a milestone no group of the project takes: "no group takes it", and how many of its
+/// issues a group still holds, out of scope.
+fn scope_note(groups: &[&Group], milestone: &str, issues: &[&Issue]) -> Option<SharedString> {
+    if groups.iter().any(|g| takes(g, milestone)) {
+        return None;
+    }
+    let held: Vec<&Issue> = issues
+        .iter()
+        .filter(|i| i.milestone.as_ref().is_some_and(|m| m.0 == milestone))
+        .filter(|i| i.group.is_some())
+        .copied()
+        .collect();
+    let mut holders: Vec<&str> = Vec::new();
+    for i in &held {
+        let id = i.group.as_ref().map_or("", |g| g.0.as_str());
+        let name = groups
+            .iter()
+            .find(|g| g.id.0 == id)
+            .map_or(id, |g| g.name.as_str());
+        if !holders.contains(&name) {
+            holders.push(name);
+        }
+    }
+    Some(s(match held.len() {
+        0 => "no group takes it".to_string(),
+        n => format!(
+            "no group takes it \u{b7} {n} held by {}, out of scope",
+            holders.join(", ")
+        ),
+    }))
+}
+
+/// The milestones of `project` that have open issues, with them, in the view's order, then one
+/// for the issues that name none. A milestone with nothing open is counted in its tracker, not
+/// listed.
 fn milestones(view: &View, project: &ProjectId, now_ms: u64) -> Vec<Milestone> {
     let issues: Vec<&Issue> = view
         .issues
         .iter()
         .filter(|i| project_of(&i.id) == project.0)
         .collect();
+    let groups = groups_of(view, project);
     let listed: Vec<&ViewMilestone> = view
         .milestones
         .iter()
@@ -385,12 +663,15 @@ fn milestones(view: &View, project: &ProjectId, now_ms: u64) -> Vec<Milestone> {
             due: m.due.as_deref().map(due),
             done: m.done,
             total: m.total,
+            note: scope_note(&groups, &m.id.0, &issues),
+            taken: groups.iter().any(|g| takes(g, &m.id.0)),
             issues: issues
                 .iter()
                 .filter(|i| i.milestone.as_ref() == Some(&m.id))
                 .map(|i| summary(view, i, now_ms))
                 .collect(),
         })
+        .filter(|m| !m.issues.is_empty())
         .collect();
     let loose: Vec<IssueSummary> = issues
         .iter()
@@ -407,31 +688,47 @@ fn milestones(view: &View, project: &ProjectId, now_ms: u64) -> Vec<Milestone> {
             due: None,
             done: 0,
             total: loose.len(),
+            note: None,
+            taken: true,
             issues: loose,
         });
     }
     out
 }
 
-/// The decisions that wait on a person, in the order Needs you lists them: those not overturned
-/// on an issue still open and not yet past the point where the loop acts on an overturn, the
-/// costliest to undo first, a ruling with no cost last, and the oldest first among equals.
-pub fn waiting(view: &View) -> Vec<&Decision> {
-    let mut waiting: Vec<&Decision> = view
-        .decisions
+/// The board's lanes: one per milestone the List shows, in the same order, closed at first when
+/// no group of the project takes it; each card with its open decisions and running agents.
+fn lanes(view: &View, milestones: &[Milestone]) -> Vec<BoardLane> {
+    let open = open_decisions(view);
+    milestones
         .iter()
-        .filter(|d| d.overturned_to.is_none())
-        .filter(|d| d.point.as_ref().is_none_or(|p| !p.passed))
-        .filter(|d| view.issues.iter().any(|i| i.id == d.issue))
-        .collect();
-    let rank = |d: &Decision| match undo_cost(d.cost) {
-        Some(UndoCost::High) => 0,
-        Some(UndoCost::Medium) => 1,
-        Some(UndoCost::Low) => 2,
-        None => 3,
-    };
-    waiting.sort_by_key(|d| (rank(d), d.id));
-    waiting
+        .map(|m| BoardLane {
+            id: m.name.clone(),
+            title: m.name.clone(),
+            note: m.note.clone(),
+            default_open: m.taken,
+            issues: m
+                .issues
+                .iter()
+                .map(|i| BoardIssue {
+                    key: i.key.clone(),
+                    title: i.title.clone(),
+                    stage: i.stage,
+                    agents: running_on(view, &i.key)
+                        .filter_map(|a| {
+                            Some(IssueCardAgent {
+                                id: s(a.id.0.clone()),
+                                label: s(a.id.0.clone()),
+                                status: agent_status(a.state)?,
+                            })
+                        })
+                        .collect(),
+                    decisions: open.get(i.key.as_ref()).copied().unwrap_or(0),
+                    updated: (!i.updated.is_empty()).then(|| i.updated.clone()),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// The Project page's view of `view`, for `project` or, when none is named or it is not in the
@@ -451,7 +748,7 @@ pub fn project_view(view: &View, project: Option<&ProjectId>, now_ms: u64) -> Op
     if let Some(url) = issues_url {
         facts.push(PageFact {
             label: s("Issues"),
-            value: address(url),
+            value: tracker_fact(url, shown.tracker_name.as_deref()),
             icon: Some(IconName::Link),
         });
     }
@@ -463,46 +760,48 @@ pub fn project_view(view: &View, project: Option<&ProjectId>, now_ms: u64) -> Op
         });
     }
 
-    let mut needs = Vec::new();
-    let mut need_project = HashMap::new();
-    let mut same_decision = HashMap::new();
-    for d in waiting(view) {
-        let own = project_of(&d.issue) == id.0;
-        let name = s(if own { key(&d.issue) } else { d.issue.as_str() });
-        let need = s(d.id.to_string());
-        need_project.insert(need.clone(), s(project_of(&d.issue)));
-        if own {
-            same_decision.insert(need.clone(), (s(key(&d.issue)), need.clone()));
-        }
-        // Needs you draws DecisionRow's short form, the decision and its button. What was
-        // weighed and why are in the issue's pane, under Decisions.
-        let mut decision = row_decision(d, &view.agents, Some(name));
-        decision.weighed.clear();
-        decision.why = None;
-        needs.push(NeedsYouDecision { id: need, decision });
-    }
+    // Needs you as on main: every decision that waits on a person, costliest first, in the
+    // short form. What was weighed and why are in the issue's pane, under Decisions.
+    let needs = waiting(view)
+        .into_iter()
+        .map(|d| NeedsYouDecision {
+            id: s(d.id.to_string()),
+            decision: need_decision(d, &view.agents),
+        })
+        .collect();
 
-    let details = view
+    let own: Vec<&Issue> = view
         .issues
         .iter()
         .filter(|i| project_of(&i.id) == id.0)
-        .map(|i| (s(key(&i.id)), detail(view, i)))
         .collect();
-
+    let details = own
+        .iter()
+        .map(|i| (s(i.id.clone()), detail(view, i, now_ms)))
+        .collect();
+    let milestones = milestones(view, id, now_ms);
+    let (areas, projects) = projects(view);
     Some(ProjectView {
-        areas: areas(view),
+        areas,
+        projects,
         project: s(id.0.clone()),
         groups: groups(view, id),
-        // The view holds no build slots and no usage limits.
-        machines: Vec::new(),
-        limits: Vec::new(),
+        stages: stage_counts(view, &own),
         title: s(id.0.clone()),
         facts,
+        problems: view
+            .problems
+            .iter()
+            .map(|(name, text)| Problem {
+                name: s(name.clone()),
+                text: s(text.clone()),
+            })
+            .collect(),
         needs,
-        milestones: milestones(view, id, now_ms),
+        lanes: lanes(view, &milestones),
+        milestones,
         details,
-        need_project,
-        same_decision,
+        agents_running: own.iter().any(|i| running_on(view, &i.id).next().is_some()),
     })
 }
 
@@ -510,7 +809,7 @@ pub fn project_view(view: &View, project: Option<&ProjectId>, now_ms: u64) -> Op
 /// With no view the notice says why: the problem's own text and the socket's path; before the
 /// first answer it says the daemon has not answered yet. With a view and a problem the view is
 /// stale, and the notice says so with the problem's text.
-pub fn notice(view: Option<&View>, problem: Option<&Problem>, path: &Path) -> Option<Notice> {
+pub fn notice(view: Option<&View>, problem: Option<&DaemonProblem>, path: &Path) -> Option<Notice> {
     let socket = s(format!("Socket: {}", path.display()));
     match (view, problem) {
         (Some(view), None) if view.projects.is_empty() => Some(Notice {
@@ -539,29 +838,17 @@ pub fn notice(view: Option<&View>, problem: Option<&Problem>, path: &Path) -> Op
 
 /// Puts the daemon's last answer on the page: the mapped view, kept through a failed ask as a
 /// stale one, and the notice. Without a view the page is blank and draws its notice alone. The
-/// person's choices stay (`Project::set_view`).
+/// person's choices stay (`Project::set_view`): the issue open in the pane, or the pane closed,
+/// View and Group by. The first view opens its first issue.
 pub fn show(
     page: &mut Project,
     view: Option<&View>,
-    problem: Option<&Problem>,
+    problem: Option<&DaemonProblem>,
     path: &Path,
     now_ms: u64,
 ) {
     page.set_view(view.and_then(|v| project_view(v, None, now_ms)));
     page.set_notice(notice(view, problem, path));
-    // With nothing selected the pane would be empty: select the first issue listed.
-    if page.selected().is_none() {
-        let first = page
-            .view()
-            .milestones
-            .iter()
-            .flat_map(|m| m.issues.iter())
-            .map(|i| i.key.clone())
-            .next();
-        if let Some(key) = first {
-            page.select(&key);
-        }
-    }
 }
 
 /// [`show`] for the daemon entity's current state, at the clock's time.

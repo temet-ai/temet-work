@@ -19,6 +19,7 @@ pub struct MilestonePanel {
     done: Option<usize>,
     total: Option<usize>,
     summary: Option<SharedString>,
+    note: Option<SharedString>,
     children: Vec<AnyElement>,
 }
 
@@ -31,6 +32,7 @@ impl MilestonePanel {
             done: None,
             total: None,
             summary: None,
+            note: None,
             children: Vec::new(),
         }
     }
@@ -58,6 +60,13 @@ impl MilestonePanel {
         self.summary = Some(summary.into());
         self
     }
+
+    /// Muted text added after the figures, such as "no group takes it" for a milestone no
+    /// agent group works on.
+    pub fn note(mut self, note: Option<SharedString>) -> Self {
+        self.note = note;
+        self
+    }
 }
 
 impl ParentElement for MilestonePanel {
@@ -66,25 +75,33 @@ impl ParentElement for MilestonePanel {
     }
 }
 
-/// The line under the panel's title: the summary, or how many are done and when it is due,
-/// as "7 / 12 done · due 12 Dec". A milestone with no issues says only when it is due.
+/// The line under the panel's title: the summary, or how many are done and when it is due, as
+/// "7 / 12 done · due 12 Dec", then the note. A milestone with no issues says only when it is
+/// due, and its note.
 pub fn subtitle(
     done: Option<usize>,
     total: Option<usize>,
     due: Option<&str>,
     summary: Option<&str>,
+    note: Option<&str>,
 ) -> Option<String> {
-    if total == Some(0) {
-        return due.map(|d| format!("due {d}"));
-    }
-    if let Some(summary) = summary {
-        return Some(summary.to_string());
-    }
-    let counted = done.zip(total).map(|(d, t)| format!("{d} / {t} done"));
     let due = due.map(|d| format!("due {d}"));
-    let line = counted
+    let figures = if total == Some(0) {
+        due
+    } else if let Some(summary) = summary {
+        Some(summary.to_string())
+    } else {
+        let counted = done.zip(total).map(|(d, t)| format!("{d} / {t} done"));
+        let line = counted
+            .into_iter()
+            .chain(due)
+            .collect::<Vec<_>>()
+            .join(" · ");
+        (!line.is_empty()).then_some(line)
+    };
+    let line = figures
         .into_iter()
-        .chain(due)
+        .chain(note.map(str::to_string))
         .collect::<Vec<_>>()
         .join(" · ");
     (!line.is_empty()).then_some(line)
@@ -106,6 +123,7 @@ impl RenderOnce for MilestonePanel {
             self.total,
             self.due.as_deref(),
             self.summary.as_deref(),
+            self.note.as_deref(),
         );
         let name = self.name.clone();
         let mut section = Section::new()

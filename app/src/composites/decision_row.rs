@@ -91,7 +91,7 @@ pub struct Decision {
     pub overturn_reason: Option<SharedString>,
 }
 
-type OnOverturn = Rc<dyn Fn(&mut Window, &mut App)>;
+type OnOverturn = Rc<dyn Fn(&OverturnChoice, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct DecisionRow {
@@ -99,6 +99,9 @@ pub struct DecisionRow {
     decision: Decision,
     inset: bool,
     on_overturn: Option<OnOverturn>,
+    default_draft: Option<OverturnDraft>,
+    pending: bool,
+    error: Option<SharedString>,
 }
 
 impl DecisionRow {
@@ -109,6 +112,9 @@ impl DecisionRow {
             decision,
             inset: false,
             on_overturn: None,
+            default_draft: None,
+            pending: false,
+            error: None,
         }
     }
 
@@ -118,9 +124,31 @@ impl DecisionRow {
         self
     }
 
-    /// Called by the Overturn button. Without it there is no button.
-    pub fn on_overturn(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+    /// Called with the option and reason once the overturn is confirmed. Without it there is
+    /// no button.
+    pub fn on_overturn(
+        mut self,
+        handler: impl Fn(&OverturnChoice, &mut Window, &mut App) + 'static,
+    ) -> Self {
         self.on_overturn = Some(Rc::new(handler));
+        self
+    }
+
+    /// Opens the confirm at first with these filled in.
+    pub fn default_draft(mut self, draft: Option<OverturnDraft>) -> Self {
+        self.default_draft = draft;
+        self
+    }
+
+    /// Set while the app sends the overturn.
+    pub fn pending(mut self, pending: bool) -> Self {
+        self.pending = pending;
+        self
+    }
+
+    /// Why the last send failed.
+    pub fn error(mut self, error: Option<SharedString>) -> Self {
+        self.error = error;
         self
     }
 }
@@ -145,7 +173,13 @@ impl RenderOnce for DecisionRow {
             (None, Some(handler)) => Some(
                 AttentionButton::new(SharedString::from(format!("overturn-{}", self.id)))
                     .text("Overturn")
-                    .on_click(move |_, window, cx| handler(window, cx))
+                    .on_click(move |_, window, cx| {
+                        let choice = OverturnChoice {
+                            option: SharedString::default(),
+                            reason: SharedString::default(),
+                        };
+                        handler(&choice, window, cx)
+                    })
                     .into_any_element(),
             ),
             (None, None) => None,

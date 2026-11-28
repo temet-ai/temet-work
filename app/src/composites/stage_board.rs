@@ -37,3 +37,61 @@ pub struct BoardLane {
     /// Its issues, in order.
     pub issues: Vec<BoardIssue>,
 }
+
+// A stand-in with the agreed API until the part lands from the board branch.
+type OnOpen = std::rc::Rc<dyn Fn(&SharedString, &mut gpui::Window, &mut gpui::App)>;
+type Menu =
+    std::rc::Rc<dyn Fn(&BoardIssue, &mut gpui::Window, &mut gpui::App) -> Option<gpui::AnyElement>>;
+
+#[derive(gpui::IntoElement)]
+pub struct StageBoard {
+    id: gpui::ElementId,
+    lanes: Vec<BoardLane>,
+    selected: Option<SharedString>,
+    on_open: Option<OnOpen>,
+    menu: Option<Menu>,
+}
+
+impl StageBoard {
+    pub fn new(id: impl Into<gpui::ElementId>, lanes: Vec<BoardLane>) -> Self {
+        Self {
+            id: id.into(),
+            lanes,
+            selected: None,
+            on_open: None,
+            menu: None,
+        }
+    }
+    pub fn selected(mut self, key: Option<SharedString>) -> Self {
+        self.selected = key;
+        self
+    }
+    pub fn on_open(
+        mut self,
+        handler: impl Fn(&SharedString, &mut gpui::Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        self.on_open = Some(std::rc::Rc::new(handler));
+        self
+    }
+    pub fn menu(
+        mut self,
+        menu: impl Fn(&BoardIssue, &mut gpui::Window, &mut gpui::App) -> Option<gpui::AnyElement>
+        + 'static,
+    ) -> Self {
+        self.menu = Some(std::rc::Rc::new(menu));
+        self
+    }
+}
+
+impl gpui::RenderOnce for StageBoard {
+    fn render(self, _: &mut gpui::Window, _: &mut gpui::App) -> impl gpui::IntoElement {
+        use gpui::{InteractiveElement, ParentElement};
+        let _ = (&self.selected, &self.on_open, &self.menu);
+        gpui::div().id(self.id).children(
+            self.lanes
+                .into_iter()
+                .flat_map(|l| l.issues)
+                .map(|i| gpui::div().child(i.key)),
+        )
+    }
+}
