@@ -292,9 +292,11 @@ pub const MERGE_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// setting says (30 seconds by default), and reports when it has finished. An issue
 /// that changes several repositories passes only when CI passed on every pull
 /// request. A pull request that still shows no run at a later read, while its
-/// repository runs CI, is a problem until it has one. It merges an issue's pull
-/// requests when the loop asks, one repository at a time in the plan's order, each
-/// after the previous one's main pipeline passed.
+/// repository runs CI, is a problem until it has one. One a person closed without
+/// merging is reported closed at the read that finds it, in review or at the
+/// merge, and its CI no longer counts. It merges an issue's pull requests when
+/// the loop asks, one repository at a time in the plan's order, each after the
+/// previous one's main pipeline passed.
 #[derive(Default)]
 pub struct CodeHosts {
     adapters: Vec<Box<dyn CodeHost>>,
@@ -394,15 +396,17 @@ impl CodeHosts {
     }
 
     /// Reads every unmerged pull request of an issue, and says what to report:
-    /// each branch the world does not hold yet; then a conflict in any of them;
-    /// else, while CI has not been reported, a failure in any at once, with the
-    /// repository named when the issue has several, or a pass once every one has
-    /// passed. A branch is compared with the world's, so a pull request read
-    /// every `ci_every` reports its branch once, and again only when it changes.
+    /// each branch the world does not hold yet; then a conflict in the first one
+    /// that has it, and each one a person closed without merging; else, while CI
+    /// has not been reported, a failure in any at once, with the repository named
+    /// when the issue has several, or a pass once every one has passed. A branch
+    /// is compared with the world's, so a pull request read every `ci_every`
+    /// reports its branch once, and again only when it changes.
     fn read_pulls(&mut self, world: &World, issue: &Issue) -> Result<Vec<Event>, String> {
         let several = issue.pulls.len() > 1;
         let (mut failed, mut pending) = (Vec::new(), false);
         let mut events = Vec::new();
+        let (mut conflict, mut closed) = (None, Vec::new());
         for repo in world.repos_of(issue) {
             let Some(number) = issue
                 .pulls
@@ -421,18 +425,34 @@ impl CodeHosts {
                     branch: pull.branch.clone(),
                 });
             }
+            let key = (issue.id.clone(), repo.clone(), number.clone());
+            // A person closed it: no CI runs on it any more, and whatever its last
+            // run said no longer counts. Its author has to replace it.
+            if pull.state == PullState::Closed {
+                self.no_run.remove(&key);
+                closed.push(Event::PullClosed {
+                    issue: issue.id.clone(),
+                    repo,
+                    number: number.clone(),
+                });
+                continue;
+            }
+            // After a conflict only closed ones are looked for, so the author
+            // hears of every pull request to replace with it.
+            if conflict.is_some() {
+                continue;
+            }
             // A conflict is caught on every read, even after CI finished.
             if pull.state == PullState::Open && pull.conflicting {
-                events.push(Event::PullConflicts {
+                conflict = Some(Event::PullConflicts {
                     issue: issue.id.clone(),
                     repo: Some(repo),
                 });
-                return Ok(events);
+                continue;
             }
             // No checks yet usually means CI has not started on the new commit; only
             // a repository that runs no CI leaves the plan's checks to the reviewer.
             let awaited = pull.checks == Checks::None && world.repo_flag(&issue.id, &repo, "ci");
-            let key = (issue.id.clone(), repo.clone(), number.clone());
             if awaited {
                 // A second read with none may mean no run is coming.
                 self.no_run
@@ -452,6 +472,14 @@ impl CodeHosts {
                         .map(|c| if several { format!("{c} ({repo})") } else { c }),
                 ),
             }
+        }
+        // The conflict first: the loop sends the issue back for it, and then adds
+        // each closed one to the same fixes. Neither leaves a CI result to report,
+        // since a pass would count for a set with a pull request gone.
+        if conflict.is_some() || !closed.is_empty() {
+            events.extend(conflict);
+            events.extend(closed);
+            return Ok(events);
         }
         let passed = failed.is_empty();
         events.extend(
@@ -1120,6 +1148,85 @@ mod tests {
         );
     }
 
+    fn closed_57() -> Event {
+        Event::PullClosed {
+            issue: watch_12(),
+            repo: ProjectId::new("watch"),
+            number: "57".into(),
+        }
+    }
+
+    #[test]
+    fn a_pull_request_closed_in_review_is_reported_closed_and_its_failed_checks_are_not() {
+        let mut w = watch_12_in(Stage::InReview { round: 1 }, "57");
+        let (repo, mut p) = watch_pull("57", PullState::Closed, "watch-12-night-shift");
+        p.checks = Checks::Failed {
+            failing: vec!["rust".into()],
+        };
+        // What a code host may still say of a closed one: no conflict follows.
+        p.conflicting = true;
+        let mut part = CodeHosts::default().every(0);
+        part.add(Box::new(FakeCodeHost {
+            pulls: vec![(repo, p)],
+            ..Default::default()
+        }));
+        let read = part.poll(&w, 0);
+        assert_eq!(read.problem, None);
+        assert_eq!(
+            read.events,
+            vec![
+                Event::PullBranch {
+                    issue: watch_12(),
+                    repo: ProjectId::new("watch"),
+                    number: "57".into(),
+                    branch: "watch-12-night-shift".into(),
+                },
+                closed_57(),
+            ]
+        );
+        for e in &read.events {
+            w.apply(e);
+        }
+        let i = &w.issues[&watch_12()];
+        assert_eq!(i.stage, Stage::Fixing { round: 1 });
+        assert_eq!(
+            i.closed[&ProjectId::new("watch")].branch.as_deref(),
+            Some("watch-12-night-shift"),
+            "the branch read first is kept with the closed one"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_closed_before_any_ci_run_is_reported_closed_not_waited_on() {
+        let w = watch_12_in(Stage::InReview { round: 1 }, "57");
+        let host = |state| FakeCodeHost {
+            pulls: vec![(
+                "ankh-morpork/watch".into(),
+                Pull {
+                    state,
+                    ..pull("57", Checks::None)
+                },
+            )],
+            ..Default::default()
+        };
+        let mut part = CodeHosts::default().every(0);
+        part.add(Box::new(host(PullState::Closed)));
+        for now in [0, 1] {
+            let read = part.poll(&w, now);
+            assert_eq!(read.events, vec![closed_57()], "read {now}");
+            assert_eq!(read.problem, None, "read {now}");
+        }
+        // Open, the same pull request is waited on, and a second read lists it.
+        let mut open = CodeHosts::default().every(0);
+        open.add(Box::new(host(PullState::Open)));
+        assert_eq!(open.poll(&w, 0).events, vec![]);
+        assert!(
+            open.poll(&w, 1)
+                .problem
+                .is_some_and(|p| p.contains("still no CI run on pull request 57"))
+        );
+    }
+
     fn set(w: &mut World, scope: Scope, key: &str, value: Value) {
         w.apply(&Event::SettingSet {
             scope,
@@ -1762,6 +1869,79 @@ mod tests {
                 ];
             }
             hosts
+        }
+
+        fn closed(repo: &str, number: &str) -> Event {
+            Event::PullClosed {
+                issue: gld(),
+                repo: pid(repo),
+                number: number.into(),
+            }
+        }
+
+        #[test]
+        fn a_closed_pull_request_in_either_repository_is_reported_and_no_ci_result_is() {
+            use PullState::{Closed, Open};
+            for (ui, svc, reported) in [
+                (Closed, Open, vec![closed("ui", "1")]),
+                (Open, Closed, vec![closed("svc", "2")]),
+                (Closed, Closed, vec![closed("ui", "1"), closed("svc", "2")]),
+            ] {
+                let mut fake = host(Checks::Passed, Checks::Passed);
+                fake.pulls[0].1.state = ui;
+                fake.pulls[1].1.state = svc;
+                let read = part(fake).poll(&world(Stage::InReview { round: 1 }), 0);
+                assert_eq!(read.events, reported, "ui {ui:?}, svc {svc:?}");
+            }
+            // Both closed: the author is told of both, in the round it had.
+            let mut w = world(Stage::InReview { round: 1 });
+            for e in [closed("ui", "1"), closed("svc", "2")] {
+                w.apply(&e);
+            }
+            let i = &w.issues[&gld()];
+            assert_eq!(i.stage, Stage::Fixing { round: 1 });
+            assert!(i.pulls.is_empty(), "{:?}", i.pulls);
+            assert_eq!(
+                i.fix,
+                ["ui", "svc"].map(|r| format!(
+                    "pull request {} in {r} was closed without merging: reopen it if its branch \
+                     still exists, or open a new one there",
+                    if r == "ui" { 1 } else { 2 }
+                ))
+            );
+        }
+
+        #[test]
+        fn a_conflict_and_a_closed_pull_request_go_back_in_one_fix() {
+            let mut w = world(Stage::InReview { round: 1 });
+            let mut fake = host(Checks::Passed, Checks::Passed);
+            fake.pulls[0].1.conflicting = true;
+            fake.pulls[1].1.state = PullState::Closed;
+            let read = part(fake).poll(&w, 0);
+            assert_eq!(
+                read.events,
+                vec![
+                    Event::PullConflicts {
+                        issue: gld(),
+                        repo: Some(pid("ui")),
+                    },
+                    closed("svc", "2"),
+                ]
+            );
+            let effects: Vec<Effect> = read.events.iter().flat_map(|e| w.apply(e)).collect();
+            let i = &w.issues[&gld()];
+            assert!(
+                matches!(i.fix.as_slice(), [conflict, gone]
+                    if conflict.starts_with("the pull request in ui conflicts")
+                        && gone.starts_with("pull request 2 in svc was closed")),
+                "{:?}",
+                i.fix
+            );
+            let last = effects.iter().rev().find_map(|e| match e {
+                Effect::RequestFix { points, .. } => Some(points),
+                _ => None,
+            });
+            assert_eq!(last, Some(&i.fix), "the last fix message holds both");
         }
 
         #[test]

@@ -996,7 +996,10 @@ fn a_pull_request_a_person_closed_is_dropped_and_the_next_author_opens_another()
     assert_eq!(i.stage, Stage::Fixing { round: 1 });
     assert_eq!(
         i.fix,
-        ["pull request 57 was closed without merging: reopen it or open a new one"]
+        [
+            "pull request 57 was closed without merging: reopen it if its branch still exists, or \
+          open a new one"
+        ]
     );
     assert!(i.pulls.is_empty(), "57 is dropped: {:?}", i.pulls);
 
@@ -1004,10 +1007,11 @@ fn a_pull_request_a_person_closed_is_dropped_and_the_next_author_opens_another()
     for line in [
         "- watch (ankh-morpork/watch): pull request 57, branch watch-12-night-shift (closed \
          without merging)\n",
-        "Pull request 57 was closed without merging: reopen it, or open a new pull request. A new \
-         one can start from its branch, watch-12-night-shift: git fetch, then git switch \
-         watch-12-night-shift.\n",
-        "- pull request 57 was closed without merging: reopen it or open a new one\n",
+        "Pull request 57 was closed without merging: reopen it if its branch still exists, or \
+         open a new pull request. If its branch still exists, a new one can start from it: git \
+         fetch, then git switch watch-12-night-shift.\n",
+        "- pull request 57 was closed without merging: reopen it if its branch still exists, or \
+         open a new one\n",
     ] {
         assert!(task.contains(line), "missing {line:?} in:\n{task}");
     }
@@ -1092,7 +1096,8 @@ fn an_author_told_of_a_closed_pull_request_is_asked_for_a_number() {
     assert_eq!(
         told,
         "Fix these, from the review or the checks:\n\
-         - pull request 57 was closed without merging: reopen it or open a new one\n\
+         - pull request 57 was closed without merging: reopen it if its branch still exists, or \
+         open a new one\n\
          Then push and run: temet-work ready watch#12 <pull request number>"
     );
     // A closed pull request that is not the one on record changes nothing.
@@ -1282,8 +1287,8 @@ fn a_closed_pull_request_in_one_repository_is_reopened_or_replaced_there() {
     assert_eq!(
         i.fix,
         [
-            "ui is merged; pull request 34 in api was closed without merging: reopen it or open a \
-          new one there"
+            "ui is merged; pull request 34 in api was closed without merging: reopen it if its \
+             branch still exists, or open a new one there"
         ]
     );
 
@@ -1313,9 +1318,9 @@ fn a_closed_pull_request_in_one_repository_is_reopened_or_replaced_there() {
             "- ui (group/ui): pull request 12, branch gld-12-locks (merged already)\n\
              - api (group/api): pull request 34, branch gld-12-locks (closed without merging)\n\
              Do not open another pull request in ui.\n\
-             Pull request 34 in api was closed without merging: reopen it, or open a new pull \
-             request in api. A new one can start from its branch, gld-12-locks: in the folder of \
-             api, git fetch, then git switch gld-12-locks.\n"
+             Pull request 34 in api was closed without merging: reopen it if its branch still \
+             exists, or open a new pull request in api. If its branch still exists, a new one can \
+             start from it: in the folder of api, git fetch, then git switch gld-12-locks.\n"
         ),
         "{task}"
     );
@@ -1368,6 +1373,301 @@ fn a_closed_pull_request_in_one_repository_is_reopened_or_replaced_there() {
         "{effects:?}"
     );
     assert_eq!(w.issues[&gld()].stage, Stage::Deploying);
+}
+
+/// What the author of watch#12 is told when a person closed pull request 57.
+const CLOSED_57: &str = "pull request 57 was closed without merging: reopen it if its branch \
+                         still exists, or open a new one";
+
+/// watch#12 in review round 1 with pull request 57, on branch
+/// watch-12-night-shift, and its reviewer-1 running, told of the round.
+fn watch_12_reviewing_57() -> World {
+    let mut w = watch_12_working();
+    let ready = ready_12(&w, "author-1", Some("57")).expect("ready 57");
+    apply_all(&mut w, &ready);
+    w.apply(&Event::PullBranch {
+        issue: watch_12(),
+        repo: pid("watch"),
+        number: "57".into(),
+        branch: "watch-12-night-shift".into(),
+    });
+    w.apply(&on_watch_12(started("reviewer-1", Role::Reviewer, "12")));
+    let i = &w.issues[&watch_12()];
+    assert_eq!(i.stage, Stage::InReview { round: 1 });
+    assert!(i.told);
+    w
+}
+
+/// Pull request 57, with its branch, as the closed one on record.
+fn closed_57_on_record() -> BTreeMap<ProjectId, crate::model::ClosedPull> {
+    [(
+        pid("watch"),
+        crate::model::ClosedPull {
+            number: "57".into(),
+            branch: Some("watch-12-night-shift".into()),
+        },
+    )]
+    .into()
+}
+
+fn fix_12(points: &[&str]) -> Effect {
+    Effect::RequestFix {
+        issue: watch_12(),
+        points: points.iter().map(ToString::to_string).collect(),
+    }
+}
+
+/// The review's verdict on watch#12: a block with no points.
+fn block_12(round: u8) -> Event {
+    Event::ReviewFinished {
+        issue: watch_12(),
+        round,
+        verdict: Verdict::Block { points: vec![] },
+        failed: None,
+        open: None,
+    }
+}
+
+fn failed_rust_12() -> Event {
+    Event::ChecksFinished {
+        issue: watch_12(),
+        passed: false,
+        failing: vec!["rust".into()],
+    }
+}
+
+/// The task of a `role` started on watch#12 now. With one pull request it names
+/// no number: it sends the agent to `temet-work issue watch#12`, whose text is
+/// returned too.
+fn reader_of_12(w: &World, role: Role) -> (String, String) {
+    let task = w
+        .launch(&GroupId::new("watch"), role, &watch_12(), None)
+        .expect("launch")
+        .brief
+        .task;
+    let text = crate::text::issue(w, &watch_12(), &Err("not read here".into())).expect("text");
+    (task, text)
+}
+
+/// Whether a reader started now is sent to 58 and never hears of 57.
+fn sent_to_58(w: &World, role: Role) {
+    let (task, text) = reader_of_12(w, role);
+    assert!(task.contains("temet-work issue watch#12"), "{task}");
+    assert!(!task.contains("57"), "{task}");
+    assert!(text.contains("Pull request: watch #58\n"), "{text}");
+    assert!(!text.contains("57"), "{text}");
+}
+
+#[test]
+fn a_pull_request_closed_in_review_goes_back_to_its_author_and_stops_the_reviewer() {
+    let mut w = watch_12_reviewing_57();
+    // One that is not on record changes nothing.
+    let before = w.issues[&watch_12()].clone();
+    let other = Event::PullClosed {
+        issue: watch_12(),
+        repo: pid("watch"),
+        number: "56".into(),
+    };
+    assert_eq!(w.apply(&other), vec![]);
+    assert_eq!(w.issues[&watch_12()], before);
+
+    let effects = w.apply(&closed_57());
+    assert_eq!(effects, vec![stop("reviewer-1"), fix_12(&[CLOSED_57])]);
+    let i = &w.issues[&watch_12()];
+    assert_eq!(i.stage, Stage::Fixing { round: 1 });
+    assert_eq!(i.round, 1);
+    assert!(i.fix_keeps_round, "no review round is used up");
+    assert_eq!(i.fix, [CLOSED_57]);
+    assert!(i.pulls.is_empty() && i.branches.is_empty(), "{i:?}");
+    assert_eq!(i.closed, closed_57_on_record());
+}
+
+#[test]
+fn a_pull_request_closed_with_the_arbiter_goes_back_to_its_author_and_stops_the_arbiter() {
+    let mut w = watch_12_reviewing_57();
+    for round in 1..=3 {
+        w.apply(&block_12(round));
+        if round < 3 {
+            let ready = ready_12(&w, "author-1", None).expect("ready");
+            apply_all(&mut w, &ready);
+        }
+    }
+    assert_eq!(w.issues[&watch_12()].stage, Stage::Arbitration { round: 3 });
+    w.apply(&on_watch_12(started("arbiter-1", Role::Arbiter, "12")));
+
+    let effects = w.apply(&closed_57());
+    assert_eq!(
+        effects,
+        vec![stop("reviewer-1"), stop("arbiter-1"), fix_12(&[CLOSED_57])]
+    );
+    let i = &w.issues[&watch_12()];
+    assert_eq!(i.stage, Stage::Fixing { round: 3 }, "the round is kept");
+    assert_eq!(i.fix, [CLOSED_57]);
+    assert!(i.pulls.is_empty());
+    assert_eq!(i.closed, closed_57_on_record());
+
+    // Once both have ended and 58 is named, a final-round block starts a fresh
+    // arbiter, which is sent to 58.
+    w.apply(&ended("reviewer-1"));
+    w.apply(&ended("arbiter-1"));
+    let ready = ready_12(&w, "author-1", Some("58")).expect("ready 58");
+    apply_all(&mut w, &ready);
+    assert_eq!(w.issues[&watch_12()].stage, Stage::InReview { round: 3 });
+    let effects = w.apply(&block_12(3));
+    assert!(starts_an_arbiter(&effects), "{effects:?}");
+    sent_to_58(&w, Role::Arbiter);
+}
+
+#[test]
+fn a_pull_request_closed_while_fixing_adds_its_point_and_keeps_the_stage() {
+    // Back with its author for a failed check, which keeps the round, or for a
+    // block, which uses one up.
+    for (back, keeps) in [(failed_rust_12(), true), (block_12(1), false)] {
+        let mut w = watch_12_reviewing_57();
+        w.apply(&back);
+        w.apply(&Event::Told { issue: watch_12() });
+        let had = w.issues[&watch_12()].fix.clone();
+        assert_eq!(w.issues[&watch_12()].fix_keeps_round, keeps);
+
+        let effects = w.apply(&closed_57());
+        let mut points: Vec<&str> = had.iter().map(String::as_str).collect();
+        points.push(CLOSED_57);
+        assert_eq!(effects, vec![stop("reviewer-1"), fix_12(&points)]);
+        let i = &w.issues[&watch_12()];
+        assert_eq!(i.stage, Stage::Fixing { round: 1 });
+        assert_eq!(i.round, 1);
+        assert_eq!(i.fix_keeps_round, keeps);
+        assert_eq!(i.fix, points);
+        assert!(!i.told, "the author hears every point again");
+        assert!(i.pulls.is_empty());
+        assert_eq!(i.closed, closed_57_on_record());
+    }
+}
+
+#[test]
+fn a_reviewer_stopped_for_a_closed_pull_request_does_not_count_against_starts() {
+    let one_start = |w: &mut World| {
+        w.apply(&Event::SettingSet {
+            scope: crate::settings::Scope::Global,
+            role: Some(Role::Reviewer),
+            key: "starts".into(),
+            value: crate::settings::Value::Number(1),
+            by: "person".into(),
+        });
+    };
+    // With one start, a reviewer that ends while it is waited on is the last.
+    let mut w = watch_12_reviewing_57();
+    one_start(&mut w);
+    w.apply(&ended("reviewer-1"));
+    assert_eq!(w.missing().start, vec![]);
+    assert_eq!(w.missing().given_up.len(), 1);
+
+    // Closed in review, with the arbiter, after a failed check, or while merging:
+    // the reviewer and the arbiter are stopped, and the issue gets a new reviewer
+    // once ready names 58. Outside arbitration the arbiter is one whose stop
+    // failed, so it still runs.
+    let in_review = |_: &mut World| {};
+    let with_the_arbiter = |w: &mut World| {
+        for round in 1..=3 {
+            w.apply(&block_12(round));
+            if round < 3 {
+                let ready = ready_12(w, "author-1", None).expect("ready");
+                apply_all(w, &ready);
+            }
+        }
+        assert_eq!(w.issues[&watch_12()].stage, Stage::Arbitration { round: 3 });
+    };
+    let fixing = |w: &mut World| {
+        w.apply(&failed_rust_12());
+        assert_eq!(w.issues[&watch_12()].stage, Stage::Fixing { round: 1 });
+    };
+    let merging = |w: &mut World| {
+        approve_12(w, 1);
+        assert_eq!(w.issues[&watch_12()].stage, Stage::Merging);
+    };
+    let stages: [&dyn Fn(&mut World); 4] = [&in_review, &with_the_arbiter, &fixing, &merging];
+    for to in stages {
+        let mut w = watch_12_reviewing_57();
+        one_start(&mut w);
+        to(&mut w);
+        // The round goes on: 3 after arbitration, else 1.
+        let (stage, round) = (w.issues[&watch_12()].stage, w.issues[&watch_12()].round);
+        w.apply(&on_watch_12(started("arbiter-1", Role::Arbiter, "12")));
+        let effects = w.apply(&closed_57());
+        for agent in ["reviewer-1", "arbiter-1"] {
+            assert!(
+                effects.contains(&stop(agent)),
+                "{agent} in {stage:?}: {effects:?}"
+            );
+        }
+        w.apply(&ended("reviewer-1"));
+        w.apply(&ended("arbiter-1"));
+
+        let ready = ready_12(&w, "author-1", Some("58")).expect("ready 58");
+        apply_all(&mut w, &ready);
+        assert_eq!(w.issues[&watch_12()].stage, Stage::InReview { round });
+        let missing = w.missing();
+        assert_eq!(missing.given_up, Vec::<String>::new(), "{stage:?}");
+        assert_eq!(
+            missing.start,
+            vec![Effect::StartReview {
+                issue: watch_12(),
+                round,
+            }],
+            "{stage:?}"
+        );
+        sent_to_58(&w, Role::Reviewer);
+    }
+}
+
+#[test]
+fn a_pull_request_closed_after_ci_failed_is_dropped_and_ready_58_is_followed() {
+    let mut w = watch_12_reviewing_57();
+    w.apply(&failed_rust_12());
+    assert_eq!(w.issues[&watch_12()].stage, Stage::Fixing { round: 1 });
+    // A person closes 57. No one has heard, and 57 is still on record.
+    let ready = ready_12(&w, "author-1", None).expect("57 is on record");
+    apply_all(&mut w, &ready);
+    assert_eq!(w.issues[&watch_12()].stage, Stage::InReview { round: 1 });
+
+    // The code host's next read finds 57 closed.
+    let effects = w.apply(&closed_57());
+    let fixes: Vec<&Vec<String>> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::RequestFix { points, .. } => Some(points),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fixes,
+        [&vec![CLOSED_57.to_string()]],
+        "not the failed check"
+    );
+    let i = &w.issues[&watch_12()];
+    assert_eq!(i.stage, Stage::Fixing { round: 1 });
+    let told = crate::brief::fixes(i, &w.repos_of(i), fixes[0]);
+    assert!(
+        told.ends_with("temet-work ready watch#12 <pull request number>"),
+        "{told}"
+    );
+    assert!(
+        ready_12(&w, "author-1", None)
+            .is_err_and(|e| e.contains("say which pull request: temet-work ready watch#12")),
+    );
+
+    let ready = ready_12(&w, "author-1", Some("58")).expect("ready 58");
+    apply_all(&mut w, &ready);
+    let i = &w.issues[&watch_12()];
+    assert_eq!(i.stage, Stage::InReview { round: 1 });
+    assert_eq!(i.pulls, [(pid("watch"), "58".to_string())].into());
+    assert!(i.closed.is_empty(), "{:?}", i.closed);
+    let effects = approve_12(&mut w, 1);
+    assert!(
+        effects.contains(&Effect::Merge { issue: watch_12() }),
+        "{effects:?}"
+    );
+    assert_eq!(w.issues[&watch_12()].stage, Stage::Merging);
 }
 
 #[test]
