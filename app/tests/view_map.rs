@@ -5,11 +5,12 @@
 use std::path::Path;
 
 use temet_work_app::components::Intent;
+use temet_work_app::components::icon::IconName;
 use temet_work_app::components::stage_tag::Stage;
 use temet_work_app::components::status_tag::Status;
 use temet_work_app::composites::decision_row::UndoCost;
 use temet_work_app::daemon::Problem;
-use temet_work_app::pages::project::{Grouping, Project, ProjectView};
+use temet_work_app::pages::project::{FactValue, Grouping, Project, ProjectView};
 use temet_work_app::view_map::{self, ago, due, notice, project_view, show};
 use temet_work_core::View;
 use temet_work_core::ids::ProjectId;
@@ -40,9 +41,9 @@ fn the_first_project_is_shown_unless_another_is_named() {
 }
 
 #[test]
-fn the_side_nav_lists_every_project_under_its_area() {
+fn a_project_in_no_area_is_listed_at_the_top_level_with_its_open_decisions() {
     let page = watch(&parse(CURRENT));
-    let names: Vec<_> = page
+    let areas: Vec<_> = page
         .areas
         .iter()
         .map(|a| {
@@ -50,18 +51,31 @@ fn the_side_nav_lists_every_project_under_its_area() {
                 a.name.to_string(),
                 a.projects
                     .iter()
-                    .map(|p| p.name.to_string())
+                    .map(|p| (p.name.to_string(), p.waiting))
                     .collect::<Vec<_>>(),
             )
         })
         .collect();
     assert_eq!(
-        names,
-        [
-            ("No area".to_string(), vec!["unseen".to_string()]),
-            ("Ankh-Morpork".to_string(), vec!["watch".to_string()]),
-        ]
+        areas,
+        [("Ankh-Morpork".to_string(), vec![("watch".to_string(), 0)])],
+        "watch is on screen: Needs you counts its decisions, not a badge"
     );
+    let loose: Vec<_> = page
+        .projects
+        .iter()
+        .map(|p| (p.name.to_string(), p.icon, p.waiting))
+        .collect();
+    assert_eq!(
+        loose,
+        [("unseen".to_string(), Some(IconName::GitRepo), 0)],
+        "unseen is in no area: at the top level, not under a No area row"
+    );
+    // Seen from unseen, watch counts the decisions that wait on a person: 3 and 1, as 2 is
+    // overturned and 4 is past its merge.
+    let unseen = project_view(&parse(CURRENT), None, NOW).expect("a project");
+    assert_eq!(unseen.areas[0].projects[0].waiting, 2);
+    assert_eq!(unseen.projects[0].waiting, 0, "unseen is on screen");
 }
 
 #[test]
@@ -79,17 +93,24 @@ fn the_title_and_facts_come_from_the_project() {
         [
             (
                 "Issues".into(),
-                "tracker.example.com/ankh-morpork/watch/issues".into()
+                "tracker.example.com ankh-morpork/watch".into()
             ),
             ("Code".into(), "git.example.com/ankh-morpork/watch".into()),
         ]
     );
     let unseen = project_view(&view, None, NOW).expect("a project");
     assert!(unseen.facts.is_empty(), "no address, so no fact");
+    // A GitHub project's issues read as the radar page writes them.
+    let mut github = view.clone();
+    github.projects[1].issues_url = Some("https://github.com/ankh-morpork/watch/issues".into());
+    assert_eq!(
+        watch(&github).facts[0].value.as_ref(),
+        "GitHub ankh-morpork/watch"
+    );
 }
 
 #[test]
-fn groups_list_their_agents_that_have_not_ended() {
+fn groups_list_their_running_agents_by_id_and_issue_and_count_the_ended_ones() {
     let page = watch(&parse(CURRENT));
     assert_eq!(page.groups.len(), 1);
     let group = &page.groups[0];
@@ -102,6 +123,7 @@ fn groups_list_their_agents_that_have_not_ended() {
             (
                 a.role.to_string(),
                 a.r#where.clone().map(|w| w.to_string()),
+                a.detail.clone().map(|d| d.to_string()),
                 a.status,
             )
         })
@@ -110,35 +132,75 @@ fn groups_list_their_agents_that_have_not_ended() {
         agents,
         [
             (
-                "author".into(),
-                Some("pseudopolis \u{b7} anthill".into()),
+                "author-2".into(),
+                Some("watch#3 \u{b7} anthill".into()),
+                Some("working: winding the clock \u{b7} pseudopolis \u{b7} anthill".into()),
                 Status::Running
             ),
             (
-                "author".into(),
-                Some("pseudopolis \u{b7} anthill".into()),
+                "author-4".into(),
+                Some("watch#5 \u{b7} anthill".into()),
+                Some("error: usage limit reached \u{b7} pseudopolis \u{b7} anthill".into()),
                 Status::Failed
             ),
-            ("refiner".into(), Some("pseudopolis".into()), Status::Idle),
             (
-                "reviewer".into(),
-                Some("pseudopolis \u{b7} anthill".into()),
+                "refiner-1".into(),
+                Some("watch#2".into()),
+                Some("idle \u{b7} pseudopolis".into()),
+                Status::Idle
+            ),
+            (
+                "reviewer-3".into(),
+                Some("watch#4 \u{b7} anthill".into()),
+                Some("blocked: permission \u{b7} pseudopolis \u{b7} anthill".into()),
                 Status::Blocked
             ),
         ],
         "the ended author-5 is not listed"
     );
+    assert_eq!(
+        group.empty.as_deref(),
+        Some("No agents running \u{b7} 1 ended"),
+        "shown only when no agent runs"
+    );
+    // With every agent ended, the group says how many have.
+    let mut view = parse(CURRENT);
+    for agent in &mut view.agents {
+        agent.state = temet_work_core::view::StateWord::Ended;
+    }
+    let page = watch(&view);
+    assert!(page.groups[0].agents.is_empty());
+    assert_eq!(
+        page.groups[0].empty.as_deref(),
+        Some("No agents running \u{b7} 5 ended")
+    );
 }
 
 #[test]
-fn what_the_view_does_not_hold_stays_empty() {
+fn the_stage_counts_have_every_stage_with_done_from_the_view() {
     let page = watch(&parse(CURRENT));
-    assert!(page.machines.is_empty());
-    assert!(page.limits.is_empty());
+    let counts: Vec<_> = page.stages.iter().map(|(s, n)| (s.name(), *n)).collect();
+    assert_eq!(
+        counts,
+        [
+            ("new", 1),
+            ("refining", 1),
+            ("ready", 0),
+            ("working", 1),
+            ("in review", 1),
+            ("fixing", 1),
+            ("with arbiter", 0),
+            ("merging", 0),
+            ("deploying", 0),
+            ("verifying", 0),
+            ("done", 2),
+        ],
+        "all 11 stages in the daemon's order; unseen#1 is another project's"
+    );
 }
 
 #[test]
-fn milestones_carry_their_counts_due_dates_and_open_issues() {
+fn milestones_with_open_issues_carry_their_counts_due_dates_and_issues() {
     let page = watch(&parse(CURRENT));
     let ms: Vec<_> = page
         .milestones
@@ -150,41 +212,197 @@ fn milestones_carry_their_counts_due_dates_and_open_issues() {
                 m.total,
                 m.due.clone().map(|d| d.to_string()),
                 m.issues.len(),
+                m.taken,
             )
         })
         .collect();
     assert_eq!(
         ms,
         [
-            ("Snuff".to_string(), 0, 0, None, 0),
             (
                 "The Clacks".to_string(),
                 2,
                 6,
                 Some("12 Dec".to_string()),
-                4
+                4,
+                true
             ),
-            ("No milestone".to_string(), 0, 1, None, 1),
+            ("No milestone".to_string(), 0, 1, None, 1, true),
         ],
-        "watch#5 names no milestone"
+        "Snuff has nothing open, so it is not listed; watch#5 names no milestone"
     );
-    let clacks = &page.milestones[1];
+    let clacks = &page.milestones[0];
     let first = &clacks.issues[0];
-    assert_eq!(first.key.as_ref(), "1");
+    assert_eq!(
+        first.key.as_ref(),
+        "watch#1",
+        "the whole id, as commands take it"
+    );
     assert_eq!(first.stage, Stage::New);
     assert_eq!(first.group, None);
+    assert_eq!(first.milestone.as_deref(), Some("The Clacks"));
     assert_eq!(first.agent, None);
     assert_eq!(first.updated.as_ref(), "12 min ago");
     let ringing = &clacks.issues[3];
-    assert_eq!(ringing.key.as_ref(), "4");
+    assert_eq!(ringing.key.as_ref(), "watch#4");
     assert_eq!(ringing.stage, Stage::InReview);
     assert_eq!(ringing.group.as_deref(), Some("Night Watch"));
-    assert_eq!(ringing.agent.as_deref(), Some("reviewer \u{b7} hex"));
+    assert_eq!(ringing.agent.as_deref(), Some("reviewer-3"));
     assert_eq!(ringing.updated.as_ref(), "9 min ago");
 }
 
+/// The fixture with The Clacks' watch#1 and watch#4 moved to Snuff, which Night Watch does not
+/// take; watch#4 is held by Night Watch.
+fn with_snuff() -> View {
+    let mut view = parse(CURRENT);
+    for issue in &mut view.issues {
+        if issue.id == "watch#1" || issue.id == "watch#4" {
+            issue.milestone = Some(temet_work_core::ids::MilestoneId::new("Snuff"));
+        }
+    }
+    view
+}
+
 #[test]
-fn needs_you_lists_open_decisions_costliest_first() {
+fn a_milestone_no_group_takes_says_so_and_how_many_a_group_holds_out_of_scope() {
+    let page = watch(&with_snuff());
+    let notes: Vec<_> = page
+        .milestones
+        .iter()
+        .map(|m| (m.name.to_string(), m.note.clone().map(|n| n.to_string())))
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            (
+                "Snuff".to_string(),
+                Some("no group takes it \u{b7} 1 held by Night Watch, out of scope".to_string())
+            ),
+            ("The Clacks".to_string(), None),
+            ("No milestone".to_string(), None),
+        ]
+    );
+    // With no issue held, the note says only that no group takes it.
+    let mut view = with_snuff();
+    for issue in &mut view.issues {
+        if issue.id == "watch#4" {
+            issue.group = None;
+        }
+    }
+    assert_eq!(
+        watch(&view).milestones[0].note.as_deref(),
+        Some("no group takes it")
+    );
+}
+
+#[test]
+fn the_board_has_a_lane_per_milestone_closed_when_no_group_takes_it() {
+    let page = watch(&with_snuff());
+    let lanes: Vec<_> = page
+        .lanes
+        .iter()
+        .map(|l| {
+            (
+                l.title.to_string(),
+                l.default_open,
+                l.note.clone().map(|n| n.to_string()),
+                l.issues
+                    .iter()
+                    .map(|i| i.key.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        lanes,
+        [
+            (
+                "Snuff".to_string(),
+                false,
+                Some("no group takes it \u{b7} 1 held by Night Watch, out of scope".to_string()),
+                vec!["watch#1".to_string(), "watch#4".to_string()]
+            ),
+            (
+                "The Clacks".to_string(),
+                true,
+                None,
+                vec!["watch#2".to_string(), "watch#3".to_string()]
+            ),
+            (
+                "No milestone".to_string(),
+                true,
+                None,
+                vec!["watch#5".to_string()]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn each_card_has_its_open_decisions_and_running_agents() {
+    let page = watch(&parse(CURRENT));
+    let cards: Vec<_> = page
+        .lanes
+        .iter()
+        .flat_map(|l| &l.issues)
+        .map(|c| {
+            (
+                c.key.to_string(),
+                c.stage,
+                c.decisions,
+                c.agents
+                    .iter()
+                    .map(|a| (a.label.to_string(), a.status))
+                    .collect::<Vec<_>>(),
+                c.updated.clone().map(|u| u.to_string()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cards,
+        [
+            (
+                "watch#1".to_string(),
+                Stage::New,
+                0,
+                vec![],
+                Some("12 min ago".to_string())
+            ),
+            (
+                "watch#2".to_string(),
+                Stage::Refining,
+                0,
+                vec![("refiner-1".to_string(), Status::Idle)],
+                Some("11 min ago".to_string())
+            ),
+            (
+                "watch#3".to_string(),
+                Stage::Working,
+                1,
+                vec![("author-2".to_string(), Status::Running)],
+                Some("10 min ago".to_string())
+            ),
+            (
+                "watch#4".to_string(),
+                Stage::InReview,
+                1,
+                vec![("reviewer-3".to_string(), Status::Blocked)],
+                Some("9 min ago".to_string())
+            ),
+            (
+                "watch#5".to_string(),
+                Stage::Fixing,
+                0,
+                vec![("author-4".to_string(), Status::Failed)],
+                Some("8 min ago".to_string())
+            ),
+        ],
+        "watch#4's decision 2 is overturned, so one of its two is open"
+    );
+}
+
+#[test]
+fn needs_you_lists_open_decisions_costliest_first_as_on_main() {
     let view = parse(CURRENT);
     let page = watch(&view);
     let ids: Vec<_> = page.needs.iter().map(|n| n.id.to_string()).collect();
@@ -197,28 +415,16 @@ fn needs_you_lists_open_decisions_costliest_first() {
     assert_eq!(first.cost, Some(UndoCost::High));
     assert_eq!(first.took.as_ref(), "merge");
     assert_eq!(first.by.as_ref(), "arbiter-6");
-    assert_eq!(first.issue.as_deref(), Some("4"));
+    assert_eq!(first.issue.as_deref(), Some("watch#4"));
     assert_eq!(first.overturn_before.as_deref(), Some("its issue's merge"));
     assert!(
-        first.weighed.is_empty() && first.why.is_none(),
-        "Needs you draws the short row; the pane has what was weighed and why"
+        first.question.is_none() && first.weighed.is_empty() && first.why.is_none(),
+        "Needs you draws the short row; the pane has the question and why"
     );
     assert_eq!(page.needs[1].decision.cost, Some(UndoCost::Low));
-    assert_eq!(
-        page.need_project.get("3").map(|p| p.as_ref()),
-        Some("watch")
-    );
-    assert_eq!(
-        page.same_decision
-            .get("3")
-            .map(|(k, i)| (k.as_ref(), i.as_ref())),
-        Some(("4", "3"))
-    );
-    // Seen from the other project, the same decisions name their project.
+    // Every project's open decisions, as on main.
     let unseen = project_view(&view, None, NOW).expect("a project");
     assert_eq!(unseen.needs.len(), 2);
-    assert_eq!(unseen.needs[0].decision.issue.as_deref(), Some("watch#4"));
-    assert!(unseen.same_decision.is_empty());
 }
 
 #[test]
@@ -238,9 +444,124 @@ fn a_decision_with_no_cost_comes_after_those_with_one() {
 }
 
 #[test]
+fn each_decision_in_the_pane_has_its_question_and_the_other_options_numbered_from_1() {
+    let page = watch(&parse(CURRENT));
+    let decisions = page.details["watch#4"]
+        .decisions
+        .as_ref()
+        .expect("decisions");
+    let ids: Vec<_> = decisions.iter().map(|d| d.id.to_string()).collect();
+    assert_eq!(ids, ["3", "2"], "the costliest to undo first");
+    let merge = &decisions[0].decision;
+    assert_eq!(
+        merge.question.as_deref(),
+        Some("Does watch#4 merge after 3 review rounds?")
+    );
+    assert_eq!(merge.took.as_ref(), "merge");
+    assert_eq!(merge.by.as_ref(), "arbiter-6");
+    assert_eq!(merge.cost, Some(UndoCost::High));
+    assert_eq!(merge.overturn_before.as_deref(), Some("merge"));
+    let others: Vec<_> = merge
+        .options
+        .iter()
+        .map(|o| (o.id.to_string(), o.label.to_string()))
+        .collect();
+    assert_eq!(others, [("2".to_string(), "fix first".to_string())]);
+    assert_eq!(merge.overturned, None);
+
+    let bells = &decisions[1].decision;
+    assert_eq!(bells.took.as_ref(), "two", "option 2 of 3 was chosen");
+    assert_eq!(bells.why.as_deref(), Some("it is easier to undo"));
+    let others: Vec<_> = bells
+        .options
+        .iter()
+        .map(|o| (o.id.to_string(), o.label.to_string()))
+        .collect();
+    assert_eq!(
+        others,
+        [
+            ("1".to_string(), "one bell".to_string()),
+            ("3".to_string(), "all of them".to_string())
+        ],
+        "numbered as the daemon counts them, the chosen one left out"
+    );
+    assert_eq!(bells.overturned.as_deref(), Some("Overturned"));
+    assert_eq!(bells.overturned_to.as_deref(), Some("all of them"));
+    assert_eq!(
+        bells.overturn_reason.as_deref(),
+        Some("the guild pays by the bell")
+    );
+}
+
+#[test]
+fn the_panes_facts_are_group_waits_for_pull_request_and_tracker() {
+    let page = project_view(&parse(CURRENT), None, NOW).expect("a project");
+    let facts = |page: &ProjectView, key: &str| -> Vec<(String, FactValue)> {
+        page.details[key]
+            .facts
+            .iter()
+            .map(|f| (f.label.to_string(), f.value.clone()))
+            .collect()
+    };
+    let text = |t: &str| FactValue::Text(t.to_string().into());
+    assert_eq!(
+        facts(&page, "unseen#1"),
+        [
+            ("Group".to_string(), text("Night Watch")),
+            (
+                "Waits for".to_string(),
+                FactValue::Keys(vec!["watch#3".into()])
+            ),
+            (
+                "Tracker".to_string(),
+                FactValue::Link {
+                    text: "unseen/university#1".into(),
+                    url: None
+                }
+            ),
+        ],
+        "the milestone, agents and last change each have their own place on the screen"
+    );
+    let page = watch(&parse(CURRENT));
+    assert_eq!(
+        facts(&page, "watch#4"),
+        [
+            ("Group".to_string(), text("Night Watch")),
+            (
+                "Pull request".to_string(),
+                FactValue::Pull {
+                    number: 41,
+                    checks: Some(false)
+                }
+            ),
+            (
+                "Tracker".to_string(),
+                FactValue::Link {
+                    text: "ankh-morpork/watch#4".into(),
+                    url: Some("https://tracker.example.com/ankh-morpork/watch/issues/4".into())
+                }
+            ),
+        ]
+    );
+    assert_eq!(
+        page.details["watch#1"].facts[0].value,
+        text("None yet"),
+        "an issue no group has taken"
+    );
+}
+
+#[test]
+fn the_deadline_every_decision_in_needs_you_shares_is_the_panes_to_leave_out() {
+    let page = watch(&parse(CURRENT));
+    assert_eq!(page.shared_deadline.as_deref(), Some("merge"));
+    // A ruling from an older log has no deadline, so none is shared.
+    assert_eq!(watch(&parse(BEFORE_COSTS)).shared_deadline, None);
+}
+
+#[test]
 fn an_issues_checks_keep_their_states() {
     let page = watch(&parse(CURRENT));
-    let plan = page.details["5"].plan.as_ref().expect("a plan");
+    let plan = page.details["watch#5"].plan.as_ref().expect("a plan");
     let states: Vec<_> = plan.checks.iter().map(|c| c.status).collect();
     assert_eq!(
         states,
@@ -256,28 +577,27 @@ fn an_issues_checks_keep_their_states() {
         plan.checks[0].proven_by.as_ref(),
         "walking the yard at dawn"
     );
-    assert_eq!(plan.folder.as_deref(), Some("pseudopolis:yard-1"));
     assert_eq!(plan.merge, None, "the view holds no merge rule");
     // An issue with no plan has no plan tab.
-    assert!(page.details["2"].plan.is_none());
+    assert!(page.details["watch#2"].plan.is_none());
 }
 
 #[test]
 fn a_check_with_no_state_draws_no_status() {
     let page = watch(&parse(BEFORE_STATES));
-    let plan = page.details["4"].plan.as_ref().expect("a plan");
+    let plan = page.details["watch#4"].plan.as_ref().expect("a plan");
     assert_eq!(plan.checks[0].status, None);
 }
 
 #[test]
 fn an_issues_review_rounds_keep_their_points_and_replies() {
     let page = watch(&parse(CURRENT));
-    let detail = &page.details["4"];
+    let detail = &page.details["watch#4"];
     assert_eq!(detail.round, 3);
     let rounds = detail.rounds.as_ref().expect("rounds");
     assert_eq!(rounds.len(), 2);
     assert_eq!(rounds[0].round, 1);
-    assert_eq!(rounds[0].by.as_ref(), "reviewer \u{b7} hex");
+    assert_eq!(rounds[0].by.as_ref(), "reviewer-3");
     assert_eq!(rounds[0].status, Status::Blocked);
     let points: Vec<_> = rounds[0]
         .points
@@ -305,13 +625,13 @@ fn an_issues_review_rounds_keep_their_points_and_replies() {
             ),
         ]
     );
-    assert!(page.details["1"].rounds.is_none());
+    assert!(page.details["watch#1"].rounds.is_none());
 }
 
 #[test]
 fn an_older_review_with_bare_points_maps_with_open_points_and_an_approval() {
     let page = watch(&parse(BEFORE_STATES));
-    let rounds = page.details["4"].rounds.as_ref().expect("rounds");
+    let rounds = page.details["watch#4"].rounds.as_ref().expect("rounds");
     assert_eq!(
         rounds[0].points[0].reply.as_deref(),
         Some("recast the bell")
@@ -322,24 +642,30 @@ fn an_older_review_with_bare_points_maps_with_open_points_and_an_approval() {
 }
 
 #[test]
-fn an_issues_pull_request_and_decisions_come_from_the_view() {
+fn an_issues_pull_request_comes_from_the_view() {
     let page = watch(&parse(CURRENT));
-    let detail = &page.details["4"];
+    let detail = &page.details["watch#4"];
     let pull = detail.pull.as_ref().expect("a pull request");
     assert_eq!(pull.number, 41);
     assert_eq!(pull.merged, Some(false));
     assert_eq!(pull.ci, Some(Status::Failed));
     assert!(pull.branch.is_none() && pull.lines.is_none() && pull.files.is_none());
-    let decisions = detail.decisions.as_ref().expect("decisions");
-    let ids: Vec<_> = decisions.iter().map(|d| d.id.to_string()).collect();
-    assert_eq!(ids, ["2", "3"]);
+    assert!(page.details["watch#1"].decisions.is_none());
+    assert!(page.details["watch#1"].pull.is_none());
+}
+
+#[test]
+fn the_daemons_problems_are_listed() {
+    let page = watch(&parse(CURRENT));
+    let problems: Vec<_> = page
+        .problems
+        .iter()
+        .map(|p| (p.name.to_string(), p.text.to_string()))
+        .collect();
     assert_eq!(
-        decisions[0].decision.overturned.as_deref(),
-        Some("Overturned to all of them: the guild pays by the bell")
+        problems,
+        [("tracker".to_string(), "the clacks are down".to_string())]
     );
-    assert!(decisions[1].decision.overturned.is_none());
-    assert!(page.details["1"].decisions.is_none());
-    assert!(page.details["1"].pull.is_none());
 }
 
 #[test]
@@ -353,13 +679,16 @@ fn a_project_with_no_milestones_maps_with_its_issues_under_none() {
     assert_eq!(page.milestones.len(), 1);
     assert_eq!(page.milestones[0].name.as_ref(), "No milestone");
     assert_eq!(page.milestones[0].issues.len(), 5);
+    assert_eq!(page.lanes.len(), 1);
 
     view.issues.clear();
     view.decisions.clear();
     let empty = watch(&view);
     assert!(empty.milestones.is_empty());
+    assert!(empty.lanes.is_empty());
     assert!(empty.needs.is_empty());
     assert!(empty.details.is_empty());
+    assert_eq!(empty.shared_deadline, None);
 }
 
 #[test]
@@ -389,7 +718,7 @@ fn stages_shown(view: &View) -> Vec<(String, Stage, String)> {
     for project in &view.projects {
         let page = project_view(view, Some(&project.id), NOW).expect("a project");
         for issue in page.milestones.iter().flat_map(|m| &m.issues) {
-            let id = format!("{}#{}", project.id.0, issue.key);
+            let id = issue.key.to_string();
             let word = view
                 .issues
                 .iter()
@@ -525,7 +854,7 @@ fn a_stale_view_stays_on_the_page_with_a_notice_and_the_choices_stay() {
     show(&mut page, Some(&view), None, path, NOW);
     assert!(!page.is_blank());
     assert!(page.notice().is_none());
-    page.select(&"4".into());
+    page.select(&"unseen#1".into());
     page.set_grouping(Grouping::Stage);
 
     let problem = Problem::NoAnswer {
@@ -537,7 +866,7 @@ fn a_stale_view_stays_on_the_page_with_a_notice_and_the_choices_stay() {
     let notice = page.notice().expect("a notice");
     assert_eq!(notice.intent, Intent::Warning);
     assert_eq!(notice.lines[0].as_ref(), "no answer within 5 s");
-    assert_eq!(page.selected().map(|k| k.as_ref()), Some("4"));
+    assert_eq!(page.selected().map(|k| k.as_ref()), Some("unseen#1"));
     assert_eq!(page.grouping(), Grouping::Stage);
 
     // A new view replaces the old and clears the notice; the choices still stay.
@@ -545,7 +874,7 @@ fn a_stale_view_stays_on_the_page_with_a_notice_and_the_choices_stay() {
     newer.issues.pop();
     show(&mut page, Some(&newer), None, path, NOW);
     assert!(page.notice().is_none());
-    assert_eq!(page.selected().map(|k| k.as_ref()), Some("4"));
+    assert_eq!(page.selected().map(|k| k.as_ref()), Some("unseen#1"));
     assert_eq!(page.grouping(), Grouping::Stage);
 }
 
@@ -559,4 +888,31 @@ fn a_view_with_no_projects_says_so() {
     let mut page = Project::blank(None);
     show(&mut page, Some(&view), None, path, NOW);
     assert!(page.is_blank());
+}
+
+#[test]
+fn the_first_view_opens_its_first_issue_and_the_persons_choices_stay_through_refreshes() {
+    use temet_work_app::composites::issue_pane::IssueTab;
+    use temet_work_app::pages::project::ViewMode;
+    let path = Path::new("/run/user/1000/temet-work.sock");
+    let view = parse(CURRENT);
+    let mut page = Project::blank(None);
+    show(&mut page, None, None, path, NOW);
+    assert_eq!(page.selected(), None);
+    show(&mut page, Some(&view), None, path, NOW);
+    assert_eq!(
+        page.selected().map(|k| k.as_ref()),
+        Some("unseen#1"),
+        "the first issue listed"
+    );
+    assert_eq!(page.tab(), Some(IssueTab::Plan), "it has no open decision");
+    assert_eq!(page.mode(), ViewMode::List, "the window opens on List");
+
+    page.set_mode(ViewMode::Board);
+    page.close();
+    for _ in 0..3 {
+        show(&mut page, Some(&view), None, path, NOW);
+    }
+    assert_eq!(page.selected(), None, "a closed pane stays closed");
+    assert_eq!(page.mode(), ViewMode::Board);
 }

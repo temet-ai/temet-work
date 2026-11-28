@@ -1,18 +1,21 @@
-//! CheckList (`temet-checklist`): the checks of an issue's plan: a line counting where they
-//! stand, then for each what done means, what proves it and its status. A long done-when or
-//! proven-by shows its first lines, with plus to open it whole and minus to close it. A check
-//! that has not run has no status tag. With no checks it says "No checks yet".
+//! CheckList (`temet-checklist`): the checks of an issue's plan: for each, what done means, what
+//! proves it and its status. A long done-when or proven-by shows its first lines; a click on its
+//! row opens it whole and another closes it, and its plus or minus, for the keyboard, shows on the
+//! row under the pointer and while the row is open. A check that has not run has no status tag.
+//! With no checks it says "No checks yet".
 
 use gpui::{
-    App, ElementId, Entity, IntoElement, ParentElement, Pixels, RenderOnce, SharedString, Styled,
-    Window, canvas, div,
+    App, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce,
+    SharedString, StatefulInteractiveElement, Styled, Window, canvas, div,
 };
 
 use crate::components::button::{Button, Size, Variant};
 use crate::components::icon::IconName;
 use crate::components::list_row::ListRow;
 use crate::components::status_tag::{Status, StatusTag};
-use crate::components::{CHECK_LINES, CHECK_META_LINES, Class, check_lines, classed, spans};
+use crate::components::{
+    CHECK_LINES, CHECK_META_LINES, Class, check_lines, classed, reveal, spans,
+};
 use crate::theme::space;
 
 /// One check in a plan.
@@ -28,31 +31,6 @@ pub struct PlanCheck {
     pub status: Option<Status>,
     /// Text in place of the status word, such as "Passed in 41 s".
     pub status_text: Option<SharedString>,
-}
-
-/// The line over the checks, such as "3 checks: 2 passed, 1 waiting": how many there are, then
-/// how many stand at each status, in the order the statuses first appear. None with no checks.
-pub fn count_line(checks: &[PlanCheck]) -> Option<String> {
-    if checks.is_empty() {
-        return None;
-    }
-    let mut counts: Vec<(String, usize)> = Vec::new();
-    for c in checks {
-        let word = c.status.map_or_else(
-            || "not run yet".to_string(),
-            |s| s.view().word.to_lowercase(),
-        );
-        match counts.iter_mut().find(|(w, _)| *w == word) {
-            Some((_, n)) => *n += 1,
-            None => counts.push((word, 1)),
-        }
-    }
-    let total = match checks.len() {
-        1 => "1 check".to_string(),
-        n => format!("{n} checks"),
-    };
-    let each: Vec<String> = counts.iter().map(|(w, n)| format!("{n} {w}")).collect();
-    Some(format!("{total}: {}", each.join(", ")))
 }
 
 /// A row's state between frames: whether it is open, and its text's width, measured after
@@ -82,7 +60,6 @@ impl CheckList {
 
 impl RenderOnce for CheckList {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let count = count_line(&self.checks).map(|line| classed(Class::PaneCount, cx).child(line));
         let empty = self
             .checks
             .is_empty()
@@ -124,28 +101,35 @@ impl RenderOnce for CheckList {
             .size_full();
             let title = div().relative().child(text).child(measure);
 
+            let openable = open || title_cut || meta_cut;
             let toggle = Button::new(SharedString::from(format!("{key}-toggle")))
                 .size(Size::Small)
                 .variant(Variant::Minimal);
-            let toggle = if open || title_cut || meta_cut {
+            let toggle = if openable {
                 let toggled = state.clone();
-                toggle
+                let button = toggle
                     .icon(if open {
                         IconName::Minus
                     } else {
                         IconName::Plus
                     })
                     .on_click(move |_, _, cx| {
+                        // The row's own click would toggle it back.
+                        cx.stop_propagation();
                         toggled.update(cx, |s, cx| {
                             s.open = !s.open;
                             cx.notify();
                         });
-                    })
+                    });
+                // Shown on the row under the pointer, and while it is open.
+                reveal(key.clone(), open, cx).child(button)
             } else {
                 // Holds the button's place, so status tags line up whether a row opens or not.
-                toggle
-                    .icon(IconName::Plus)
-                    .class_name(Class::CheckToggleNone)
+                div().child(
+                    toggle
+                        .icon(IconName::Plus)
+                        .class_name(Class::CheckToggleNone),
+                )
             };
             let status = c.status.map(|status| match c.status_text {
                 Some(text) => StatusTag::new(status).children(text),
@@ -157,8 +141,24 @@ impl RenderOnce for CheckList {
                 .gap(space::s5(cx))
                 .children(status)
                 .child(toggle);
-            rows.push(ListRow::new(title).meta(meta).end(end));
+            let row = div()
+                .id(key.clone())
+                .group(key.clone())
+                .child(ListRow::new(title).meta(meta).end(end));
+            // A cut check opens with a click anywhere on its row.
+            let row = if openable {
+                let toggled = state.clone();
+                row.cursor_pointer().on_click(move |_, _, cx| {
+                    toggled.update(cx, |s, cx| {
+                        s.open = !s.open;
+                        cx.notify();
+                    });
+                })
+            } else {
+                row
+            };
+            rows.push(row);
         }
-        div().children(count).children(empty).children(rows)
+        div().children(empty).children(rows)
     }
 }

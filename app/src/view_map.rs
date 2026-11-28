@@ -285,8 +285,9 @@ fn open_decisions(view: &View) -> HashMap<&str, usize> {
 }
 
 /// The left column's projects: those in an area under it, those in no area at the top level, each
-/// with the count of its decisions that wait on a person.
-fn projects(view: &View) -> (Vec<SideNavArea>, Vec<SideNavProject>) {
+/// with the count of its decisions that wait on a person, but for the project on screen, whose
+/// decisions Needs you counts.
+fn projects(view: &View, shown: &ProjectId) -> (Vec<SideNavArea>, Vec<SideNavProject>) {
     let waiting = waiting(view);
     let mut areas: Vec<SideNavArea> = Vec::new();
     let mut loose = Vec::new();
@@ -295,10 +296,14 @@ fn projects(view: &View) -> (Vec<SideNavArea>, Vec<SideNavProject>) {
             id: s(project.id.0.clone()),
             name: s(project.id.0.clone()),
             icon: Some(IconName::GitRepo),
-            waiting: waiting
-                .iter()
-                .filter(|d| project_of(&d.issue) == project.id.0)
-                .count(),
+            waiting: if &project.id == shown {
+                0
+            } else {
+                waiting
+                    .iter()
+                    .filter(|d| project_of(&d.issue) == project.id.0)
+                    .count()
+            },
         };
         let Some(area) = &project.area else {
             loose.push(item);
@@ -441,39 +446,25 @@ fn summary(view: &View, issue: &Issue, now_ms: u64) -> IssueSummary {
     }
 }
 
-/// The facts the pane shows for an issue, the radar page's rows: Milestone (out of scope for its
-/// group when the group does not take it), Group, Waits for, Pull request with its checks,
-/// Agents, Tracker and Updated. A row the view has nothing for is left out.
-pub fn facts(view: &View, issue: &Issue, now_ms: u64) -> Vec<IssueFact> {
+/// The facts the pane shows for an issue, the radar page's rows: Group, Waits for, Pull request
+/// with its checks, and Tracker. Its milestone, agents and last change each have one place of
+/// their own on the screen (the list or board, the left column, the row), so the pane leaves
+/// them out. A row the view has nothing for is left out.
+pub fn facts(view: &View, issue: &Issue) -> Vec<IssueFact> {
     let fact = |label: &str, value: FactValue| IssueFact {
         label: s(label),
         value,
     };
-    let group = issue
-        .group
-        .as_ref()
-        .map(|id| view.groups.iter().find(|g| &g.id == id).ok_or(id));
-    let group_name = group.map(|g| match g {
-        Ok(g) => s(g.name.clone()),
-        Err(id) => s(id.0.clone()),
+    let group = issue.group.as_ref().map(|id| {
+        view.groups
+            .iter()
+            .find(|g| &g.id == id)
+            .map_or_else(|| s(id.0.clone()), |g| s(g.name.clone()))
     });
-    let milestone = match &issue.milestone {
-        Some(m) => {
-            let out = matches!(group, Some(Ok(g)) if !takes(g, &m.0));
-            match (&group_name, out) {
-                (Some(name), true) => s(format!("{} \u{b7} out of scope for {name}", m.0)),
-                _ => s(m.0.clone()),
-            }
-        }
-        None => s("No milestone"),
-    };
-    let mut out = vec![
-        fact("Milestone", FactValue::Text(milestone)),
-        fact(
-            "Group",
-            FactValue::Text(group_name.unwrap_or_else(|| s("None yet"))),
-        ),
-    ];
+    let mut out = vec![fact(
+        "Group",
+        FactValue::Text(group.unwrap_or_else(|| s("None yet"))),
+    )];
     if !issue.depends_on.is_empty() {
         out.push(fact(
             "Waits for",
@@ -489,17 +480,6 @@ pub fn facts(view: &View, issue: &Issue, now_ms: u64) -> Vec<IssueFact> {
             },
         ));
     }
-    let agents: Vec<&str> = running_on(view, &issue.id)
-        .map(|a| a.id.0.as_str())
-        .collect();
-    out.push(fact(
-        "Agents",
-        FactValue::Text(if agents.is_empty() {
-            s("None running")
-        } else {
-            s(agents.join(", "))
-        }),
-    ));
     let project = view
         .projects
         .iter()
@@ -513,16 +493,13 @@ pub fn facts(view: &View, issue: &Issue, now_ms: u64) -> Vec<IssueFact> {
         .and_then(|p| p.issues_url.as_deref())
         .map(|base| s(format!("{}/{key}", base.trim_end_matches('/'))));
     out.push(fact("Tracker", FactValue::Link { text, url }));
-    if let Some(t) = issue.updated_ms {
-        out.push(fact("Updated", FactValue::Text(ago(now_ms, t))));
-    }
     out
 }
 
 /// An issue's pane: its facts, and what the view holds about its plan, pull request, reviews
 /// and decisions. A tab whose data is empty is `None`, so the pane does not show it. Its
 /// decisions come costliest to undo first.
-fn detail(view: &View, issue: &Issue, now_ms: u64) -> IssueDetail {
+fn detail(view: &View, issue: &Issue) -> IssueDetail {
     let plan = (!issue.checks.is_empty()).then(|| IssuePlan {
         folder: None,
         merge: None,
@@ -601,7 +578,7 @@ fn detail(view: &View, issue: &Issue, now_ms: u64) -> IssueDetail {
         .collect();
     IssueDetail {
         round: usize::from(issue.round),
-        facts: facts(view, issue, now_ms),
+        facts: facts(view, issue),
         plan,
         pull,
         rounds,
@@ -777,10 +754,18 @@ pub fn project_view(view: &View, project: Option<&ProjectId>, now_ms: u64) -> Op
         .collect();
     let details = own
         .iter()
-        .map(|i| (s(i.id.clone()), detail(view, i, now_ms)))
+        .map(|i| (s(i.id.clone()), detail(view, i)))
         .collect();
     let milestones = milestones(view, id, now_ms);
-    let (areas, projects) = projects(view);
+    let (areas, projects) = projects(view, id);
+    // The deadline every decision in Needs you shares, which the pane's rows then leave out.
+    let deadlines: Vec<Option<SharedString>> =
+        waiting(view).into_iter().map(overturn_before).collect();
+    let shared_deadline = deadlines
+        .first()
+        .cloned()
+        .flatten()
+        .filter(|first| deadlines.iter().all(|d| d.as_ref() == Some(first)));
     Some(ProjectView {
         areas,
         projects,
@@ -801,7 +786,7 @@ pub fn project_view(view: &View, project: Option<&ProjectId>, now_ms: u64) -> Op
         lanes: lanes(view, &milestones),
         milestones,
         details,
-        agents_running: own.iter().any(|i| running_on(view, &i.id).next().is_some()),
+        shared_deadline,
     })
 }
 

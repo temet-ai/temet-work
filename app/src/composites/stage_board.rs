@@ -87,11 +87,14 @@ impl gpui::RenderOnce for StageBoard {
     fn render(self, _: &mut gpui::Window, _: &mut gpui::App) -> impl gpui::IntoElement {
         use gpui::{InteractiveElement, ParentElement};
         let _ = (&self.selected, &self.on_open, &self.menu);
-        gpui::div().id(self.id).children(
-            self.lanes
-                .into_iter()
-                .flat_map(|l| l.issues)
-                .map(|i| gpui::div().child(i.key)),
-        )
+        gpui::div()
+            .id(self.id)
+            .debug_selector(|| "board".to_string())
+            .children(
+                self.lanes
+                    .into_iter()
+                    .flat_map(|l| l.issues)
+                    .map(|i| gpui::div().child(i.key)),
+            )
     }
 }

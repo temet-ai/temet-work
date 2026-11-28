@@ -61,9 +61,8 @@ pub struct ProjectView {
     pub lanes: Vec<BoardLane>,
     /// What each issue's pane shows beyond its row, by key.
     pub details: HashMap<SharedString, IssueDetail>,
-    /// Whether an agent runs on any of the project's issues: the tables leave out their Agent
-    /// column when none does, so a column of None takes no room.
-    pub agents_running: bool,
+    /// The deadline every decision in Needs you shares, which the pane's decisions leave out.
+    pub shared_deadline: Option<SharedString>,
 }
 
 /// Something to tell the person about where the page's data comes from, such as the daemon not
@@ -538,7 +537,6 @@ impl Render for Project {
             .child(header)
             .child(ProblemList::new(view.problems.clone()))
             .child(needs);
-        let show_agent = view.agents_running;
         if board {
             // A card's menu offers Open alone: the other actions wait for their commands.
             let menu_open = open.clone();
@@ -570,15 +568,14 @@ impl Render for Project {
                         if let Some(due) = &m.due {
                             panel = panel.due(due.clone());
                         }
-                        let mut table = IssueTable::new(
+                        let table = IssueTable::new(
                             SharedString::from(format!("issues-{}", m.name)),
                             m.issues.clone(),
                         )
                         .selected(selected.clone())
-                        .on_select(open.clone());
-                        if !show_agent {
-                            table = table.show_agent(false);
-                        }
+                        .on_select(open.clone())
+                        // The agents and their issues are the left column's to show.
+                        .show_agent(false);
                         shell = shell.child(panel.child(table));
                     }
                 }
@@ -594,14 +591,12 @@ impl Render for Project {
                     if all.is_empty() {
                         panel = panel.total(0);
                     }
-                    let mut table = IssueTable::new("issues-all", all)
+                    let table = IssueTable::new("issues-all", all)
                         .group_by(by)
                         .show_milestone(true)
                         .selected(selected.clone())
-                        .on_select(open.clone());
-                    if !show_agent {
-                        table = table.show_agent(false);
-                    }
+                        .on_select(open.clone())
+                        .show_agent(false);
                     shell = shell.child(panel.child(table));
                 }
             }
@@ -664,6 +659,7 @@ impl Render for Project {
                 .plan(detail.plan)
                 .rounds(detail.rounds)
                 .decisions(detail.decisions)
+                .shared_deadline(view.shared_deadline.clone())
                 .on_tab_change(on_tab)
                 .on_close(on_close);
             if let Some(tab) = self.tab {

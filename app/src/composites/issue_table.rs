@@ -308,12 +308,13 @@ impl RenderOnce for IssueTable {
                         .into_any_element(),
                     None => name.clone().into_any_element(),
                 };
-                let head =
-                    TableRow::new(SharedString::from(format!("group-{name}"))).head(Th::element(
-                        classed(Class::IssueGroup, cx)
-                            .child(label)
-                            .child(classed(Class::IssueCount, cx).child(count(issues.len()))),
-                    ));
+                // A stage's count is StageCounts' to say; a group's is said only here.
+                let tally = stage
+                    .is_none()
+                    .then(|| classed(Class::IssueCount, cx).child(count(issues.len())));
+                let head = TableRow::new(SharedString::from(format!("group-{name}"))).head(
+                    Th::element(classed(Class::IssueGroup, cx).child(label).children(tally)),
+                );
                 table = table.tbody(std::iter::once(head).chain(issues.into_iter().map(row)));
             }
         } else {

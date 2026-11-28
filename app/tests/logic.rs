@@ -1,5 +1,6 @@
-//! The app's logic, without a window: the sample data in the parts' props, the selected row,
-//! the issue table's column choice, a milestone's subtitle, and the icons the parts need.
+//! The app's logic, without a window: the sample in the shape of the radar page's data, the
+//! page's choices, the issue table's columns, a milestone's subtitle, the pane's count line, and
+//! the icons and faces the parts need.
 
 use std::collections::HashSet;
 
@@ -8,240 +9,271 @@ use temet_work_app::assets::FILES;
 use temet_work_app::components::icon::{IconName, IconSize};
 use temet_work_app::components::stage_tag::{Stage, StageTag};
 use temet_work_app::components::status_tag::Status;
-use temet_work_app::composites::check_list::{PlanCheck, count_line};
-use temet_work_app::composites::issue_pane::{IssueTab, tabs_shown};
-use temet_work_app::composites::issue_table::{GroupBy, agent_fits, colgroup, count, grouped};
-use temet_work_app::composites::milestone_panel::{progress, subtitle};
-use temet_work_app::pages::project::{
-    Grouping, Project, Selection, all_issues_summary, issue_facts,
+
+use temet_work_app::composites::decision_row::{Decision, UndoCost};
+use temet_work_app::composites::issue_pane::{IssueTab, closes, one_deadline, tabs_shown};
+use temet_work_app::composites::issue_table::{
+    Columns, GroupBy, Room, colgroup, count, grouped, optional_columns, room,
 };
+use temet_work_app::composites::milestone_panel::{progress, subtitle};
+use temet_work_app::pages::project::{Grouping, Project, ViewMode, all_issues_summary, first_tab};
 use temet_work_app::sample;
 use temet_work_app::theme;
 use temet_work_app::theme::size::IssueColumns;
 
 fn columns() -> IssueColumns {
     IssueColumns {
-        key: px(76.),
+        key: px(96.),
         stage: px(120.),
+        milestone: px(88.),
         agent: px(124.),
         updated: px(88.),
         title_min: px(272.),
+        title_narrow: px(180.),
     }
 }
 
 #[test]
-fn the_sample_has_every_state_the_screen_must_draw() {
+fn the_sample_has_the_shape_of_the_radar_pages_data() {
     let view = sample::project_view();
-    assert!(
-        view.groups.iter().any(|g| g.agents.is_empty()),
-        "a group with no agents"
-    );
-    assert!(
-        view.milestones.iter().any(|m| m.issues.is_empty()),
-        "a milestone with no issues"
-    );
-    assert!(
-        view.milestones
-            .iter()
-            .flat_map(|m| &m.issues)
-            .any(|i| i.title.len() > 120),
-        "a title longer than two lines"
-    );
-    assert!(
-        view.groups.iter().any(|g| g.name.len() > 40),
-        "a group name that is cut short"
-    );
-    let projects: Vec<_> = view.areas.iter().flat_map(|a| &a.projects).collect();
-    assert!(
-        projects.iter().any(|p| p.id == view.project),
-        "the project on screen is listed"
-    );
-}
-
-#[test]
-fn each_milestone_counts_its_issues_and_the_done_ones_as_done() {
-    for m in sample::project_view().milestones {
-        assert_eq!(m.issues.len(), m.total, "{}", m.name);
-        let done = m.issues.iter().filter(|i| i.stage == Stage::Done).count();
-        assert_eq!(m.done, done, "{}", m.name);
-    }
-}
-
-#[test]
-fn every_agent_folder_and_decision_names_an_issue_of_its_own_group() {
-    let view = sample::project_view();
-    let issues: Vec<_> = view
+    let issues: Vec<_> = view.milestones.iter().flat_map(|m| &m.issues).collect();
+    assert_eq!(issues.len(), 53, "open issues");
+    let backlog = view
         .milestones
         .iter()
-        .flat_map(|m| m.issues.clone())
+        .find(|m| m.name.as_ref() == "Backlog")
+        .expect("Backlog");
+    assert_eq!(backlog.issues.len(), 43);
+    assert!(!backlog.taken, "no group takes Backlog");
+    assert_eq!(
+        backlog.note.as_deref(),
+        Some("no group takes it \u{b7} 18 held by grand-trunk, out of scope")
+    );
+    let names: Vec<&str> = view.milestones.iter().map(|m| m.name.as_ref()).collect();
+    assert_eq!(names, ["0.4", "0.5", "Backlog"], "0.3 has nothing open");
+    assert_eq!(view.needs.len(), 33, "open decisions");
+    let with_decisions: HashSet<_> = view
+        .needs
+        .iter()
+        .filter_map(|n| n.decision.issue.clone())
         .collect();
-    for group in &view.groups {
-        for agent in &group.agents {
-            let Some(place) = &agent.r#where else {
-                continue;
-            };
-            for issue in &issues {
-                let folder = issue.key.to_lowercase();
-                if place.contains(&format!("{folder}-")) {
-                    assert_eq!(issue.group.as_ref(), Some(&group.name), "{place}");
-                }
-            }
-        }
-    }
-    // Each project's count of decisions that need the person matches the list.
-    for need in &view.needs {
-        assert!(view.need_project.contains_key(&need.id), "{}", need.id);
-    }
-    for (need, (key, id)) in &view.same_decision {
-        let need = view.needs.iter().find(|n| &n.id == need).expect("the need");
-        let decisions = view.details[key].decisions.as_ref().expect("decisions");
-        let decision = decisions
-            .iter()
-            .find(|d| &d.id == id)
-            .expect("the decision");
-        assert_eq!(
-            need.decision.took, decision.decision.took,
-            "one decision, one wording"
-        );
-    }
+    assert_eq!(with_decisions.len(), 7, "on 7 issues");
+    assert_eq!(view.stages.last(), Some(&(Stage::Done, 91)));
+    assert_eq!(view.areas.len(), 0, "no areas");
+    assert_eq!(view.projects.len(), 1);
+    assert_eq!(
+        view.projects[0].waiting, 0,
+        "the project on screen: Needs you counts its decisions"
+    );
+    assert_eq!(
+        view.groups[0].empty.as_deref(),
+        Some("No agents running \u{b7} 324 ended")
+    );
+    assert!(view.groups[0].agents.is_empty());
+    assert_eq!(view.shared_deadline.as_deref(), Some("merge"));
+    assert!(view.problems.is_empty(), "no daemon answers, so none");
+    let keys: HashSet<_> = issues.iter().map(|i| &i.key).collect();
+    assert_eq!(keys.len(), issues.len(), "keys are unique");
+    let selected = sample::selected().expect("an issue starts open");
+    assert!(keys.contains(&selected));
 }
 
 #[test]
-fn each_group_note_names_milestones_the_window_has() {
-    let view = sample::project_view();
-    let names: HashSet<String> = view.milestones.iter().map(|m| m.name.to_string()).collect();
-    for group in &view.groups {
-        let Some(note) = &group.note else { continue };
-        let Some((project, versions)) = note.split_once(' ') else {
-            continue;
-        };
-        if project != view.project.as_ref() {
-            continue;
-        }
-        for version in versions.split(", ") {
-            assert!(names.contains(&format!("{project} {version}")), "{note}");
-        }
-    }
-}
-
-#[test]
-fn the_issues_and_code_links_are_written_alike() {
-    for fact in sample::project_view().facts {
-        let (host, path) = fact.value.split_once('/').expect("host and path");
-        assert!(
-            host.ends_with(".example.com") && !path.contains(' '),
-            "{}",
-            fact.value
-        );
-    }
-}
-
-#[test]
-fn overturning_asks_then_marks_both_copies_of_a_decision_and_says_so() {
-    let mut page = Project::new(sample::project_view(), sample::selected());
-    page.ask_need(&"n3".into());
-    let ask = page.asking().cloned().expect("a question");
+fn with_the_daemon_running_seven_agents_work_and_two_new_issues_are_refining() {
+    let view = sample::running_view();
+    let agents: Vec<_> = view.groups[0]
+        .agents
+        .iter()
+        .map(|a| {
+            (
+                a.role.to_string(),
+                a.r#where.clone().map(|w| w.to_string()),
+                a.status,
+            )
+        })
+        .collect();
     assert_eq!(
-        ask.decision,
-        Some(("WATCH-44".into(), "d2".into())),
-        "the same decision"
+        agents,
+        [
+            (
+                "author-71".into(),
+                Some("clacks#212 \u{b7} opus".into()),
+                Status::Running
+            ),
+            (
+                "investigator-6".into(),
+                Some("clacks#212 \u{b7} sonnet".into()),
+                Status::Running
+            ),
+            (
+                "author-69".into(),
+                Some("clacks#215 \u{b7} opus".into()),
+                Status::Running
+            ),
+            (
+                "reviewer-74".into(),
+                Some("clacks#201 \u{b7} opus".into()),
+                Status::Running
+            ),
+            (
+                "reviewer-75".into(),
+                Some("clacks#203 \u{b7} sonnet".into()),
+                Status::Idle
+            ),
+            (
+                "refiner-82".into(),
+                Some("clacks#224 \u{b7} opus".into()),
+                Status::Running
+            ),
+            (
+                "refiner-83".into(),
+                Some("clacks#226 \u{b7} sonnet".into()),
+                Status::Blocked
+            ),
+        ]
     );
-    assert_eq!(
-        ask.question(),
-        "Overturn the arbiter's decision on WATCH-44? Claude chose to refuse to store the \
-         token when the keyring is locked."
-    );
-    page.cancel();
-    assert!(page.asking().is_none() && page.needs().len() == 4);
-    page.ask_decision(&"WATCH-44".into(), &"d2".into());
-    assert_eq!(
-        page.asking().and_then(|a| a.need.clone()).as_deref(),
-        Some("n3")
-    );
-    page.confirm();
-    assert_eq!(page.needs().len(), 3);
-    assert_eq!(
-        page.toast().map(|t| t.to_string()),
-        Some("Overturned on WATCH-44: Refuse to store the token when the keyring is locked".into())
-    );
-}
-
-#[test]
-fn issue_keys_are_unique_and_the_first_selection_is_one_of_them() {
-    let view = sample::project_view();
-    let keys: Vec<&SharedString> = view
+    let refining: Vec<_> = view
         .milestones
         .iter()
         .flat_map(|m| &m.issues)
-        .map(|i| &i.key)
+        .filter(|i| i.stage == Stage::Refining)
+        .map(|i| (i.key.to_string(), i.updated.to_string()))
         .collect();
-    let unique: HashSet<_> = keys.iter().collect();
-    assert_eq!(unique.len(), keys.len());
-    let selected = sample::selected().expect("an issue starts selected");
-    assert!(keys.contains(&&selected));
-}
-
-#[test]
-fn selecting_a_row_moves_the_one_selection() {
-    let mut selection = Selection::new(Some("WATCH-44".into()));
-    assert!(
-        !selection.select(&"WATCH-44".into()),
-        "the same row changes nothing"
-    );
-    assert!(selection.select(&"WATCH-51".into()));
-    assert_eq!(selection.key().map(|k| k.as_ref()), Some("WATCH-51"));
-    let mut none = Selection::default();
-    assert_eq!(none.key(), None);
-    assert!(none.select(&"WATCH-55".into()));
-}
-
-#[test]
-fn the_agent_column_shows_only_when_the_title_keeps_its_room() {
-    let c = columns();
-    // 76 + 120 + 124 + 88 + 272 = 680.
-    assert!(agent_fits(px(680.), &c, true));
-    assert!(!agent_fits(px(679.), &c, true));
-    // Without the Stage column the agent fits 120 px sooner.
-    assert!(agent_fits(px(560.), &c, false));
     assert_eq!(
-        colgroup(&c, true, true),
+        refining,
+        [
+            ("clacks#224".to_string(), "just now".to_string()),
+            ("clacks#226".to_string(), "just now".to_string())
+        ]
+    );
+    assert_eq!(view.problems.len(), 2);
+}
+
+#[test]
+fn each_milestone_lists_only_its_open_issues() {
+    for m in sample::project_view().milestones {
+        assert!(m.issues.len() <= m.total - m.done, "{}", m.name);
+    }
+}
+
+#[test]
+fn the_issues_and_code_facts_are_written_as_the_radar_page_writes_them() {
+    let facts: Vec<_> = sample::project_view()
+        .facts
+        .iter()
+        .map(|f| (f.label.to_string(), f.value.to_string()))
+        .collect();
+    assert_eq!(
+        facts,
+        [
+            (
+                "Issues".to_string(),
+                "GitHub grand-trunk/clacks".to_string()
+            ),
+            (
+                "Code".to_string(),
+                "github.com/grand-trunk/clacks".to_string()
+            )
+        ]
+    );
+}
+
+#[test]
+fn opening_an_issue_picks_decisions_when_it_has_open_ones_and_plan_otherwise() {
+    let view = sample::project_view();
+    assert_eq!(
+        first_tab(view.details.get(&SharedString::from("clacks#212"))),
+        IssueTab::Decisions
+    );
+    assert_eq!(
+        first_tab(view.details.get(&SharedString::from("clacks#210"))),
+        IssueTab::Plan
+    );
+    let mut page = Project::new(view, sample::selected());
+    assert_eq!(page.tab(), Some(IssueTab::Decisions));
+    page.set_tab(IssueTab::Plan);
+    assert!(page.select(&"clacks#210".into()));
+    assert_eq!(page.tab(), Some(IssueTab::Plan));
+    assert!(
+        !page.select(&"clacks#210".into()),
+        "the same issue changes nothing"
+    );
+    page.close();
+    assert_eq!(page.selected(), None);
+    assert_eq!(page.mode(), ViewMode::List, "the window opens on List");
+}
+
+#[test]
+fn a_table_has_room_for_updated_then_agent_then_neither() {
+    let c = columns();
+    // 96 + 124 + 120 = 340 fixed, with the Stage column.
+    assert_eq!(room(px(340. + 88. + 272.), &c, true, false), Room::Both);
+    assert_eq!(room(px(340. + 88. + 271.), &c, true, false), Room::Agent);
+    assert_eq!(room(px(340. + 180.), &c, true, false), Room::Agent);
+    assert_eq!(room(px(340. + 179.), &c, true, false), Room::Neither);
+    // The Milestone column takes its room too.
+    assert_eq!(room(px(340. + 88. + 272.), &c, true, true), Room::Agent);
+    assert_eq!(optional_columns(None, Room::Both), (true, true));
+    assert_eq!(optional_columns(None, Room::Agent), (true, false));
+    assert_eq!(optional_columns(None, Room::Neither), (false, false));
+    // Without the Agent column by request, Updated has its room.
+    assert_eq!(optional_columns(Some(false), Room::Neither), (false, true));
+    let all = Columns {
+        stage: true,
+        milestone: true,
+        agent: true,
+        updated: true,
+    };
+    assert_eq!(
+        colgroup(&c, all),
         vec![
-            Some(px(76.)),
+            Some(px(96.)),
             None,
             Some(px(120.)),
+            Some(px(88.)),
             Some(px(124.)),
             Some(px(88.))
         ]
     );
-    assert_eq!(colgroup(&c, true, false).len(), 4);
     // Grouped by stage, the table has no Stage column.
     assert_eq!(
-        colgroup(&c, false, true),
-        vec![Some(px(76.)), None, Some(px(124.)), Some(px(88.))]
+        colgroup(
+            &c,
+            Columns {
+                stage: false,
+                milestone: false,
+                ..all
+            }
+        ),
+        vec![Some(px(96.)), None, Some(px(124.)), Some(px(88.))]
     );
 }
 
 #[test]
-fn a_milestone_says_what_is_done_and_when_it_is_due() {
+fn a_milestone_says_what_is_done_when_it_is_due_and_its_note() {
     assert_eq!(
-        subtitle(Some(7), Some(12), Some("12 Dec"), None).as_deref(),
+        subtitle(Some(7), Some(12), Some("12 Dec"), None, None).as_deref(),
         Some("7 / 12 done · due 12 Dec")
     );
     assert_eq!(
-        subtitle(None, None, Some("16 Jan"), None).as_deref(),
+        subtitle(Some(1), Some(44), None, None, Some("no group takes it")).as_deref(),
+        Some("1 / 44 done · no group takes it")
+    );
+    assert_eq!(
+        subtitle(None, None, Some("16 Jan"), None, None).as_deref(),
         Some("due 16 Jan")
     );
     assert_eq!(
-        subtitle(Some(1), Some(2), None, Some("3 issues")).as_deref(),
+        subtitle(Some(1), Some(2), None, Some("3 issues"), None).as_deref(),
         Some("3 issues")
     );
-    assert_eq!(subtitle(None, None, None, None), None);
+    assert_eq!(subtitle(None, None, None, None, None), None);
     // A milestone with no issues says only when it is due, whatever summary it is given.
     assert_eq!(
-        subtitle(Some(0), Some(0), Some("20 Feb"), Some("3 issues")).as_deref(),
+        subtitle(Some(0), Some(0), Some("20 Feb"), Some("3 issues"), None).as_deref(),
         Some("due 20 Feb")
     );
-    assert_eq!(subtitle(Some(0), Some(0), None, None), None);
+    assert_eq!(subtitle(Some(0), Some(0), None, None, None), None);
     assert_eq!(progress(0, 0), 0.);
     assert_eq!(progress(7, 14), 0.5);
 }
@@ -286,34 +318,43 @@ fn every_font_file_the_design_system_lists_is_embedded() {
 }
 
 #[test]
-fn grouping_by_stage_follows_the_stages_and_by_group_their_first_appearance() {
+fn grouping_by_stage_runs_from_the_furthest_stage_and_by_group_by_first_appearance() {
     let issues: Vec<_> = sample::project_view()
         .milestones
         .into_iter()
         .flat_map(|m| m.issues)
         .collect();
     let by_stage = grouped(issues.clone(), GroupBy::Stage);
-    let stages: Vec<Stage> = by_stage.iter().filter_map(|(s, _, _)| *s).collect();
-    let mut in_order = stages.clone();
-    in_order.sort_by_key(|s| Stage::ALL.iter().position(|x| x == s));
-    assert_eq!(stages, in_order, "groups follow the order of the stages");
-    assert!(by_stage.iter().all(|(_, _, these)| !these.is_empty()));
+    let stages: Vec<(Stage, usize)> = by_stage
+        .iter()
+        .filter_map(|(s, _, these)| s.map(|s| (s, these.len())))
+        .collect();
     assert_eq!(
-        by_stage
-            .iter()
-            .map(|(_, _, these)| these.len())
-            .sum::<usize>(),
-        issues.len()
+        stages,
+        [
+            (Stage::Fixing, 1),
+            (Stage::InReview, 2),
+            (Stage::Working, 1),
+            (Stage::Ready, 22),
+            (Stage::New, 27)
+        ],
+        "the issues closest to shipping first"
     );
     let by_group = grouped(issues.clone(), GroupBy::Group);
-    let names: Vec<&str> = by_group.iter().map(|(_, n, _)| n.as_ref()).collect();
-    assert_eq!(names[0], issues[0].group.as_deref().unwrap_or("No group"));
+    let names: Vec<(&str, usize)> = by_group
+        .iter()
+        .map(|(_, n, these)| (n.as_ref(), these.len()))
+        .collect();
+    assert_eq!(names, [("grand-trunk", 26), ("No group", 27)]);
     assert_eq!(count(1), "1 issue");
     assert_eq!(count(3), "3 issues");
 }
 
 #[test]
-fn the_group_by_control_maps_to_the_tables_grouping() {
+fn the_view_and_group_by_controls_map_to_what_the_middle_draws() {
+    assert_eq!(ViewMode::from_value("board"), Some(ViewMode::Board));
+    assert_eq!(ViewMode::from_value("list"), Some(ViewMode::List));
+    assert_eq!(ViewMode::from_value("grid"), None);
     assert_eq!(Grouping::Milestone.table(), None);
     assert_eq!(Grouping::Stage.table(), Some(GroupBy::Stage));
     assert_eq!(Grouping::from_value("group"), Some(Grouping::Group));
@@ -321,7 +362,7 @@ fn the_group_by_control_maps_to_the_tables_grouping() {
     let view = sample::project_view();
     assert_eq!(
         all_issues_summary(&view.milestones),
-        "7 issues across 3 milestones"
+        "53 open in 0.4, 0.5, Backlog"
     );
 }
 
@@ -339,81 +380,60 @@ fn the_pane_shows_a_tab_for_each_part_an_issue_has() {
     assert_eq!(tabs_shown(false, false, true, false), [IssueTab::Review]);
     assert!(tabs_shown(false, false, false, false).is_empty());
     let view = sample::project_view();
-    let full = &view.details[&SharedString::from("WATCH-44")];
-    assert!(full.plan.is_some() && full.pull.is_some());
-    assert_eq!(full.rounds.as_ref().map(Vec::len), Some(2));
-    assert_eq!(full.decisions.as_ref().map(Vec::len), Some(2));
+    let full = &view.details[&SharedString::from("clacks#212")];
+    assert_eq!(full.plan.as_ref().map(|p| p.checks.len()), Some(12));
+    assert_eq!(full.rounds.as_ref().map(Vec::len), Some(1));
+    assert_eq!(full.decisions.as_ref().map(Vec::len), Some(11));
+    let quiet = &view.details[&SharedString::from("clacks#228")];
     assert!(
-        !view.details.contains_key(&SharedString::from("WATCH-47")),
-        "facts only"
+        quiet.plan.is_none() && quiet.rounds.is_none() && quiet.decisions.is_none(),
+        "a new issue has its facts only"
     );
 }
 
-#[test]
-fn the_pane_states_each_issues_facts() {
-    let view = sample::project_view();
-    let m = &view.milestones[0];
-    let issue = m
-        .issues
-        .iter()
-        .find(|i| i.key.as_ref() == "WATCH-47")
-        .unwrap();
-    let facts = issue_facts(m, issue, None);
-    let labels: Vec<&str> = facts.iter().map(|(l, _)| l.as_ref()).collect();
-    assert_eq!(labels, ["Milestone", "Group", "Agent", "Round", "Updated"]);
-    assert_eq!(facts[3].1.as_ref(), "Not reviewed yet");
-}
-
-#[test]
-fn selecting_another_row_opens_it_on_its_first_tab() {
-    let mut page = Project::new(sample::project_view(), sample::selected());
-    page.set_tab(IssueTab::Review);
-    assert!(page.select(&"WATCH-51".into()));
-    assert!(!page.select(&"WATCH-51".into()));
-}
-
-#[test]
-fn needs_you_is_sorted_costliest_first_and_can_be_emptied() {
-    use temet_work_app::composites::decision_row::UndoCost;
-    let view = sample::project_view();
-    let rank = |c: Option<UndoCost>| match c {
-        Some(UndoCost::High) => 0,
-        Some(UndoCost::Medium) => 1,
-        Some(UndoCost::Low) => 2,
-        None => 3,
-    };
-    let costs: Vec<_> = view.needs.iter().map(|n| rank(n.decision.cost)).collect();
-    let mut sorted = costs.clone();
-    sorted.sort();
-    assert_eq!(costs, sorted);
-    assert_eq!(view.needs.len(), 4);
-    let none = sample::without_needs(view);
-    assert!(none.needs.is_empty());
-    assert!(
-        none.areas
-            .iter()
-            .flat_map(|a| &a.projects)
-            .all(|p| p.waiting == 0)
-    );
-}
-
-#[test]
-fn each_machine_has_a_slot_in_use_for_each_agent_on_it_and_one_is_full() {
-    let view = sample::project_view();
-    assert_eq!(view.machines.len(), 3);
-    for machine in &view.machines {
-        let agents = view
-            .groups
-            .iter()
-            .flat_map(|g| &g.agents)
-            .filter_map(|a| a.r#where.as_ref())
-            .filter(|w| w.split(" · ").next() == Some(machine.label.as_ref()))
-            .count();
-        let used = machine.reading.split(" / ").next().expect("in use");
-        assert_eq!(used, agents.to_string(), "{}", machine.label);
+/// A decision with a cost and a deadline, for the count line.
+fn decision(cost: UndoCost, before: &str, overturned: bool) -> Decision {
+    Decision {
+        question: Some("How many towers?".into()),
+        took: "8".into(),
+        by: "refiner-66".into(),
+        issue: None,
+        at: None,
+        cost: Some(cost),
+        weighed: Vec::new(),
+        why: None,
+        options: Vec::new(),
+        overturn_before: Some(before.to_string().into()),
+        overturned: overturned.then(|| "Overturned".into()),
+        overturned_to: None,
+        overturn_reason: None,
     }
-    assert!(view.machines.iter().any(|m| m.value >= 1.));
-    assert_eq!(view.limits.len(), 3);
+}
+
+#[test]
+fn a_deadline_every_open_decision_shares_is_said_by_none_of_them() {
+    let mut ds = vec![decision(UndoCost::Medium, "merge", false)];
+    ds.extend((0..2).map(|_| decision(UndoCost::Low, "merge", false)));
+    assert_eq!(one_deadline(&ds).as_deref(), Some("merge"));
+    ds.push(decision(UndoCost::Low, "deploy", false));
+    ds.push(decision(UndoCost::High, "merge", true));
+    assert_eq!(one_deadline(&ds), None);
+    assert_eq!(
+        one_deadline(&[decision(UndoCost::Low, "merge", false)]),
+        None,
+        "one decision keeps its own"
+    );
+}
+
+#[test]
+fn q_closes_the_pane_unless_a_text_field_has_the_focus_or_a_modifier_is_held() {
+    assert!(closes("q", false, false));
+    assert!(!closes("q", false, true), "typed into the field");
+    assert!(
+        !closes("q", true, false),
+        "ctrl-q and the like are commands"
+    );
+    assert!(!closes("w", false, false));
 }
 
 #[test]
@@ -432,33 +452,5 @@ fn a_tag_shows_the_round_only_on_the_stages_that_count_rounds() {
         text(Stage::Working, Some(2)),
         "working",
         "working counts no rounds"
-    );
-}
-
-#[test]
-fn the_count_line_counts_the_checks_by_status_in_order() {
-    let check = |status| PlanCheck {
-        done_when: "The clacks tower answers".into(),
-        proven_by: "cargo nextest run -p clacks".into(),
-        status,
-        status_text: None,
-    };
-    assert_eq!(count_line(&[]), None);
-    assert_eq!(
-        count_line(&[check(Some(Status::Failed))]).as_deref(),
-        Some("1 check: 1 failed")
-    );
-    assert_eq!(
-        count_line(&[
-            check(Some(Status::Passed)),
-            check(Some(Status::Running)),
-            check(Some(Status::Passed)),
-        ])
-        .as_deref(),
-        Some("3 checks: 2 passed, 1 running")
-    );
-    assert_eq!(
-        count_line(&[check(None), check(None)]).as_deref(),
-        Some("2 checks: 2 not run yet")
     );
 }

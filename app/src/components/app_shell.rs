@@ -127,7 +127,10 @@ impl RenderOnce for AppShell {
                 (Child::Narrow(el) | Child::Wide(el), _) => el,
             });
         let side = self.side.map(|side| {
-            let column = box_of(div().id("side"), &pane).flex_none().w(right);
+            let column = box_of(div().id("side"), &pane)
+                .debug_selector(|| "side".to_string())
+                .flex_none()
+                .w(right);
             match side {
                 Side::Plain(el) => column
                     .h_full()
@@ -158,6 +161,7 @@ impl RenderOnce for AppShell {
             (None, side)
         };
         let main_column = box_of(div().id("main"), &main)
+            .debug_selector(|| "main".to_string())
             .flex_1()
             .min_w_0()
             .h_full()

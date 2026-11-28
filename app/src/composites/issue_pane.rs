@@ -17,7 +17,7 @@ use gpui::{
 };
 
 use super::check_list::{CheckList, PlanCheck};
-use super::decision_row::{Decision, DecisionRow, OverturnChoice, OverturnDraft, UndoCost};
+use super::decision_row::{Decision, DecisionRow, OverturnChoice, OverturnDraft};
 use super::review_rounds::{ReviewRound, ReviewRounds};
 use crate::components::button::{Button, Size, Variant};
 use crate::components::cut_panel::CutPanel;
@@ -123,6 +123,7 @@ pub struct IssuePane {
     on_close: Option<OnClose>,
     actions: Option<Actions>,
     here: bool,
+    shared_deadline: Option<SharedString>,
 }
 
 impl IssuePane {
@@ -147,6 +148,7 @@ impl IssuePane {
             on_close: None,
             actions: None,
             here: false,
+            shared_deadline: None,
         }
     }
 
@@ -221,6 +223,14 @@ impl IssuePane {
         self
     }
 
+    /// A deadline the screen already states for every open decision, such as Needs you's
+    /// "overturn before merge": decisions with it leave it out, and only one whose deadline
+    /// differs shows its own.
+    pub fn shared_deadline(mut self, deadline: Option<SharedString>) -> Self {
+        self.shared_deadline = deadline;
+        self
+    }
+
     /// Marks the facts panel with CutPanel's `here` edge, as the item the person is in.
     pub fn here(mut self, here: bool) -> Self {
         self.here = here;
@@ -241,7 +251,7 @@ pub fn tabs_shown(plan: bool, pull: bool, rounds: bool, decisions: bool) -> Vec<
     .collect()
 }
 
-/// The deadline every open decision shares, said once in the count line; none when there is
+/// The deadline every open decision shares, which the rows then leave out; none when there is
 /// one open decision or fewer, or they differ.
 pub fn one_deadline(decisions: &[Decision]) -> Option<SharedString> {
     let open: Vec<&Decision> = decisions
@@ -252,52 +262,6 @@ pub fn one_deadline(decisions: &[Decision]) -> Option<SharedString> {
     (open.len() > 1 && open.iter().all(|d| d.overturn_before == first))
         .then_some(first)
         .flatten()
-}
-
-/// The line over the decisions: the open ones as Needs you counts them, the deadline they all
-/// share, then how many are overturned, as "10 decisions: 2 medium, 8 low undo cost · overturn
-/// before merge · 1 overturned". It wraps only between its parts: the spaces inside a part do
-/// not break.
-pub fn decision_count(decisions: &[Decision]) -> String {
-    let open: Vec<&Decision> = decisions
-        .iter()
-        .filter(|d| d.overturned.is_none())
-        .collect();
-    let done = decisions.len() - open.len();
-    let by_cost: Vec<String> = [
-        (UndoCost::High, "high"),
-        (UndoCost::Medium, "medium"),
-        (UndoCost::Low, "low"),
-    ]
-    .into_iter()
-    .filter_map(|(cost, word)| {
-        let n = open.iter().filter(|d| d.cost == Some(cost)).count();
-        (n > 0).then(|| format!("{n} {word}"))
-    })
-    .collect();
-    let mut parts = Vec::new();
-    if !open.is_empty() {
-        let count = match open.len() {
-            1 => "1 decision".to_string(),
-            n => format!("{n} decisions"),
-        };
-        parts.push(if by_cost.is_empty() {
-            count
-        } else {
-            format!("{count}: {} undo cost", by_cost.join(", "))
-        });
-    }
-    if let Some(deadline) = one_deadline(decisions) {
-        parts.push(format!("overturn before {deadline}"));
-    }
-    if done > 0 {
-        parts.push(format!("{done} overturned"));
-    }
-    parts
-        .iter()
-        .map(|p| p.replace(' ', "\u{a0}"))
-        .collect::<Vec<_>>()
-        .join(" \u{b7} ")
 }
 
 /// What closes the pane on q: the latest `on_close`, read by an observer of every keystroke the
@@ -453,16 +417,15 @@ impl RenderOnce for IssuePane {
             let plain: Vec<Decision> = decisions.iter().map(|d| d.decision.clone()).collect();
             let open = plain.iter().filter(|d| d.overturned.is_none()).count();
             let shared = one_deadline(&plain).is_some();
-            let line = (!decisions.is_empty())
-                .then(|| classed(Class::PaneCount, cx).child(decision_count(&plain)));
+            let screen = self.shared_deadline;
             let empty = decisions
                 .is_empty()
                 .then(|| ListRow::new("No decisions yet"));
             let on_overturn = self.on_overturn;
             let rows = decisions.into_iter().map(|d| {
                 let mut decision = d.decision;
-                // A deadline every decision shares is said once, in the count line.
-                if shared {
+                // A deadline the screen states, or every decision here shares, is not said again.
+                if shared || (screen.is_some() && decision.overturn_before == screen) {
                     decision.overturn_before = None;
                 }
                 let row = DecisionRow::new(d.id.clone(), decision)
@@ -477,7 +440,7 @@ impl RenderOnce for IssuePane {
                     None => row,
                 }
             });
-            let panel = div().children(line).children(empty).children(rows);
+            let panel = div().children(empty).children(rows);
             panels.push((
                 IssueTab::Decisions,
                 "Decisions",
