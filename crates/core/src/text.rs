@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use crate::IssueText;
 use crate::ids::GroupId;
-use crate::model::{AgentState, Issue, PointState, Review, Role, Stage};
+use crate::model::{AgentState, Issue, PointState, Review, Stage};
 use crate::placement::{Hold, StartWait, Unlisted, Why};
 use crate::world::World;
 
@@ -2214,6 +2214,7 @@ mod person_stops {
     use super::*;
     use crate::event::Event;
     use crate::ids::{AgentId, GroupId, IssueId, MachineId};
+    use crate::model::Role;
 
     fn started(agent: &str, role: Role) -> Event {
         Event::AgentStarted {

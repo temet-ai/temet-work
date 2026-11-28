@@ -208,15 +208,6 @@ impl World {
                 group.id
             ));
         }
-        if !self.has_place(i, Role::Refiner) {
-            let machine = self
-                .machine_for(id, Role::Refiner)
-                .map_or_else(String::new, |m| m.to_string());
-            return Err(format!(
-                "{id}'s refiner has no folder to run in: its machine setting is {machine}, and \
-                 {id}'s repository has no work folder there"
-            ));
-        }
         Ok(())
     }
 }
