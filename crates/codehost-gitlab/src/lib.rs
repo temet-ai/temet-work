@@ -6,7 +6,7 @@
 //! test run, the real transport runs nothing.
 
 use serde_json::Value;
-use temet_work_codehost::{CheckRun, Checks, CodeHost, CodeHostError, Pull, PullState};
+use temet_work_codehost::{CheckRun, Checks, CodeHost, CodeHostError, Pull, PullState, RunState};
 
 /// Runs `glab` with arguments and returns what it printed.
 pub trait Transport: Send {
@@ -168,6 +168,33 @@ impl GitLab {
     }
 }
 
+/// The project a merge request's pipeline runs in, as an API path segment: a
+/// merge request from a fork runs its pipeline in the fork.
+fn runs_in(request: &Value, pipeline: &Value, project: &str) -> String {
+    match pipeline.get("project_id").and_then(Value::as_u64) {
+        Some(other)
+            if request.get("source_project_id") != request.get("target_project_id")
+                && request.get("source_project_id").and_then(Value::as_u64) == Some(other) =>
+        {
+            other.to_string()
+        }
+        _ => project.to_string(),
+    }
+}
+
+/// What a job's `status` says, as a check's state.
+fn run_state(status: &str) -> RunState {
+    match status {
+        "success" => RunState::Passed,
+        "failed" => RunState::Failed,
+        "manual" => RunState::Waiting,
+        "skipped" => RunState::Skipped,
+        "canceled" => RunState::Cancelled,
+        // running, pending, created, preparing, waiting_for_resource, scheduled
+        _ => RunState::Running,
+    }
+}
+
 /// What a pipeline is called when it failed with no failed job to name.
 fn pipeline_name(pipeline: &Value, id: Option<u64>) -> String {
     match (pipeline.get("name").and_then(Value::as_str), id) {
@@ -207,17 +234,7 @@ impl CodeHost for GitLab {
                     // Every job passed or was skipped: nothing to name.
                     (Some(_), "success" | "manual" | "skipped") | (None, _) => Vec::new(),
                     (Some(id), _) => {
-                        // A merge request from a fork runs its pipeline in the fork.
-                        let runs_in = match p.get("project_id").and_then(Value::as_u64) {
-                            Some(other)
-                                if v.get("source_project_id") != v.get("target_project_id")
-                                    && v.get("source_project_id").and_then(Value::as_u64)
-                                        == Some(other) =>
-                            {
-                                other.to_string()
-                            }
-                            _ => project.clone(),
-                        };
+                        let runs_in = runs_in(&v, p, &project);
                         self.failed_jobs(&runs_in, id)?
                     }
                 };
@@ -277,8 +294,60 @@ impl CodeHost for GitLab {
         format!("refs/merge-requests/{number}/head")
     }
 
-    fn ci(&mut self, _repo: &str, _number: &str) -> Result<Vec<CheckRun>, CodeHostError> {
-        Err(CodeHostError::Other("not built yet".into()))
+    fn ci(&mut self, repo: &str, number: &str) -> Result<Vec<CheckRun>, CodeHostError> {
+        let project = encode(repo);
+        let v = self.request(&project, number)?;
+        let pipeline = v
+            .get("head_pipeline")
+            .filter(|p| p.is_object())
+            .or_else(|| v.get("pipeline").filter(|p| p.is_object()));
+        let Some(pipeline) = pipeline else {
+            return Ok(Vec::new());
+        };
+        let Some(id) = pipeline.get("id").and_then(Value::as_u64) else {
+            return Ok(Vec::new());
+        };
+        let runs_in = runs_in(&v, pipeline, &project);
+        let out = self.run(&[
+            "api",
+            &format!("projects/{runs_in}/pipelines/{id}/jobs?per_page=100"),
+        ])?;
+        let jobs: Vec<Value> =
+            serde_json::from_str(&out).map_err(|e| parse_error("glab api jobs", e))?;
+        let mut runs = Vec::new();
+        for job in &jobs {
+            let text = |k: &str| job.get(k).and_then(Value::as_str);
+            let state = run_state(text("status").unwrap_or("pending"));
+            let name = match (text("stage"), text("name")) {
+                (Some(stage), Some(name)) if !stage.is_empty() => format!("{stage}: {name}"),
+                (_, Some(name)) => name.to_string(),
+                _ => "a job without a name".into(),
+            };
+            // A failed job that may fail still reads as failed, and says so.
+            let summary = if state == RunState::Failed
+                && job.get("allow_failure").and_then(Value::as_bool) == Some(true)
+            {
+                "failed, allowed to fail".to_string()
+            } else {
+                String::new()
+            };
+            // The trace is the whole log. One that cannot be read leaves the
+            // check without it, not the read of every check failed.
+            let log = match (state, job.get("id").and_then(Value::as_u64)) {
+                (RunState::Failed, Some(job_id)) => self
+                    .run(&["api", &format!("projects/{runs_in}/jobs/{job_id}/trace")])
+                    .ok(),
+                _ => None,
+            };
+            runs.push(CheckRun {
+                name,
+                state,
+                log,
+                summary,
+                address: text("web_url").map(str::to_string),
+            });
+        }
+        Ok(runs)
     }
 
     fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
@@ -366,6 +435,16 @@ mod tests {
             if args == ["api", &format!("{base}/pipelines?sha=4b1d0c7e&ref=main")] {
                 return Ok(include_str!("../tests/fixtures/main-pipelines.json").into());
             }
+            if args == ["api", &format!("{base}/pipelines/9002/jobs?per_page=100")] {
+                return Ok(include_str!("../tests/fixtures/pipeline-9002-all-jobs.json").into());
+            }
+            if args == ["api", &format!("{base}/pipelines/9001/jobs?per_page=100")] {
+                return Ok(include_str!("../tests/fixtures/pipeline-9001-jobs.json").into());
+            }
+            if args == ["api", &format!("{base}/jobs/70002/trace")] {
+                return Ok(include_str!("../tests/fixtures/job-70002-trace.txt").into());
+            }
+            // The trace of job 70003 is not recorded: reading it fails.
             Err("glab: 404 Not Found".into())
         }
     }
@@ -696,6 +775,70 @@ mod tests {
             read("connection reset"),
             CodeHostError::Other("connection reset".into())
         );
+    }
+
+    #[test]
+    fn reads_every_job_of_a_failing_pipeline_as_a_check() {
+        let runs = GitLab::with(Box::new(Recorded))
+            .ci(REPO, "8")
+            .expect("recorded");
+        let seen: Vec<(&str, RunState)> = runs.iter().map(|r| (r.name.as_str(), r.state)).collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("deploy: nightly", RunState::Cancelled),
+                ("deploy: e2e", RunState::Running),
+                ("deploy: release", RunState::Waiting),
+                ("build: package", RunState::Skipped),
+                ("test: lint", RunState::Failed),
+                ("test: unit-tests", RunState::Failed),
+                ("build: build", RunState::Passed),
+            ]
+        );
+        assert_eq!(
+            runs[5].address.as_deref(),
+            Some("https://gitlab.example.com/example-group/example-project/-/jobs/70002")
+        );
+    }
+
+    #[test]
+    fn a_failed_job_carries_its_whole_trace_and_no_other_job_has_a_log() {
+        let runs = GitLab::with(Box::new(Recorded))
+            .ci(REPO, "8")
+            .expect("recorded");
+        let trace = include_str!("../tests/fixtures/job-70002-trace.txt");
+        let unit = runs
+            .iter()
+            .find(|r| r.name == "test: unit-tests")
+            .expect("job");
+        assert_eq!(unit.log.as_deref(), Some(trace));
+        assert!(trace.contains("section_start:") && trace.contains("\x1b["));
+        assert!(unit.summary.is_empty());
+        assert_eq!(runs.iter().filter(|r| r.log.is_some()).count(), 1);
+    }
+
+    #[test]
+    fn a_failed_job_that_may_fail_says_so_and_keeps_its_check_when_its_trace_cannot_be_read() {
+        let runs = GitLab::with(Box::new(Recorded))
+            .ci(REPO, "8")
+            .expect("recorded");
+        let lint = runs.iter().find(|r| r.name == "test: lint").expect("job");
+        assert_eq!(lint.state, RunState::Failed);
+        assert_eq!(lint.log, None);
+        assert_eq!(lint.summary, "failed, allowed to fail");
+        assert!(lint.address.is_some());
+    }
+
+    #[test]
+    fn a_request_with_no_pipeline_has_no_checks_and_one_that_is_missing_is_an_error() {
+        let body = json!({"iid": 3, "state": "opened"}).to_string();
+        let mut host = GitLab::with(Box::new(Spy(Seen::default(), Ok(body))));
+        assert_eq!(host.ci(REPO, "3"), Ok(Vec::new()));
+        let mut host = GitLab::with(Box::new(Recorded));
+        assert!(matches!(
+            host.ci(REPO, "999999999"),
+            Err(CodeHostError::NotFound(_))
+        ));
     }
 
     #[test]

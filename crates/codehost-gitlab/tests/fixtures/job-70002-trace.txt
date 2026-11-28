@@ -1,0 +1,21 @@
+Running with GitLab Runner 17.5.0 (example) on runner-ankh-1 abc123de
+[0KPreparing the "docker" executor[0;m
+section_start:1764000001:prepare_executor[0K[0KPreparing the "docker" executor[0;m
+section_end:1764000002:prepare_executor[0K
+section_start:1764000003:step_script[0K[0K[36;1mExecuting "step_script" stage of the job script[0;m
+[32;1m$ cargo test --workspace[0;m
+running 2 tests
+test rota::night_watch_has_a_captain ... ok
+test rota::vimes_never_sleeps ... FAILED
+
+failures:
+
+---- rota::vimes_never_sleeps stdout ----
+thread 'rota::vimes_never_sleeps' panicked at src/rota.rs:41:9:
+assertion `left == right` failed
+  left: 2
+ right: 3
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored
+section_end:1764000009:step_script[0K[31;1mERROR: Job failed: exit code 101
+[0;m

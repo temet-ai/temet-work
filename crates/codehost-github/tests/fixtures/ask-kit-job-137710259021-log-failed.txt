@@ -1,0 +1,228 @@
+test (macos-latest, 22.x)	UNKNOWN STEP	﻿2026-11-23T13:01:19.1058270Z Current runner version: '2.338.2'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1075590Z ##[group]Runner Image Provisioner
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1076190Z Hosted Compute Agent
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1076570Z Version: 20261111.635
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1076990Z Commit: b8a594ea514ff44cadb5342986c68b1eac6e22ed
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1077460Z Build Date: 2026-11-11T01:49:01Z
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1077910Z Worker ID: {d5f3bca8-2671-485a-9c56-248e4eaf357e}
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1078360Z Region: westus
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1078720Z Cloud: MacCloud
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1079070Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1080000Z ##[group]Operating System
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1080400Z macOS
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1080740Z 26.7.2
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1081070Z 25G332
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1081410Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1081770Z ##[group]Runner Image
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1082140Z Image: macos-26-arm64
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1082590Z Version: 20261117.0516.1
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1083480Z Included Software: https://github.com/actions/runner-images/blob/macos-26-arm64/20261117.0516/images/macos/macos-26-arm64-Readme.md
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1084530Z Image Release: https://github.com/actions/runner-images/releases/tag/macos-26-arm64%2F20261117.0516
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1085190Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1085990Z ##[group]GITHUB_TOKEN Permissions
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1087140Z Contents: read
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1087510Z Metadata: read
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1087870Z Packages: read
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1088230Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1089610Z Secret source: Actions
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1090180Z Cache mode: write
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1090620Z Prepare workflow directory
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1594210Z Prepare all required actions
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.1650830Z Getting action download info
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.6398530Z Download action repository 'actions/checkout@v7' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:19.9475330Z Download action repository 'actions/setup-node@v7' (SHA:949feb2413d6458794dcd2491c4babbbce0c15c1)
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.2176900Z Complete job name: test (macos-latest, 22.x)
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3131780Z ##[group]Run actions/checkout@v7
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3132540Z with:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3133060Z   repository: temet-ai/ask-kit
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3135970Z   token: ***
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3136300Z   ssh-strict: true
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3136640Z   ssh-user: git
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3137060Z   persist-credentials: true
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3138530Z   clean: true
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3139620Z   sparse-checkout-cone-mode: true
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3140710Z   fetch-depth: 1
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3141620Z   fetch-tags: false
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3142580Z   show-progress: true
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3143490Z   lfs: false
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3144370Z   submodules: false
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3145350Z   set-safe-directory: true
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3146430Z   allow-unsafe-pr-checkout: false
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.3149440Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8191690Z Syncing repository: temet-ai/ask-kit
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8194150Z ##[group]Getting Git version info
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8199250Z Working directory is '/Users/runner/work/ask-kit/ask-kit'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8201300Z [command]/opt/homebrew/bin/git version
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8725630Z git version 2.56.1
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8746550Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8757320Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/34193670-cd2c-4b1a-8ac4-35bd81c65b0b/.gitconfig'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8760630Z Temporarily overriding HOME='/Users/runner/work/_temp/34193670-cd2c-4b1a-8ac4-35bd81c65b0b' before making global git config changes
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8789870Z Adding repository directory to the temporary git global config as a safe directory
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8790890Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/ask-kit/ask-kit
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8911570Z Deleting the contents of '/Users/runner/work/ask-kit/ask-kit'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8916170Z ##[group]Determining repository object format
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8918110Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8919880Z ##[group]Initializing the repository
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.8923860Z [command]/opt/homebrew/bin/git init /Users/runner/work/ask-kit/ask-kit
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9241220Z hint: Using 'master' as the name for the initial branch. This default branch name
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9242210Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9243520Z hint: to use in all of your new repositories, which will suppress this warning,
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9244100Z hint: call:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9244460Z hint:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9244880Z hint: 	git config --global init.defaultBranch <name>
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9245310Z hint:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9245730Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9246480Z hint: 'development'. The just-created branch can be renamed via this command:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9247010Z hint:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9247350Z hint: 	git branch -m <name>
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9247710Z hint:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9248330Z hint: Disable this message with "git config set advice.defaultBranchName false"
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9262460Z Initialized empty Git repository in /Users/runner/work/ask-kit/ask-kit/.git/
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9274410Z [command]/opt/homebrew/bin/git remote add origin https://github.com/temet-ai/ask-kit
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9383680Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9385970Z ##[group]Disabling automatic garbage collection
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9387630Z [command]/opt/homebrew/bin/git config --local gc.auto 0
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9483250Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9483990Z ##[group]Setting up auth
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9484760Z Removing SSH command configuration
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9490690Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:20.9583600Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.1017410Z Removing HTTP extra header
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.1029200Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.1145040Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.2260750Z Removing includeIf entries pointing to credentials config files
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.2265450Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.2368270Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.3631570Z [command]/opt/homebrew/bin/git config --file /Users/runner/work/_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.3777600Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/Users/runner/work/ask-kit/ask-kit/.git.path /Users/runner/work/_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.3871430Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/Users/runner/work/ask-kit/ask-kit/.git/worktrees/*.path /Users/runner/work/_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.3965070Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.4051630Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.4135200Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.4136860Z ##[group]Fetching the repository
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:21.4138660Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +33329a7eac055c08d2cb90abeb2a9cac80c85587:refs/remotes/origin/fix/imagegen-gallery-release
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1454810Z From https://github.com/temet-ai/ask-kit
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1459230Z  * [new ref]         33329a7eac055c08d2cb90abeb2a9cac80c85587 -> origin/fix/imagegen-gallery-release
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1471590Z [command]/opt/homebrew/bin/git branch --list --remote origin/fix/imagegen-gallery-release
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1666890Z   origin/fix/imagegen-gallery-release
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1682430Z [command]/opt/homebrew/bin/git rev-parse refs/remotes/origin/fix/imagegen-gallery-release
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1839010Z 33329a7eac055c08d2cb90abeb2a9cac80c85587
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1847980Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1850400Z ##[group]Determining the checkout info
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1853670Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1856260Z [command]/opt/homebrew/bin/git sparse-checkout disable
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.1990500Z [command]/opt/homebrew/bin/git config --local --unset-all extensions.worktreeConfig
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.2088390Z ##[group]Checking out the ref
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.2090290Z [command]/opt/homebrew/bin/git checkout --progress --force -B fix/imagegen-gallery-release refs/remotes/origin/fix/imagegen-gallery-release
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3062170Z Switched to a new branch 'fix/imagegen-gallery-release'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3080060Z branch 'fix/imagegen-gallery-release' set up to track 'origin/fix/imagegen-gallery-release'.
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3091180Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3202610Z [command]/opt/homebrew/bin/git log -1 --format=%H
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3300530Z 33329a7eac055c08d2cb90abeb2a9cac80c85587
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3699030Z ##[group]Run actions/setup-node@v7
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3700290Z with:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3700920Z   node-version: 22.x
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3701620Z   cache: npm
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3702290Z   check-latest: false
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3710140Z   token: ***
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3711010Z   package-manager-cache: true
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.3711880Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.5909950Z Found in cache @ /Users/runner/hostedtoolcache/node/22.23.5/arm64
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:22.7510470Z ##[group]Environment details
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:23.4564240Z node: v22.23.5
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:23.4567640Z npm: 10.9.9
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:23.4569050Z yarn: 1.22.22
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:23.4571060Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:23.4609960Z [command]/Users/runner/hostedtoolcache/node/22.23.5/arm64/bin/npm config get cache
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:23.7336470Z /Users/runner/.npm
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:24.0505140Z npm cache is not found
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:24.0652350Z ##[group]Run npm ci
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:24.0652910Z ^[[36;1mnpm ci^[[0m
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:24.0710010Z shell: /bin/bash -e {0}
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:24.0710400Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.5352060Z 
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.5362430Z added 101 packages, and audited 102 packages in 3s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.5363250Z 
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.5363680Z 38 packages are looking for funding
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.5364530Z   run `npm fund` for details
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.5364900Z 
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.5365110Z found 0 vulnerabilities
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.6777740Z ##[group]Run npm test
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.6778050Z ^[[36;1mnpm test^[[0m
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.6958840Z shell: /bin/bash -e {0}
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:27.6959700Z ##[endgroup]
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:28.1073560Z 
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:28.1076730Z > @temet-ai/ask-kit@0.6.0 test
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:28.1078470Z > node test/run.mjs
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:28.1079060Z 
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:41.8888350Z ok   act.mjs                13.7s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:51.8463960Z ok   actions.mjs            10.0s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:55.0308920Z ok   aliases.mjs            3.2s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:01:55.7281110Z ok   api-toolkit-globals.mjs 0.7s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:05.6816040Z ok   backend-pick.mjs       10.0s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:05.7817460Z ok   bundle.mjs             0.1s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:08.2007970Z ok   citations.mjs          2.4s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:08.3841860Z ok   domain-tuning.mjs      0.2s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:10.9488580Z ok   early.mjs              2.6s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:11.1129920Z ok   find-sessions-any.mjs  0.2s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:11.4347870Z ok   fixtures.mjs           0.3s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:11.4911640Z ok   gallery-download.mjs   0.1s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:11.5375890Z ok   gallery-purpose.mjs    0.0s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:11.6199780Z ok   gaps.mjs               0.1s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.4808410Z ok   grep-prefilter.mjs     0.9s
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5982890Z node:internal/modules/run_main:123
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5985440Z     triggerUncaughtException(
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5986580Z     ^
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5986800Z 
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5987190Z AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5987770Z + actual - expected
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5988160Z 
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5989150Z + '/private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/ask-improve-QV531n/config/kits/watch'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5990450Z - '/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/ask-improve-QV531n/config/kits/watch'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5991260Z 
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5991600Z     at file:///Users/runner/work/ask-kit/ask-kit/test/improve.mjs:60:8 {
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5992410Z   generatedMessage: true,
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5992760Z   code: 'ERR_ASSERTION',
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5993490Z   actual: '/private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/ask-improve-QV531n/config/kits/watch',
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5994380Z   expected: '/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/ask-improve-QV531n/config/kits/watch',
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5995170Z   operator: 'strictEqual',
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5995630Z   diff: 'simple'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5996050Z }
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5996300Z 
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5996530Z Node.js v22.23.5
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.5997080Z FAIL improve.mjs (0.1s, exit 1)
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.6358220Z ##[error]Process completed with exit code 1.
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:12.6565140Z Post job cleanup.
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.0519930Z [command]/opt/homebrew/bin/git version
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.0599160Z git version 2.56.1
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.0624050Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/995323e9-cc5e-49f3-82a5-e0a8615db908/.gitconfig'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.0632970Z Temporarily overriding HOME='/Users/runner/work/_temp/995323e9-cc5e-49f3-82a5-e0a8615db908' before making global git config changes
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.0634230Z Adding repository directory to the temporary git global config as a safe directory
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.0636600Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/ask-kit/ask-kit
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.0719140Z Removing SSH command configuration
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.0721990Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.0835520Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.1860190Z Removing HTTP extra header
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.1862680Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.1939080Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3027740Z Removing includeIf entries pointing to credentials config files
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3033210Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3108070Z includeif.gitdir:/Users/runner/work/ask-kit/ask-kit/.git.path
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3110000Z includeif.gitdir:/Users/runner/work/ask-kit/ask-kit/.git/worktrees/*.path
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3111690Z includeif.gitdir:/github/workspace/.git.path
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3113220Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3117020Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/Users/runner/work/ask-kit/ask-kit/.git.path
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3196870Z /Users/runner/work/_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3207180Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/Users/runner/work/ask-kit/ask-kit/.git.path \/Users\/runner\/work\/_temp\/git\-credentials\-83d0f33a\-3435\-4c26\-a497\-eece043d2ded\.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3292710Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/Users/runner/work/ask-kit/ask-kit/.git/worktrees/*.path
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3391670Z /Users/runner/work/_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3394560Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/Users/runner/work/ask-kit/ask-kit/.git/worktrees/*.path \/Users\/runner\/work\/_temp\/git\-credentials\-83d0f33a\-3435\-4c26\-a497\-eece043d2ded\.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3473040Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3544780Z /github/runner_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3551920Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-83d0f33a\-3435\-4c26\-a497\-eece043d2ded\.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3638120Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3737810Z /github/runner_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3752570Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-83d0f33a\-3435\-4c26\-a497\-eece043d2ded\.config
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.3925770Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.4993510Z Removing credentials config '/Users/runner/work/_temp/git-credentials-83d0f33a-3435-4c26-a497-eece043d2ded.config'
+test (macos-latest, 22.x)	UNKNOWN STEP	2026-11-23T13:02:13.5121720Z Cleaning up orphan processes
