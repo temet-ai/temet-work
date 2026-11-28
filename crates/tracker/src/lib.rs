@@ -185,6 +185,9 @@ pub struct FakeTracker {
     /// When set, every reopen fails with this error, as it does in a Jira
     /// workflow with no transition out of Done.
     pub reopen_refused: Option<TrackerError>,
+    /// Open issues its list of a project leaves out, as (project, key), as
+    /// GitHub's leaves out an open pull request; asked about, each is open.
+    pub unlisted: Vec<(String, String)>,
 }
 
 impl Default for FakeTracker {
@@ -202,6 +205,7 @@ impl FakeTracker {
             milestones: Vec::new(),
             comments: Vec::new(),
             reopen_refused: None,
+            unlisted: Vec::new(),
         }
     }
 }
@@ -221,6 +225,7 @@ impl Tracker for FakeTracker {
             .issues
             .iter()
             .filter(|(p, i)| p == project && !i.closed)
+            .filter(|(p, i)| !self.unlisted.contains(&(p.clone(), i.key.clone())))
             .map(|(_, i)| i.clone())
             .collect())
     }
@@ -861,7 +866,14 @@ impl Part for Trackers {
                     // A dependency counts as done only once its tracker says it is
                     // closed; until then the issue waits.
                     for (issue, written) in unknown_dependencies(world, &source, &open) {
-                        let own = issue.project == source;
+                        // Another project's open issue is listed by its own sync,
+                        // unless that sync has worked and left it out, as it does an
+                        // open pull request or an issue past the list's limit.
+                        let listed_elsewhere = issue.project != source
+                            && self
+                                .texts
+                                .get(&issue.project)
+                                .is_none_or(|t| t.contains_key(&issue.key));
                         match self.ask(&sources, &issue) {
                             Ok(true) => events.push(Event::IssueSynced {
                                 issue,
@@ -871,8 +883,7 @@ impl Part for Trackers {
                                 order: 0,
                                 closed: true,
                             }),
-                            // Another project's open issue is listed by its own sync.
-                            Ok(false) if !own => {}
+                            Ok(false) if listed_elsewhere => {}
                             Ok(false) => unsure.push(format!(
                                 "an issue depends on {written}, which is open but was not listed"
                             )),
@@ -1847,6 +1858,30 @@ mod tests {
             }
             assert_eq!(part.poll(&w, 1).events, [], "{line} {closed}");
         }
+    }
+
+    #[test]
+    fn another_projects_open_issue_its_sync_does_not_list_is_a_problem() {
+        let mut w = configured();
+        add_project(&mut w, "klatch", "other", "desert/klatch");
+        let mut klatch = FakeTracker::named("other");
+        klatch
+            .issues
+            .push(("desert/klatch".into(), issue("4", None)));
+        klatch.unlisted.push(("desert/klatch".into(), "4".into()));
+        let mut part = Trackers::default().every(0);
+        part.add(Box::new(depending("Depends on klatch#4")));
+        part.add(Box::new(klatch));
+        // ankh syncs before klatch has: klatch's own sync may list it.
+        let first = part.poll(&w, 0);
+        assert_eq!(first.problem, None);
+        apply(&mut w, &first.events);
+        assert!(!w.issues.contains_key(&IssueId::new("klatch", "4")));
+        // klatch's sync worked and left it out.
+        assert_eq!(
+            part.poll(&w, 1).problem.as_deref(),
+            Some("ankh/morpork: an issue depends on klatch#4, which is open but was not listed")
+        );
     }
 
     #[test]

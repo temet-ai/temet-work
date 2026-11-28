@@ -373,7 +373,13 @@ fn an_issue_that_left_its_groups_scope_shows_its_stage_and_out_of_scope() {
         status.contains("\n  ankh#2  ready, out of scope  issue 2 [m9]\n"),
         "{status}"
     );
-    assert!(!status.contains("Waiting"), "{status}");
+    // It waits on its scope, and not on the machine any more.
+    assert!(
+        status.contains(
+            "Waiting\n  ankh#2 waiting, out of scope (m9 is not a milestone of watch)\nAgents\n"
+        ),
+        "{status}"
+    );
     let unread = Err("not read here".into());
     let shown = crate::text::issue(&w, &issue("2"), &unread).unwrap_or_default();
     assert!(shown.contains("\nStage: ready, out of scope\n"), "{shown}");

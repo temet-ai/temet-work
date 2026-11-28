@@ -6,6 +6,7 @@ use std::fmt::Write;
 
 use crate::IssueText;
 use crate::model::{AgentState, Issue, PointState, Role, Stage};
+use crate::placement::{Hold, StartWait, Unlisted, Why};
 use crate::world::World;
 
 /// A stage in a word or two.
@@ -224,12 +225,18 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
 }
 
 /// The issues waiting for a work folder on the machine a setting names, then the
-/// ready ones waiting on a dependency out of scope; no section when there are
-/// neither.
+/// ready ones that would not start once a folder is free, with each reason; no
+/// section when there are neither.
 fn waiting(out: &mut String, world: &World) {
     let machines = world.machine_waits();
-    let dependencies = world.dependency_waits();
-    if machines.is_empty() && dependencies.is_empty() {
+    let starts: Vec<StartWait> = world
+        .issues
+        .values()
+        .filter(|i| i.stage == Stage::Ready)
+        .filter_map(|i| Some((world.groups.get(i.group.as_ref()?)?, i)))
+        .flat_map(|(group, i)| world.start_waits(group, i))
+        .collect();
+    if machines.is_empty() && starts.is_empty() {
         return;
     }
     let _ = writeln!(out, "Waiting");
@@ -248,27 +255,45 @@ fn waiting(out: &mut String, world: &World) {
             w.issue, w.machine
         );
     }
-    for w in dependencies {
-        let through: Vec<String> = w.through.iter().map(ToString::to_string).collect();
-        let through = match through.split_last() {
-            None => String::new(),
-            Some((only, [])) => format!(" through {only}"),
-            Some((last, rest)) => format!(" through {} and {last}", rest.join(", ")),
-        };
-        let why = w.left_out.map_or_else(
-            || "no group covers it".to_string(),
-            |m| format!("{m} is not a milestone of {}", w.group),
-        );
-        // A name nothing matches is shown as its "Depends on" line writes it.
-        let on =
-            w.on.unmatched()
-                .map_or_else(|| w.on.to_string(), str::to_string);
-        let _ = writeln!(
-            out,
-            "  {} waiting on {on}{through}, out of scope ({why})",
-            w.issue
-        );
+    for w in starts {
+        let _ = writeln!(out, "  {} {}", w.issue, start_wait(&w));
     }
+}
+
+/// Why a ready issue waits, after its key: `waiting on klatch#5, never synced`.
+fn start_wait(w: &StartWait) -> String {
+    let group = &w.group;
+    let (on, through, hold) = match &w.why {
+        Why::OutOfScope(unlisted) => {
+            let what = match unlisted {
+                Unlisted::Project(p) => format!("{p} is not a project of {group}"),
+                Unlisted::Area(a) => format!("{a} is not an area of {group}"),
+                Unlisted::Milestone(m) => format!("{m} is not a milestone of {group}"),
+                Unlisted::NoMilestone => "it has no milestone".to_string(),
+            };
+            return format!("waiting, out of scope ({what})");
+        }
+        Why::On { on, through, hold } => (on, through, hold),
+    };
+    let through: Vec<String> = through.iter().map(ToString::to_string).collect();
+    let through = match through.split_last() {
+        None => String::new(),
+        Some((only, [])) => format!(" through {only}"),
+        Some((last, rest)) => format!(" through {} and {last}", rest.join(", ")),
+    };
+    let why = match hold {
+        Hold::NeverSynced => "never synced".to_string(),
+        Hold::OutOfScope(None) => "out of scope (no group covers it)".to_string(),
+        Hold::OutOfScope(Some(m)) => {
+            format!("out of scope ({m} is not a milestone of {group})")
+        }
+        Hold::NotDone(at) => format!("not done ({})", stage(*at)),
+    };
+    // A name nothing matches is shown as its "Depends on" line writes it.
+    let on = on
+        .unmatched()
+        .map_or_else(|| on.to_string(), str::to_string);
+    format!("waiting on {on}{through}, {why}")
 }
 
 /// The settings in effect over `target` for `role`, one per line with the level
@@ -751,13 +776,14 @@ radar#44, author
 Projects
   radar: city/radar in t
 Groups
-  watch (Night watch): radar; every milestone; refines 3 at a time; 2 in its queue, investigates below 2
+  watch (Night watch): radar; every milestone; refines 3 at a time; 1 in its queue, investigates below 2
 Issues
   radar#1  working  Issue 1
   radar#2  ready  Issue 2
   radar#3  ready  Issue 3
 Waiting
   radar#2 waiting for a work folder on mac
+  radar#3 waiting on radar#2, not done (ready)
 Agents
 Decisions
 Rules
@@ -791,7 +817,8 @@ Problems
             status.contains(
                 "Waiting\n  \
                  radar#1 waiting for a work folder on mac2 for its reviewer (radar has no work folder there)\n  \
-                 radar#2 waiting for a work folder on mac2 (radar has no work folder there)\nAgents\n"
+                 radar#2 waiting for a work folder on mac2 (radar has no work folder there)\n  \
+                 radar#3 waiting on radar#2, not done (ready)\nAgents\n"
             ),
             "{status}"
         );
@@ -1088,7 +1115,7 @@ Problems
         for (key, depends_on) in [
             ("1", vec![later.clone(), uncovered.clone()]),
             ("2", Vec::new()),
-            // An open dependency in scope.
+            // An open dependency in scope, which counts in its place.
             ("4", vec![IssueId::new("ankh", "2")]),
         ] {
             let issue = IssueId::new("ankh", key);
@@ -1104,7 +1131,8 @@ Problems
                 "Waiting\n  \
                  ankh#2 waiting for a work folder on mac (ankh has no work folder there)\n  \
                  ankh#1 waiting on ankh#100, out of scope (Later is not a milestone of watch)\n  \
-                 ankh#1 waiting on klatch#3, out of scope (no group covers it)\n\
+                 ankh#1 waiting on klatch#3, out of scope (no group covers it)\n  \
+                 ankh#4 waiting on ankh#2, not done (ready)\n\
                  Agents\n"
             ),
             "{all}"

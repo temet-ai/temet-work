@@ -23,6 +23,7 @@ use crate::model::{
     Addresses, Agent, AgentState, Area, CheckState, DecisionKind, Folder, Group, INVESTIGATE_EVERY,
     Investigation, Issue, PointState, Project, Review, Role, Rule, RuleState, Stage,
 };
+use crate::placement::Unlisted;
 use crate::settings::{self, FILE, Scope, Value};
 
 /// What [`World::missing`] finds.
@@ -1470,15 +1471,6 @@ impl World {
         }
     }
 
-    /// Whether every issue `issue` depends on is done. An issue the loop has not
-    /// seen counts as not done.
-    pub(crate) fn ready_to_start(&self, issue: &Issue) -> bool {
-        issue
-            .depends_on
-            .iter()
-            .all(|d| self.issues.get(d).is_some_and(|i| i.stage == Stage::Done))
-    }
-
     /// The order a group takes issues in: its milestones first to last, then the
     /// tracker's order, then the key.
     fn rank(group: &Group, issue: &Issue) -> (usize, u64, String) {
@@ -1562,6 +1554,13 @@ impl World {
     /// Whether a group works on an issue: one of its projects, and one of its
     /// milestones when it names any.
     pub(crate) fn in_scope(&self, group: &Group, issue: &Issue) -> bool {
+        self.unlisted(group, issue).is_none()
+    }
+
+    /// What `group` does not list that it would need to for `issue` to be in its
+    /// scope; `None` when it is. Its project or area comes first, since without
+    /// it the milestone does not matter.
+    pub(crate) fn unlisted(&self, group: &Group, issue: &Issue) -> Option<Unlisted> {
         let from = &issue.id.project;
         let taken = group.projects.contains(from)
             || group.areas.contains(from)
@@ -1570,12 +1569,19 @@ impl World {
                 .iter()
                 .filter_map(|a| self.areas.get(a))
                 .any(|a| a.projects.contains(from));
-        taken
-            && (group.milestones.is_empty()
-                || issue
-                    .milestone
-                    .as_ref()
-                    .is_some_and(|m| group.milestones.contains(m)))
+        if !taken {
+            return Some(if self.areas.contains_key(from) {
+                Unlisted::Area(from.clone())
+            } else {
+                Unlisted::Project(from.clone())
+            });
+        }
+        match &issue.milestone {
+            _ if group.milestones.is_empty() => None,
+            Some(m) if group.milestones.contains(m) => None,
+            Some(m) => Some(Unlisted::Milestone(m.clone())),
+            None => Some(Unlisted::NoMilestone),
+        }
     }
 
     /// A free work folder `may` allows in each of `repos`, in their order and all
@@ -1646,8 +1652,7 @@ impl World {
                 .filter(|i| {
                     i.group.as_ref() == Some(&group.id)
                         && i.stage == Stage::Ready
-                        && self.in_scope(group, i)
-                        && self.ready_to_start(i)
+                        && self.start_waits(group, i).is_empty()
                 })
                 .collect();
             ready.sort_by_key(|i| Self::rank(group, i));

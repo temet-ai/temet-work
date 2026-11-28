@@ -152,7 +152,9 @@ area's id, or its tracker's name for it, before the number: `klatch#4` or `owner
 For a dependency the daemon has not synced, a sync asks the tracker of its project or area
 whether it is closed. When no configured tracker can be asked about it, or the tracker answers
 with an error, `temet-work status` lists the dependency under Problems with the reason, and
-the issue waits.
+the issue waits. The dependency is also listed under Problems when the tracker says it is open
+but a sync of its project or area, once one has worked, does not list it, as GitHub lists no
+pull request among the issues. The daemon then never syncs it, and the issue waits on it.
 
 An issue leaves a group's scope when the group no longer lists its milestone, project or
 area, because the issue moved or the group changed. An agent already working on it
@@ -178,19 +180,33 @@ not refined again.
 A group's work queue is the refining, ready and new issues in its scope (its milestones,
 projects and areas): those it is refining or has refined and not started, and those no group
 has taken yet. An issue moved out of them does not hold off an investigator, and counts again
-once it is back. A ready issue is not counted either while it waits on an open dependency out
-of its group's scope, directly or through another open issue: one that no group covers, or one
-in a milestone the group does not take, even when another group takes it. `temet-work status`
-lists such an issue under Waiting, with a line for each of those dependencies, such as
-`radar#44 waiting on radar#51, out of scope (Later is not a milestone of core)`. The brackets
-say `no group covers it` for a dependency with no milestone the group leaves out, and
-`through radar#47` follows the dependency when radar#44 reaches it through radar#47. The issue
-counts again once the dependency is done or back in scope, or its "Depends on" line is gone.
-A dependency on a repository that no project or area matches is one no group covers: no
-tracker is asked about it, and the line shows it as the issue's text writes it, such as
-`nowhere#5`.
-Refining and new issues count whatever they depend on, and so does a ready issue whose
-dependency in a known project or area the daemon has never synced.
+once it is back. Refining and new issues count whatever they depend on. A ready issue counts
+only while it would start once a work folder is free, even in a project with none yet, decided
+by the same rule that starts its author: its group covers it and every issue in its "Depends
+on" lines is done.
+`temet-work status` lists each ready issue that would not start under Waiting, with a line for
+each reason:
+
+- `radar#44 waiting on radar#51, never synced`: the daemon holds no issue by that name, in the
+  issue's own project or another, so nothing says it is done.
+- `radar#44 waiting on radar#51, out of scope (Later is not a milestone of core)`: the
+  dependency is open and in a milestone the group does not take, even when another group takes
+  it. The brackets say `no group covers it` when no group covers the dependency at all. A
+  dependency on a repository that no project or area matches is one no group covers: no tracker
+  is asked about it, and the line shows it as the issue's text writes it, such as `nowhere#5`.
+- `radar#44 waiting on radar#51, not done (working)`: the dependency is open and in scope, at
+  the stage in the brackets. It counts in its own place while it is new, refining or ready.
+- `radar#44 waiting, out of scope (Later is not a milestone of core)`: the group no longer
+  covers the issue itself, and no other group does. The brackets name what the group no longer
+  lists: the milestone, the project or area, or, for an issue with no milestone, `it has no
+  milestone`.
+
+An open dependency in scope is followed to its own dependencies, and the line names the one
+where that walk ends: one whose own open dependencies all lead back to it, as in a cycle,
+where each of two issues names the other. `through radar#47` names the issues between when
+radar#44 reaches it through radar#47. The issue counts again once nothing holds it: the
+dependency is done or back in scope, its "Depends on" line is gone, or the issue is back in its
+group's lists.
 
 When the queue holds fewer than `queue_low` issues, the daemon starts one
 investigator for the group. Left out, `queue_low` is twice the work folders of the group's
