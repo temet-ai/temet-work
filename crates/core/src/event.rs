@@ -350,6 +350,20 @@ pub enum Event {
         /// The stage it goes to.
         stage: crate::model::Stage,
     },
+    /// A person stopped one agent with `temet-work stop AGENT`: its terminal is
+    /// stopped, nothing waits on it, and no agent starts on its issue until a
+    /// person starts the issue again ([`Event::IssueStartedByPerson`]). The
+    /// time is the log entry's ([`crate::World::person_stops`]).
+    AgentStoppedByPerson {
+        /// The agent.
+        agent: AgentId,
+    },
+    /// A person let agents start again on an issue whose agent a person stopped,
+    /// with `temet-work start ISSUE`. The agent that was stopped stays stopped.
+    IssueStartedByPerson {
+        /// The issue.
+        issue: IssueId,
+    },
     /// The code host reports that the pull request under review conflicts with the
     /// branch it merges into. It goes back to its author at once.
     PullConflicts {

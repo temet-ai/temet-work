@@ -668,6 +668,190 @@ fn a_persons_hold_starts_nothing_through_rounds_and_a_restart_until_a_resume() {
     ));
 }
 
+#[test]
+fn a_persons_stop_starts_no_agent_on_its_issue_through_rounds_and_a_restart_until_a_start() {
+    use temet_work::socket::{self, Reply};
+
+    let kept = Kept::default();
+    let (mut host, starts) = host_with(Box::new(kept.clone()));
+    let ask = |host: &mut Host, request: &Request, peer: &Peer| {
+        socket::answer(host, 1, request, peer).expect("answer")
+    };
+    // The agents started on ankh#1; an investigator may start for the group.
+    let on_issue = |starts: &temet_work_runner::fake::Starts| {
+        starts
+            .lock()
+            .expect("starts")
+            .iter()
+            .filter(|s| s.labels.get("issue").map(String::as_str) == Some("ankh#1"))
+            .count()
+    };
+    host.tick(0).expect("tick");
+    let issue = IssueId::new("ankh", "1");
+    let refiner = AgentId::new("refiner-1");
+    assert_eq!(host.world().issues[&issue].stage, Stage::Refining);
+    let stop = Command::Stop {
+        agent: refiner.clone(),
+    };
+
+    // An agent may not stop an agent, even with its own secret; nor may a
+    // person's command sent from inside its process tree with both variables
+    // unset.
+    let own = ask(
+        &mut host,
+        &from(&starts, Some("refiner-1"), stop.clone()),
+        &Peer::Unchecked,
+    );
+    assert!(
+        matches!(&own, Reply::Refused { why } if why.starts_with("stop is a person's: refiner-1 is an agent")),
+        "{own:?}"
+    );
+    let inside = Peer::Read(vec![temet_work_runner::digest(&secret(
+        &starts,
+        "refiner-1",
+    ))]);
+    let tree = ask(&mut host, &Request::new(None, stop.clone()), &inside);
+    assert!(
+        matches!(&tree, Reply::Refused { why } if why.starts_with("stop names no agent but comes from inside refiner-1's process tree")),
+        "{tree:?}"
+    );
+    assert!(
+        host.world().person_stopped(&refiner).is_none(),
+        "neither was taken"
+    );
+
+    // A person's stop reaches the runner, which stops the terminal: the agent ends.
+    let stopped = ask(
+        &mut host,
+        &Request::new(None, stop.clone()),
+        &Peer::Unchecked,
+    );
+    assert_eq!(
+        stopped,
+        Reply::Done {
+            text: "refiner-1's terminal is being stopped: no agent starts on ankh#1 until \
+                   temet-work start ankh#1; its other agents carry on, and its merge, deploy and \
+                   verify still run"
+                .into()
+        }
+    );
+    assert_eq!(
+        host.world().agents[&refiner].state,
+        temet_work_core::model::AgentState::Ended
+    );
+    assert!(host.screen(&refiner).is_err(), "its terminal is gone");
+    for at in [60_000, 120_000] {
+        host.tick(at).expect("tick");
+    }
+    assert_eq!(on_issue(&starts), 1, "no fresh refiner");
+    assert_eq!(
+        host.world().issues[&issue].stage,
+        Stage::Refining,
+        "it keeps its stage"
+    );
+    let again = ask(
+        &mut host,
+        &Request::new(None, stop.clone()),
+        &Peer::Unchecked,
+    );
+    assert!(
+        matches!(&again, Reply::Refused { why } if why.starts_with("refiner-1 is already stopped by a person")),
+        "{again:?}"
+    );
+
+    // Status and the view say so.
+    let Reply::Done { text } = ask(
+        &mut host,
+        &Request::new(None, Command::Status),
+        &Peer::Unchecked,
+    ) else {
+        panic!("no status");
+    };
+    assert!(
+        text.contains("stopped by a person (refiner-1) since ")
+            && text.contains("no agent starts on it until temet-work start ankh#1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("refiner-1 on ankh#1: ended (on local); stopped by a person at "),
+        "{text}"
+    );
+    match ask(
+        &mut host,
+        &Request::new(None, Command::View),
+        &Peer::Unchecked,
+    ) {
+        Reply::View { view } => {
+            let i = view
+                .issues
+                .iter()
+                .find(|i| i.id == "ankh#1")
+                .expect("listed");
+            assert_eq!(i.stopped.as_ref(), Some(&refiner));
+            assert!(i.stopped_since.is_some());
+            let a = view
+                .agents
+                .iter()
+                .find(|a| a.id == refiner)
+                .expect("listed");
+            assert!(a.stopped_by_person && a.stopped_at.is_some());
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // A restart replays the stop: still nothing starts.
+    let (mut again, starts) = host_from(
+        kept.replayed(host.world()),
+        Box::new(kept.clone()),
+        fake_runtimes(),
+        CONFIG,
+        None,
+        vec![tracked("city/ankh", "1", 1)],
+    );
+    assert_eq!(
+        again.world().stopped_by(&issue),
+        Some(&refiner),
+        "the log keeps it"
+    );
+    again.tick(180_000).expect("tick");
+    assert_eq!(on_issue(&starts), 0, "still nothing");
+
+    // A person's start: the next round starts a fresh refiner.
+    let started = ask(
+        &mut again,
+        &Request::new(
+            None,
+            Command::Start {
+                issue: issue.clone(),
+            },
+        ),
+        &Peer::Unchecked,
+    );
+    assert_eq!(
+        started,
+        Reply::Done {
+            text: "started: the next round starts what ankh#1 needs".into()
+        }
+    );
+    again.tick(240_000).expect("tick");
+    assert!(
+        again
+            .world()
+            .agents
+            .contains_key(&AgentId::new("refiner-2"))
+    );
+    assert_eq!(on_issue(&starts), 1);
+    let twice = ask(
+        &mut again,
+        &Request::new(None, Command::Start { issue }),
+        &Peer::Unchecked,
+    );
+    assert!(
+        matches!(&twice, Reply::Refused { why } if why.starts_with("ankh#1 is not stopped")),
+        "{twice:?}"
+    );
+}
+
 /// A plan of one check, as `temet-work plan` reads it.
 const ONE_CHECK: &str =
     "checks:\n  - done_when: the clock strikes on time\n    proven_by: listening at noon\n";

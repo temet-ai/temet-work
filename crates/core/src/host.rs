@@ -405,7 +405,15 @@ impl Host {
     /// so each goes when the agent leaves the state or ends.
     fn report_blocked(&mut self) {
         self.problems.retain(|k, _| !of_a_stopped_agent(k));
-        for agent in self.world.agents.values() {
+        // An agent a person stopped is not reminded, continued or answered: its
+        // stop's own line says what is left to do.
+        let person_stops = &self.world.person_stops;
+        for agent in self
+            .world
+            .agents
+            .values()
+            .filter(|a| !person_stops.contains_key(&a.id))
+        {
             // A reader's place is its readers' folder, made on its machine.
             let place = || {
                 self.world

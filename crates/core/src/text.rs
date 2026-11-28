@@ -102,6 +102,31 @@ pub fn held(world: &World) -> Option<String> {
     })
 }
 
+/// What an agent's line says when a person stopped it, whatever state it is
+/// in: `stopped by a person at TIME`; none when no person did.
+pub fn agent_stopped(world: &World, agent: &crate::ids::AgentId) -> Option<String> {
+    let at = world.person_stopped(agent)?;
+    let at = at
+        .map(|at| format!(" at {}", crate::investigation::utc(at)))
+        .unwrap_or_default();
+    Some(format!("stopped by a person{at}"))
+}
+
+/// What an issue's line says while a person has stopped an agent of it: the
+/// agent, since when, and how the issue goes on; none while it is not stopped.
+pub fn issue_stopped(world: &World, issue: &Issue) -> Option<String> {
+    let agent = world.stopped_by(&issue.id)?;
+    let since = world
+        .person_stopped(agent)
+        .flatten()
+        .map(|at| format!(" since {}", crate::investigation::utc(at)))
+        .unwrap_or_default();
+    Some(format!(
+        "stopped by a person ({agent}){since}: no agent starts on it until temet-work start {}",
+        issue.id
+    ))
+}
+
 /// The whole state, with what is wrong now. Done issues are counted, not listed.
 pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
@@ -194,9 +219,10 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
         } else {
             String::new()
         };
+        let stopped = issue_stopped(world, i).map_or_else(String::new, |s| format!("; {s}"));
         let _ = writeln!(
             out,
-            "  {}  {}  {}{milestone}{pulls}",
+            "  {}  {}  {}{milestone}{pulls}{stopped}",
             i.id,
             issue_stage(world, i),
             i.title
@@ -212,9 +238,10 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             .issue
             .as_ref()
             .map_or_else(String::new, |i| format!(" on {i}"));
+        let stopped = agent_stopped(world, &a.id).map_or_else(String::new, |s| format!("; {s}"));
         let _ = writeln!(
             out,
-            "  {}{issue}: {} (on {})",
+            "  {}{issue}: {} (on {}){stopped}",
             a.id,
             agent_state(&a.state),
             a.machine
@@ -554,6 +581,9 @@ pub fn issue(
     let mut out = String::new();
     let _ = writeln!(out, "{}  {}", i.id, i.title);
     let _ = writeln!(out, "Stage: {}", issue_stage(world, i));
+    if let Some(stopped) = issue_stopped(world, i) {
+        let _ = writeln!(out, "Stopped: {stopped}");
+    }
     if let Some(m) = &i.milestone {
         let _ = writeln!(out, "Milestone: {m}");
     }
@@ -618,9 +648,10 @@ pub fn issue(
         .values()
         .filter(|a| a.issue.as_ref() == Some(id))
     {
+        let stopped = agent_stopped(world, &a.id).map_or_else(String::new, |s| format!("; {s}"));
         let _ = writeln!(
             out,
-            "  {} ({}): {}",
+            "  {} ({}): {}{stopped}",
             a.id,
             a.role.name(),
             agent_state(&a.state)
@@ -1912,5 +1943,111 @@ mod decisions {
             );
             assert!(lines[2].ends_with(": the bell is cracked"), "{lines:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod person_stops {
+    use super::*;
+    use crate::event::Event;
+    use crate::ids::{AgentId, GroupId, IssueId, MachineId};
+
+    fn started(agent: &str, role: Role) -> Event {
+        Event::AgentStarted {
+            agent: AgentId::new(agent),
+            group: GroupId::new("watch"),
+            role,
+            issue: Some(IssueId::new("ankh", "1")),
+            machine: MachineId::new("morpork"),
+            folder: None,
+            secret_digest: None,
+            runtime: None,
+            model: None,
+        }
+    }
+
+    /// ankh#1 refining, its refiner working and an author idle, with the
+    /// refiner stopped by a person at `at`.
+    fn stopped(at: u64) -> World {
+        let mut w = World::default();
+        w.apply(&Event::IssueSynced {
+            issue: IssueId::new("ankh", "1"),
+            title: "Mend the clock".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        w.issues
+            .get_mut(&IssueId::new("ankh", "1"))
+            .expect("synced")
+            .stage = Stage::Refining;
+        w.apply(&started("refiner-1", Role::Refiner));
+        w.apply(&started("author-1", Role::Author));
+        w.apply(&Event::AgentChanged {
+            agent: AgentId::new("refiner-1"),
+            state: AgentState::Working {
+                doing: "reading the clock".into(),
+            },
+            lost: false,
+        });
+        w.apply_at(
+            at,
+            &Event::AgentStoppedByPerson {
+                agent: AgentId::new("refiner-1"),
+            },
+        );
+        w
+    }
+
+    #[test]
+    fn text_status_shows_the_agent_stopped_by_a_person_whatever_its_state_and_its_issue_stopped() {
+        let at = 1_795_784_700_000;
+        let w = stopped(at);
+        let status = text(&w, &BTreeMap::new());
+        assert!(
+            status.contains(
+                "refiner-1 on ankh#1: working: reading the clock (on morpork); stopped by a \
+                 person at 2026-11-27 13:05 UTC"
+            ),
+            "{status}"
+        );
+        assert!(
+            status.contains("author-1 on ankh#1: idle (on morpork)\n"),
+            "{status}"
+        );
+        assert!(
+            status.contains(
+                "ankh#1  refining  Mend the clock; stopped by a person (refiner-1) since \
+                 2026-11-27 13:05 UTC: no agent starts on it until temet-work start ankh#1"
+            ),
+            "{status}"
+        );
+        let shown = issue(
+            &w,
+            &IssueId::new("ankh", "1"),
+            &Err("not read in this test".into()),
+        )
+        .expect("an issue");
+        assert!(
+            shown.contains("Stopped: stopped by a person (refiner-1) since 2026-11-27 13:05 UTC"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("refiner-1 (refiner): working: reading the clock; stopped by a person"),
+            "{shown}"
+        );
+
+        // Started again: the issue's line says nothing, the agent's still does.
+        let mut w = w;
+        w.apply(&Event::IssueStartedByPerson {
+            issue: IssueId::new("ankh", "1"),
+        });
+        let status = text(&w, &BTreeMap::new());
+        assert!(
+            status.contains("ankh#1  refining  Mend the clock\n"),
+            "{status}"
+        );
+        assert!(status.contains("; stopped by a person at "), "{status}");
     }
 }

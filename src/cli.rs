@@ -60,6 +60,10 @@ temet-work move ISSUE STAGE                 a person's: move an issue back to ne
                                             new, refining, ready, working, in_review, fixing,
                                             arbitration, merging, deploying, verifying, done, and
                                             any other move is refused with its reason
+temet-work stop AGENT                       a person's: stop one agent's terminal; no agent starts
+                                            on its issue until temet-work start ISSUE
+temet-work start ISSUE                      a person's: let agents start again on an issue whose
+                                            agent a person stopped; that agent stays stopped
 temet-work file PROJECT TITLE BODY [--milestone M]
                                             an investigator's: file an issue in a project or area its
                                             group takes; BODY - reads it from standard input; the
@@ -406,6 +410,14 @@ pub fn request(
         },
         "hold" => Command::Hold,
         "resume" => Command::Resume,
+        "stop" | "start" if args.len() != 2 => {
+            let what = if name == "stop" { "AGENT" } else { "ISSUE" };
+            return Err(format!("{name} takes exactly one {what}\n\n{USAGE}"));
+        }
+        "stop" => Command::Stop {
+            agent: AgentId::new(arg(1, "AGENT")?),
+        },
+        "start" => Command::Start { issue: issue()? },
         "rule" => Command::Rule {
             issue: issue()?,
             approve: match arg(2, "approve or fix")? {
@@ -603,6 +615,37 @@ pub(crate) mod tests {
         assert_eq!(read("resume"), Ok(Command::Resume));
         assert!(read("hold --json").is_err(), "--json goes with status only");
         assert!(USAGE.contains("temet-work hold ") && USAGE.contains("temet-work resume "));
+    }
+
+    #[test]
+    fn stop_and_start_each_take_exactly_one_argument_and_are_in_the_usage() {
+        let read = |line: &str| request(&args(line), None, no_files).map(|r| r.command);
+        assert_eq!(
+            read("stop author-3"),
+            Ok(Command::Stop {
+                agent: AgentId::new("author-3")
+            })
+        );
+        assert_eq!(
+            read("start ankh#1"),
+            Ok(Command::Start {
+                issue: IssueId::new("ankh", "1")
+            })
+        );
+        for line in [
+            "stop",
+            "stop author-3 reviewer-1",
+            "start",
+            "start ankh#1 ankh#2",
+        ] {
+            let why = read(line).expect_err(line);
+            assert!(why.contains("takes exactly one"), "{line}: {why}");
+        }
+        assert!(read("start ankh").is_err(), "an issue is project#key");
+        assert!(read("stop author-3 --json").is_err());
+        assert!(
+            USAGE.contains("temet-work stop AGENT ") && USAGE.contains("temet-work start ISSUE ")
+        );
     }
 
     #[test]

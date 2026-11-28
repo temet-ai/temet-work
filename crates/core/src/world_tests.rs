@@ -3513,3 +3513,6 @@ mod hold;
 
 #[path = "world_readers_tests.rs"]
 mod readers;
+
+#[path = "world_person_stop_tests.rs"]
+mod person_stop;

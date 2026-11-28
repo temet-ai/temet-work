@@ -220,6 +220,8 @@ impl Command {
             Self::Hold => "hold",
             Self::Resume => "resume",
             Self::Move { .. } => "move",
+            Self::Stop { .. } => "stop",
+            Self::Start { .. } => "start",
         }
     }
 
@@ -645,6 +647,55 @@ mod tests {
             w.admit(&sender(None, None, Peer::Read(vec![])), &back),
             Ok(())
         );
+    }
+
+    #[test]
+    fn stop_and_start_are_a_persons_and_refused_as_every_persons_command_is() {
+        let w = world();
+        let commands = [
+            Command::Stop {
+                agent: AgentId::new("reviewer-1"),
+            },
+            Command::Start {
+                issue: IssueId::new("ankh", "1"),
+            },
+        ];
+        for command in &commands {
+            assert!(command.changes(), "{command:?}");
+            let name = command.name();
+            // From inside an agent's process tree with both variables unset.
+            let why = w
+                .admit(&sender(None, None, Peer::Read(vec![d("a")])), command)
+                .expect_err("refused");
+            assert!(
+                why.starts_with(&format!(
+                    "{name} names no agent but comes from inside author-1's process tree"
+                )),
+                "{why}"
+            );
+            // Carrying an agent's secret, from a process that cannot be read,
+            // and through the relay from another machine.
+            let carried = w
+                .admit(&sender(None, Some("a"), Peer::Read(vec![])), command)
+                .expect_err("refused");
+            assert!(carried.contains("carries author-1's secret"), "{carried}");
+            let unread = w
+                .admit(
+                    &sender(None, None, unreadable("process 7: gone", vec![])),
+                    command,
+                )
+                .expect_err("refused");
+            assert!(unread.contains("cannot be read"), "{unread}");
+            let far = w
+                .admit(&relayed(None, None, Peer::Read(vec![])), command)
+                .expect_err("refused");
+            assert!(far.contains("temet-work relay"), "{far}");
+            // A person's shell outside any agent.
+            assert_eq!(
+                w.admit(&sender(None, None, Peer::Read(vec![])), command),
+                Ok(())
+            );
+        }
     }
 
     #[test]
