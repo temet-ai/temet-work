@@ -34,11 +34,11 @@ pub const CONTINUE: &str = "continue";
 /// sent too early comes straight back with the same error.
 pub const CONTINUE_AFTER_MS: u64 = 60_000;
 
-/// How long after a failed stop of an ended agent's terminal the runner family
-/// tries it again: a terminal service that keeps refusing is asked once a
-/// minute, not at every poll. The stop after an agent's last reminder is tried
-/// again at the next poll instead, since the agent has not ended and its issue
-/// waits until the stop works.
+/// How long the runner family waits after a failed stop, of an ended agent's
+/// terminal or after an agent's last reminder, before it tries again: once this
+/// long (a minute) has passed since the last try, so a terminal service that
+/// keeps refusing is asked once a minute, not at every poll. The stop after an
+/// agent's last reminder is listed under Problems while it keeps failing.
 pub const STOP_AGAIN_MS: u64 = 60_000;
 
 /// A terminal, by the id its runner gave it.
@@ -213,7 +213,7 @@ struct Message {
 /// that ends in an error after it was seen working for at least `remind_after`
 /// (ten minutes by default) has recovered: a new count starts at that error. A
 /// shorter one counts toward the stop, timed from the last reminder.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Count {
     /// When its clock last started: when the count began (at the error, after
     /// a retry that recovered), or the last reminder.
@@ -222,9 +222,11 @@ struct Count {
     nudges: u32,
     /// What the latest poll saw the agent doing.
     saw: Saw,
-    /// Whether the stop after the last reminder has failed, which is logged
-    /// the first time only.
-    stop_failed: bool,
+    /// When the stop after the last reminder last failed. It is tried again
+    /// [`STOP_AGAIN_MS`] later.
+    last_try_ms: Option<u64>,
+    /// Why that try failed.
+    refusal: Option<RunnerError>,
 }
 
 /// What a poll saw an agent with a [`Count`] doing.
@@ -368,12 +370,14 @@ impl Runners {
     /// An agent ends here only once its stop works, or its runner says the
     /// terminal is gone or unknown. After any other error it may still be
     /// running: it is not ended, so no fresh agent starts beside it, it keeps
-    /// its terminal and its queued messages, and the next poll tries the stop
-    /// again, with no further reminder. Between tries an agent in a turn, at a
-    /// prompt or waiting on a limit, or one its issue no longer waits on, is not
-    /// stopped, and the rules above say whether its count is kept. An agent with
-    /// no terminal here, as before its runner has reported any after a restart,
-    /// is not ended either.
+    /// its terminal and its queued messages, and the stop is tried again, with
+    /// no further reminder, once [`STOP_AGAIN_MS`] (a minute) has passed since
+    /// the last try. It is listed under Problems while it keeps failing, until
+    /// the stop works or the count is dropped. Between tries an agent in a turn,
+    /// at a prompt or waiting on a limit, or one its issue no longer waits on, is
+    /// not stopped, and the rules above say whether its count is kept. An agent
+    /// with no terminal here, as before its runner has reported any after a
+    /// restart, is not ended either.
     fn remind(
         &mut self,
         world: &World,
@@ -422,7 +426,8 @@ impl Runners {
                     since: now_ms,
                     nudges: 0,
                     saw,
-                    stop_failed: false,
+                    last_try_ms: None,
+                    refusal: None,
                 });
             count.saw = saw;
             let reminders = world.number_at(&scope, Some(a.role), "reminders");
@@ -449,17 +454,17 @@ impl Runners {
                 ));
                 continue;
             }
-            let Some((i, terminal)) = self.terminals.get(agent).cloned() else {
+            let too_soon = count
+                .last_try_ms
+                .is_some_and(|at| now_ms < at.saturating_add(STOP_AGAIN_MS));
+            let Some((i, terminal)) = self.terminals.get(agent).cloned().filter(|_| !too_soon)
+            else {
                 self.counts.insert(agent.clone(), count);
                 continue;
             };
             if let Err(e) = self.end_session(agent, i, &terminal) {
-                if !count.stop_failed {
-                    eprintln!(
-                        "cannot stop {agent}'s terminal {terminal}: {e}; trying again at each poll"
-                    );
-                }
-                count.stop_failed = true;
+                count.last_try_ms = Some(now_ms);
+                count.refusal = Some(e);
                 self.counts.insert(agent.clone(), count);
                 continue;
             }
@@ -470,6 +475,17 @@ impl Runners {
             });
         }
         events
+    }
+
+    /// A line for each agent whose stop after its last reminder keeps failing,
+    /// in agent order. A count that is dropped takes its line with it, and an
+    /// agent whose terminal is gone has none.
+    fn stop_problems(&self) -> impl Iterator<Item = String> {
+        self.counts.iter().filter_map(|(agent, count)| {
+            let why = count.refusal.as_ref()?;
+            let (_, terminal) = self.terminals.get(agent)?;
+            Some(format!("cannot stop {agent}'s terminal {terminal}: {why}"))
+        })
     }
 
     /// Stops the terminal of an agent that has not ended. Once it is stopped, or
@@ -909,7 +925,12 @@ impl Part for Runners {
         events.extend(self.continue_after_reset(world, &mut seen, now_ms));
         events.extend(self.deliver(world, &seen));
         events.extend(self.remind(world, &seen, now_ms));
-        let problems: Vec<String> = self.adapters.iter().filter_map(|a| a.problem()).collect();
+        let problems: Vec<String> = self
+            .adapters
+            .iter()
+            .filter_map(|a| a.problem())
+            .chain(self.stop_problems())
+            .collect();
         Polled {
             events,
             problem: (!problems.is_empty()).then(|| problems.join("; ")),
@@ -1371,6 +1392,7 @@ mod tests {
     struct Shared {
         fake: std::sync::Arc<std::sync::Mutex<FakeRunner>>,
         list: std::sync::Arc<std::sync::Mutex<Option<Vec<Update>>>>,
+        problem: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     }
 
     impl Runner for Shared {
@@ -1402,6 +1424,9 @@ mod tests {
         }
         fn listed(&mut self) -> Option<Vec<Update>> {
             self.list.lock().expect("list").take()
+        }
+        fn problem(&self) -> Option<String> {
+            self.problem.lock().expect("problem").clone()
         }
     }
 
@@ -2592,33 +2617,182 @@ mod tests {
         (w, part, handle, author)
     }
 
-    #[test]
-    fn a_stop_that_fails_after_the_last_reminder_is_tried_again_and_the_agent_has_not_ended() {
-        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+    /// When the stop after the last reminder comes due for the agent of
+    /// [`reminded_twice_with_a_fix_waiting`].
+    const STOP_DUE: u64 = 30 * 60_000;
+
+    const TIMED_OUT: &str = "the request timed out";
+    const STILL_LIVE: &str = "t1 is still live after kill";
+
+    /// Makes the next stop fail with `why`.
+    fn refuse_stop(handle: &Shared, why: &str) {
         handle
             .fake
             .lock()
             .expect("lock")
-            .fail_next_stop(RunnerError::Other("the request timed out".into()));
-        let at = 30 * 60_000;
+            .fail_next_stop(RunnerError::Other(why.into()));
+    }
 
-        let polled = step(&mut part, &mut w, at);
+    /// Polls `after_ms` after [`STOP_DUE`] and applies the events it returns.
+    fn poll_after_due(part: &mut Runners, w: &mut World, after_ms: u64) -> Polled {
+        let polled = part.poll(w, STOP_DUE + after_ms);
+        apply(w, &polled.events);
+        polled
+    }
+
+    /// The problem line for a stop of `agent`'s terminal that failed with `why`.
+    fn cannot_stop(agent: &AgentId, terminal: &str, why: &str) -> String {
+        format!("cannot stop {agent}'s terminal {terminal}: {why}")
+    }
+
+    #[test]
+    fn a_failed_stop_after_the_last_reminder_is_tried_once_a_minute_later_and_not_sooner() {
+        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+        refuse_stop(&handle, TIMED_OUT);
+
+        let polled = poll_after_due(&mut part, &mut w, 1_000);
         assert_eq!(stops(&handle), 1);
-        assert!(!ended(&polled, &author), "{polled:?}");
-        assert!(part.screen(&author.0).is_ok());
-        assert_eq!(part.waiting(), 1);
-        assert!(!starts_an_author(&w), "{:?}", w.missing());
+        assert!(!ended(&polled.events, &author), "{polled:?}");
+        // Every 2 s up to a minute after the stop came due, and just before the
+        // next try.
+        for after in (2..=60).step_by(2).map(|s| s * 1_000).chain([60_999]) {
+            let polled = poll_after_due(&mut part, &mut w, after);
+            assert_eq!(stops(&handle), 1, "tried again at {after} ms");
+            assert!(!ended(&polled.events, &author), "at {after} ms: {polled:?}");
+            assert!(part.screen(&author.0).is_ok(), "at {after} ms");
+            assert_eq!(part.waiting(), 1, "at {after} ms");
+            assert!(!starts_an_author(&w), "at {after} ms: {:?}", w.missing());
+        }
 
-        let polled = step(&mut part, &mut w, at + 2_000);
-        assert_eq!(stops(&handle), 2, "at the next poll");
+        let polled = poll_after_due(&mut part, &mut w, 61_000);
+        assert_eq!(stops(&handle), 2, "a minute after the first");
         assert_eq!(reminders(&handle), 2);
-        assert!(ended(&polled, &author), "{polled:?}");
+        assert!(ended(&polled.events, &author), "{polled:?}");
         assert!(matches!(
             part.screen(&author.0),
             Err(RunnerError::Unknown(_))
         ));
         assert_eq!(part.waiting(), 0);
         assert!(starts_an_author(&w), "{:?}", w.missing());
+    }
+
+    #[test]
+    fn a_failed_stop_after_the_last_reminder_is_tried_a_minute_after_each_refusal() {
+        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+        for why in [TIMED_OUT, STILL_LIVE, STILL_LIVE] {
+            refuse_stop(&handle, why);
+        }
+        let tries = [1_000, 61_000, 121_000, 181_000];
+        // A poll every 2 s for five minutes.
+        for after in (1..=301).step_by(2).map(|s| s * 1_000) {
+            let polled = poll_after_due(&mut part, &mut w, after);
+            let tried = tries.iter().filter(|t| after >= **t).count();
+            assert_eq!(stops(&handle), tried, "at {after} ms");
+            assert_eq!(
+                ended(&polled.events, &author),
+                after == 181_000,
+                "at {after} ms: {polled:?}"
+            );
+            let why = match after {
+                ..61_000 => Some(TIMED_OUT),
+                61_000..181_000 => Some(STILL_LIVE),
+                _ => None,
+            };
+            assert_eq!(
+                polled.problem,
+                why.map(|why| cannot_stop(&author, "t1", why)),
+                "at {after} ms"
+            );
+        }
+        assert!(starts_an_author(&w), "{:?}", w.missing());
+    }
+
+    #[test]
+    fn a_failed_stop_after_the_last_reminder_is_a_runner_problem_until_the_stop_works() {
+        let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+        refuse_stop(&handle, TIMED_OUT);
+        // The poll at 1 s makes the try that fails.
+        for after in [1_000]
+            .into_iter()
+            .chain((2..=60).step_by(2).map(|s| s * 1_000))
+        {
+            let polled = poll_after_due(&mut part, &mut w, after);
+            assert_eq!(
+                polled.problem,
+                Some(cannot_stop(&author, "t1", TIMED_OUT)),
+                "at {after} ms"
+            );
+        }
+        let polled = poll_after_due(&mut part, &mut w, 61_000);
+        assert!(ended(&polled.events, &author), "{polled:?}");
+        assert_eq!(polled.problem, None);
+
+        // Two authors whose stops fail, beside a problem of the runner's own:
+        // the runner's first, then a line for each agent.
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let first = run(&mut part, &mut w, &["claude"]);
+        let second = run(&mut part, &mut w, &["claude"]);
+        for minute in [0, 10, 20] {
+            step(&mut part, &mut w, minute * 60_000);
+        }
+        refuse_stop(&handle, TIMED_OUT);
+        refuse_stop(&handle, "t2 is still live after kill");
+        *handle.problem.lock().expect("problem") = Some("cannot reach the core".into());
+        assert_eq!(
+            poll_after_due(&mut part, &mut w, 0).problem,
+            Some(format!(
+                "cannot reach the core; {}; {}",
+                cannot_stop(&first, "t1", TIMED_OUT),
+                cannot_stop(&second, "t2", "t2 is still live after kill")
+            ))
+        );
+    }
+
+    #[test]
+    fn a_failed_stops_problem_clears_when_its_count_is_dropped() {
+        use temet_work_core::model::Stage;
+        let failed = || {
+            let (mut w, mut part, handle, author) = reminded_twice_with_a_fix_waiting();
+            refuse_stop(&handle, TIMED_OUT);
+            let polled = poll_after_due(&mut part, &mut w, 1_000);
+            assert_eq!(polled.problem, Some(cannot_stop(&author, "t1", TIMED_OUT)));
+            (w, part, handle, author)
+        };
+
+        // The issue stops waiting on the agent.
+        let (mut w, mut part, handle, _) = failed();
+        at_stage(&mut w, Stage::InReview { round: 1 });
+        assert_eq!(poll_after_due(&mut part, &mut w, 3_000).problem, None);
+        assert_eq!(poll_after_due(&mut part, &mut w, 61_000).problem, None);
+        assert_eq!(stops(&handle), 1);
+
+        // The terminal is reported gone.
+        let t1 = TerminalId("t1".into());
+        let (mut w, mut part, handle, author) = failed();
+        handle.fake.lock().expect("lock").end_program(&t1);
+        let polled = poll_after_due(&mut part, &mut w, 3_000);
+        assert!(ended(&polled.events, &author), "{polled:?}");
+        assert_eq!(polled.problem, None);
+
+        // Its program is reported lost, to a shell.
+        let (mut w, mut part, handle, author) = failed();
+        handle.fake.lock().expect("lock").lose_to_shell(&t1);
+        let polled = poll_after_due(&mut part, &mut w, 3_000);
+        assert!(ended_lost(&polled.events, &author), "{polled:?}");
+        assert_eq!(polled.problem, None);
+
+        // A send is answered with the terminal gone.
+        let (mut w, mut part, handle, author) = failed();
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .fail_sends(RunnerError::Gone);
+        let polled = poll_after_due(&mut part, &mut w, 3_000);
+        assert!(ended(&polled.events, &author), "{polled:?}");
+        assert_eq!(polled.problem, None);
     }
 
     #[test]
