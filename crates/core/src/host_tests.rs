@@ -835,3 +835,95 @@ fn a_failed_verify_offers_no_close_once_one_repository_of_the_fix_has_merged() {
          fixing, round 1, a stage where a close in its tracker is not applied",
     );
 }
+
+/// Fails every stop, as a runner whose terminal service times out, and
+/// reports what its polls hold.
+#[derive(Default)]
+struct Unstoppable {
+    polls: Vec<Polled>,
+    stops: Arc<Mutex<Vec<AgentId>>>,
+}
+
+impl Part for Unstoppable {
+    fn id(&self) -> &'static str {
+        "unstoppable"
+    }
+    fn poll(&mut self, _world: &World, _now_ms: u64) -> Polled {
+        if self.polls.is_empty() {
+            Polled::default()
+        } else {
+            self.polls.remove(0)
+        }
+    }
+    fn carry_out(&mut self, effect: &Effect, _world: &World) -> Outcome {
+        let Effect::StopAgent { agent } = effect else {
+            return Outcome::NotMine;
+        };
+        self.stops.lock().expect("stops").push(agent.clone());
+        Outcome::Failed("the request timed out".into())
+    }
+}
+
+#[test]
+fn stop_problem_goes_when_the_agent_ends() {
+    let author_ends = Polled {
+        events: vec![Event::AgentChanged {
+            agent: AgentId::new("author-1"),
+            state: AgentState::Ended,
+            lost: false,
+        }],
+        problem: None,
+    };
+    let unstoppable = Unstoppable {
+        polls: vec![Polled::default(), author_ends],
+        stops: Arc::default(),
+    };
+    let stops = unstoppable.stops.clone();
+    let mut h = host(
+        vec![
+            Box::new(Brains),
+            Box::new(Terms::default()),
+            Box::new(unstoppable),
+        ],
+        Shared::default(),
+    );
+    // refiner-1's stop after its plan fails, and author-1's after a person
+    // closes the issue in its tracker.
+    feed(&mut h, [synced("1"), planned(&ankh_one())]);
+    feed(
+        &mut h,
+        [Event::IssueSynced {
+            issue: ankh_one(),
+            title: "Mend clock 1".into(),
+            milestone: Some(MilestoneId::new("m1")),
+            depends_on: vec![],
+            order: 1,
+            closed: true,
+        }],
+    );
+    let line = |h: &Host, agent: &str| h.problems().get(&format!("stop {agent}")).cloned();
+    let timed_out = Some("the request timed out".to_string());
+    assert_eq!(line(&h, "author-1"), timed_out);
+    assert_eq!(line(&h, "refiner-1"), timed_out);
+
+    // A tick asks for both stops again; both fail, and both lines stay.
+    h.tick(2).expect("tick");
+    assert_eq!(line(&h, "author-1"), timed_out);
+    assert_eq!(line(&h, "refiner-1"), timed_out);
+
+    // The next poll reports author-1 ended, with no stop of it carried out:
+    // its line goes, and refiner-1's, which still runs, stays.
+    let tried = stops.lock().expect("stops").len();
+    h.tick(3).expect("tick");
+    assert_eq!(line(&h, "author-1"), None, "{:?}", h.problems());
+    assert_eq!(line(&h, "refiner-1"), timed_out);
+    let after: Vec<AgentId> = stops.lock().expect("stops")[tried..].to_vec();
+    assert_eq!(
+        after,
+        [AgentId::new("refiner-1")],
+        "author-1 is not asked again"
+    );
+    let status = crate::text::text(h.world(), h.problems());
+    assert!(!status.contains("stop author-1"), "{status}");
+    assert!(status.contains("stop refiner-1"), "{status}");
+}

@@ -460,8 +460,9 @@ impl World {
                     entry.verify_failed = false;
                     entry.reopen_due = false;
                     let folders = entry.take_folders();
-                    // Closed in the tracker while agents worked on it: stop them
-                    // before the folder goes to the next issue.
+                    // Closed in the tracker while agents worked on it: stop them.
+                    // No other author is given the folders until this issue's
+                    // author has ended (`World::in_use`).
                     out.extend(
                         self.agents
                             .values()
@@ -502,6 +503,15 @@ impl World {
                 runtime,
                 model,
             } => {
+                // An author holds its issue's folders, one per repository; an
+                // older log's author may name none of them.
+                let held = match issue.as_ref().and_then(|id| self.issues.get(id)) {
+                    _ if *role != Role::Author => Vec::new(),
+                    Some(i) if folder.is_none() || *folder == i.folder => {
+                        i.folder.iter().chain(&i.other_folders).cloned().collect()
+                    }
+                    _ => folder.iter().cloned().collect(),
+                };
                 self.agents.insert(
                     agent.clone(),
                     Agent {
@@ -511,6 +521,7 @@ impl World {
                         issue: issue.clone(),
                         machine: machine.clone(),
                         folder: folder.clone(),
+                        held,
                         state: AgentState::Idle,
                         started: self.applied,
                         secret_digest: secret_digest.clone(),
@@ -809,6 +820,8 @@ impl World {
                         .all(|r| i.merged.contains(r) || !i.pulls.contains_key(r))
                     {
                         // Merged everywhere: the author, reviewer and arbiter are done.
+                        // The folders go to no other author until the author has
+                        // ended (`World::in_use`).
                         i.stage = Stage::Deploying;
                         let folders = i.take_folders();
                         out.push(Effect::Deploy {
@@ -1262,7 +1275,9 @@ impl World {
     /// ended, or one the daemon decided on and did not start before it stopped. A
     /// running author or reviewer that has not heard its fixes or its round is
     /// told again, and an arbiter that ruled in an earlier arbitration and still
-    /// runs is asked again to stop. After the `starts` setting's number of agents of one role have
+    /// runs is asked again to stop. So is every agent that runs although its step
+    /// is over for good ([`Self::over_for_good`]), first, since its stop may have
+    /// failed or been lost to a restart. After the `starts` setting's number of agents of one role have
     /// ended while one issue waited on them it gives up, and says so. Agents whose programs were
     /// lost do not count toward `starts`; after [`LOST_PER_START`] times `starts` of them it gives
     /// up too, with a line of its own. A paused
@@ -1271,9 +1286,10 @@ impl World {
     /// one.
     pub fn missing(&self) -> Missing {
         let mut out = Missing {
-            start: self.missing_investigators(),
+            start: self.stops_again(),
             ..Missing::default()
         };
+        out.start.extend(self.missing_investigators());
         for i in self.issues.values().filter(|i| !self.paused(i)) {
             // A merge, deploy or verify lost to a restart or a failure is asked for
             // again; the parts that do them do not repeat work already done or running.
@@ -1400,6 +1416,60 @@ impl World {
         }
         out.start.retain(|e| !self.waits_for_machine(e));
         out
+    }
+
+    /// A stop for each agent that runs although its step is over for good
+    /// ([`Self::over_for_good`]), in agent order. The loop asked for it when the
+    /// step ended, but that stop may have failed, or been lost to a restart,
+    /// since a replay drops effects. It is asked for on a paused issue too: a
+    /// stop starts no work.
+    fn stops_again(&self) -> Vec<Effect> {
+        self.agents
+            .values()
+            .filter(|a| a.state != AgentState::Ended && self.over_for_good(a))
+            .map(|a| Effect::StopAgent {
+                agent: a.id.clone(),
+            })
+            .collect()
+    }
+
+    /// Whether nothing will need `agent` again: an agent on an issue that is
+    /// done, deploying or verifying, or back to ready, as after a failed
+    /// verify; any but the refiner on an issue being refined, as after a reopen
+    /// in the tracker; a refiner whose issue's plan is in; an author whose issue holds
+    /// other folders than the ones it held; an investigator whose investigation
+    /// has ended. An author or reviewer on an issue in review, being fixed or
+    /// merging, a refiner while its issue is refining and the investigator of a
+    /// running investigation are still needed. An arbiter that has ruled is
+    /// asked to stop by [`Self::missing`] once its issue waits on an arbiter
+    /// again.
+    fn over_for_good(&self, agent: &Agent) -> bool {
+        if agent.role == Role::Investigator && agent.issue.is_none() {
+            return self
+                .investigating(&agent.group)
+                .is_none_or(|i| i.agent != agent.id);
+        }
+        let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
+            return false;
+        };
+        match i.stage {
+            Stage::Done | Stage::Deploying | Stage::Verifying | Stage::Ready => true,
+            // Back to new after a reopen: its group refines it again at once
+            // when it has room, and the rule for refining applies then.
+            Stage::New => false,
+            Stage::Refining => agent.role != Role::Refiner,
+            _ => match agent.role {
+                Role::Refiner => i.plan.is_some(),
+                // Its issue let them go, as at a close before a reopen, and
+                // holds others now, for a later author.
+                Role::Author => {
+                    let holds =
+                        |f: &FolderId| i.folder.as_ref() == Some(f) || i.other_folders.contains(f);
+                    i.folder.is_some() && !agent.held.is_empty() && !agent.held.iter().any(holds)
+                }
+                _ => false,
+            },
+        }
     }
 
     /// The folder an agent of `role` on `issue` runs in: its own, else (for a
@@ -1760,17 +1830,19 @@ impl World {
     /// A free work folder `may` allows in each of `repos`, in their order and all
     /// on one machine, since one author has to reach every one: the machine of the
     /// first repository's folder. `None` when no such machine has them all, so two
-    /// issues cannot each hold half of what the other needs.
+    /// issues cannot each hold half of what the other needs. A folder no issue
+    /// holds is not free while an agent that held it runs ([`Self::in_use`]).
     pub(crate) fn free_folders(
         &self,
         repos: &[ProjectId],
         may: impl Fn(&Folder) -> bool,
     ) -> Option<Vec<FolderId>> {
         let (first, others) = repos.split_first()?;
+        let in_use = self.in_use();
         let free = || {
             self.folders
                 .values()
-                .filter(|f| f.holder.is_none() && may(f))
+                .filter(|f| f.holder.is_none() && !in_use.contains(&f.id) && may(f))
         };
         free().filter(|f| &f.project == first).find_map(|start| {
             std::iter::once(Some(start.id.clone()))
@@ -1781,6 +1853,17 @@ impl World {
                 }))
                 .collect()
         })
+    }
+
+    /// The work folders held by an agent that has not ended: an author's stop
+    /// may have failed after its issue merged or was closed, and its session may
+    /// still change them.
+    pub(crate) fn in_use(&self) -> BTreeSet<&FolderId> {
+        self.agents
+            .values()
+            .filter(|a| a.state != AgentState::Ended)
+            .flat_map(|a| &a.held)
+            .collect()
     }
 
     /// Takes new issues for refining and starts authors on ready ones.
@@ -1869,3 +1952,7 @@ mod settings_scope;
 #[cfg(test)]
 #[path = "world_states_tests.rs"]
 mod states;
+
+#[cfg(test)]
+#[path = "world_stops_tests.rs"]
+mod stops;

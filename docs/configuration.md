@@ -144,7 +144,8 @@ A group takes its projects' open issues in milestone order, then in the tracker'
 It refines `refining_at_once` issues at a time. It starts an author on a refined issue
 when one of the project's folders is free (on the issue's `machine`, when that setting
 names one) and every issue in the issue's "Depends on" lines is done. A project with two
-folders has at most two authors working at once.
+folders has at most two authors working at once. A folder whose issue has merged or been
+closed is not free while that issue's author still runs, as when its stop failed.
 
 A merged pull request named in a "Depends on" line counts as done. In such a line, `#491` is
 number 491 of the same project. An issue of another project or area has that project's or
