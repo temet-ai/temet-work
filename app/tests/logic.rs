@@ -74,7 +74,10 @@ fn the_sample_has_the_shape_of_the_radar_pages_data() {
         Some("No agents running \u{b7} 324 ended")
     );
     assert!(view.groups[0].agents.is_empty());
-    assert_eq!(view.shared_deadline, None, "Needs you is empty, so no deadline is shared");
+    assert_eq!(
+        view.shared_deadline, None,
+        "Needs you is empty, so no deadline is shared"
+    );
     assert!(view.problems.is_empty(), "no daemon answers, so none");
     let keys: HashSet<_> = issues.iter().map(|i| &i.key).collect();
     assert_eq!(keys.len(), issues.len(), "keys are unique");
