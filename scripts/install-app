@@ -1,0 +1,13 @@
+#!/bin/sh
+# Builds temet-work's desktop app in release and installs it as PREFIX/bin/temet-work-app,
+# beside the daemon and the command line, and writes its launcher entry, temet-work.desktop,
+# under $XDG_DATA_HOME/applications so the person's launcher lists it.
+#   scripts/install-app [PREFIX]        PREFIX is ~/.local when left out
+set -eu
+root=$(cd "$(dirname "$0")/.." && pwd)
+prefix=${1:-$HOME/.local}
+cargo install --path "$root/app" --locked --root "$prefix"
+apps=${XDG_DATA_HOME:-$HOME/.local/share}/applications
+mkdir -p "$apps"
+"$prefix/bin/temet-work-app" --desktop-entry > "$apps/temet-work.desktop"
+echo "installed temet-work-app $("$prefix/bin/temet-work-app" --build) and $apps/temet-work.desktop"

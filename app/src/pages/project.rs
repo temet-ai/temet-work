@@ -231,6 +231,8 @@ pub struct Project {
     /// Whether there is no view to draw: the page then draws its notice and nothing else.
     blank: bool,
     notice: Option<Notice>,
+    /// The notice that a newer build of the app is installed.
+    newer_build: Option<Notice>,
     selection: Selection,
     grouping: Grouping,
     /// The open tab of the selected issue's pane; its first tab when none is chosen.
@@ -251,6 +253,7 @@ impl Project {
             view,
             blank: false,
             notice: None,
+            newer_build: None,
             selection: Selection::new(selected),
             grouping: Grouping::Milestone,
             tab: None,
@@ -280,6 +283,16 @@ impl Project {
     /// Sets the notice above the page, or clears it.
     pub fn set_notice(&mut self, notice: Option<Notice>) {
         self.notice = notice;
+    }
+
+    /// Sets the notice that a newer build of the app is installed, or clears it.
+    pub fn set_newer_build(&mut self, notice: Option<Notice>) {
+        self.newer_build = notice;
+    }
+
+    /// The notice that a newer build of the app is installed, when there is one.
+    pub fn newer_build(&self) -> Option<&Notice> {
+        self.newer_build.as_ref()
     }
 
     /// The notice on show.
@@ -502,13 +515,17 @@ impl Render for Project {
 
         let view = &self.view;
         let selected = self.selection.key().cloned();
-        let notice = self.notice.as_ref().map(|n| {
-            let mut callout = Callout::new().intent(n.intent).title(n.title.clone());
-            for line in &n.lines {
-                callout = callout.child(line.clone());
-            }
-            callout
-        });
+        let notice: Vec<Callout> = [&self.newer_build, &self.notice]
+            .into_iter()
+            .flatten()
+            .map(|n| {
+                let mut callout = Callout::new().intent(n.intent).title(n.title.clone());
+                for line in &n.lines {
+                    callout = callout.child(line.clone());
+                }
+                callout
+            })
+            .collect();
         if self.blank {
             return AppShell::new(SideNav::new(Vec::new()))
                 .children(notice)
