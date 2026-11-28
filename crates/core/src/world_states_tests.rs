@@ -696,6 +696,7 @@ fn a_second_arbiter_is_given_every_review_round_with_the_replies_to_the_ruled_on
     w.apply(&Event::AgentChanged {
         agent: AgentId::new("arbiter-1"),
         state: AgentState::Ended,
+        lost: false,
     });
     run(
         &mut w,

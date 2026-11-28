@@ -403,8 +403,10 @@ pub struct Agent {
     #[serde(default)]
     pub continued: Option<u64>,
     /// Whether its session ended while its issue still waited on it
-    /// ([`crate::world::World::waiting_on`]). Only such agents count toward the
-    /// `starts` limit: one stopped because its issue moved on had finished its step.
+    /// ([`crate::world::World::waiting_on`]) and its program was not lost. Only
+    /// such agents count toward the `starts` limit: one stopped because its issue
+    /// moved on had finished its step, and one whose program was lost, as to a
+    /// reboot, did not give up.
     #[serde(default)]
     pub ended_waited_on: bool,
     /// The runtime it was started with; none for an agent from an older log.

@@ -200,6 +200,12 @@ pub enum Event {
         agent: AgentId,
         /// Its new state.
         state: AgentState,
+        /// Whether it ended because its program was lost, as to a signal or a
+        /// reboot, and not by anything it did: such an end does not count
+        /// toward the `starts` limit. False for every other change, and in
+        /// older logs.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lost: bool,
     },
     /// The daemon typed `continue` into an agent whose turn ended on a limit,
     /// once that limit had reset; the agent is working again.

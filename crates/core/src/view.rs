@@ -820,6 +820,7 @@ mod tests {
             events.push(Event::AgentChanged {
                 agent: AgentId::new(agent),
                 state,
+                lost: false,
             });
         }
         events.extend([
@@ -1086,6 +1087,7 @@ mod tests {
                 state: AgentState::Working {
                     doing: "counting".into(),
                 },
+                lost: false,
             },
             synced("watch", "2", "Light every lamp", vec![]),
             // The same again: nothing changes.
@@ -1468,6 +1470,7 @@ mod tests {
             state: AgentState::Working {
                 doing: format!("reading {FOLDER_PATH}/clock.rs and {FOLDER_PATH}/ui/face.rs"),
             },
+            lost: false,
         });
         let problems = [
             (
@@ -1539,6 +1542,7 @@ mod tests {
             Event::AgentChanged {
                 agent: AgentId::new("reviewer-3"),
                 state: AgentState::Ended,
+                lost: false,
             },
         )
         .expect("ended");

@@ -2,7 +2,7 @@
 //! text onto the screen and runs one turn, and tests can put a terminal at a
 //! prompt, end its turn in an error, once or after every send, keep it in the
 //! turn a send starts, have it report no status, lose its program to a shell,
-//! make its next stop fail, or end it.
+//! let its program end by itself, make its next stop fail, or stop it.
 
 use std::collections::BTreeMap;
 
@@ -21,7 +21,7 @@ struct Term {
     /// The turn it is in, when that turn is going to fail.
     failing: Option<Failing>,
     /// Whether a shell holds it in place of its lost program: it is reported
-    /// gone, still listed, and takes typed text until it is stopped.
+    /// lost, still listed, and takes typed text until it is stopped.
     shell: bool,
 }
 
@@ -193,13 +193,19 @@ impl FakeRunner {
 
     /// Loses a terminal's program to a shell, as herdr-core does for a kept
     /// terminal whose program a signal or a reboot ended: the terminal is
-    /// reported gone, stays listed with its labels, and takes typed text into
+    /// reported lost, stays listed with its labels, and takes typed text into
     /// the shell until it is stopped.
     pub fn lose_to_shell(&mut self, terminal: &TerminalId) {
         if let Some(t) = self.terms.get_mut(terminal) {
             t.shell = true;
             t.turns = Turns::End;
         }
+        self.set(terminal, Status::Lost);
+    }
+
+    /// Ends a terminal's program by itself, as herdr-core reports one that has
+    /// finished: the terminal is reported gone and takes no more text.
+    pub fn end_program(&mut self, terminal: &TerminalId) {
         self.set(terminal, Status::Gone);
     }
 
@@ -244,12 +250,12 @@ impl FakeRunner {
 
     /// Reports every terminal that has not ended once more, with its labels and
     /// status, as a runner does when it connects again after a restart. A
-    /// terminal a shell holds is still there, and is reported gone.
+    /// terminal a shell holds is still there, and is reported lost.
     pub fn reconnect(&mut self) {
         let live: Vec<TerminalId> = self
             .terms
             .iter()
-            .filter(|(_, t)| t.status != Status::Gone || t.shell)
+            .filter(|(_, t)| t.status != Status::Gone)
             .map(|(id, _)| id.clone())
             .collect();
         for id in live {

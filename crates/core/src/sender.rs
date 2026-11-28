@@ -267,10 +267,12 @@ mod tests {
             Event::AgentChanged {
                 agent: AgentId::new("reviewer-0"),
                 state: crate::model::AgentState::Ended,
+                lost: false,
             },
             Event::AgentChanged {
                 agent: AgentId::new("reviewer-2"),
                 state: crate::model::AgentState::Ended,
+                lost: false,
             },
         ])
         .0

@@ -344,6 +344,7 @@ fn a_failed_poll_is_a_problem_until_a_poll_succeeds() {
                 events: vec![Event::AgentChanged {
                     agent: AgentId::new("nobody"),
                     state: AgentState::Idle,
+                    lost: false,
                 }],
                 problem: None,
             },

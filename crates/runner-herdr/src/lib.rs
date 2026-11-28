@@ -437,16 +437,17 @@ fn take_snapshot(terminals: &Value, s: &mut Shared) {
         // A finished terminal that was not removed is still listed; its session
         // is over. So is the session of one whose program was lost, although
         // herdr-core lists it live.
-        let status =
-            if t.get("state").and_then(Value::as_str) == Some("finished") || lost(t, &labels) {
-                Status::Gone
-            } else {
-                status_of(
-                    t.pointer("/status/state").and_then(Value::as_str),
-                    t.pointer("/status/kind").and_then(Value::as_str),
-                    t.pointer("/status/msg").and_then(Value::as_str),
-                )
-            };
+        let status = if t.get("state").and_then(Value::as_str) == Some("finished") {
+            Status::Gone
+        } else if lost(t, &labels) {
+            Status::Lost
+        } else {
+            status_of(
+                t.pointer("/status/state").and_then(Value::as_str),
+                t.pointer("/status/kind").and_then(Value::as_str),
+                t.pointer("/status/msg").and_then(Value::as_str),
+            )
+        };
         s.updates.push(Update {
             terminal: TerminalId(addr.to_string()),
             labels,
@@ -458,6 +459,45 @@ fn take_snapshot(terminals: &Value, s: &mut Shared) {
         });
     }
     s.listed = Some(s.updates[first..].to_vec());
+}
+
+/// Turns one event into its terminal's update, when it changes one's status,
+/// and keeps the labels the later events of that terminal are read with.
+fn take_event(p: &Value, s: &mut Shared) {
+    let Some(t) = p.get("terminal").and_then(Value::as_str) else {
+        return;
+    };
+    let data = &p["data"];
+    let kind = p.get("type").and_then(Value::as_str).unwrap_or_default();
+    if kind == "created" || kind == "labels" {
+        let labels = labels_of(data.get("labels"));
+        if !labels.is_empty() {
+            s.labels.insert(t.to_string(), labels);
+        }
+    }
+    let status = match kind {
+        "created" => Some(Status::Unknown),
+        "status" => Some(status_of(
+            data.pointer("/status/state").and_then(Value::as_str),
+            data.pointer("/status/kind").and_then(Value::as_str),
+            data.pointer("/status/msg").and_then(Value::as_str),
+        )),
+        "finished" | "removed" => Some(Status::Gone),
+        "lost" => Some(Status::Lost),
+        _ => None,
+    };
+    if let Some(status) = status {
+        let labels = s.labels.get(t).cloned().unwrap_or_default();
+        s.updates.push(Update {
+            terminal: TerminalId(t.to_string()),
+            labels,
+            status,
+            doing: data
+                .pointer("/status/msg")
+                .and_then(Value::as_str)
+                .map(String::from),
+        });
+    }
 }
 
 fn follow(mut conn: Conn, shared: Arc<Mutex<Shared>>) {
@@ -473,42 +513,7 @@ fn follow(mut conn: Conn, shared: Arc<Mutex<Shared>>) {
         };
         let Ok(mut s) = shared.lock() else { break };
         match msg.get("method").and_then(Value::as_str) {
-            Some("event") => {
-                let p = &msg["params"];
-                let Some(t) = p.get("terminal").and_then(Value::as_str) else {
-                    continue;
-                };
-                let data = &p["data"];
-                let kind = p.get("type").and_then(Value::as_str).unwrap_or_default();
-                if kind == "created" || kind == "labels" {
-                    let labels = labels_of(data.get("labels"));
-                    if !labels.is_empty() {
-                        s.labels.insert(t.to_string(), labels);
-                    }
-                }
-                let status = match kind {
-                    "created" => Some(Status::Unknown),
-                    "status" => Some(status_of(
-                        data.pointer("/status/state").and_then(Value::as_str),
-                        data.pointer("/status/kind").and_then(Value::as_str),
-                        data.pointer("/status/msg").and_then(Value::as_str),
-                    )),
-                    "finished" | "lost" | "removed" => Some(Status::Gone),
-                    _ => None,
-                };
-                if let Some(status) = status {
-                    let labels = s.labels.get(t).cloned().unwrap_or_default();
-                    s.updates.push(Update {
-                        terminal: TerminalId(t.to_string()),
-                        labels,
-                        status,
-                        doing: data
-                            .pointer("/status/msg")
-                            .and_then(Value::as_str)
-                            .map(String::from),
-                    });
-                }
-            }
+            Some("event") => take_event(&msg["params"], &mut s),
             Some("missed") => {
                 // The reader fell behind: the core sends a fresh snapshot of terminals.
                 if let Some(terminals) = msg.pointer("/params/terminals") {
@@ -1205,18 +1210,18 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_program_is_gone_while_recovering_and_once_a_shell_has_replaced_it() {
+    fn a_lost_program_is_lost_while_recovering_and_once_a_shell_has_replaced_it() {
         assert_eq!(
             snapshot_status(recovering(agent_labels(true))),
-            Status::Gone
+            Status::Lost
         );
-        assert_eq!(snapshot_status(recovered(agent_labels(true))), Status::Gone);
+        assert_eq!(snapshot_status(recovered(agent_labels(true))), Status::Lost);
         // A shell left by the runner contract's echo program, which is one word.
         let contract = json!({"item": "contract-1", "role": "contract", "owner": "temet-work",
                               "program": "cat"});
         assert_eq!(
             snapshot_status(recovered(contract.clone())),
-            Status::Gone,
+            Status::Lost,
             "the program label does not need an agent"
         );
         assert_eq!(
@@ -1228,15 +1233,15 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_program_without_label_is_gone_once_a_shell_has_replaced_it() {
+    fn a_lost_program_without_label_is_lost_once_a_shell_has_replaced_it() {
         // An agent terminal started by a build before the program label.
         assert_eq!(
             snapshot_status(recovered(agent_labels(false))),
-            Status::Gone
+            Status::Lost
         );
         assert_eq!(
             snapshot_status(recovering(agent_labels(false))),
-            Status::Gone
+            Status::Lost
         );
         // Listed without its argv, a terminal is not read as lost.
         let mut no_argv = recovered(agent_labels(false));
@@ -1249,6 +1254,25 @@ mod tests {
                                    "argv": ["cat"]})),
             Status::Unknown
         );
+    }
+
+    #[test]
+    fn a_lost_event_reports_lost_and_finished_and_removed_events_report_gone() {
+        let mut s = Shared::default();
+        take_event(
+            &json!({"type": "created", "terminal": "t7",
+                    "data": {"labels": agent_labels(true)}}),
+            &mut s,
+        );
+        for kind in ["lost", "finished", "removed"] {
+            take_event(&json!({"type": kind, "terminal": "t7", "data": {}}), &mut s);
+        }
+        let statuses: Vec<Status> = s.updates.iter().map(|u| u.status.clone()).collect();
+        assert_eq!(
+            statuses,
+            [Status::Unknown, Status::Lost, Status::Gone, Status::Gone]
+        );
+        assert!(s.updates.iter().all(|u| u.labels["agent"] == "author-1"));
     }
 
     #[test]

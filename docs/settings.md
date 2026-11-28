@@ -61,7 +61,7 @@ which is the one in effect.
 | `deploy`, `verify`, `run_in` | no | every level | none | the deploy part, per issue |
 | `merge` | no | every level | `squash` (or `merge`, `rebase`) | the code host's merge |
 | `remind_after`, `reminders` | yes | every level | 10 minutes, 2 | the runner family, per agent's issue and role |
-| `starts` | yes | every level | 3 agents of one role that ended while one issue waited on them | the loop, per issue and role |
+| `starts` | yes | every level | 3 agents of one role that ended while one issue waited on them, not counting any whose program was lost, as on a reboot | the loop, per issue and role |
 | `sync_every` | no | project, area, global | 60 s | the tracker family for each project or area |
 | `ci_every` | no | every level | 30 s | the code-host family for each issue |
 | `investigate` | no | project, area, global | none | the investigator's brief, under each project's name: lines a person adds, such as the parts of the code another team owns |
