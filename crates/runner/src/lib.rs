@@ -1489,6 +1489,31 @@ mod tests {
     }
 
     #[test]
+    fn continuing_a_terminal_that_is_gone_ends_its_agent() {
+        let t1 = TerminalId("t1".into());
+        for answer in [RunnerError::Gone, RunnerError::Unknown(t1.clone())] {
+            let mut w = world();
+            at_stage(&mut w, temet_work_core::model::Stage::Working);
+            let (mut part, handle) = shared();
+            let author = run(&mut part, &mut w, &["claude"]);
+            handle.fake.lock().expect("fake").end_in_error(&t1, LIMIT);
+            step(&mut part, &mut w, nov27(16, 50));
+            assert!(limit_reset(&w.agents[&author], &BTreeMap::new()).is_some());
+            handle.fake.lock().expect("fake").fail_sends(answer.clone());
+            assert_eq!(
+                step(&mut part, &mut w, nov27(17, 41)),
+                vec![Event::AgentChanged {
+                    agent: author.clone(),
+                    state: AgentState::Ended,
+                    lost: false,
+                }],
+                "{answer:?}"
+            );
+            assert!(w.agents[&author].ended_waited_on, "{answer:?} counts");
+        }
+    }
+
+    #[test]
     fn a_quick_turn_ends_on_idle() {
         let mut w = world();
         let mut part = runners();
