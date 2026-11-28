@@ -860,10 +860,21 @@ impl World {
                     .get(issue)
                     .map(|i| self.repos_of(i))
                     .unwrap_or_default();
+                // A running reviewer or arbiter was started on the closed one, and
+                // a next round's message would not name its replacement: a fresh
+                // one starts once ready names that. One stopped now ends while the
+                // issue is fixed, so it does not count against `starts`.
+                let reviewers = self.stop(issue, &[Role::Reviewer]);
                 let arbiters = self.stop(issue, &[Role::Arbiter]);
                 if let Some(i) = self.issues.get_mut(issue)
-                    && i.stage == Stage::Merging
                     && i.pulls.get(repo) == Some(number)
+                    && let Some(round) = match i.stage {
+                        Stage::InReview { round }
+                        | Stage::Arbitration { round }
+                        | Stage::Fixing { round } => Some(round),
+                        Stage::Merging => Some(i.round.max(1)),
+                        _ => None,
+                    }
                 {
                     // Dropped, so that ready asks for the number of the one the
                     // author reopens or opens in its place.
@@ -892,12 +903,27 @@ impl World {
                         1 => format!("{} is merged; ", merged[0]),
                         _ => format!("{} are merged; ", merged.join(", ")),
                     };
+                    // It cannot be reopened once its branch is deleted, as when the
+                    // code host closed it for that reason.
                     let point = format!(
                         "{before}pull request {number}{which} was closed without merging: reopen \
-                         it or open a new one{there}"
+                         it if its branch still exists, or open a new one{there}"
                     );
-                    let round = i.round.max(1);
-                    Self::send_back(i, round, vec![point], true, arbiters, &mut out);
+                    i.review_ok = false;
+                    out.extend(reviewers);
+                    if matches!(i.stage, Stage::Fixing { .. }) {
+                        // Already back with its author, as after a failed check: one
+                        // more point, in the same stage and round.
+                        out.extend(arbiters);
+                        i.fix.push(point);
+                        i.told = false;
+                        out.push(Effect::RequestFix {
+                            issue: issue.clone(),
+                            points: i.fix.clone(),
+                        });
+                    } else {
+                        Self::send_back(i, round, vec![point], true, arbiters, &mut out);
+                    }
                 }
             }
             Event::MergeRefused { issue, reason } => {

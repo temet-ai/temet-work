@@ -396,9 +396,9 @@ pub enum Event {
         /// Its branch.
         branch: String,
     },
-    /// The merge found that a person closed one of an issue's pull requests
-    /// without merging it. It is dropped, and the issue goes back to its author,
-    /// who reopens it or opens another and names that with ready.
+    /// A read in review or the merge found that a person closed one of an issue's
+    /// pull requests without merging it. It is dropped, and the issue goes back to
+    /// its author, who reopens it or opens another and names that with ready.
     PullClosed {
         /// The issue.
         issue: IssueId,

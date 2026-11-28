@@ -184,7 +184,8 @@ pub struct Issue {
     pub reviews: Vec<Review>,
 }
 
-/// A pull request a person closed without merging: the merge found it so.
+/// A pull request a person closed without merging: a read in review or the
+/// merge found it so.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ClosedPull {
     /// Its number.

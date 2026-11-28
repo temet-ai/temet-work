@@ -225,7 +225,9 @@ fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, St
     } else {
         format!("{}\n", said.join(" "))
     };
-    // Pushing to a closed pull request does not reopen it.
+    // Pushing to a closed pull request does not reopen it. Its branch may be
+    // gone, as when the code host closed it because the branch was deleted, and
+    // then it can neither be reopened nor checked out.
     let reopen: String = closed
         .iter()
         .map(|p| {
@@ -241,13 +243,13 @@ fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, St
                     String::new()
                 };
                 format!(
-                    " A new one can start from its branch, {b}: {folder}{}.",
+                    " If its branch still exists, a new one can start from it: {folder}{}.",
                     switch_to(b)
                 )
             });
             format!(
-                "Pull request {}{there} was closed without merging: reopen it, or open a new pull \
-                 request{there}.{start}\n",
+                "Pull request {}{there} was closed without merging: reopen it if its branch still \
+                 exists, or open a new pull request{there}.{start}\n",
                 p.number
             )
         })
@@ -1792,9 +1794,9 @@ mod tests {
             task.contains(
                 "- watch (ankh-morpork/watch): pull request 57, branch watch-12-night-shift (closed \
                  without merging)\n\
-                 Pull request 57 was closed without merging: reopen it, or open a new pull request. \
-                 A new one can start from its branch, watch-12-night-shift: git fetch, then git \
-                 switch watch-12-night-shift.\n"
+                 Pull request 57 was closed without merging: reopen it if its branch still exists, \
+                 or open a new pull request. If its branch still exists, a new one can start from \
+                 it: git fetch, then git switch watch-12-night-shift.\n"
             ),
             "{task}"
         );
@@ -1813,7 +1815,8 @@ mod tests {
             "{task}"
         );
 
-        // No branch on record: none is named, and no empty one is printed.
+        // No branch on record: none is named, and no empty one is printed. A
+        // closed one is still reopened only if its branch exists.
         for pulls in [
             vec![pulled("watch", "57", None)],
             vec![Pulled {
@@ -1822,13 +1825,22 @@ mod tests {
             }],
         ] {
             let task = author_task_of(fixing, &TWO_HELD[..1], &pulls);
-            for not in ["branch ", "git switch", "branch,", "start from"] {
+            for not in [
+                ", branch",
+                "branch ,",
+                "git switch",
+                "branch,",
+                "start from",
+            ] {
                 assert!(!task.contains(not), "{not:?} in {task}");
             }
             assert!(
                 task.contains("- watch (ankh-morpork/watch): pull request 57"),
                 "{task}"
             );
+            let reopen = "Pull request 57 was closed without merging: reopen it if its branch \
+                          still exists, or open a new pull request.\n";
+            assert_eq!(task.contains(reopen), pulls[0].closed, "{task}");
         }
     }
 
