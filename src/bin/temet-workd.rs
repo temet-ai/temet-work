@@ -15,6 +15,10 @@
 //! logged before the configuration's events and the first round, so the daemon
 //! comes back without starting anything. A log that is held already stays so.
 //!
+//! Started by a service manager that holds the socket (systemd's socket activation,
+//! `LISTEN_FDS`), it answers on that socket instead of binding its own; a client that
+//! connects while no daemon runs then starts one (docs/configuration.md).
+//!
 //! `--once` runs one round and prints the state as text. The configuration
 //! defaults to `$XDG_CONFIG_HOME/temet-work/config.toml` and the log to
 //! `$XDG_STATE_HOME/temet-work/events.jsonl`.
@@ -50,6 +54,9 @@ fn xdg(var: &str, fallback: &str, rest: &str) -> PathBuf {
 }
 
 fn run() -> Result<(), String> {
+    // First, before any thread starts: it takes the service manager's variables out of
+    // the environment.
+    let passed = socket::passed()?;
     let mut args = std::env::args().skip(1);
     let mut config_path = xdg("XDG_CONFIG_HOME", ".config", "config.toml");
     let mut log_path = xdg("XDG_STATE_HOME", ".local/state", "events.jsonl");
@@ -133,8 +140,33 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
     let socket_path = socket::path();
-    let requests = socket::listen(&socket_path)?;
-    eprintln!("temet-workd: listening at {}", socket_path.display());
+    let requests = match passed {
+        // The service manager's socket: it stays where the manager put it, and whatever
+        // connected before this daemon started is answered now.
+        Some(listener) => {
+            let at = listener
+                .local_addr()
+                .ok()
+                .and_then(|a| a.as_pathname().map(std::path::Path::to_path_buf));
+            match at {
+                Some(at) if at == socket_path => eprintln!(
+                    "temet-workd: listening at {}, the service manager's socket",
+                    at.display()
+                ),
+                at => eprintln!(
+                    "temet-workd: listening on the service manager's socket at {}, but temet-work looks for it at {}",
+                    at.map_or_else(|| "no path".into(), |a| a.display().to_string()),
+                    socket_path.display()
+                ),
+            }
+            socket::listen_on(listener)
+        }
+        None => {
+            let requests = socket::listen(&socket_path)?;
+            eprintln!("temet-workd: listening at {}", socket_path.display());
+            requests
+        }
+    };
     let mut shown: BTreeMap<String, String> = BTreeMap::new();
     let mut next_round = Instant::now();
     loop {

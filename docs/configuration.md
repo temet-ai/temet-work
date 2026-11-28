@@ -474,6 +474,55 @@ another machine is free, and its author starts when a folder on that machine is 
 folder's own `machine` field still says where that folder is. The daemon's own machine is
 `local`, whatever its host name.
 
+## Starting the daemon when anything asks
+
+Under systemd, a socket unit lets anything that talks to the daemon start it: `temet-work`,
+the desktop app and an agent's MCP calls. systemd holds the socket, so the daemon can be
+stopped, can crash or can be restarting, and the next request still finds the socket. If
+no daemon is running, that request starts one. The request waits in the socket's queue
+until the daemon has read its log, then gets its answer.
+
+```ini
+# ~/.config/systemd/user/temet-workd.socket
+[Unit]
+Description=temet-work daemon's socket
+
+[Socket]
+ListenStream=%t/temet-work/daemon.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target
+```
+
+```ini
+# ~/.config/systemd/user/temet-workd.service
+[Unit]
+Description=temet-work daemon
+Requires=temet-workd.socket
+After=temet-workd.socket
+
+[Service]
+ExecStart=%h/.local/bin/temet-workd
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+`systemctl --user enable --now temet-workd.socket temet-workd.service` turns both on. The
+service stays enabled so the daemon's rounds run from login, not only after the first
+request. `%t/temet-work/daemon.sock` is where `temet-work` looks when `TEMET_WORK_SOCKET`
+is unset. The daemon's first line says whether it took the socket from systemd, and names
+both paths when the socket is not where `temet-work` looks.
+
+A daemon built before it could take the socket from systemd finds the socket already
+answering and exits, so install the new build before you enable the socket unit. To pause the
+work, use `temet-work hold`, not `systemctl stop`: the next request starts the daemon
+again, and it comes back held. `temet-work` waits 60 s for an answer, so a daemon that
+cannot start gives an error, not a command that never returns.
+
 ## temet-work deploying itself
 
 Self-deploy updates only the daemon's machine. Every other machine that has a work folder

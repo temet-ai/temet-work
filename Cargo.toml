@@ -20,6 +20,8 @@ sha2 = "0.11"
 # Reads the clock time on an agent's error line in the daemon's time zone.
 jiff = { version = "1.0", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 rustix = { version = "1.1", features = ["net"] }
+# Takes the socket systemd opened for the daemon (socket activation).
+listenfd = "1.0"
 temet-work-core = { path = "crates/core" }
 temet-work-tracker = { path = "crates/tracker" }
 temet-work-codehost = { path = "crates/codehost" }
@@ -81,6 +83,8 @@ serde-saphyr.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 toml.workspace = true
+# The socket a service manager opened for the daemon (systemd's socket activation).
+listenfd.workspace = true
 temet-work-tracker = { workspace = true, optional = true }
 temet-work-runner = { workspace = true, optional = true }
 temet-work-runtime = { workspace = true, optional = true }

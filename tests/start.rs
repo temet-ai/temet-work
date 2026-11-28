@@ -125,3 +125,65 @@ fn a_project_on_the_jira_tracker_loads_and_the_daemon_polls_it() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("TEMET_WORK_SANDBOX"), "{text}");
 }
+
+/// Under a service manager that holds the socket, as systemd's socket activation does,
+/// no daemon runs until the first command: that command starts it, and the daemon
+/// answers it on the socket it was handed.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_first_command_on_a_service_managers_socket_starts_the_daemon_and_is_answered() {
+    use std::time::{Duration, Instant};
+
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("start-activated");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a folder");
+    std::fs::write(dir.join("config.toml"), "").expect("a config");
+    let socket = dir.join("d.sock");
+    // systemd's own stand-in for a socket unit: it binds the socket and, on the first
+    // connection, starts the daemon with the socket handed over in LISTEN_FDS.
+    let mut manager = Command::new("systemd-socket-activate")
+        .arg("--listen")
+        .arg(&socket)
+        .args([
+            "--setenv=HOME",
+            "--setenv=PATH",
+            "--setenv=TEMET_WORK_SANDBOX=1",
+        ])
+        .arg(format!("--setenv=TEMET_WORK_SOCKET={}", socket.display()))
+        .arg(env!("CARGO_BIN_EXE_temet-workd"))
+        .arg("--config")
+        .arg(dir.join("config.toml"))
+        .arg("--log")
+        .arg(dir.join("events.jsonl"))
+        .arg("--hold")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("systemd-socket-activate runs");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(Instant::now() < deadline, "no socket at {}", socket.display());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let status = Command::new(env!("CARGO_BIN_EXE_temet-work"))
+        .arg("status")
+        .env("TEMET_WORK_SOCKET", &socket)
+        .env_remove("TEMET_WORK_DAEMON")
+        .env_remove("TEMET_WORK_AGENT")
+        .env_remove(temet_work_core::launch::SECRET_VAR)
+        .output()
+        .expect("runs");
+    manager.kill().expect("stopped");
+    let said = manager.wait_with_output().expect("ended");
+    assert!(status.status.success(), "{status:?}");
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(text.starts_with("Held since "), "{text}");
+    let said = String::from_utf8_lossy(&said.stderr);
+    assert!(
+        said.contains(&format!(
+            "listening at {}, the service manager's socket",
+            socket.display()
+        )),
+        "{said}"
+    );
+}

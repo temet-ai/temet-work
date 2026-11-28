@@ -73,6 +73,29 @@ pub fn listen_as(path: &Path, build: &str) -> Result<Receiver<Pending>, String> 
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let listener = UnixListener::bind(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(listen_on_as(listener, build))
+}
+
+/// The listening socket a service manager opened for this daemon and handed it, as
+/// systemd's socket activation does (`LISTEN_FDS`, `LISTEN_PID`), or `None` when it
+/// handed none. A client that connects while no daemon runs then starts one, and waits
+/// in the socket's queue until that daemon answers. Call it before the process starts
+/// a thread: it takes those variables out of the environment, so no child takes the
+/// socket too.
+pub fn passed() -> Result<Option<UnixListener>, String> {
+    listenfd::ListenFd::from_env()
+        .take_unix_listener(0)
+        .map_err(|e| format!("the socket the service manager handed over: {e}"))
+}
+
+/// [`listen`] on a socket bound already, such as the one [`passed`] returns. It stays
+/// where its owner put it, and connections queued on it before this call are answered.
+pub fn listen_on(listener: UnixListener) -> Receiver<Pending> {
+    listen_on_as(listener, crate::BUILD)
+}
+
+/// [`listen_on`], answering the build question with `build`.
+fn listen_on_as(listener: UnixListener, build: &str) -> Receiver<Pending> {
     let (tx, rx) = mpsc::channel();
     let build: Arc<str> = build.into();
     std::thread::spawn(move || {
@@ -81,7 +104,7 @@ pub fn listen_as(path: &Path, build: &str) -> Result<Receiver<Pending>, String> 
             std::thread::spawn(move || serve(stream, &build, &tx));
         }
     });
-    Ok(rx)
+    rx
 }
 
 fn serve(stream: UnixStream, build: &str, tx: &Sender<Pending>) {
@@ -524,15 +547,36 @@ fn connect(path: &Path) -> Result<UnixStream, String> {
     })
 }
 
-/// Sends one request to the daemon at `path` and returns its reply.
+/// The longest [`send`] waits for the daemon on this machine to answer. A socket a
+/// service manager holds ([`passed`]) takes the connection while its daemon is still
+/// starting, or cannot start, so without a limit a daemon that never comes up would keep
+/// the command waiting for good. The same as [`SSH_DEADLINE`], for the same reasons.
+pub const LOCAL_DEADLINE: Duration = SSH_DEADLINE;
+
+/// Sends one request to the daemon at `path` and returns its reply, within
+/// [`LOCAL_DEADLINE`].
 pub fn send(path: &Path, request: &Request) -> Result<Reply, String> {
+    send_within(path, request, LOCAL_DEADLINE)
+}
+
+fn send_within(path: &Path, request: &Request, deadline: Duration) -> Result<Reply, String> {
     let mut stream = connect(path)?;
-    let line = serde_json::to_string(request).map_err(|e| e.to_string())?;
-    writeln!(stream, "{line}").map_err(|e| e.to_string())?;
-    let mut reply = String::new();
-    BufReader::new(stream)
-        .read_line(&mut reply)
+    let late = |e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => format!(
+            "the temet-work daemon at {} took the request and did not answer within {} s; it may still be starting, or be failing to start",
+            path.display(),
+            deadline.as_secs_f32()
+        ),
+        _ => e.to_string(),
+    };
+    stream
+        .set_read_timeout(Some(deadline))
+        .and_then(|()| stream.set_write_timeout(Some(deadline)))
         .map_err(|e| e.to_string())?;
+    let line = serde_json::to_string(request).map_err(|e| e.to_string())?;
+    writeln!(stream, "{line}").map_err(late)?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).map_err(late)?;
     serde_json::from_str(&reply).map_err(|e| format!("the daemon's reply is not readable: {e}"))
 }
 
@@ -1021,6 +1065,49 @@ mod tests {
         daemon.join().expect("daemon");
         let _ = std::fs::remove_file(&path);
         assert_eq!(reply, all_quiet());
+    }
+
+    #[test]
+    fn a_request_sent_before_the_daemon_takes_its_socket_is_answered_on_it() {
+        // The service manager's socket, bound while no daemon runs.
+        let path = socket_at("handed-over");
+        let held = UnixListener::bind(&path).expect("bind");
+        let stream = UnixStream::connect(&path).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("timeout");
+        (&stream)
+            .write_all(format!("{STATUS}\n").as_bytes())
+            .expect("sent");
+        let requests = listen_on(held);
+        let pending = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the queued request");
+        assert_eq!(pending.request, status(None));
+        pending.answer(Reply::Done {
+            text: "all quiet".into(),
+        });
+        let mut reply = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut reply)
+            .expect("a reply");
+        assert!(path.exists(), "the owner's socket stays where it put it");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            serde_json::from_str::<Reply>(&reply).map_err(|e| e.to_string()),
+            all_quiet()
+        );
+    }
+
+    #[test]
+    fn a_socket_that_takes_the_request_and_never_answers_is_given_up_on() {
+        // A service manager's socket whose daemon cannot start: the connection waits.
+        let path = socket_at("never-answers");
+        let _held = UnixListener::bind(&path).expect("bind");
+        let sent = send_within(&path, &status(None), Duration::from_millis(50));
+        let _ = std::fs::remove_file(&path);
+        let why = sent.expect_err("no answer");
+        assert!(why.contains("did not answer within 0.05 s"), "{why}");
     }
 
     /// A daemon that takes one connection, closes its listener, and answers each
