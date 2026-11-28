@@ -61,9 +61,10 @@ pub struct View {
     pub decisions: Vec<Decision>,
     /// What is wrong now, by where it came from.
     pub problems: BTreeMap<String, String>,
-    /// Whether a person has held the daemon: no issue is taken and no agent or
-    /// investigation starts until a person resumes it. False in a view from a
-    /// daemon that has no hold.
+    /// Whether a person has held the daemon: no issue is taken, no investigation
+    /// starts, and an issue with nothing merged gets no new agent, fix, review or
+    /// merge until a person resumes it. False in a view from a daemon that has no
+    /// hold.
     #[serde(default)]
     pub held: bool,
     /// When the hold began, in milliseconds since 1970; null while the daemon is

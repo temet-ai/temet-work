@@ -108,15 +108,15 @@ fn run() -> Result<(), String> {
         let id = format!("{:x}{:x}", now_ms(), std::process::id());
         host.handle(now_ms(), Event::LogStarted { id })?;
     }
-    // Before the configuration's events, since each of those places work.
-    if hold && !host.world().held {
-        host.handle(now_ms(), Event::Held)?;
-    }
     // A setting that names a runtime or runner this build lacks stops the start,
     // before anything is logged.
     config
         .check_build(host.world())
         .map_err(|e| format!("{}: {e}", config_path.display()))?;
+    // Before the configuration's events, since each of those places work.
+    if hold && !host.world().held {
+        host.handle(now_ms(), Event::Held)?;
+    }
     for event in config.events(host.world()) {
         host.handle(now_ms(), event)?;
     }

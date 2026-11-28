@@ -176,7 +176,7 @@ fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "hold",
-            description: "A person's: hold the daemon. No issue is taken for refining and no agent or investigation starts; agents at work finish their turn, nothing is reminded, and an issue with a pull request merged still deploys and is verified. The hold is in the event log, so it outlasts a restart. Refused from an agent.",
+            description: "A person's: hold the daemon. No issue is taken for refining and no investigation starts. An issue with nothing merged gets no new agent, fix, review round or merge, and its agents are not reminded; agents at work finish their turn. An issue with a pull request merged still finishes: it merges the rest, deploys and is verified. The hold is in the event log, so it outlasts a restart. Refused from an agent.",
             acts: true,
             schema: json!({"type": "object", "properties": {}}),
         },

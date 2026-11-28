@@ -1,6 +1,7 @@
-//! A held daemon (`temet-work hold`): no issue is taken and no agent starts, no
-//! fix, review round or merge goes out, and nothing waits on an agent, until a
-//! person resumes it. Work past the agents finishes.
+//! A held daemon (`temet-work hold`): no issue is taken, and an issue with
+//! nothing merged gets no new agent, fix, review round or merge, and nothing waits
+//! on its agents, until a person resumes it. An issue with a pull request merged
+//! finishes.
 
 use std::collections::BTreeMap;
 
@@ -162,9 +163,9 @@ fn a_hold_and_the_time_it_began_outlast_a_replay_until_a_resume() {
     let status = crate::text::text(&w, &BTreeMap::new());
     assert!(
         status.starts_with(&format!(
-            "Held since {since}: no issue is taken and no agent or investigation starts; agents \
-             at work finish their turn, and merged changes still deploy. temet-work resume lifts \
-             it.\nProjects\n"
+            "Held since {since}: no issue is taken and no investigation starts; an issue with \
+             nothing merged gets no new agent, fix, review or merge, and agents at work finish \
+             their turn. temet-work resume lifts it.\nProjects\n"
         )),
         "{status}"
     );
@@ -177,4 +178,54 @@ fn a_hold_and_the_time_it_began_outlast_a_replay_until_a_resume() {
     assert!(crate::text::text(&w, &BTreeMap::new()).starts_with("Projects\n"));
     let view = crate::View::new(&w, &BTreeMap::new());
     assert_eq!((view.held, view.held_since), (false, None));
+}
+
+#[test]
+fn agents_of_an_issue_with_a_pull_request_merged_are_still_waited_on_while_held() {
+    let start = |w: &mut World, agent: &str, role: Role| {
+        w.apply(&Event::AgentStarted {
+            agent: AgentId::new(agent),
+            group: GroupId::new("watch"),
+            role,
+            issue: Some(gld()),
+            machine: MachineId::new("morpork"),
+            folder: None,
+            secret_digest: None,
+            runtime: None,
+            model: None,
+        });
+    };
+    let mut w = merging_two();
+    merged(&mut w, "ui");
+    w.apply(&Event::Held);
+    let refused = w.apply(&Event::MergeRefused {
+        issue: gld(),
+        reason: "api conflicts with main".into(),
+    });
+    assert!(
+        refused
+            .iter()
+            .any(|e| matches!(e, Effect::RequestFix { issue, .. } if *issue == gld())),
+        "the fix still goes out: {refused:?}"
+    );
+    start(&mut w, "author-9", Role::Author);
+    assert!(waited_on(&w, "author-9"), "it finishes the issue");
+
+    // An arbiter at work on such an issue is neither stopped nor replaced.
+    let i = w.issues.get_mut(&gld()).expect("there");
+    (i.stage, i.review_ok) = (Stage::Arbitration { round: 3 }, false);
+    start(&mut w, "arbiter-1", Role::Arbiter);
+    assert!(waited_on(&w, "arbiter-1"));
+    let start = w.missing().start;
+    assert!(
+        !start.iter().any(|e| matches!(
+            e,
+            Effect::StopAgent { .. }
+                | Effect::StartAgent {
+                    role: Role::Arbiter,
+                    ..
+                }
+        )),
+        "{start:?}"
+    );
 }

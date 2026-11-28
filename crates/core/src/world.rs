@@ -89,9 +89,10 @@ pub struct World {
     /// Whether a person has held the daemon (`temet-work hold`, or
     /// `temet-workd --hold`) and not resumed it. While held, no issue is taken
     /// for refining, no author is placed, no investigation starts, every issue is
-    /// paused ([`World::paused`]) and nothing waits on an agent
-    /// ([`World::waiting_on`]). Agents at work finish their turn, and an issue
-    /// with a pull request merged still merges the rest, deploys and is verified.
+    /// paused ([`World::paused`]) and nothing waits on an investigator or an
+    /// agent of a paused issue ([`World::waiting_on`]). Agents at work finish
+    /// their turn, and an issue with a pull request merged still merges the rest,
+    /// deploys and is verified.
     pub held: bool,
     /// When the hold began, in milliseconds since 1970: the time its event was
     /// applied at ([`World::apply_at`]). None while the daemon is not held, and
@@ -1259,12 +1260,21 @@ impl World {
     /// Nothing waits on an agent whose step is over for good
     /// ([`Self::over_for_good`]), such as an old author whose issue works again
     /// in another folder: it is not reminded, and its stop is asked for again.
-    /// Nothing waits on any agent while the daemon is held ([`World::held`]).
+    /// While the daemon is held ([`World::held`]), nothing waits on an
+    /// investigator or on an agent of a paused issue.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
-        // A held daemon pushes no agent: one at work finishes its turn, and none
-        // is reminded into another or stopped for sitting idle, since a person
-        // may be talking to it in its terminal.
-        if self.held {
+        // A held daemon pushes no agent of a paused issue, nor an investigator:
+        // one at work finishes its turn, and none is reminded into another or
+        // stopped for sitting idle, since a person may be talking to it in its
+        // terminal. An issue with a pull request merged is not paused, and its
+        // agents are waited on as ever, so its arbiter is not stopped mid-ruling.
+        if self.held
+            && agent
+                .issue
+                .as_ref()
+                .and_then(|id| self.issues.get(id))
+                .is_none_or(|i| self.paused(i))
+        {
             return false;
         }
         if self.investigates(agent) {

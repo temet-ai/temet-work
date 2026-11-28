@@ -36,9 +36,10 @@ temet-work overturn DECISION OPTION REASON
                                             a person's: choose another option of a decision, as
                                             `status` numbers them; REASON is required
 temet-work proposal RULE keep|drop          a person's: keep or drop a rule proposed from an overturn
-temet-work hold                             a person's: hold the daemon, so no issue is taken and no
-                                            agent or investigation starts; agents at work finish
-                                            their turn, and merged changes still deploy
+temet-work hold                             a person's: hold the daemon, so no issue is taken, no
+                                            investigation starts, and an issue with nothing merged
+                                            gets no new agent, fix, review or merge; agents at
+                                            work finish their turn
 temet-work resume                           a person's: lift the hold, so work starts again
 temet-work file PROJECT TITLE BODY [--milestone M]
                                             an investigator's: file an issue in a project or area its

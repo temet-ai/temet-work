@@ -38,7 +38,7 @@ reports its step done.
 | `temet-work overturn DECISION OPTION REASON` | a person only; `DECISION` and `OPTION` are the numbers `status` lists (options count from 1), `REASON` is required | any, if the decision exists, the option is another than the one chosen, and the reason is not empty. What it changes depends on the issue: see below |
 | `temet-work proposal RULE keep` | a person only: the rule moves to kept and ends every brief written from then on | the rule is proposed |
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
-| `temet-work hold` | a person only: no issue is taken and no agent or investigation starts until a person resumes the daemon; agents at work finish their turn (see "Holding the daemon") | no issue: while the daemon is not held |
+| `temet-work hold` | a person only: until a person resumes the daemon, no issue is taken, no investigation starts, and an issue with nothing merged gets no new agent, fix, review round or merge; agents at work finish their turn (see "Holding the daemon") | no issue: while the daemon is not held |
 | `temet-work resume` | a person only: work starts again | no issue: while the daemon is held |
 | `temet-work file PROJECT TITLE BODY [--milestone M]` | only the investigator of a group whose investigation is running, for a project or area its group takes issues from; `BODY` `-` reads it from standard input. The reply names the new issue and how a "Depends on" line names it | no issue: while the group's investigation runs. The milestone is the last in the group's list when none is named; one the group does not take is refused, and a group with no milestones files with none. A title an open issue of that project already has is refused, and so is the title of an issue a person closed in that project (one the loop did not close after verifying it, with none of its pull requests merged); the reply names the issue |
 | `temet-work investigated GROUP` | only the investigator of GROUP whose investigation is running: the investigation ends and the investigator's session is stopped | no issue: while GROUP's investigation runs |
@@ -239,14 +239,16 @@ none for it.
   investigation starts. An investigation whose investigator never started gets none.
 - Every issue is paused, as one that left its group's scope is: no agent starts on it, no
   fix is sent, no review round starts and nothing merges. An issue with a pull request
-  merged still merges the rest, deploys and is verified, since stopping between
-  repositories would leave main branches that do not match.
+  merged is not paused: it still merges the rest, deploys and is verified, since stopping
+  between repositories would leave main branches that do not match, and its agents work as
+  without the hold, as when a refused merge sends it back to its author.
 - Agents at work finish their turn, and their commands are still taken: an author's
   `ready` or a reviewer's verdict is recorded, and the step after it waits. Nothing waits
-  on any agent: none is reminded, none is stopped for sitting idle, and one that ends does
-  not count toward `starts`, so a person can talk to an agent in its terminal without the
-  daemon typing into it. An agent stopped on a usage limit is still sent `continue` once
-  the limit resets, since its turn is under way.
+  on an investigator or an agent of a paused issue: none is reminded, none is stopped for
+  sitting idle, one that ends does not count toward `starts`, and a message to one queued
+  before the hold, such as a fix, waits until the resume. A person can then talk to such an
+  agent in its terminal without the daemon typing into it. An agent stopped on a usage
+  limit is still sent `continue` once the limit resets, since its turn is under way.
 - The trackers still sync, deploys and verifies run, `retry` works, and stops the loop
   asks for, such as of an agent whose step is over, still go out.
 

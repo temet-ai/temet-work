@@ -57,8 +57,9 @@ pub fn held(world: &World) -> Option<String> {
             .map(|at| format!(" since {}", crate::investigation::utc(at)))
             .unwrap_or_default();
         format!(
-            "Held{since}: no issue is taken and no agent or investigation starts; agents at work \
-             finish their turn, and merged changes still deploy. temet-work resume lifts it."
+            "Held{since}: no issue is taken and no investigation starts; an issue with nothing \
+             merged gets no new agent, fix, review or merge, and agents at work finish their turn. \
+             temet-work resume lifts it."
         )
     })
 }
