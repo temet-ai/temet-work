@@ -672,11 +672,25 @@ impl Herdr {
     }
 
     /// Sends one request on the control connection, opening it when needed. A
-    /// broken connection is dropped, so the next request opens a new one. When
-    /// the event subscription or the control connection cannot be opened, or
-    /// the request's line cannot be written, the error is [`UNSENT`].
+    /// broken connection is dropped, so the next request opens a new one. A
+    /// connection kept from an earlier request may have closed with a core
+    /// that has since restarted: when the line cannot be written on it, nothing
+    /// was sent, so the request goes once more on a new connection. When the
+    /// event subscription or the control connection cannot be opened, or the
+    /// request's line cannot be written, the error is [`UNSENT`].
     fn request(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
         self.follow().map_err(|e| unsent(&e))?;
+        let kept = self.control.is_some();
+        let result = self.control_call(method, &params);
+        if kept && matches!(&result, Err(e) if e.kind == UNSENT) {
+            return self.control_call(method, &params);
+        }
+        result
+    }
+
+    /// Sends one request on the control connection, opening it when needed,
+    /// and drops a connection that broke.
+    fn control_call(&mut self, method: &str, params: &Value) -> Result<Value, RpcError> {
         if self.control.is_none() {
             let path = self.path().map_err(|e| unsent(&e))?;
             self.control = Some(Conn::open(&path, REQUEST_TIMEOUT).map_err(|e| unsent(&e))?);
@@ -684,7 +698,7 @@ impl Herdr {
         let Some(conn) = self.control.as_mut() else {
             return Err(unsent(&RunnerError::Unreached("no connection".into())));
         };
-        let result = conn.call(method, params);
+        let result = conn.call(method, params.clone());
         if matches!(&result, Err(e) if e.kind == "io" || e.kind == UNSENT) {
             self.control = None;
         }
