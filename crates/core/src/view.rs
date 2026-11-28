@@ -4,8 +4,9 @@
 //! plan's checks with each one's state, its review rounds with the author's
 //! reply to each point and whether the next round resolved it, each agent's
 //! runtime and model, milestones with their progress and due dates, what
-//! overturning a decision costs, where each project's issues and code are, and
-//! whether a person has held the daemon.
+//! overturning a decision costs, where each project's issues and code are,
+//! whether a person has held the daemon, and which agents a person stopped and
+//! which issues start no agent until a person starts them again.
 //! A state the log does not hold, as in a log from before states were kept, is
 //! null: the window then draws no status tag, and no word stands in for it.
 //! Times are in milliseconds since 1970 and dates are `YYYY-MM-DD`; the window
@@ -173,6 +174,16 @@ pub struct Issue {
     /// Its review rounds, in the order they finished.
     #[serde(default)]
     pub reviews: Vec<Review>,
+    /// The agent a person stopped on it (`temet-work stop AGENT`), while no
+    /// agent starts on it until a person starts it again (`temet-work start
+    /// ISSUE`): the first stopped since it last started. Null when it is not
+    /// stopped, and in a view from a daemon that has no stop.
+    #[serde(default)]
+    pub stopped: Option<AgentId>,
+    /// When that agent was stopped, in milliseconds since 1970; null when the
+    /// issue is not stopped, or when the daemon's log does not say.
+    #[serde(default)]
+    pub stopped_since: Option<u64>,
 }
 
 /// One of a plan's checks.
@@ -363,6 +374,14 @@ pub struct Agent {
     /// The model it was started with; none when its settings named none, or for
     /// an agent from an older log.
     pub model: Option<String>,
+    /// Whether a person stopped it (`temet-work stop AGENT`), whatever state it
+    /// is in now. False in a view from a daemon that has no stop.
+    #[serde(default)]
+    pub stopped_by_person: bool,
+    /// When a person stopped it, in milliseconds since 1970; null when no
+    /// person did, or when the daemon's log does not say.
+    #[serde(default)]
+    pub stopped_at: Option<u64>,
 }
 
 /// What an agent is doing, as one word.
@@ -640,6 +659,11 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
                     .collect(),
             })
             .collect(),
+        stopped: world.stopped_by(&i.id).cloned(),
+        stopped_since: world
+            .stopped_by(&i.id)
+            .and_then(|a| world.person_stopped(a))
+            .flatten(),
     }
 }
 
@@ -656,6 +680,8 @@ fn agent(world: &World, a: &model::Agent) -> Agent {
         started: a.started,
         runtime: a.runtime.clone(),
         model: a.model.clone(),
+        stopped_by_person: world.person_stopped(&a.id).is_some(),
+        stopped_at: world.person_stopped(&a.id).flatten(),
     }
 }
 
@@ -927,6 +953,10 @@ mod tests {
             },
             ruled(3, "4", true),
             ruled(4, "6", false),
+            // A person stopped the idle refiner, so watch#2 starts no agent.
+            Event::AgentStoppedByPerson {
+                agent: AgentId::new("refiner-1"),
+            },
         ]);
         let (mut w, _) =
             World::default().replay_at(events.iter().enumerate().map(|(n, e)| (minute(n), e)));
@@ -1159,6 +1189,17 @@ mod tests {
             assert!(!view.issues.is_empty(), "{old}");
             // A daemon from before the hold sends neither field: not held.
             assert_eq!((view.held, view.held_since), (false, None));
+            // Nor, from before a person's stop, any of its fields: nothing stopped.
+            assert!(
+                view.issues
+                    .iter()
+                    .all(|i| i.stopped.is_none() && i.stopped_since.is_none())
+            );
+            assert!(
+                view.agents
+                    .iter()
+                    .all(|a| !a.stopped_by_person && a.stopped_at.is_none())
+            );
         }
     }
 

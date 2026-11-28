@@ -98,6 +98,19 @@ pub struct World {
     /// applied at ([`World::apply_at`]). None while the daemon is not held, and
     /// in a world replayed without times.
     pub held_since: Option<u64>,
+    /// The agents a person stopped (`temet-work stop AGENT`), each with when,
+    /// in milliseconds since 1970: the time its event was applied at
+    /// ([`World::apply_at`]); none in a world replayed without times. Nothing
+    /// waits on such an agent ([`World::waiting_on`]), nothing is told to it,
+    /// and its stop is asked for until it ends ([`World::missing`]). It stays
+    /// stopped after its issue is started again.
+    pub person_stops: BTreeMap<AgentId, Option<u64>>,
+    /// The issues a person stopped an agent of and has not started again
+    /// (`temet-work start ISSUE`), each with the first agent stopped on it since
+    /// it last started. No agent starts on such an issue
+    /// ([`World::stopped_by`]); its other agents carry on, and its merge, deploy
+    /// and verify are still asked for.
+    pub stopped_issues: BTreeMap<IssueId, AgentId>,
     /// How many events have been applied.
     pub applied: u64,
 }
@@ -220,12 +233,18 @@ impl World {
     /// Applies one event that happened at `at_ms`, in milliseconds since 1970,
     /// and returns what the daemon must do. Each issue whose record it changed
     /// last changed at `at_ms`; an event that changes no issue leaves the times
-    /// alone. A hold applied at `at_ms` began then ([`World::held_since`]).
+    /// alone. A hold applied at `at_ms` began then ([`World::held_since`]), and
+    /// so did a person's stop of an agent ([`World::person_stops`]).
     pub fn apply_at(&mut self, at_ms: u64, event: &Event) -> Vec<Effect> {
         let out = self.change(event);
         self.updated.note(&self.issues, Some(at_ms));
         if *event == Event::Held && self.held_since.is_none() {
             self.held_since = Some(at_ms);
+        }
+        if let Event::AgentStoppedByPerson { agent } = event
+            && let Some(at) = self.person_stops.get_mut(agent)
+        {
+            at.get_or_insert(at_ms);
         }
         out
     }
@@ -1081,6 +1100,25 @@ impl World {
                 self.held = false;
                 self.held_since = None;
             }
+            Event::AgentStoppedByPerson { agent } => {
+                if let Some(a) = self.agents.get(agent)
+                    && !self.person_stops.contains_key(agent)
+                {
+                    // Its issue starts no agent until a person starts it again;
+                    // an investigator works on no issue, and its investigation
+                    // ends with its session.
+                    if let Some(issue) = &a.issue {
+                        self.stopped_issues
+                            .entry(issue.clone())
+                            .or_insert_with(|| agent.clone());
+                    }
+                    out.extend(self.stop_agent(agent));
+                    self.person_stops.insert(agent.clone(), None);
+                }
+            }
+            Event::IssueStartedByPerson { issue } => {
+                self.stopped_issues.remove(issue);
+            }
             Event::Retried { issue } => {
                 if self
                     .issues
@@ -1139,7 +1177,7 @@ impl World {
                 }
             }
         }
-        out.retain(|e| !self.waits_for_scope(e));
+        out.retain(|e| !self.waits_for_scope(e) && !self.waits_for_person(e));
         self.follow_scope();
         out.extend(self.place());
         out.retain(|e| !self.waits_for_machine(e));
@@ -1261,8 +1299,12 @@ impl World {
     /// ([`Self::over_for_good`]), such as an old author whose issue works again
     /// in another folder: it is not reminded, and its stop is asked for again.
     /// While the daemon is held ([`World::held`]), nothing waits on an
-    /// investigator or on an agent of a paused issue.
+    /// investigator or on an agent of a paused issue. Nothing waits on an agent a
+    /// person stopped ([`World::person_stops`]): it did not give up its step.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
+        if self.person_stops.contains_key(&agent.id) {
+            return false;
+        }
         // A held daemon pushes no agent of a paused issue, nor an investigator:
         // one at work finishes its turn, and none is reminded into another or
         // stopped for sitting idle, since a person may be talking to it in its
@@ -1328,7 +1370,11 @@ impl World {
     /// up too, with a line of its own. A paused
     /// issue gets nothing until it is back in its group's scope and the daemon is
     /// not held, and then what its stage needs. A running investigation whose
-    /// investigator never started gets one, once the daemon is not held.
+    /// investigator never started gets one, once the daemon is not held. An
+    /// issue a person stopped an agent of ([`World::stopped_by`]) gets no agent
+    /// until a person starts it again, and its merge, deploy or verify as ever;
+    /// an agent a person stopped is told nothing, and its stop is asked for
+    /// again until it ends.
     pub fn missing(&self) -> Missing {
         let mut out = Missing {
             start: self.stops_again(),
@@ -1407,6 +1453,8 @@ impl World {
                                     && a.role == Role::Arbiter
                                     && a.state != AgentState::Ended
                                     && !self.waiting_on(a)
+                                    // Asked for with every agent a person stopped.
+                                    && !self.person_stops.contains_key(&a.id)
                             })
                             .map(|a| Effect::StopAgent {
                                 agent: a.id.clone(),
@@ -1428,6 +1476,10 @@ impl World {
                         _ => {}
                     }
                 }
+                continue;
+            }
+            // A person stopped an agent of it: none starts until the person says so.
+            if self.stopped_issues.contains_key(&i.id) {
                 continue;
             }
             // Only agents that ended while the issue waited on them count: not one
@@ -1459,23 +1511,59 @@ impl World {
                 out.start.push(effect);
             }
         }
-        out.start.retain(|e| !self.waits_for_machine(e));
+        out.start
+            .retain(|e| !self.waits_for_machine(e) && !self.waits_for_person(e));
         out
     }
 
     /// A stop for each agent that runs although its step is over for good
-    /// ([`Self::over_for_good`]), in agent order. The loop asked for it when the
-    /// step ended, but that stop may have failed, or been lost to a restart,
-    /// since a replay drops effects. It is asked for on a paused issue too: a
-    /// stop starts no work.
+    /// ([`Self::over_for_good`]), or that a person stopped, in agent order. The
+    /// loop asked for it when the step ended or the person asked, but that stop
+    /// may have failed, or been lost to a restart, since a replay drops effects.
+    /// It is asked for on a paused issue too: a stop starts no work.
     fn stops_again(&self) -> Vec<Effect> {
         self.agents
             .values()
-            .filter(|a| a.state != AgentState::Ended && self.over_for_good(a))
+            .filter(|a| {
+                a.state != AgentState::Ended
+                    && (self.over_for_good(a) || self.person_stops.contains_key(&a.id))
+            })
             .map(|a| Effect::StopAgent {
                 agent: a.id.clone(),
             })
             .collect()
+    }
+
+    /// The agent a person stopped on `issue`, while no agent starts on it: the
+    /// first stopped since a person last started it ([`World::stopped_issues`]).
+    pub fn stopped_by(&self, issue: &IssueId) -> Option<&AgentId> {
+        self.stopped_issues.get(issue)
+    }
+
+    /// When a person stopped `agent`, in milliseconds since 1970: `Some(None)`
+    /// when the log does not say, and `None` when no person stopped it.
+    pub fn person_stopped(&self, agent: &AgentId) -> Option<Option<u64>> {
+        self.person_stops.get(agent).copied()
+    }
+
+    /// Whether `effect` would start an agent on an issue a person stopped an
+    /// agent of, or tell something to an agent a person stopped. The loop drops
+    /// it. A review round starts a reviewer when none runs, else tells the one
+    /// that runs; a fix goes to the running author. [`World::missing`] asks again
+    /// once the issue is started and the stopped agent has ended.
+    fn waits_for_person(&self, effect: &Effect) -> bool {
+        let stopped = |issue: &IssueId, role: Role| match self.running(issue, role) {
+            Some(a) => self.person_stops.contains_key(&a.id),
+            None => self.stopped_issues.contains_key(issue),
+        };
+        match effect {
+            Effect::StartAgent { issue, .. } => self.stopped_issues.contains_key(issue),
+            Effect::StartReview { issue, .. } => stopped(issue, Role::Reviewer),
+            Effect::RequestFix { issue, .. } => self
+                .running(issue, Role::Author)
+                .is_some_and(|a| self.person_stops.contains_key(&a.id)),
+            _ => false,
+        }
     }
 
     /// Whether nothing will need `agent` again: an agent on an issue that is
@@ -1915,7 +2003,8 @@ impl World {
     }
 
     /// Takes new issues for refining and starts authors on ready ones; none
-    /// while the daemon is held.
+    /// while the daemon is held, and none on an issue a person stopped an agent
+    /// of ([`World::stopped_by`]).
     fn place(&mut self) -> Vec<Effect> {
         let mut out = Vec::new();
         if self.held {
@@ -1932,6 +2021,7 @@ impl World {
                 .issues
                 .values()
                 .filter(|i| i.stage == Stage::New && i.group.is_none() && self.in_scope(group, i))
+                .filter(|i| !self.stopped_issues.contains_key(&i.id))
                 // One whose refiner has no folder on its machine takes no slot.
                 .filter(|i| self.has_place(i, Role::Refiner))
                 .collect();
@@ -1960,6 +2050,7 @@ impl World {
                 .filter(|i| {
                     i.group.as_ref() == Some(&group.id)
                         && i.stage == Stage::Ready
+                        && !self.stopped_issues.contains_key(&i.id)
                         && self.start_waits(group, i).is_empty()
                 })
                 .collect();

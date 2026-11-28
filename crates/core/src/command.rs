@@ -186,6 +186,18 @@ pub enum Command {
     Hold,
     /// A person lifts the hold, so work starts again.
     Resume,
+    /// A person stops one agent: its terminal is stopped, and no agent starts
+    /// on its issue until a person starts the issue again ([`Command::Start`]).
+    Stop {
+        /// The agent.
+        agent: AgentId,
+    },
+    /// A person lets agents start again on an issue whose agent a person
+    /// stopped. The stopped agent stays stopped.
+    Start {
+        /// The issue.
+        issue: IssueId,
+    },
 }
 
 /// How long a front end waits after one [`Command::View`] ends, answered or failed,
@@ -214,8 +226,9 @@ impl Command {
             | Self::File { .. }
             | Self::Investigated { .. }
             | Self::Hold
-            | Self::Resume => None,
-            Self::Issue { issue } => Some(issue),
+            | Self::Resume
+            | Self::Stop { .. } => None,
+            Self::Issue { issue } | Self::Start { issue } => Some(issue),
             Self::Plan { issue, .. }
             | Self::Ready { issue, .. }
             | Self::Review { issue, .. }
@@ -826,6 +839,17 @@ impl World {
         let refuse = |issue: &IssueId, now: Stage, wanted: &str| {
             Err(format!("{issue} is {}, not {wanted}", stage(now)))
         };
+        // A person stopped it: whatever it still sends, as while its stop keeps
+        // failing, moves nothing. It may still read.
+        if let Some(by) = by
+            && command.changes()
+            && self.person_stops.contains_key(by)
+        {
+            return Err(format!(
+                "{by} was stopped by a person, so it takes no further step; its session is \
+                 being stopped"
+            ));
+        }
         let event = match command {
             Command::Status | Command::View | Command::Screen { .. } => return Ok(None),
             // Filing waits for the tracker's answer: the daemon carries it out
@@ -1149,6 +1173,58 @@ impl World {
                 }
                 Event::Resumed
             }
+            Command::Stop { agent } => {
+                if let Some(by) = by {
+                    return Err(format!(
+                        "stop is a person's: {by} is an agent; an agent finishes its step, and a \
+                         person stops agents from a shell outside any agent's terminal"
+                    ));
+                }
+                let Some(a) = self.agents.get(agent) else {
+                    return Err(format!("{agent} is not an agent this daemon started"));
+                };
+                if let Some(at) = self.person_stops.get(agent) {
+                    let since = at
+                        .map(|at| format!(" at {}", crate::investigation::utc(at)))
+                        .unwrap_or_default();
+                    let then = match &a.issue {
+                        Some(issue) if self.stopped_issues.contains_key(issue) => format!(
+                            "; temet-work start {issue} lets agents start on {issue} again"
+                        ),
+                        _ => String::new(),
+                    };
+                    return Err(format!(
+                        "{agent} is already stopped by a person{since}{then}"
+                    ));
+                }
+                if a.state == crate::model::AgentState::Ended {
+                    return Err(format!(
+                        "{agent} has ended: its session is over, so there is nothing to stop"
+                    ));
+                }
+                Event::AgentStoppedByPerson {
+                    agent: agent.clone(),
+                }
+            }
+            Command::Start { issue } => {
+                if let Some(by) = by {
+                    return Err(format!(
+                        "start is a person's: {by} is an agent, and only a person lets agents \
+                         start again on an issue a person stopped"
+                    ));
+                }
+                at(issue)?;
+                if !self.stopped_issues.contains_key(issue) {
+                    return Err(format!(
+                        "{issue} is not stopped: no person has stopped an agent of it since it \
+                         last started, so nothing holds its agents back; temet-work stop AGENT \
+                         stops one"
+                    ));
+                }
+                Event::IssueStartedByPerson {
+                    issue: issue.clone(),
+                }
+            }
             // A choice moves no work: its agent carries on at once.
             Command::Choose { .. } => Event::DecisionMade {
                 decision: self.choice(by, command)?,
@@ -1373,6 +1449,119 @@ mod tests {
             .expect("an event");
         w.apply(&event);
         Ok(())
+    }
+
+    fn stop(agent: &str) -> Command {
+        Command::Stop {
+            agent: AgentId::new(agent),
+        }
+    }
+
+    #[test]
+    fn stop_is_taken_from_a_person_as_an_event_of_its_own_and_refused_when_it_changes_nothing() {
+        let mut w = refining();
+        let why = |w: &World, c: &Command| w.events(None, c).expect_err("refused");
+        let stopped = Event::AgentStoppedByPerson {
+            agent: AgentId::new("author-1"),
+        };
+        assert_eq!(w.events(None, &stop("author-1")), Ok(vec![stopped.clone()]));
+        assert_eq!(
+            why(&w, &stop("author-9")),
+            "author-9 is not an agent this daemon started"
+        );
+        w.apply(&Event::AgentChanged {
+            agent: AgentId::new("reviewer-1"),
+            state: crate::model::AgentState::Ended,
+            lost: false,
+        });
+        assert_eq!(
+            why(&w, &stop("reviewer-1")),
+            "reviewer-1 has ended: its session is over, so there is nothing to stop"
+        );
+        let at = 1_795_000_000_000;
+        w.apply_at(at, &stopped);
+        assert_eq!(
+            why(&w, &stop("author-1")),
+            format!(
+                "author-1 is already stopped by a person at {}; temet-work start ankh#1 lets \
+                 agents start on ankh#1 again",
+                crate::investigation::utc(at)
+            )
+        );
+        // Still refused once its issue has started again.
+        w.apply(&Event::IssueStartedByPerson { issue: issue() });
+        assert_eq!(
+            why(&w, &stop("author-1")),
+            format!(
+                "author-1 is already stopped by a person at {}",
+                crate::investigation::utc(at)
+            )
+        );
+    }
+
+    #[test]
+    fn start_is_taken_on_an_issue_a_person_stopped_and_refused_on_any_other() {
+        let mut w = refining();
+        let start = Command::Start { issue: issue() };
+        assert_eq!(
+            w.events(None, &start).expect_err("refused"),
+            "ankh#1 is not stopped: no person has stopped an agent of it since it last started, \
+             so nothing holds its agents back; temet-work stop AGENT stops one"
+        );
+        let unknown = Command::Start {
+            issue: IssueId::new("ankh", "404"),
+        };
+        assert_eq!(
+            w.events(None, &unknown).expect_err("refused"),
+            "there is no issue ankh#404"
+        );
+        w.apply(&Event::AgentStoppedByPerson {
+            agent: AgentId::new("refiner-1"),
+        });
+        assert_eq!(
+            w.events(None, &start),
+            Ok(vec![Event::IssueStartedByPerson { issue: issue() }])
+        );
+    }
+
+    #[test]
+    fn stop_and_start_are_a_persons_and_an_agent_is_refused_with_its_own_secret() {
+        let mut w = refining();
+        let author = AgentId::new("author-1");
+        let why = w.events(Some(&author), &stop("reviewer-1")).expect_err("refused");
+        assert_eq!(
+            why,
+            "stop is a person's: author-1 is an agent; an agent finishes its step, and a person \
+             stops agents from a shell outside any agent's terminal"
+        );
+        let why = w.events(Some(&author), &stop("author-1")).expect_err("refused");
+        assert!(why.starts_with("stop is a person's: author-1 is an agent"), "{why}");
+        w.apply(&Event::AgentStoppedByPerson {
+            agent: AgentId::new("refiner-1"),
+        });
+        let why = w
+            .events(Some(&author), &Command::Start { issue: issue() })
+            .expect_err("refused");
+        assert!(why.starts_with("start is a person's: author-1 is an agent"), "{why}");
+    }
+
+    #[test]
+    fn an_agent_a_person_stopped_takes_no_further_step_but_may_read() {
+        let mut w = refining();
+        let refiner = AgentId::new("refiner-1");
+        w.apply(&Event::AgentStoppedByPerson {
+            agent: refiner.clone(),
+        });
+        let plan = Command::Plan {
+            issue: issue(),
+            plan: plan(),
+        };
+        assert_eq!(
+            w.events(Some(&refiner), &plan).expect_err("refused"),
+            "refiner-1 was stopped by a person, so it takes no further step; its session is \
+             being stopped"
+        );
+        assert_eq!(w.events(Some(&refiner), &Command::Status), Ok(vec![]));
     }
 
     #[test]

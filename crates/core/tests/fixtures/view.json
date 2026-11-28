@@ -74,7 +74,9 @@
       "agents": [],
       "updated_ms": 1795000900000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "stopped": null,
+      "stopped_since": null
     },
     {
       "id": "watch#1",
@@ -91,7 +93,9 @@
       "agents": [],
       "updated_ms": 1795000480000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "stopped": null,
+      "stopped_since": null
     },
     {
       "id": "watch#2",
@@ -110,7 +114,9 @@
       ],
       "updated_ms": 1795000540000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "stopped": "refiner-1",
+      "stopped_since": 1795001860000
     },
     {
       "id": "watch#3",
@@ -129,7 +135,9 @@
       ],
       "updated_ms": 1795000600000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "stopped": null,
+      "stopped_since": null
     },
     {
       "id": "watch#4",
@@ -190,7 +198,9 @@
             }
           ]
         }
-      ]
+      ],
+      "stopped": null,
+      "stopped_since": null
     },
     {
       "id": "watch#5",
@@ -236,7 +246,9 @@
           "state": "failed"
         }
       ],
-      "reviews": []
+      "reviews": [],
+      "stopped": null,
+      "stopped_since": null
     }
   ],
   "done": 2,
@@ -252,7 +264,9 @@
       "state_text": "working: winding the clock",
       "started": 19,
       "runtime": "hex",
-      "model": "anthill"
+      "model": "anthill",
+      "stopped_by_person": false,
+      "stopped_at": null
     },
     {
       "id": "author-4",
@@ -265,7 +279,9 @@
       "state_text": "error: usage limit reached",
       "started": 23,
       "runtime": "hex",
-      "model": "anthill"
+      "model": "anthill",
+      "stopped_by_person": false,
+      "stopped_at": null
     },
     {
       "id": "author-5",
@@ -278,7 +294,9 @@
       "state_text": "ended",
       "started": 25,
       "runtime": null,
-      "model": null
+      "model": null,
+      "stopped_by_person": false,
+      "stopped_at": null
     },
     {
       "id": "refiner-1",
@@ -291,7 +309,9 @@
       "state_text": "idle",
       "started": 17,
       "runtime": "hex",
-      "model": null
+      "model": null,
+      "stopped_by_person": true,
+      "stopped_at": 1795001860000
     },
     {
       "id": "reviewer-3",
@@ -304,7 +324,9 @@
       "state_text": "blocked: permission",
       "started": 21,
       "runtime": "hex",
-      "model": "anthill"
+      "model": "anthill",
+      "stopped_by_person": false,
+      "stopped_at": null
     }
   ],
   "decisions": [

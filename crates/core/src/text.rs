@@ -64,6 +64,31 @@ pub fn held(world: &World) -> Option<String> {
     })
 }
 
+/// What an agent's line says when a person stopped it, whatever state it is
+/// in: `stopped by a person at TIME`; none when no person did.
+pub fn agent_stopped(world: &World, agent: &crate::ids::AgentId) -> Option<String> {
+    let at = world.person_stopped(agent)?;
+    let at = at
+        .map(|at| format!(" at {}", crate::investigation::utc(at)))
+        .unwrap_or_default();
+    Some(format!("stopped by a person{at}"))
+}
+
+/// What an issue's line says while a person has stopped an agent of it: the
+/// agent, since when, and how the issue goes on; none while it is not stopped.
+pub fn issue_stopped(world: &World, issue: &Issue) -> Option<String> {
+    let agent = world.stopped_by(&issue.id)?;
+    let since = world
+        .person_stopped(agent)
+        .flatten()
+        .map(|at| format!(" since {}", crate::investigation::utc(at)))
+        .unwrap_or_default();
+    Some(format!(
+        "stopped by a person ({agent}){since}: no agent starts on it until temet-work start {}",
+        issue.id
+    ))
+}
+
 /// The whole state, with what is wrong now. Done issues are counted, not listed.
 pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
@@ -156,9 +181,10 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
         } else {
             String::new()
         };
+        let stopped = issue_stopped(world, i).map_or_else(String::new, |s| format!("; {s}"));
         let _ = writeln!(
             out,
-            "  {}  {}  {}{milestone}{pulls}",
+            "  {}  {}  {}{milestone}{pulls}{stopped}",
             i.id,
             issue_stage(world, i),
             i.title
@@ -174,9 +200,10 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             .issue
             .as_ref()
             .map_or_else(String::new, |i| format!(" on {i}"));
+        let stopped = agent_stopped(world, &a.id).map_or_else(String::new, |s| format!("; {s}"));
         let _ = writeln!(
             out,
-            "  {}{issue}: {} (on {})",
+            "  {}{issue}: {} (on {}){stopped}",
             a.id,
             agent_state(&a.state),
             a.machine
@@ -521,6 +548,9 @@ pub fn issue(
     let mut out = String::new();
     let _ = writeln!(out, "{}  {}", i.id, i.title);
     let _ = writeln!(out, "Stage: {}", issue_stage(world, i));
+    if let Some(stopped) = issue_stopped(world, i) {
+        let _ = writeln!(out, "Stopped: {stopped}");
+    }
     if let Some(m) = &i.milestone {
         let _ = writeln!(out, "Milestone: {m}");
     }
@@ -585,9 +615,10 @@ pub fn issue(
         .values()
         .filter(|a| a.issue.as_ref() == Some(id))
     {
+        let stopped = agent_stopped(world, &a.id).map_or_else(String::new, |s| format!("; {s}"));
         let _ = writeln!(
             out,
-            "  {} ({}): {}",
+            "  {} ({}): {}{stopped}",
             a.id,
             a.role.name(),
             agent_state(&a.state)
