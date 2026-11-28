@@ -42,6 +42,8 @@ pub(crate) enum Rank {
     LatestRound,
     /// The kept rules.
     Rules,
+    /// The issues a person closed, as an investigator's brief lists them.
+    Closed,
     /// An arbiter's earlier review rounds.
     EarlierRounds,
 }
@@ -109,6 +111,25 @@ impl Part {
                 entries,
                 left_out: Box::new(left_out),
                 latest: true,
+                shrinks: false,
+            },
+        )
+    }
+
+    /// Entries at `rank` of which the first that fit are kept, each with its
+    /// texts at most [`ITEM_CHARS`] characters, ended by the line counting the
+    /// later ones.
+    pub(crate) fn first(
+        rank: Rank,
+        entries: Vec<Entry>,
+        left_out: impl Fn(Range<usize>) -> String + 'static,
+    ) -> Self {
+        Self::List(
+            rank,
+            List {
+                entries,
+                left_out: Box::new(left_out),
+                latest: false,
                 shrinks: false,
             },
         )

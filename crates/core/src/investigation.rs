@@ -269,12 +269,7 @@ impl World {
         let (machine, folder) = self.investigator_place(g);
         let sources = self.group_sources(g);
         let covered = sources.iter().map(|source| self.covered(source)).collect();
-        let mut closed: Vec<&Issue> = self
-            .issues
-            .values()
-            .filter(|i| sources.contains(&i.id.project) && i.closed_by_a_person())
-            .collect();
-        closed.sort_by_key(|i| i.order);
+        let closed = self.closed_by_persons(g);
         let notes = self
             .group_repos(g)
             .into_iter()
@@ -312,6 +307,20 @@ impl World {
                 )
             },
         })
+    }
+
+    /// The issues a person closed in the projects and areas `group` takes
+    /// issues from, in the tracker's order: those its investigator's brief lists
+    /// and `temet-work closed` prints.
+    pub(crate) fn closed_by_persons(&self, group: &Group) -> Vec<&Issue> {
+        let sources = self.group_sources(group);
+        let mut closed: Vec<&Issue> = self
+            .issues
+            .values()
+            .filter(|i| sources.contains(&i.id.project) && i.closed_by_a_person())
+            .collect();
+        closed.sort_by_key(|i| i.order);
+        closed
     }
 
     /// One place an investigator files issues in, with the repositories it reads.

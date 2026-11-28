@@ -14,6 +14,7 @@ pub use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 pub const USAGE: &str = "\
 temet-work status [--json]                  the state as text, or with --json as data
 temet-work issue ISSUE                      one issue in full, with its text from the last sync
+temet-work closed GROUP                     every issue a person closed where GROUP takes issues from
 temet-work screen AGENT                     what an agent's terminal shows now
 temet-work change ISSUE [PROJECT] [--by-commit]
                                             each open pull request of the issue whole, from
@@ -74,11 +75,12 @@ temet-work set TARGET [--role ROLE] KEY VALUE
 temet-work unset TARGET [--role ROLE] KEY   remove it, so the next level answers
 temet-work settings TARGET [--role ROLE]    every setting in effect there, and the level that set it
 temet-work mcp [--allow read|act]           the same views and commands as MCP tools, for agents;
-                                            read (the default) offers status, issue, screen,
-                                            settings, change, show, search and ci
+                                            read (the default) offers status, issue, closed,
+                                            screen, settings, change, show, search and ci
 temet-work parts                            the parts in this build
 temet-work --version                        the version and the build id
 
+GROUP is a group's id, as status lists it.
 ISSUE is project#key, such as radar#44. TARGET is global, an area or project id, a
 milestone as project:Milestone name, or an issue. ROLE is refiner, author, reviewer,
 arbiter or investigator. Agents' commands are recorded as theirs
@@ -335,6 +337,9 @@ pub fn request(
         "status" if json => Command::View,
         "status" => Command::Status,
         "issue" => Command::Issue { issue: issue()? },
+        "closed" => Command::Closed {
+            group: GroupId::new(arg(1, "GROUP")?),
+        },
         "screen" => Command::Screen {
             agent: AgentId::new(arg(1, "AGENT")?),
         },
@@ -863,12 +868,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn closed_reads_its_group() {
+        let read = |line: &str| request(&args(line), None, no_files).map(|r| r.command);
+        assert_eq!(
+            read("closed watch"),
+            Ok(Command::Closed {
+                group: GroupId::new("watch")
+            })
+        );
+        assert!(read("closed").is_err_and(|e| e.contains("missing GROUP")));
+        assert!(USAGE.contains("\ntemet-work closed GROUP "));
+    }
+
+    #[test]
     fn json_asks_status_for_the_view_and_is_refused_on_any_other_command() {
         let read = |line: &str| request(&args(line), None, no_files).map(|r| r.command);
         assert_eq!(read("status"), Ok(Command::Status));
         assert_eq!(read("status --json"), Ok(Command::View));
         for line in [
             "issue ankh#1 --json",
+            "closed watch --json",
             "screen author-1 --json",
             "ready ankh#1 --json",
             "review ankh#1 approve --json",

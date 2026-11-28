@@ -199,6 +199,7 @@ impl Command {
             Self::Status => "status",
             Self::View => "view",
             Self::Issue { .. } => "issue",
+            Self::Closed { .. } => "closed",
             Self::Screen { .. } => "screen",
             Self::Change { .. } => "change",
             Self::Show { .. } => "show",
@@ -225,14 +226,15 @@ impl Command {
         }
     }
 
-    /// Whether the command changes anything; `status`, `view`, `issue`, `screen`,
-    /// `change`, `show`, `search`, `ci` and `settings` only read.
+    /// Whether the command changes anything; `status`, `view`, `issue`, `closed`,
+    /// `screen`, `change`, `show`, `search`, `ci` and `settings` only read.
     pub fn changes(&self) -> bool {
         !matches!(
             self,
             Self::Status
                 | Self::View
                 | Self::Issue { .. }
+                | Self::Closed { .. }
                 | Self::Screen { .. }
                 | Self::Change { .. }
                 | Self::Show { .. }
@@ -537,6 +539,9 @@ mod tests {
                 Command::View,
                 Command::Issue {
                     issue: IssueId::new("ankh", "1"),
+                },
+                Command::Closed {
+                    group: GroupId::new("watch"),
                 },
                 Command::Screen {
                     agent: AgentId::new("author-1"),

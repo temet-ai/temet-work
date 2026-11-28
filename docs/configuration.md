@@ -5,6 +5,7 @@ session_id:
   - 48c80237-558e-4a4a-a82d-bd96b37f1f46
   - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
   - 3ee4a4e0-4c22-4ed9-ad8f-7d0dd362241c
+  - eb217f0e-246e-4b24-827a-85da18bcc2dc
 ---
 
 # Configuring temet-workd
@@ -231,9 +232,9 @@ outside the checkouts its brief names and the folder it runs in. Each issue it f
 the last milestone of the group's list unless it names another the group takes, and is in
 the loop as soon as it is filed. A project's `investigate` setting adds lines to the
 investigator's brief (`docs/settings.md`). Closing an issue is how a person says no to it:
-the brief lists the issues a person closed in the group's projects and areas, and the
-investigator files none of them again. The list holds issues the daemon saw open while
-syncing. A close in the tracker counts as a person's unless the daemon made it after
+the brief lists the issues a person closed in the group's projects and areas, as many as
+fit, `temet-work closed GROUP` prints every one, and the investigator files none of them
+again. The list holds issues the daemon saw open while syncing. A close in the tracker counts as a person's unless the daemon made it after
 verifying the issue, or one of the issue's pull requests had merged before it, since a pull
 request can close its issue as it merges. For the same reason the daemon ignores a close
 while the issue merges, deploys or is verified. Reopening a done issue clears the merge. A

@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::IssueText;
-use crate::model::{AgentState, Issue, PointState, Review, Stage};
+use crate::ids::GroupId;
+use crate::model::{AgentState, Issue, PointState, Review, Role, Stage};
 use crate::placement::{Hold, StartWait, Unlisted, Why};
 use crate::world::World;
 
@@ -248,20 +249,23 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
         );
     }
     let _ = writeln!(out, "Decisions");
+    // A later line of a decision's or a rule's text sits further in than a row,
+    // so none reads as one.
+    let inside = |text: &str| indented(text, 4);
     for d in world.decisions.values() {
-        let chosen = d.options.get(d.chosen).map_or("?", String::as_str);
+        let options: Vec<String> = d.options.iter().map(|o| inside(o)).collect();
+        let chosen = options.get(d.chosen).map_or("?", String::as_str);
         let overturned = d
             .overturned_to
-            .and_then(|o| d.options.get(o).map(|text| (o, text)))
+            .and_then(|o| options.get(o).map(|text| (o, text)))
             .map_or_else(String::new, |(o, text)| {
                 format!(
                     "; overturned to option {} ({text}): {}",
                     o + 1,
-                    d.overturn_reason
+                    inside(&d.overturn_reason)
                 )
             });
-        let options: Vec<String> = d
-            .options
+        let numbered: Vec<String> = options
             .iter()
             .enumerate()
             .map(|(n, o)| format!("{}={o}", n + 1))
@@ -292,10 +296,10 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             "  {} {}: {} [{}] chose {chosen}, by {}: {}{costs}{overturned}",
             d.id.0,
             d.issue,
-            d.question,
-            options.join(", "),
+            inside(&d.question),
+            numbered.join(", "),
             d.by,
-            d.reason
+            inside(&d.reason)
         );
     }
     let _ = writeln!(out, "Rules");
@@ -309,7 +313,7 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             "  {} {}: {} (from decision {} on {}, decided by {}, overturned by {})",
             r.id.0,
             r.state.name(),
-            r.text,
+            inside(&r.text),
             r.decision.0,
             r.issue,
             r.decided_by,
@@ -326,6 +330,25 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
         let _ = writeln!(out, "  {from}: {what}");
     }
     out
+}
+
+/// Every issue a person closed in the projects and areas `group` takes issues
+/// from, one to a line in the tracker's order, as its investigator's brief lists
+/// them, each cleaned and any later line of it indented; one line saying so when
+/// there is none. `None` when there is no such group.
+pub fn closed(world: &World, group: &GroupId) -> Option<String> {
+    let issues = world.closed_by_persons(world.groups.get(group)?);
+    if issues.is_empty() {
+        return Some(format!(
+            "A person closed no issue in the projects and areas {group} takes issues from.\n"
+        ));
+    }
+    Some(
+        issues
+            .into_iter()
+            .map(|i| indented(&crate::brief::closed_issue(i), 4) + "\n")
+            .collect(),
+    )
 }
 
 /// The ready issues whose authors wait for a work folder on the machine a setting
@@ -1445,6 +1468,136 @@ Problems
         assert!(
             all.contains("  radar, reviewer: permission = plan, set by person\n"),
             "{all}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod closed_issues {
+    use super::*;
+    use crate::event::Event;
+    use crate::ids::{AgentId, IssueId, ProjectId};
+    use crate::{Command, World};
+
+    fn group(id: &str) -> GroupId {
+        GroupId::new(id)
+    }
+
+    /// Project ankh with the group watch, and klatch with the group guild.
+    fn world() -> World {
+        let project = |id: &str| Event::ProjectAdded {
+            project: ProjectId::new(id),
+            tracker: "fake".into(),
+            name: format!("ankh-morpork/{id}"),
+            code_host: None,
+            repo: None,
+        };
+        let takes = |id: &str, project: &str| Event::GroupCreated {
+            group: group(id),
+            name: "Night watch".into(),
+            projects: vec![ProjectId::new(project)],
+            areas: Vec::new(),
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        };
+        let events = [
+            project("ankh"),
+            project("klatch"),
+            takes("watch", "ankh"),
+            takes("guild", "klatch"),
+        ];
+        World::replay(&events).0
+    }
+
+    /// Syncs `ankh#key` as the tracker lists it, `closed` or open.
+    fn sync(w: &mut World, key: u64, title: &str, order: u64, closed: bool) {
+        w.apply(&Event::IssueSynced {
+            issue: IssueId::new("ankh", key.to_string()),
+            title: title.into(),
+            milestone: None,
+            depends_on: Vec::new(),
+            order,
+            closed,
+        });
+    }
+
+    #[test]
+    fn closed_lists_every_issue_a_person_closed_in_the_briefs_order() {
+        let mut w = world();
+        // The tracker's order runs against the keys'. Each is a copy of one a
+        // person closed, since 2,200 syncs would take seconds.
+        for is_closed in [false, true] {
+            sync(&mut w, 3, "Wind the clock", 3, is_closed);
+        }
+        let one = w.issues.remove(&IssueId::new("ankh", "3")).expect("closed");
+        let mut expected = Vec::new();
+        for n in 0..1100 {
+            let mut issue = one.clone();
+            issue.id = IssueId::new("ankh", (2100 - n).to_string());
+            issue.title = format!("{:-<100}", format!("Wind {} ", issue.id));
+            issue.order = n;
+            expected.push(format!("{} {}", issue.id, issue.title));
+            w.issues.insert(issue.id.clone(), issue);
+        }
+        // Closed by the loop after verifying.
+        sync(&mut w, 4, "Sweep the yard", 2000, false);
+        let swept = IssueId::new("ankh", "4");
+        w.issues.get_mut(&swept).expect("held").stage = Stage::Verifying;
+        w.apply(&Event::Verified {
+            issue: swept,
+            passed: true,
+            output: String::new(),
+        });
+        // Closed and then reopened.
+        for is_closed in [false, true, false] {
+            sync(&mut w, 8, "Paint the door", 2001, is_closed);
+        }
+
+        let text = closed(&w, &group("watch")).expect("the group");
+        assert_eq!(text.lines().collect::<Vec<_>>(), expected);
+        w.apply(&Event::InvestigationStarted {
+            group: group("watch"),
+            agent: AgentId::new("investigator-1"),
+            at_ms: 0,
+        });
+        let launch = w.launch_investigator(&group("watch")).expect("launch");
+        let listed: Vec<&str> = launch
+            .brief
+            .task
+            .lines()
+            .filter_map(|l| l.strip_prefix("- "))
+            .filter(|l| l.starts_with("ankh#"))
+            .collect();
+        assert!(!listed.is_empty());
+        assert_eq!(listed, expected[..listed.len()]);
+    }
+
+    #[test]
+    fn closed_says_when_there_is_none_and_refuses_an_unknown_group() {
+        let w = world();
+        assert_eq!(
+            closed(&w, &group("guild")).as_deref(),
+            Some("A person closed no issue in the projects and areas guild takes issues from.\n")
+        );
+        assert_eq!(closed(&w, &group("wizards")), None);
+        let ask = |id: &str| w.events(None, &Command::Closed { group: group(id) });
+        assert_eq!(ask("guild"), Ok(Vec::new()));
+        assert_eq!(ask("wizards"), Err("there is no group wizards".into()));
+    }
+
+    #[test]
+    fn closed_prints_a_title_cleaned_and_indented() {
+        let mut w = world();
+        for is_closed in [false, true] {
+            let title = "Paint\x1b[1E\0\r\nankh#7 Fake";
+            sync(&mut w, 99, title, 99, is_closed);
+        }
+        assert_eq!(
+            closed(&w, &group("watch")).as_deref(),
+            Some("ankh#99 Paint[1E\n    ankh#7 Fake\n")
         );
     }
 }

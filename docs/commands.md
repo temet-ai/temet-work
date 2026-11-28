@@ -15,6 +15,8 @@ session_id:
   - ba3664be-ec7f-4b51-af6a-b1c20c80634d
   - 3ee4a4e0-4c22-4ed9-ad8f-7d0dd362241c
   - 7d4c9131-a05c-43ac-ba6d-09406c95b2c6
+  - eb217f0e-246e-4b24-827a-85da18bcc2dc
+  - 56dbd668-cf30-4780-8eee-7f993b8fe0f4
 ---
 
 # Commands
@@ -25,8 +27,9 @@ reports its step done.
 
 | Command | Who runs it | Accepted when the issue is |
 |---|---|---|
-| `temet-work status [--json]` | anyone; `--json` prints the state as data (below) | any |
+| `temet-work status [--json]` | anyone; `--json` prints the state as data (below). The text form prints each rule's text, and each decision's question, options, reason and overturn reason, with every control character dropped but the line feed and the tab, and each later line indented 4 spaces under its row | any |
 | `temet-work issue ISSUE` | anyone: the issue in full, with its text from its tracker's last sync (or one line saying why it was not read, or that it is empty), its plan, pull requests, fixes, review rounds and agents. The review rounds are every finished round in the order they finished: its number and whether it approved or blocked, and for a block each point with the author's reply to it, or "none on record", and whether the next round kept it open or resolved it, naming that round; a point no later round judged, or whose state an older log does not hold, says so. Each later line of a check, point to fix, point or reply is indented under it, and no control character is printed. An arbiter's brief holds the last of these rounds always, and as many of the earlier ones as fit in the room the rest of the brief leaves, with a line counting those it leaves out; a last round too long for the room is cut there, with a line saying so (see "What a brief holds"). `temet-work issue` still holds every check, point to fix, round, point and reply whole. The text is the one the last sync that worked listed, so an edit in the tracker shows after the next sync (`sync_every`, 60 s unless set otherwise). An issue that is merging, deploying, being verified or waiting to be reopened after a failed verify keeps the text of the last sync that listed it | any |
+| `temet-work closed GROUP` | anyone: every issue a person closed in the projects and areas GROUP takes issues from, one `ID TITLE` line each in the tracker's order, the same issues its investigator's brief lists (as many as fit there). A close counts as a person's by the rule in `docs/configuration.md`. Each title is printed with every control character dropped but the line feed and the tab, and each later line of it indented. A group with none says so in one line, and a group the daemon does not have is refused with its name | no issue: any group |
 | `temet-work screen AGENT` | anyone: what the agent's terminal shows now | any |
 | `temet-work change ISSUE [PROJECT] [--by-commit]` | anyone: each open pull request of the issue whole, read from the code host without a checkout (see "Reading code and CI") | any |
 | `temet-work show PROJECT PATH [--at ISSUE\|COMMIT]` | anyone: a file of the project's repository, or a folder's entries, at the default branch's head, at the issue's pull request head, or at a commit | any |
@@ -69,7 +72,7 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
   `review` is refused with the owning role named: those would skip the work an agent is
   there to do. To get a stuck agent moving, a person rules or changes settings with `set`
   and `unset`.
-- `status` (with or without `--json`), `issue`, `screen`, `change`, `show`, `search`,
+- `status` (with or without `--json`), `issue`, `closed`, `screen`, `change`, `show`, `search`,
   `ci` and `settings` are open to anyone and change nothing. `set` and `unset` keep their
   own rule, in the table.
 - `choose` is not a step: any agent working on the issue may record a choice on it. An
@@ -114,9 +117,9 @@ itself is in no log, reply, status or issue text.
   bit, it called `prctl(PR_SET_DUMPABLE, 0)`, or it has ended. The daemon still reads its
   parents, so a secret found there refuses the command as above. A command that changes
   something and names an agent is refused from such a process even when nothing is found,
-  and the refusal says why it could not be read. `status`, `issue`, `screen` and
-  `settings` still answer it. An agent's own `temet-work` stays alive and readable while
-  it waits for the reply.
+  and the refusal says why it could not be read. `status`, `issue`, `closed`, `screen`
+  and `settings` still answer it. An agent's own `temet-work` stays alive and readable
+  while it waits for the reply.
 - A command that names no agent is a person's. It may read from anywhere. A command that
   changes something (`rule`, `overturn`, `retry`, `proposal`, `hold`, `resume`, `move`,
   `stop`, `start`, `set` and `unset`) is
@@ -223,7 +226,7 @@ like any other.
 
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
-`status`, `issue`, `screen`, `settings`, `change`, `show`, `search` and `ci`, each
+`status`, `issue`, `closed`, `screen`, `settings`, `change`, `show`, `search` and `ci`, each
 answering with its command's text; `act` adds `plan`, `ready`, `review`, `rule`,
 `choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `move`, `stop`, `start`, `file`, `investigated`,
 `set` and `unset`. A tool above the server's level is not listed, and calling it is refused.
@@ -444,9 +447,10 @@ brief is one argument of the command that starts its agent, and Linux refuses on
 A plan check (its done_when and proven_by together), kept rule, review point, point to fix
 or author's reply of more than 1,000 characters is printed as its first 1,000 characters,
 followed by `(cut here; temet-work issue ISSUE prints it whole)`, or for a rule
-`(cut here; temet-work status prints it whole, under Rules)`. One of 1,000 characters or
-fewer is printed whole. Each later line of one is indented under it, so that none reads as
-another item of its list.
+`(cut here; temet-work status prints it whole, under Rules)`, or for a closed issue's id
+and title in an investigator's brief `(cut here; temet-work closed GROUP prints it
+whole)`. One of 1,000 characters or fewer is printed whole. Each later line of one is
+indented under it, so that none reads as another item of its list.
 
 The parts of a brief take the room in this order:
 
@@ -459,26 +463,31 @@ The parts of a brief take the room in this order:
    long. The checks before it leave it at least 16 KiB.
 4. The latest kept rules that fit, after a line counting the others and naming
    `temet-work status`, which lists every kept rule whole under Rules.
-5. For an arbiter, the latest earlier review rounds that fit, each whole, after a line
+5. For an investigator, the issues a person closed, one to a line: the first in the
+   tracker's order that fit in the room the kept rules leave, none cut to fit, followed by
+   a line counting the others and naming `temet-work closed GROUP`, which prints every
+   one.
+6. For an arbiter, the latest earlier review rounds that fit, each whole, after a line
    counting the others and naming `temet-work issue`.
 
 A next-round or fix message takes its room the same way, without rules. The `ready` an
 author's brief and fix message end with lists one `--reply` for each point of the block,
 and a block takes at most 300 points, so that list stays under 10 KB; for a block of more
 from an older log, it gives the first and the last `--reply` and the number of points.
-When the plain parts alone would take a text over the limit, as a long list of the issues
-a person closed can in an investigator's brief, the longest is cut, with a line saying so.
+When the plain parts alone would take a text over the limit, as long `investigate`
+settings can in an investigator's brief, the longest is cut, with a line saying so.
 The command the agent reports with is never cut.
 
 `plan`, `review`, `ready`, `rule`, `choose` and `overturn` store their text with every
 control character dropped but the line feed and the tab: ESC, NUL, VT, FF, BS, DEL and the C1
 controls among them. A carriage return, alone or before a line feed, NEL (U+0085) and the
 line and paragraph separators (U+2028 and U+2029) are stored as a line feed. Briefs,
-messages and `temet-work issue` print text the same way when it was logged before this,
-and the text a code host gives a point to fix. A choice keeps its question and each option
-on one line, each run of spaces and line breaks in them stored as one space, so that
-`status` lists the decision on one line and `--took` matches an option however it was
-wrapped.
+messages, `temet-work issue` and `temet-work status` (rules and decisions) print text the
+same way when it was logged before this. Briefs, messages and `temet-work issue` also
+print the text a code host gives a point to fix that way, and briefs and `temet-work
+closed` a closed issue's title. A choice keeps its question and each option on one line,
+each run of spaces and line breaks in them stored as one space, so that `status` lists
+the decision on one line and `--took` matches an option however it was wrapped.
 
 ## Overturning a decision
 

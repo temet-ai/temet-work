@@ -590,7 +590,9 @@ const POINTS: (&str, &str) = ("point", "points");
 /// and the pull requests; then the checks and the points it judges or answers;
 /// for an arbiter, then its latest review round; then the latest kept rules
 /// that fit, after a line counting the others and naming `temet-work status`;
-/// last, an arbiter's earlier review rounds.
+/// then, for an investigator, the first issues a person closed that fit, ended
+/// by a line counting the others and naming `temet-work closed`; last, an
+/// arbiter's earlier review rounds.
 /// What every brief says, before its kept rules, about a person stopping the agent in its own
 /// terminal. Dawid agreed to this wording on 28 Nov 2026.
 pub const STOP: &str = "If a person types into this terminal and tells you to stop, stop: do no \
@@ -882,31 +884,20 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
         format!("What the projects add:\n{notes}")
     };
     // With none a person closed, the brief says nothing of them.
-    let (read_open, never, closed) = if what.closed.is_empty() {
+    let (read_open, never) = if what.closed.is_empty() {
         (
             "The open issues of each project, so you know what is covered already.",
             "Never file an issue an open one already covers.",
-            String::new(),
         )
     } else {
-        let list: Vec<String> = what
-            .closed
-            .iter()
-            .map(|i| format!("{} {}", i.id, i.title))
-            .collect();
         (
             "The open issues of each project, and the ones a person closed, listed below, so you \
              know what is covered already and what was turned down.",
             "Never file an issue that an open one, or one a person closed, already covers.",
-            format!(
-                "A person closed these issues. Never file one of them again, because closing an \
-                 issue is how a person says no, and a person who wants it built reopens it: {}\n",
-                list.join("; ")
-            ),
         )
     };
     let id = &g.id;
-    let parts = vec![
+    let mut parts = vec![
         Part::Whole(format!(
             "Investigate for group {name} ({id}): its work queue is short. Find the work that should \
              come next and file an issue for each item.\n\
@@ -935,12 +926,16 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
              waiting one's body with that line.\n\
              {never} Change no file.\n"
         )),
-        Part::Whole(closed),
+    ];
+    if !what.closed.is_empty() {
+        parts.extend(closed_list(id, &what.closed));
+    }
+    parts.extend([
         Part::Whole(notes),
         Part::Command(format!(
             "When you have filed every issue you found, run: temet-work investigated {id}"
         )),
-    ];
+    ]);
     Brief {
         role: Role::Investigator,
         issue: None,
@@ -949,6 +944,43 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
         permission: builtin_permission(),
         folder: place.folder,
     }
+}
+
+/// An issue a person closed, in the words an investigator's brief and
+/// `temet-work closed` give it.
+pub(crate) fn closed_issue(issue: &Issue) -> String {
+    format!("{} {}", issue.id, issue.title)
+}
+
+/// The issues a person closed as `group`'s investigator's brief lists them,
+/// under a line saying what they are: one entry each, the first that fit in the
+/// room the kept rules leave, then a line counting the others and naming the
+/// command that prints every one.
+fn closed_list(group: &crate::ids::GroupId, closed: &[&Issue]) -> [Part; 2] {
+    let command = format!("temet-work closed {group}");
+    let pointer = format!(" (cut here; {command} prints it whole)");
+    let entries = closed
+        .iter()
+        .map(|i| entry("- ".into(), &closed_issue(i), &pointer))
+        .collect();
+    [
+        Part::Whole(
+            "A person closed these issues. Never file one of them again, because closing an \
+             issue is how a person says no, and a person who wants it built reopens it:\n"
+                .into(),
+        ),
+        Part::first(Rank::Closed, entries, move |left: Range<usize>| {
+            let issues = if left.len() == 1 {
+                "issue a person closed is"
+            } else {
+                "issues a person closed are"
+            };
+            format!(
+                "{} more {issues} left out here; {command} prints every one.\n",
+                left.len()
+            )
+        }),
+    ]
 }
 
 /// What an investigator hears when it has been idle a while.
