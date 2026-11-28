@@ -2,10 +2,10 @@
 //! what the row is, `meta` adds muted detail, `end` holds its status or its one action.
 
 use gpui::{
-    AnyElement, App, IntoElement, ParentElement, Pixels, RenderOnce, Styled, Window, div, px,
+    AnyElement, App, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, Styled, Window, div, px,
 };
 
-use super::{Class, apply, baseline, box_of, to_baseline, type_of};
+use super::{Class, ROW_GROUP, apply, baseline, box_of, to_baseline, type_of};
 use crate::theme::look::{self, State};
 use crate::theme::space;
 
@@ -176,7 +176,11 @@ impl RenderOnce for ListRow {
         } else {
             look::get(cx, "ListRow", "tm-row", rest)
         };
-        let mut row = box_of(div(), &look).flex().gap(space::s4(cx));
+        // The group a revealed action (`.tm-reveal`) shows on.
+        let mut row = box_of(div(), &look)
+            .group(ROW_GROUP)
+            .flex()
+            .gap(space::s4(cx));
         for class in &self.class_name {
             row = apply(row, *class, cx);
         }

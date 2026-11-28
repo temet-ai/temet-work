@@ -11,7 +11,7 @@
 //! design system measured for an element with that class.
 
 use gpui::{
-    App, Div, Font, ParentElement, Pixels, SharedString, Styled, StyledText, TextRun, Window, div,
+    App, Div, Font, InteractiveElement, IntoElement, ParentElement, Pixels, SharedString, Styled, StyledText, TextRun, Window, div,
     font, px,
 };
 
@@ -232,6 +232,24 @@ pub enum Class {
     ProblemsHead,
     /// `.tm-problems-title`: ProblemList's icon and title on one line.
     ProblemsTitle,
+}
+
+/// The group a ListRow's box belongs to, which [`reveal`] shows its action on.
+pub(crate) const ROW_GROUP: &str = "tm-row";
+/// A revealed action's opacity, hidden and shown: `.tm-reveal { opacity: 0 }`, and 1 on the row
+/// under the pointer.
+const HIDDEN: f32 = 0.;
+const SHOWN: f32 = 1.;
+
+/// `.tm-reveal`: an action every row has, such as Overturn, shown only on the row under the
+/// pointer. It keeps its place, so nothing moves when it shows, and takes clicks while hidden.
+/// (`.tm-row:focus-within` has no counterpart: GPUI styles no element by the focus inside it.)
+pub fn reveal(action: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .opacity(HIDDEN)
+        .group_hover(ROW_GROUP, |style| style.opacity(SHOWN))
+        .child(action)
 }
 
 /// The lines a long done-when shows until its row is opened: `.tm-check-clamp {
@@ -534,10 +552,12 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
                 .h(title.height)
                 .line_height(browser_line(cx, title.font_size, title.height))
         }
+        // `.tm-decision-issue { font-family: var(--bp-typography-family-mono) }`.
         Class::DecisionIssue => type_of(
             el,
             &look::get(cx, "DecisionRow", "tm-decision-issue tm-row-meta", rest),
-        ),
+        )
+        .font_family(text::code_family(cx)),
         Class::DecisionDone => type_of(
             el,
             &look::get(cx, "DecisionRow", "tm-decision-done tm-row-end", rest),

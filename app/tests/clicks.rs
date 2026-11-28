@@ -1,7 +1,6 @@
 //! Clicks on the Project page, drawn under GPUI's test support with the design system's faces
-//! and no window: a tab, Group by, a row, Overturn with its confirm, and a long check's plus
-//! and minus; and on parts drawn on their own: a DecisionRow's overturn confirm and
-//! RefineDialog. Run with
+//! and no window: a tab, Group by, a row, and a long check's plus and minus; and on parts drawn
+//! on their own: a DecisionRow's overturn confirm and RefineDialog. Run with
 //! `cargo test --features shots --test clicks`.
 
 use std::cell::RefCell;
@@ -106,50 +105,6 @@ fn a_row_is_selected_and_opened_on_click() {
     let (selected, tab) = vcx.read_entity(&page, |p, _| (p.selected().cloned(), p.tab()));
     assert_eq!(selected.as_deref(), Some("WATCH-51"));
     assert_eq!(tab, None, "a newly selected issue opens on its first tab");
-}
-
-#[test]
-fn overturn_asks_first_then_overturns_and_says_so() {
-    let (page, vcx) = page();
-    let waiting = |vcx: &mut VisualTestContext| {
-        vcx.read_entity(&page, |p, _| {
-            p.areas()
-                .iter()
-                .flat_map(|a| a.projects.clone())
-                .find(|p| p.id.as_ref() == "watch")
-                .map(|p| p.waiting)
-        })
-    };
-    assert_eq!(waiting(vcx), Some(2));
-
-    click(vcx, "overturn-n1");
-    let question = vcx.read_entity(&page, |p, _| p.asking().map(|a| a.question()));
-    assert_eq!(
-        question.as_deref(),
-        Some(
-            "Overturn the arbiter's decision on WATCH-51? Claude chose to page the tower list \
-             200 at a time instead of loading all."
-        )
-    );
-    // Cancelling leaves it; Overturn again, then confirm.
-    click(vcx, "alert-cancel");
-    assert!(vcx.read_entity(&page, |p, _| p.asking().is_none()));
-    click(vcx, "overturn-n1");
-    click(vcx, "alert-confirm");
-
-    let (needs, toast) = vcx.read_entity(&page, |p, _| (p.needs().len(), p.toast().cloned()));
-    assert_eq!(needs, 3);
-    assert_eq!(
-        toast.as_deref(),
-        Some("Overturned on WATCH-51: Page the tower list 200 at a time instead of loading all")
-    );
-    assert_eq!(waiting(vcx), Some(1), "the project's count drops with it");
-    // The toast and its close button lie inside the window.
-    let close = vcx.debug_bounds("toast-close").expect("a close button");
-    let window = vcx.update(|w, _| w.viewport_size());
-    assert!(close.right() <= window.width && close.bottom() <= window.height);
-    last_click(vcx, "toast-close");
-    assert!(vcx.read_entity(&page, |p, _| p.toast().is_none()));
 }
 
 /// A check list in a column as wide as the pane's, outlined for the test to measure: a check

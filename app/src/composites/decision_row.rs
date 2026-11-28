@@ -25,7 +25,7 @@ use crate::components::property_list::{LabelWidth, PropertyItem, PropertyList};
 use crate::components::radio_group::{Radio, RadioGroup};
 use crate::components::tag::Tag;
 use crate::components::text_area::TextArea;
-use crate::components::{Class, Intent, classed};
+use crate::components::{Class, Intent, classed, reveal};
 use crate::theme::space;
 
 /// How costly a decision is to undo.
@@ -363,16 +363,19 @@ impl RenderOnce for DecisionRow {
         } else if can && !open {
             let opening = confirm.clone();
             let options = d.options.clone();
+            // `.tm-reveal`: shown on the row under the pointer, keeping its place.
             Some(
-                Button::new(SharedString::from(format!("overturn-{id}")))
-                    .size(Size::Small)
-                    .variant(Variant::Outlined)
-                    .text("Overturn")
-                    .on_click(move |_, _, cx| {
-                        let draft = start(OverturnDraft::default(), &options);
-                        change(&opening, cx, |c| c.draft = Some(draft));
-                    })
-                    .into_any_element(),
+                reveal(
+                    Button::new(SharedString::from(format!("overturn-{id}")))
+                        .size(Size::Small)
+                        .variant(Variant::Outlined)
+                        .text("Overturn")
+                        .on_click(move |_, _, cx| {
+                            let draft = start(OverturnDraft::default(), &options);
+                            change(&opening, cx, |c| c.draft = Some(draft));
+                        }),
+                )
+                .into_any_element(),
             )
         } else {
             None
@@ -394,17 +397,22 @@ impl RenderOnce for DecisionRow {
             Some(at) => format!("{} · {at}", d.by),
             None => d.by.to_string(),
         };
-        let cost = d.cost.map(|cost| {
-            let icon = match cost {
-                UndoCost::Low => IconName::InfoSign,
-                _ => IconName::WarningSign,
-            };
-            Tag::new(cost.words()).icon(icon)
-        });
+        // Low is most decisions' cost, so only a costlier one says it.
+        let cost = d
+            .cost
+            .filter(|c| *c != UndoCost::Low)
+            .map(|cost| Tag::new(cost.words()).icon(IconName::WarningSign));
         let (meta_deadline, act_deadline) = if detailed {
             (None, deadline)
         } else {
             (deadline, None)
+        };
+        // With no deadline of its own to sit beside, a long decision's action goes at the right
+        // of the meta line (`.tm-decision-buttons-top`).
+        let (top_action, action) = if detailed && act_deadline.is_none() {
+            (action, None)
+        } else {
+            (None, action)
         };
         let meta = div()
             .flex()
@@ -419,7 +427,8 @@ impl RenderOnce for DecisionRow {
             )
             .child(by)
             .children(cost)
-            .children(meta_deadline);
+            .children(meta_deadline)
+            .children(top_action.map(|a| div().ml_auto().child(a)));
 
         let title = d.question.clone().unwrap_or_else(|| d.took.clone());
         let mut row = ListRow::new(title)
@@ -466,7 +475,7 @@ impl RenderOnce for DecisionRow {
             LabelWidth::Narrow
         };
         row = row.child(PropertyList::new(items).label_width(width));
-        if act_deadline.is_some() || action.is_some() {
+        if act_deadline.is_some() {
             // `.tm-decision-act`: the deadline at the left, the action kept at the right.
             row = row.child(
                 div()
