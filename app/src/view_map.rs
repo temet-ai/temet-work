@@ -412,24 +412,20 @@ fn milestones(view: &View, project: &ProjectId, now_ms: u64) -> Vec<Milestone> {
     out
 }
 
-/// The decisions that wait on a person, in the order Needs you lists them: those not overturned
-/// on an issue still open and not yet past the point where the loop acts on an overturn, the
-/// costliest to undo first, a ruling with no cost last, and the oldest first among equals.
+/// The decisions Needs you lists, oldest first: those an agent marked high to undo, not
+/// overturned, on an issue still open and not yet past the point where the loop acts on an
+/// overturn. A decision of low or medium cost, or a ruling with none, has gone ahead and needs
+/// no one; it is in its issue's pane, under Decisions.
 pub fn waiting(view: &View) -> Vec<&Decision> {
     let mut waiting: Vec<&Decision> = view
         .decisions
         .iter()
+        .filter(|d| undo_cost(d.cost) == Some(UndoCost::High))
         .filter(|d| d.overturned_to.is_none())
         .filter(|d| d.point.as_ref().is_none_or(|p| !p.passed))
         .filter(|d| view.issues.iter().any(|i| i.id == d.issue))
         .collect();
-    let rank = |d: &Decision| match undo_cost(d.cost) {
-        Some(UndoCost::High) => 0,
-        Some(UndoCost::Medium) => 1,
-        Some(UndoCost::Low) => 2,
-        None => 3,
-    };
-    waiting.sort_by_key(|d| (rank(d), d.id));
+    waiting.sort_by_key(|d| d.id);
     waiting
 }
 

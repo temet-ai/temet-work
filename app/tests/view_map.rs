@@ -184,14 +184,14 @@ fn milestones_carry_their_counts_due_dates_and_open_issues() {
 }
 
 #[test]
-fn needs_you_lists_open_decisions_costliest_first() {
+fn needs_you_lists_only_open_decisions_high_to_undo() {
     let view = parse(CURRENT);
     let page = watch(&view);
     let ids: Vec<_> = page.needs.iter().map(|n| n.id.to_string()).collect();
     assert_eq!(
         ids,
-        ["3", "1"],
-        "decision 2 is overturned and 4 is on an issue that is past its merge"
+        ["3"],
+        "1 is low to undo, 2 is overturned and 4 is on an issue that is past its merge"
     );
     let first = &page.needs[0].decision;
     assert_eq!(first.cost, Some(UndoCost::High));
@@ -203,7 +203,6 @@ fn needs_you_lists_open_decisions_costliest_first() {
         first.weighed.is_empty() && first.why.is_none(),
         "Needs you draws the short row; the pane has what was weighed and why"
     );
-    assert_eq!(page.needs[1].decision.cost, Some(UndoCost::Low));
     assert_eq!(
         page.need_project.get("3").map(|p| p.as_ref()),
         Some("watch")
@@ -216,24 +215,22 @@ fn needs_you_lists_open_decisions_costliest_first() {
     );
     // Seen from the other project, the same decisions name their project.
     let unseen = project_view(&view, None, NOW).expect("a project");
-    assert_eq!(unseen.needs.len(), 2);
+    assert_eq!(unseen.needs.len(), 1);
     assert_eq!(unseen.needs[0].decision.issue.as_deref(), Some("watch#4"));
     assert!(unseen.same_decision.is_empty());
 }
 
 #[test]
-fn a_decision_with_no_cost_comes_after_those_with_one() {
+fn a_decision_with_no_cost_is_not_in_needs_you() {
     for text in [BEFORE_COSTS, BEFORE_STATES] {
         let page = watch(&parse(text));
         let ids: Vec<_> = page.needs.iter().map(|n| n.id.to_string()).collect();
         assert_eq!(
             ids,
-            ["3", "1"],
+            ["3"],
             "1 has no cost; 2 is overturned; 4 is on a closed issue"
         );
         assert_eq!(page.needs[0].decision.cost, Some(UndoCost::High));
-        assert_eq!(page.needs[1].decision.cost, None);
-        assert_eq!(page.needs[1].decision.overturn_before, None);
     }
 }
 
