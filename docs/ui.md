@@ -31,7 +31,9 @@ only crate that may use a UI library (`tests/parts.rs`). Each part is one file n
 StatusTag is `app/src/components/status_tag.rs`, declaring `pub struct StatusTag`. The theme
 module, `app/src/theme.rs`, is the one file that reads `temet-work-style`. Every other file
 outside the layer folders is plumbing and draws nothing: `app/src/daemon.rs` reads the
-daemon's view once a second into an entity the window observes.
+daemon's view once a second into an entity the window observes, and `app/src/view_map.rs` maps
+that view into the Project page's props; the page's notice about the daemon (no answer, a stale
+view) is a Callout.
 
 These rules hold the layers in place:
 
@@ -189,7 +191,7 @@ is closed.
 
 | Page | What it shows | Built from | Design system |
 |---|---|---|---|
-| Project | one project: the nav bar, groups, machines and limits on the left; the project's milestones and issues in the middle; the selected issue or agent on the right (`docs/objects.md`) | AppShell, SideNav, GroupList, MeterList, PageHeader, NeedsYou, MilestonePanel, IssueTable, IssuePane, AgentPane, Alert, Toast | `pages-temet-work-radar` (RadarScreen) |
+| Project | one project: the nav bar, groups, machines and limits on the left (a list the view has no data for is left out); the project's milestones and issues in the middle; the selected issue or agent on the right (`docs/objects.md`) | AppShell, SideNav, GroupList, MeterList, PageHeader, NeedsYou, MilestonePanel, IssueTable, IssuePane, AgentPane, Callout, Alert, Toast | `pages-temet-work-radar` (RadarScreen) |
 | Area | one area: its projects' milestones as a list, its tracker and code-host groups in the page header (`docs/areas.md`) | AppShell, SideNav, PageHeader, MilestonePanel | gap |
 | Settings | the settings chain, global down to one task (`docs/settings.md`) | not defined yet | gap |
 | Rules | rules with where they came from, their state and what measures them (`docs/objects.md`) | not defined yet | gap |
@@ -202,6 +204,8 @@ PropertyList, Meter and ListRow are on the design system's branch `fleet/temet-w
 has not merged to its main yet, and `crates/style/src/tokens.rs` is synced from that branch.
 
 - TerminalView and AgentPane, once temet-work sends their definitions.
+- NonIdealState has no measured look in the token export, so the window shows a problem with no
+  view as a Callout alone. The page would use NonIdealState once its look is measured.
 
 ## Checks
 

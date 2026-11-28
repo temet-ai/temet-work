@@ -9,6 +9,7 @@ use gpui::{App, Context, IntoElement, ParentElement, Render, SharedString, Windo
 use crate::components::Intent;
 use crate::components::alert::Alert;
 use crate::components::app_shell::AppShell;
+use crate::components::callout::Callout;
 use crate::components::icon::IconName;
 use crate::components::segmented_control::{SegmentedControl, SegmentedControlOption};
 use crate::components::toast::{OverlayToaster, Toast};
@@ -25,7 +26,7 @@ use crate::composites::review_rounds::ReviewRound;
 use crate::composites::side_nav::{SideNav, SideNavArea};
 
 /// What the Project page shows, in the shape of its parts' props.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProjectView {
     /// The areas and projects. Each project's count is worked out from `needs`.
     pub areas: Vec<SideNavArea>,
@@ -48,6 +49,16 @@ pub struct ProjectView {
     /// The decision in an issue's pane that is the same as one in `needs`: the need's id, and
     /// the issue's key and the decision's id. Overturning either overturns both.
     pub same_decision: HashMap<SharedString, (SharedString, SharedString)>,
+}
+
+/// Something to tell the person about where the page's data comes from, such as the daemon not
+/// answering: a Callout above the page's content, or alone when the page has no view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Notice {
+    pub intent: Intent,
+    pub title: SharedString,
+    /// The lines under the title.
+    pub lines: Vec<SharedString>,
 }
 
 /// A milestone and its open issues.
@@ -217,6 +228,9 @@ pub const OVERTURNED: &str = "Overturned just now";
 /// The Project page: a window's view, holding what it shows and what the person has chosen.
 pub struct Project {
     view: ProjectView,
+    /// Whether there is no view to draw: the page then draws its notice and nothing else.
+    blank: bool,
+    notice: Option<Notice>,
     selection: Selection,
     grouping: Grouping,
     /// The open tab of the selected issue's pane; its first tab when none is chosen.
@@ -235,6 +249,8 @@ impl Project {
     pub fn new(view: ProjectView, selected: Option<SharedString>) -> Self {
         Self {
             view,
+            blank: false,
+            notice: None,
             selection: Selection::new(selected),
             grouping: Grouping::Milestone,
             tab: None,
@@ -243,6 +259,42 @@ impl Project {
             overturned_decisions: HashSet::new(),
             toast: None,
         }
+    }
+
+    /// A page with no view yet: it draws `notice` alone until [`Project::set_view`] gives it one.
+    pub fn blank(notice: Option<Notice>) -> Self {
+        let mut page = Self::new(ProjectView::default(), None);
+        page.blank = true;
+        page.notice = notice;
+        page
+    }
+
+    /// Replaces what the page shows with `view`, or with nothing for `None`. What the person
+    /// chose stays: the selected issue, Group by, the open tab, a question being asked and what
+    /// is overturned.
+    pub fn set_view(&mut self, view: Option<ProjectView>) {
+        self.blank = view.is_none();
+        self.view = view.unwrap_or_default();
+    }
+
+    /// Sets the notice above the page, or clears it.
+    pub fn set_notice(&mut self, notice: Option<Notice>) {
+        self.notice = notice;
+    }
+
+    /// The notice on show.
+    pub fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
+    }
+
+    /// Whether the page has no view to draw.
+    pub fn is_blank(&self) -> bool {
+        self.blank
+    }
+
+    /// The view the page draws.
+    pub fn view(&self) -> &ProjectView {
+        &self.view
     }
 
     /// Asks to overturn the decision `id` in Needs you: the confirm question opens.
@@ -450,11 +502,29 @@ impl Render for Project {
 
         let view = &self.view;
         let selected = self.selection.key().cloned();
-        let nav = SideNav::new(self.areas())
-            .selected(view.project.clone())
-            .child(GroupList::new(view.groups.clone()))
-            .child(MeterList::new("Machines", view.machines.clone()))
-            .child(MeterList::new("Limits", view.limits.clone()));
+        let notice = self.notice.as_ref().map(|n| {
+            let mut callout = Callout::new().intent(n.intent).title(n.title.clone());
+            for line in &n.lines {
+                callout = callout.child(line.clone());
+            }
+            callout
+        });
+        if self.blank {
+            return AppShell::new(SideNav::new(Vec::new()))
+                .children(notice)
+                .into_any_element();
+        }
+        // A list with nothing in it is left out, so no heading stands over an empty space.
+        let mut nav = SideNav::new(self.areas()).selected(view.project.clone());
+        if !view.groups.is_empty() {
+            nav = nav.child(GroupList::new(view.groups.clone()));
+        }
+        if !view.machines.is_empty() {
+            nav = nav.child(MeterList::new("Machines", view.machines.clone()));
+        }
+        if !view.limits.is_empty() {
+            nav = nav.child(MeterList::new("Limits", view.limits.clone()));
+        }
 
         let group_by = SegmentedControl::new(
             "group-by",
@@ -478,7 +548,10 @@ impl Render for Project {
             .note(format!("{}, costliest to undo first", open.len()))
             .on_overturn(ask_need);
 
-        let mut shell = AppShell::new(nav).child(header).child(needs);
+        let mut shell = AppShell::new(nav)
+            .children(notice)
+            .child(header)
+            .child(needs);
         match self.grouping.table() {
             None => {
                 for m in &view.milestones {
@@ -569,6 +642,6 @@ impl Render for Project {
                     .on_dismiss(update(Project::dismiss_toast)),
             );
         }
-        shell.child(alert).child(toaster)
+        shell.child(alert).child(toaster).into_any_element()
     }
 }

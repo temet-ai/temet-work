@@ -14,7 +14,8 @@ pub struct PlanCheck {
     pub done_when: SharedString,
     /// The command or action that shows it.
     pub proven_by: SharedString,
-    pub status: Status,
+    /// None when the daemon has no state for the check: no tag is drawn.
+    pub status: Option<Status>,
     /// Text in place of the status word, such as "Passed in 41 s".
     pub status_text: Option<SharedString>,
 }
@@ -37,20 +38,21 @@ impl RenderOnce for CheckList {
             .is_empty()
             .then(|| ListRow::new("No checks yet"));
         let rows = self.checks.into_iter().map(|c| {
-            let status = match c.status_text {
-                Some(text) => StatusTag::new(c.status).children(text),
-                None => StatusTag::new(c.status),
-            };
-            ListRow::new(c.done_when)
-                .strong(true)
-                .meta(spans(
-                    vec![
-                        ("Proven by ".into(), None),
-                        (c.proven_by, Some(Class::Mono)),
-                    ],
-                    cx,
-                ))
-                .end(status)
+            let status = c.status.map(|status| match c.status_text {
+                Some(text) => StatusTag::new(status).children(text),
+                None => StatusTag::new(status),
+            });
+            let row = ListRow::new(c.done_when).strong(true).meta(spans(
+                vec![
+                    ("Proven by ".into(), None),
+                    (c.proven_by, Some(Class::Mono)),
+                ],
+                cx,
+            ));
+            match status {
+                Some(status) => row.end(status),
+                None => row,
+            }
         });
         div().children(empty).children(rows)
     }

@@ -50,9 +50,9 @@ impl IssueTab {
 #[derive(Clone, Debug, PartialEq)]
 pub struct IssuePlan {
     /// The folder the work happens in, with its machine, such as omit:~/work/watch-2.
-    pub folder: SharedString,
+    pub folder: Option<SharedString>,
     /// How the work is merged.
-    pub merge: SharedString,
+    pub merge: Option<SharedString>,
     pub checks: Vec<PlanCheck>,
 }
 
@@ -60,14 +60,18 @@ pub struct IssuePlan {
 #[derive(Clone, Debug, PartialEq)]
 pub struct IssuePullRequest {
     pub number: u32,
-    pub branch: SharedString,
+    /// The repository it is in, when the issue has pull requests in more than one.
+    pub repo: Option<SharedString>,
+    /// Whether it has merged.
+    pub merged: Option<bool>,
+    pub branch: Option<SharedString>,
     /// Where its CI stands.
-    pub ci: Status,
+    pub ci: Option<Status>,
     /// Text in place of the CI status word, such as "CI passed in 3 m 12 s".
     pub ci_text: Option<SharedString>,
-    pub additions: u32,
-    pub deletions: u32,
-    pub files: u32,
+    /// Lines added and removed.
+    pub lines: Option<(u32, u32)>,
+    pub files: Option<u32>,
 }
 
 /// A decision taken on the issue, with an id to tell it apart.
@@ -218,10 +222,16 @@ impl RenderOnce for IssuePane {
             });
         }
         if let Some(plan) = self.plan {
-            let props = PropertyList::new(vec![
-                PropertyItem::new("Folder", plan.folder).mono(true),
-                PropertyItem::new("Merge", plan.merge),
-            ]);
+            let props = PropertyList::new(
+                [
+                    plan.folder
+                        .map(|folder| PropertyItem::new("Folder", folder).mono(true)),
+                    plan.merge.map(|merge| PropertyItem::new("Merge", merge)),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+            );
             let panel = div()
                 .flex()
                 .flex_col()
@@ -231,20 +241,31 @@ impl RenderOnce for IssuePane {
             tabs = tabs.child(Tab::new("plan", "Plan").panel(panel));
         }
         if let Some(pull) = self.pull {
-            let ci = match pull.ci_text {
-                Some(text) => StatusTag::new(pull.ci).children(text),
-                None => StatusTag::new(pull.ci),
-            };
-            let props = PropertyList::new(vec![
-                PropertyItem::new("Number", format!("#{}", pull.number)),
-                PropertyItem::new("Branch", pull.branch).mono(true),
-                PropertyItem::element("CI", ci),
-                PropertyItem::new(
-                    "Lines",
-                    format!("+{} \u{2212}{}", pull.additions, pull.deletions),
-                ),
-                PropertyItem::new("Files", pull.files.to_string()),
-            ]);
+            let ci = pull.ci.map(|status| match pull.ci_text {
+                Some(text) => StatusTag::new(status).children(text),
+                None => StatusTag::new(status),
+            });
+            let props = PropertyList::new(
+                [
+                    Some(PropertyItem::new("Number", format!("#{}", pull.number))),
+                    pull.repo
+                        .map(|repo| PropertyItem::new("Repository", repo).mono(true)),
+                    pull.merged.map(|merged| {
+                        PropertyItem::new("State", if merged { "Merged" } else { "Open" })
+                    }),
+                    pull.branch
+                        .map(|branch| PropertyItem::new("Branch", branch).mono(true)),
+                    ci.map(|ci| PropertyItem::element("CI", ci)),
+                    pull.lines.map(|(added, removed)| {
+                        PropertyItem::new("Lines", format!("+{added} \u{2212}{removed}"))
+                    }),
+                    pull.files
+                        .map(|files| PropertyItem::new("Files", files.to_string())),
+                ]
+                .into_iter()
+                .flatten()
+                .collect(),
+            );
             tabs = tabs.child(Tab::new("pull", "Pull request").panel(props));
         }
         if let Some(rounds) = self.rounds {

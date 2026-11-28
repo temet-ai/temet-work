@@ -23,6 +23,7 @@ pub mod app_shell;
 pub mod attention_button;
 pub mod attention_text;
 pub mod button;
+pub mod callout;
 pub mod cut_panel;
 pub mod heading;
 pub mod html_table;
