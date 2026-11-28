@@ -48,6 +48,10 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// A commit to make: on top of what (none for a first commit), its files as
+/// (path, text), its message, and the ref to point at it.
+type ToCommit<'a> = (Option<&'a str>, &'a [(&'a str, &'a str)], &'a str, &'a str);
+
 /// A code host's repository: a bare origin the test writes commits into
 /// straight, as pushes would land, with `git fast-import`: one git command per
 /// commit.
@@ -82,7 +86,7 @@ impl Origin {
     /// Makes each commit as [`Origin::commit`] does, all in one `fast-import`,
     /// and gives their ids in order. A `from` of `:N` is the Nth commit of this
     /// list, counted from 1.
-    fn import(&self, commits: &[(Option<&str>, &[(&str, &str)], &str, &str)]) -> Vec<String> {
+    fn import(&self, commits: &[ToCommit<'_>]) -> Vec<String> {
         let mut stream = String::new();
         for (i, (from, files, message, to)) in commits.iter().enumerate() {
             let n = self.made.get() + 1;
