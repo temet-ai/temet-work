@@ -317,9 +317,11 @@ fn assign_sends_the_agent_picked_from_the_actions_menu() {
     });
     let (page, vcx) = page_sending_to(&socket);
     click(vcx, "issue-actions");
-    // The menu lists the agents a person may assign, each with the issue it is on now.
+    // The menu lists only the agents the view says a person may assign: not nw-1, a running
+    // refiner of the group that the issue's review does not need.
     click(vcx, "issue-actions-assign");
-    assert!(vcx.debug_bounds("assign-nw-1").is_some());
+    assert!(vcx.debug_bounds("assign-py-1").is_some());
+    assert!(vcx.debug_bounds("assign-nw-1").is_none());
     click(vcx, "assign-py-1");
     assert_eq!(
         socket.request(),

@@ -361,11 +361,9 @@ pub fn project_view() -> ProjectView {
         };
     let watch_44 = IssueDetail {
         id: s("watch#44"),
-        // A reviewer on another issue, and a free refiner; the author and reviewer on it now.
-        assignable: vec![
-            actions_agent("py-1", "watch#58"),
-            actions_agent("nw-1", "free"),
-        ],
+        // It is in review, so only a reviewer on another issue of its group and project may be
+        // assigned to it; the author and reviewer on it now may be unassigned.
+        assignable: vec![actions_agent("py-1", "watch#58")],
         assigned: vec![
             actions_agent("nw-2", "watch#44"),
             actions_agent("nw-3", "watch#44"),
