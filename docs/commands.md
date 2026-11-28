@@ -40,6 +40,7 @@ reports its step done.
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
 | `temet-work hold` | a person only: until a person resumes the daemon, no issue is taken, no investigation starts, and an issue with nothing merged gets no new agent, fix, review round or merge; agents at work finish their turn (see "Holding the daemon") | no issue: while the daemon is not held |
 | `temet-work resume` | a person only: work starts again | no issue: while the daemon is held |
+| `temet-work move ISSUE STAGE` | a person only. `STAGE` is one of the view's stage words: `new`, `refining`, `ready`, `working`, `in_review`, `fixing`, `arbitration`, `merging`, `deploying`, `verifying`, `done`; another word is refused with a list of them. Back to new the issue is refined again; back to ready a new author does it again from its plan (see "Moving an issue") | to new: refining, ready, working, in review, fixing or with the arbiter; to ready: working, in review, fixing or with the arbiter; either only while none of its pull requests has merged. Every other move is refused with its reason |
 | `temet-work file PROJECT TITLE BODY [--milestone M]` | only the investigator of a group whose investigation is running, for a project or area its group takes issues from; `BODY` `-` reads it from standard input. The reply names the new issue and how a "Depends on" line names it | no issue: while the group's investigation runs. The milestone is the last in the group's list when none is named; one the group does not take is refused, and a group with no milestones files with none. A title an open issue of that project already has is refused, and so is the title of an issue a person closed in that project (one the loop did not close after verifying it, with none of its pull requests merged); the reply names the issue |
 | `temet-work investigated GROUP` | only the investigator of GROUP whose investigation is running: the investigation ends and the investigator's session is stopped | no issue: while GROUP's investigation runs |
 | `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`, `run_in` and `investigate`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role. `--role` is for the settings that take a role (`docs/settings.md`, Roles) | any for a person; refining for a refiner |
@@ -70,8 +71,13 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
 - `file` and `investigated` belong to a group's running investigator, which works for its
   group and on no issue. A person, another agent, or an investigator whose investigation
   has ended is refused with the reason; a person files issues in the tracker itself.
-- `hold` and `resume` are a person's alone, as `retry`, `overturn` and `proposal` are. An
-  agent is refused: it finishes its step.
+- `hold`, `resume` and `move` are a person's alone, as `retry`, `overturn` and `proposal`
+  are. An agent is refused: it finishes its step.
+- After a person moves an issue, a step from an agent that started before the move is
+  refused, and so are its `choose` and a refiner's `set`, with a reason that names the
+  move: `plan for radar#44 is refused: a person moved radar#44 to new after refiner-3
+  started, so its step is over and its session is being stopped; refiner-5 is working on
+  it now`.
 
 ## How the daemon knows who sent a command
 
@@ -103,8 +109,8 @@ itself is in no log, reply, status or issue text.
   `settings` still answer it. An agent's own `temet-work` stays alive and readable while
   it waits for the reply.
 - A command that names no agent is a person's. It may read from anywhere. A command that
-  changes something (`rule`, `overturn`, `retry`, `proposal`, `hold`, `resume`, `set` and
-  `unset`) is
+  changes something (`rule`, `overturn`, `retry`, `proposal`, `hold`, `resume`, `move`, `set`
+  and `unset`) is
   refused when it carries an agent's secret; when, on Linux, the sending process or one of
   its parents holds a secret this daemon issued, which still holds after the agent unsets
   both variables with `env -u`; when the sending process cannot be read; or when it came
@@ -197,7 +203,9 @@ decisions and problems (`crates/core/src/view.rs`; what it carries is listed in
 `docs/privacy.md`). Issue ids are `project#key`, each stage and agent state is a
 fixed word with the text form's words beside it, each check's state (`passed`, `running`,
 `waiting`, `failed`) and each review point's state (`open`, `resolved`) is a fixed word, and
-decision options are numbered from 1.
+decision options are numbered from 1. Each issue lists the stages a person may move it to
+(`moves`), worked out by the rule `move` is checked by, so a front end offers only moves the
+daemon takes; an issue that may not be moved lists none.
 Times, such as when an issue last changed, are milliseconds since 1970, and due dates are
 `YYYY-MM-DD`; a value temet-work does not know, such as a due date the tracker does not
 give, is `null`. `--json` on any other command is refused
@@ -207,8 +215,8 @@ like any other.
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
 `status`, `issue`, `screen` and `settings`; `act` adds `plan`, `ready`, `review`, `rule`,
-`choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `file`, `investigated`, `set`
-and `unset`.
+`choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `move`, `file`, `investigated`,
+`set` and `unset`.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
@@ -258,6 +266,71 @@ lifts it; `status --json` gives `held`, true or false, and `held_since`, the tim
 or `null`. A `hold` while the daemon is held, and a `resume` while it is not, are refused
 with the reason. On `resume` the loop takes issues and places authors at once, and the
 next round starts what each issue's stage needs.
+
+## Moving an issue
+
+`temet-work move ISSUE STAGE` moves an issue back to an earlier stage, as the window's
+Move to does. A person runs it from a shell outside any agent's terminal; it is refused
+from an agent, as `overturn` is (see "How the daemon knows who sent a command"). Two moves
+are taken, both backwards, and only while none of the issue's pull requests has merged:
+
+- Back to new, from refining, ready, working, in review, fixing or with the arbiter: the
+  issue is refined again from nothing. It has no group and no plan, and is taken for
+  refining again in its turn, by milestone and tracker order, once its group has a
+  refining slot free, by a fresh refiner.
+- Back to ready, from working, in review, fixing or with the arbiter: a new author does it
+  again from its plan. It keeps its plan and its group, and each of the plan's checks goes
+  back to waiting. A new author, never the old one, starts once a work folder is free in
+  each repository it changes and the issues it depends on are done.
+
+Either move:
+
+- Stops every agent running on the issue: its refiner, author, reviewer and arbiter. Each
+  one's step is over for good, also once a fresh agent works on the issue at the same
+  stage. The loop asks its stop again each round until it has ended, after a restart too.
+  It is not reminded, nothing more is typed into it (neither a fix or round queued for it
+  before the move, nor `continue` after a usage limit), its end does not count toward
+  `starts`, and its `plan`, `ready`, `review`, `rule`, `choose` or `set` is refused with a
+  reason that names the move.
+- Releases every work folder the issue held. No author is placed in one while an agent
+  that held it runs, so the new author takes another free folder, or waits until the old
+  author has ended.
+- Drops the issue's pull requests, their branches and the notes of any a person closed,
+  its points to fix, its approval, its check results, a waived review and its review
+  rounds, so its next change starts at round 1. The pull requests stay open on the code
+  host, for the person to close or reuse.
+- Keeps its decisions, its issue-level settings, and what a failed verify left: the line
+  under Problems and the reopen in its tracker.
+
+A move is taken while the daemon is held, since it starts nothing: the issue's agents are
+stopped and its folders released at once, and no refiner or author starts on it until a
+person resumes the daemon.
+
+The reply says the stage the issue is at now, which is the next one when the loop took it
+at once: `radar#44 is new`, `radar#44 is refining` when a refining slot was free, or
+`radar#44 is working` when a folder was free. It names each pull request the move dropped:
+`radar#44 is ready; the move dropped its pull request 57, which is left open on the code
+host for you to close or reuse`.
+
+Every other move is refused with its reason, and nothing is logged:
+
+| Move | Reason given |
+|---|---|
+| To the stage the issue is at | it is already there |
+| To ready from new or refining | it has no plan yet: its refiner's plan moves it to ready |
+| To refining | the loop takes an issue at new for refining when its group has a refining slot free: move it to new |
+| To working | the loop starts an author on a ready issue once a work folder is free: move it to ready |
+| To in_review | its author's `ready` puts it in review |
+| To fixing | a reviewer's block, an arbiter's ruling, a failed check or a conflict sends it back to its author |
+| To arbitration | the loop hands it to an arbiter when the review rounds run out with the reviewer still blocking |
+| To merging | the loop merges it once its review and its checks have passed |
+| To deploying or verifying | the loop deploys and verifies it after its merge |
+| Any move of an issue merging, deploying or verifying, or with a pull request merged | the loop cannot undo a merge: the issue finishes, and once it is done a person reopens it in its tracker to have it worked again |
+| To done | close it in its tracker, and the loop takes it as done at the next sync |
+| Out of done | reopen it in its tracker |
+| A stage word this build does not know | the reply lists the words |
+
+The move is an event in the log, with the issue and the stage, so a restart keeps it.
 
 ## What a brief holds
 
