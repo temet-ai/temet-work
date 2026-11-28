@@ -131,8 +131,8 @@ it is closed. The Project page draws neither now: it sends no overturn until tem
 |---|---|---|---|
 | AppShell | `temet-appshell` | regions: nav bar, main area, side pane, optional top bar; `sideOver`, the pane over the right of the main column, where only a wide child (StageBoard) runs under it (`wide_child`); a side holding IssuePane neither pads nor scrolls and ends where the pane ends, no taller than the window, with an edge under it (`side_fit`, `.tm-shell-pane:has(.tm-issue-pane)`) | |
 | Icon | `blueprint-icon` | 16, 20 px; `intent`, as ProblemList draws its icon in the danger colour | `icon` |
-| Button | `blueprint-button` | `variant` solid, minimal, outlined; `intent` none, primary; `size` small, medium; `icon`; `loading`; `disabled` | `button` |
-| AttentionButton | `temet-attentionbutton` | `size` small | `button` |
+| Button | `blueprint-button` | `variant` solid, minimal, outlined; `intent` none, primary; `size` small, medium; `icon`; `loading`; `disabled`. Only the primary solid button was measured disabled; the others follow Blueprint's `.bp6-button:disabled` rules. A loading button draws Blueprint's spinner standing still | `button` |
+| AttentionButton | `temet-attentionbutton` | `size` small; `loading`, drawn as a disabled small outlined Button with its spinner | `button` |
 | AttentionText | `temet-attentionbutton` (subcomponent) | | `label` |
 | Tag | `temet-tag` | `minimal`; `intent` none, primary, success, warning, danger; `icon`; `interactive`. Story: Intents. In the dark theme the warning and danger tags are outlined in their colour with no wash; in the light theme the warning tag is a neutral tag and the danger tag keeps its red wash, as the design system measured them | `tag` |
 | StatusTag | `temet-statustag` | `status` (9); `size` medium, large; own word | Tag and Icon |
@@ -142,8 +142,8 @@ it is closed. The Project page draws neither now: it sends no overturn until tem
 | ProgressBar | `blueprint-progressbar` | `intent` primary; `stripes` off; `animate` off | `progress` |
 | Spinner | `blueprint-spinner` | | `spinner` |
 | Divider | `blueprint-divider` | | `separator` |
-| InputGroup | `temet-inputgroup` | `leftIcon` (search); `size` small, medium | `input` |
-| TextArea | `blueprint-textarea` | | `input` |
+| InputGroup | `temet-inputgroup` | `leftIcon` (search); `size` small, medium; `intent` danger; `fill`; `disabled`. Stories: Labelled, Small, Disabled. Its box is the measured look; gpui-component's single-line input, without its own box, edits the text, held under the field's id | `input` (Input) |
+| TextArea | `blueprint-textarea` | `fill`; `autoResize`; `disabled`; the code face with `className` `Mono` (`.tm-refine-row textarea.tm-mono`). Story: Auto Resize. Its box is the measured `fill` look at rest and in focus; disabled it takes the disabled InputGroup's look, which Blueprint draws with the same rules | `input` (Textarea) |
 | HTMLSelect | `blueprint-htmlselect` | | `select` |
 | Switch | `blueprint-switch` | | `switch` |
 | Checkbox | `blueprint-checkbox` | | `checkbox` |
@@ -154,9 +154,11 @@ it is closed. The Project page draws neither now: it sends no overturn until tem
 | Popover | `blueprint-popover` | | `popover` |
 | ContextMenu | `blueprint-contextmenu` | | `menu` |
 | Alert | `blueprint-alert` | `intent` primary; `cancelButtonText`, `confirmButtonText` | `dialog` |
-| Dialog | `blueprint-dialog` | | `dialog` |
+| Dialog | `blueprint-dialog` | `title`; `icon`; `className` `Refine` (`.tm-refine`, `--tm-dialog-wide`); the footer's `actions`, as `DialogFooter` takes them. Closes on its close button, Escape and a click on the backdrop | |
+| FormGroup | `blueprint-formgroup` | `label`. No measured look: Blueprint's `.bp6-form-group` and `label.bp6-label` rules | |
+| RadioGroup, Radio | `blueprint-radiogroup` | `label`; `inline`; `disabled`; `selectedValue`. Stories: Options, Inline, Disabled. No measured look: the circle, its accent fill and dot follow Blueprint's `.bp6-control.bp6-radio` rules with the theme's tokens | |
 | Toast, OverlayToaster | `blueprint-toast` | `icon`; `position` bottom-right; no `timeout` (no duration token) | `notification` |
-| Callout | `blueprint-callout` | `intent`; `compact` | `alert` |
+| Callout | `blueprint-callout` | `intent`; `compact`, padded by Blueprint's `.bp6-callout.bp6-compact` rules | `alert` |
 | NonIdealState | `blueprint-nonidealstate` | | `empty` |
 | Omnibar | `blueprint-omnibar` | | `command` |
 | HTMLTable | `blueprint-htmltable` | `compact`; `interactive` | `table`, `virtual_list` |
@@ -181,7 +183,8 @@ it is closed. The Project page draws neither now: it sends no overturn until tem
 | MeterList | the left column's machines (build slots in use) and limits (use per window, when it resets); not on the Project page, whose view holds neither | Heading, Meter | `temet-meterlist` |
 | PageHeader | the top of the main area: the project or area name, where its issues and code are, and the controls for the whole page in a row after `actionsLabel`, such as View and, on the list, a muted "Group by" (`Classes.TEXT_MUTED`, `Class::TextMuted`) and Group by | Heading, Icon, SegmentedControl, Button | `temet-pageheader` |
 | NeedsYou | the decisions that wait on a person, costliest to undo first. The window keeps this form, from before the design system drew Needs you by issue; that redesign is temet-work#258 | CutPanel (`attention`, `buildUp`), AttentionText, DecisionRow | `temet-needsyou` |
-| DecisionRow | one agent decision: who, when, what it took, the cost to undo, what it weighed and why, the deadline and Overturn | ListRow, Tag, PropertyList, AttentionText, AttentionButton | `temet-decisionrow` |
+| DecisionRow | one agent decision: who, when, the cost to undo, the agent's question with what it took, the other options and why (or what it weighed), the deadline and Overturn; Overturn opens a confirm in the row: the option to switch to, a reason, Cancel and Overturn, busy while sent, the failure above the buttons. Without a question, the short form: what it took as the title and the button at the right. Stories: Short, Overturn Ready, No Options, With Question, With Question Overturning, One Other Option, Sending, Not Sent, Sent | ListRow, Tag, PropertyList, Button, AttentionButton, RadioGroup, TextArea, Callout | `temet-decisionrow` |
+| RefineDialog | an issue's title and its plan's checks, each a done-when and a proven-by in the code face, added and deleted in place; Save, and Save and send to refiner, both waiting for a title; closed unsaved by its close button, Escape and Cancel. Stories: Default, No Plan | Dialog, FormGroup, InputGroup, TextArea, Button | `temet-refinedialog` |
 | MilestonePanel | one milestone: name, done of total, due date, progress, and its issues; `note`, muted after the figures, such as "no group takes it". Stories: Default, Not Taken | CutPanel, Section, ProgressBar, IssueTable | `temet-milestonepanel` |
 | IssueTable | issues as rows: key, title, stage, agent, updated; `showMilestone`, a Milestone column; `showAgent`; a narrow table leaves out Updated, a narrower one Agent too; optional group rows, stages from the furthest along, a stage's row with no count (StageCounts says it), a group's with its count; one set of column widths in every panel. Story: By Stage With Milestone | HTMLTable, TableRow, StageTag | `temet-issuetable` |
 | IssuePane | the side pane for an issue: a head that stays put with a quiet rule under it (title, key, stage with its round, `actions` behind a button and, with `onClose`, a close button with the tooltip "Close (q)"; q closes it unless the focus is in a text field), then in its own scroll area the facts panel (CutPanel `here`) and tabs with their counts for its plan, pull request, review rounds and decisions; one of them alone has no tab row; `sharedDeadline`, which its decisions leave out. Stories: Decisions, Plan, Review, Pull Request, Facts Only, No Decisions, In The Shell | Heading, StageTag, Tabs, Tooltip, Popover, Button, CutPanel, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
@@ -231,4 +234,4 @@ request, beside the main workspace's job. Run the app's tests locally with
 | Every design-system id in this map is in the design system's part list, and each component and composite has that part's name | `review`, against `tokens::PARTS` | built |
 | Every `look::get` the app makes names a look both themes measured | `app/src/theme.rs` tests | built |
 | The window as the design system draws it: each theme at 1440, 1280 and 1700 px wide, each tab of the issue pane, the issues grouped by stage and by group, and nothing waiting on the person, drawn offscreen with GPUI's headless renderer, with no window or compositor, beside the design system's story shots | `cargo run --example shots --features shots -- DIR` in `app/` | built; compared by eye |
-| StageTag, Tag, CheckList and CutPanel as their stories draw them, in each theme at 1440 px: the `part-` shots, named after each story's id (`part-temet-stagetag--all-stages-dark`) | the same command | built; compared by eye |
+| StageTag, Tag, CheckList, CutPanel, TextArea, InputGroup, RadioGroup, RefineDialog and DecisionRow as their stories draw them, in each theme at 1440 px: the `part-` shots, named after each story's id (`part-temet-stagetag--all-stages-dark`) | the same command | built; compared by eye |

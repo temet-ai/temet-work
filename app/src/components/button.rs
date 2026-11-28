@@ -4,8 +4,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, Styled, Window, div,
+    App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement, PathBuilder,
+    Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, canvas, div,
+    point,
 };
 
 use super::icon::{Icon, IconName};
@@ -41,6 +42,8 @@ pub struct Button {
     variant: Variant,
     size: Size,
     class_name: Option<Class>,
+    disabled: bool,
+    loading: bool,
     on_click: Option<OnClick>,
 }
 
@@ -55,6 +58,8 @@ impl Button {
             variant: Variant::Solid,
             size: Size::Medium,
             class_name: None,
+            disabled: false,
+            loading: false,
             on_click: None,
         }
     }
@@ -92,6 +97,19 @@ impl Button {
         self
     }
 
+    /// Draws it disabled: it takes no click.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Shows a spinner in place of its text and icon, at the same size, and takes no click, as
+    /// while what it started is under way.
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
+        self
+    }
+
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -117,6 +135,62 @@ fn button_look(cx: &App, variant: Variant, intent: Intent, size: Size, state: St
             }
         }
     }
+}
+
+/// A disabled button's look, from its look at rest. The export measured only the primary
+/// solid button disabled; the others follow Blueprint's `.bp6-button:disabled` rules: no
+/// shadow and the disabled text colour; a faint fill on a solid button, no fill on a minimal
+/// or outlined one, and an outlined one's border in the default border colour.
+pub(crate) fn disabled_look(cx: &App, variant: Variant, intent: Intent, size: Size) -> Look {
+    if (variant, intent) == (Variant::Solid, Intent::Primary) {
+        let look = button_look(cx, variant, intent, size, State::Disabled);
+        return Look {
+            shadow: Vec::new(),
+            ..look
+        };
+    }
+    let rest = button_look(cx, variant, intent, size, State::Rest);
+    let (background, border_colour) = match variant {
+        Variant::Solid => (colour::disabled_fill(cx), rest.border_colour),
+        Variant::Minimal => (gpui::transparent_black(), rest.border_colour),
+        Variant::Outlined => (gpui::transparent_black(), Some(colour::border(cx))),
+    };
+    Look {
+        background,
+        text: colour::disabled_text(cx),
+        border_colour,
+        shadow: Vec::new(),
+        ..rest
+    }
+}
+
+/// Blueprint's spinner at the icon size, in place of a busy button's text: a faint ring and a
+/// quarter of it drawn from the top, as `.bp6-spinner` with no value draws it standing still.
+pub(crate) fn spinner(cx: &App) -> impl IntoElement {
+    let (radius, width) = size::spinner(cx);
+    let (track, head) = colour::spinner(cx);
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let centre = bounds.center();
+            let radii = point(radius, radius);
+            let top = point(centre.x, centre.y - radius);
+            let mut ring = PathBuilder::stroke(width);
+            ring.move_to(top);
+            ring.arc_to(radii, Pixels::ZERO, false, true, point(centre.x, centre.y + radius));
+            ring.arc_to(radii, Pixels::ZERO, false, true, top);
+            if let Ok(path) = ring.build() {
+                window.paint_path(path, track);
+            }
+            let mut arc = PathBuilder::stroke(width);
+            arc.move_to(top);
+            arc.arc_to(radii, Pixels::ZERO, false, true, point(centre.x + radius, centre.y));
+            if let Ok(path) = arc.build() {
+                window.paint_path(path, head);
+            }
+        },
+    )
+    .size(size::icon(cx))
 }
 
 /// The medium button's measured look in a variant, intent and state.
@@ -158,31 +232,56 @@ fn variant_look(cx: &App, variant: Variant, intent: Intent, state: State) -> Loo
 
 impl RenderOnce for Button {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let rest = button_look(cx, self.variant, self.intent, self.size, State::Rest);
+        let off = self.disabled || self.loading;
+        let rest = if off {
+            disabled_look(cx, self.variant, self.intent, self.size)
+        } else {
+            button_look(cx, self.variant, self.intent, self.size, State::Rest)
+        };
         let hover = button_look(cx, self.variant, self.intent, self.size, State::Hover);
         let active = button_look(cx, self.variant, self.intent, self.size, State::Active);
         let selector = format!("{}", self.id);
         let icon_only = self.text.is_none();
-        // `.bp6-button .bp6-icon` is muted; an intent's button draws its icon in its text colour.
+        // `.bp6-button .bp6-icon` is muted; an intent's button draws its icon in its text colour,
+        // and a disabled one in its text's (`color: inherit`).
         let intent = self.intent;
-        let icon = self.icon.map(|icon| match intent {
-            Intent::None => Icon::new(icon).color(colour::muted(cx)),
+        let icon = self.icon.map(|icon| match (intent, off) {
+            (Intent::None, false) => Icon::new(icon).color(colour::muted(cx)),
             _ => Icon::new(icon),
         });
         let mut button = box_of(type_of(div().id(self.id), &rest), &rest)
             .debug_selector(|| selector)
+            .relative()
             .flex()
             .flex_none()
             .items_center()
             .justify_center()
-            .gap(size::tag_gap(cx))
+            .gap(size::button_gap(cx))
             .h(rest.height)
-            .min_w(rest.height)
-            .cursor_pointer()
-            .hover(move |style| style.bg(hover.background).text_color(hover.text))
-            .active(move |style| style.bg(active.background))
-            .children(icon)
-            .children(self.text);
+            .min_w(rest.height);
+        if self.loading {
+            // `.bp6-button.bp6-loading > :not(.bp6-button-spinner) { visibility: hidden }`: the
+            // text keeps the button's width under the spinner.
+            button = button
+                .child(div().flex().gap(size::button_gap(cx)).invisible().children(icon).children(self.text))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(spinner(cx)),
+                );
+        } else {
+            button = button.children(icon).children(self.text);
+        }
+        if !off {
+            button = button
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover.background).text_color(hover.text))
+                .active(move |style| style.bg(active.background));
+        }
         if icon_only {
             // An icon alone sits in a square button, `.bp6-button:empty`.
             button = button.px(gpui::Pixels::ZERO);
@@ -190,7 +289,7 @@ impl RenderOnce for Button {
         if let Some(class) = self.class_name {
             button = apply(button, class, cx);
         }
-        if let Some(handler) = self.on_click {
+        if let Some(handler) = self.on_click.filter(|_| !off) {
             button = button.on_click(move |event, window, cx| handler(event, window, cx));
         }
         button

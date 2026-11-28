@@ -60,6 +60,7 @@ pub struct PropertyItem {
     label: SharedString,
     value: PropertyValue,
     mono: bool,
+    field: bool,
 }
 
 impl PropertyItem {
@@ -68,6 +69,7 @@ impl PropertyItem {
             label: label.into(),
             value: PropertyValue::Text(value.into()),
             mono: false,
+            field: false,
         }
     }
 
@@ -77,6 +79,7 @@ impl PropertyItem {
             label: label.into(),
             value: PropertyValue::Element(value.into_any_element()),
             mono: false,
+            field: false,
         }
     }
 
@@ -86,7 +89,16 @@ impl PropertyItem {
             label: label.into(),
             value: PropertyValue::Set(values),
             mono: false,
+            field: false,
         }
+    }
+
+    /// A value that is a text field, such as the reason in DecisionRow's overturn confirm:
+    /// its label sits level with the field's middle, where `.tm-overturn-fields { align-items:
+    /// baseline }` puts it beside a text area.
+    pub fn field(mut self, field: bool) -> Self {
+        self.field = field;
+        self
     }
 
     /// A value that is one link or several, such as the issues an issue waits for.
@@ -95,6 +107,7 @@ impl PropertyItem {
             label: label.into(),
             value: PropertyValue::Links(links),
             mono: false,
+            field: false,
         }
     }
 
@@ -164,10 +177,13 @@ impl RenderOnce for PropertyList {
                     .gap(space::s2(cx))
                     .children(links.into_iter().map(|link| anchor(link, cx))),
             };
-            div()
-                .flex()
-                .items_start()
-                .gap(space::s4(cx))
+            let row = div().flex().gap(space::s4(cx));
+            let row = if item.field {
+                row.items_center()
+            } else {
+                row.items_start()
+            };
+            row
                 .child(
                     div()
                         .flex_none()

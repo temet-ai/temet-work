@@ -50,11 +50,14 @@ pub enum IconName {
     // A project in SideNav, and closing a pane.
     GitRepo,
     Cross,
+    // RefineDialog's checks: delete one, add one.
+    Trash,
+    Add,
 }
 
 impl IconName {
     /// Every icon the app embeds.
-    pub const ALL: [IconName; 34] = [
+    pub const ALL: [IconName; 36] = [
         Self::TickCircle,
         Self::Refresh,
         Self::Time,
@@ -89,6 +92,8 @@ impl IconName {
         Self::Search,
         Self::GitRepo,
         Self::Cross,
+        Self::Trash,
+        Self::Add,
     ];
 
     /// Blueprint's name for the icon, such as `tick-circle`.
@@ -128,6 +133,8 @@ impl IconName {
             Self::Search => "search",
             Self::GitRepo => "git-repo",
             Self::Cross => "cross",
+            Self::Trash => "trash",
+            Self::Add => "add",
         }
     }
 
