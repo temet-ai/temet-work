@@ -628,4 +628,63 @@ mod tests {
             Ok(())
         );
     }
+
+    #[test]
+    fn admit_refuses_a_refine_from_an_agent_however_it_came() {
+        let w = world();
+        let refine = Command::Refine {
+            issue: IssueId::new("ankh", "1"),
+            title: Some("The gate shuts at dusk".into()),
+            checks: None,
+            send: true,
+        };
+        let carried = w
+            .admit(&sender(None, Some("a"), Peer::Read(vec![])), &refine)
+            .expect_err("an agent's secret");
+        assert!(
+            carried.starts_with("refine names no agent but carries author-1's secret"),
+            "{carried}"
+        );
+        let inside = w
+            .admit(&sender(None, None, Peer::Read(vec![d("b")])), &refine)
+            .expect_err("an agent's process tree");
+        assert!(
+            inside.starts_with("refine names no agent but comes from inside reviewer-1's"),
+            "{inside}"
+        );
+        let unread = w
+            .admit(
+                &sender(None, None, unreadable("process 7: gone", vec![])),
+                &refine,
+            )
+            .expect_err("a process that cannot be read");
+        assert!(unread.contains("process 7: gone"), "{unread}");
+        let far = w
+            .admit(&relayed(None, None, Peer::Read(vec![])), &refine)
+            .expect_err("relayed");
+        assert!(
+            far.starts_with("refine names no agent and came through temet-work relay"),
+            "{far}"
+        );
+        // Named as the agent with its own secret, the loop refuses it as an agent's.
+        assert_eq!(
+            w.admit(
+                &sender(Some("author-1"), Some("a"), Peer::Read(vec![d("a")])),
+                &refine
+            ),
+            Ok(())
+        );
+        let why = w
+            .events(Some(&AgentId::new("author-1")), &refine)
+            .expect_err("refused by the loop");
+        assert!(
+            why.starts_with("refine is a person's: author-1 is an agent"),
+            "{why}"
+        );
+        // A person outside any agent is taken at their word.
+        assert_eq!(
+            w.admit(&sender(None, None, Peer::Read(vec![])), &refine),
+            Ok(())
+        );
+    }
 }

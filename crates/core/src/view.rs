@@ -969,6 +969,15 @@ mod tests {
         at(watch("6"), Stage::Done, 1);
         at(watch("7"), Stage::Done, 0);
         at(IssueId::new("unseen", "1"), Stage::Ready, 0);
+        // A person holds watch#3 to checks of their own, one with nothing named
+        // to prove it.
+        w.issues.get_mut(&watch("3")).expect("synced").person_checks = vec![
+            model::Check::new(
+                "the clock keeps time through the night",
+                "comparing it with the Patrician's at dawn",
+            ),
+            model::Check::new("the key hangs by the door", ""),
+        ];
         // Within one round the loop moves all of an issue's checks together, so
         // watch#5's four states are put in the world directly.
         let check = |done_when: &str, proven_by: &str, state| model::Check {
@@ -1247,6 +1256,9 @@ mod tests {
         assert!(view.issues.iter().all(|i| i.checks.is_empty()));
         let view = without(SNAPSHOT, "reviews");
         assert!(view.issues.iter().all(|i| i.reviews.is_empty()));
+        // A daemon from before refine sends no person's checks.
+        let view = without(SNAPSHOT, "person_checks");
+        assert!(view.issues.iter().all(|i| i.person_checks.is_empty()));
         // Only a daemon from before #161 sends `replies`.
         let view = without(BEFORE_161, "replies");
         let mut points = view

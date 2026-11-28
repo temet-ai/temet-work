@@ -449,8 +449,8 @@ pub fn write(
     let (work, ready) = authors_work(id, &held, pulls);
     let to_review = to_review(pulls);
     let parts = match role {
-        Role::Refiner => vec![
-            Part::Whole(format!(
+        Role::Refiner => {
+            let mut parts = vec![Part::Whole(format!(
                 "Refine {id}: {title}. It is {source}.\n\
                  {LEAVE_THE_FOLDER}\n{area_note}Read the issue. {code}{area_read} Change no file here.\n",
                 title = issue.title,
@@ -459,9 +459,21 @@ pub fn write(
                     "this folder",
                     "outside this folder",
                 ),
-            )),
-            Part::Whole(record_choices(id)),
-            Part::Command(format!(
+            ))];
+            // Sent back by a person: the plan on record is the one this replaces.
+            if issue.plan.is_some() {
+                parts.push(Part::Whole(
+                    "It was refined before. The plan yours replaces had these checks:\n".into(),
+                ));
+                parts.push(checks(issue, false, &pointer));
+            }
+            parts.extend(person_checks(
+                issue,
+                "The person's checks, each a point your plan must hold:\n",
+                &pointer,
+            ));
+            parts.push(Part::Whole(record_choices(id)));
+            parts.push(Part::Command(format!(
                 "Then send the plan, one entry per check, as YAML on standard input:\n\
                  temet-work plan {id} - <<'PLAN'\n\
                  checks:\n  - done_when: one outcome a person can observe\n    proven_by: the command, test or page that shows it\n\
@@ -481,8 +493,9 @@ pub fn write(
                  {PLAIN_MODEL} \
                  Only a person sets {persons}: a plan that names one is refused.",
                 persons = only_a_persons().join(", "),
-            )),
-        ],
+            )));
+            parts
+        }
         Role::Author => {
             let mut parts = vec![Part::Whole(format!(
                 "Work on {id}: {title}. It is {source}.\n\
@@ -498,6 +511,11 @@ pub fn write(
                 "The plan's checks, each to hold before you finish:\n".into(),
             ));
             parts.push(checks(issue, false, &pointer));
+            parts.extend(person_checks(
+                issue,
+                "The person's checks, each to hold too:\n",
+                &pointer,
+            ));
             parts.push(Part::Command(format!("{ready}{replies}")));
             parts
         }
@@ -508,6 +526,11 @@ pub fn write(
                 title = issue.title,
             ))];
             parts.extend(to_judge(issue, round, &pointer));
+            parts.extend(person_checks(
+                issue,
+                "The person's checks; one the change does not meet is a point to block on:\n",
+                &pointer,
+            ));
             parts.push(Part::Whole(format!(
                 "{LEAVE_THE_FOLDER}\n\
                  Read the whole change, not only the last commit. Run the checks yourself where you can, \
@@ -529,6 +552,7 @@ pub fn write(
                 )),
                 checks(issue, false, &pointer),
             ];
+            parts.extend(person_checks(issue, "The person's checks:\n", &pointer));
             parts.extend(rounds(issue, &pointer));
             parts.push(Part::Whole(format!(
                 "{LEAVE_THE_FOLDER}\n\
@@ -681,6 +705,34 @@ fn checks(issue: &Issue, numbered: bool, pointer: &str) -> Part {
         .map(|(n, c)| entry(mark(numbered, n), &check_text(c), pointer))
         .collect();
     Part::acted_on(entries, left_out(&issue.id, ("check", "checks"), numbered))
+}
+
+/// The checks a person holds `issue` to, under `heading`, as a list a reader
+/// acts on, each cut with `pointer` as the plan's checks are; nothing when the
+/// person gave none.
+fn person_checks(issue: &Issue, heading: &str, pointer: &str) -> Vec<Part> {
+    if issue.person_checks.is_empty() {
+        return Vec::new();
+    }
+    let entries = issue
+        .person_checks
+        .iter()
+        .map(|c| {
+            let text = if c.proven_by.trim().is_empty() {
+                c.done_when.clone()
+            } else {
+                check_text(c)
+            };
+            entry(mark(false, 0), &text, pointer)
+        })
+        .collect();
+    vec![
+        Part::Whole(heading.to_string()),
+        Part::acted_on(
+            entries,
+            left_out(&issue.id, ("person's check", "person's checks"), false),
+        ),
+    ]
 }
 
 /// The line saying which items of a list of `issue`'s are left out, by their
@@ -2643,7 +2695,10 @@ mod tests {
             };
             write(role, issue, None, &[], place, &pulls, &rules).task
         };
-        let refiner = brief(Role::Refiner, &issue);
+        // A refiner of an issue no person sent back has no plan to list.
+        let mut new = issue.clone();
+        new.plan = None;
+        let refiner = brief(Role::Refiner, &new);
         let mut fixing = issue.clone();
         fixing.stage = Stage::Fixing { round: 1 };
         fixing.reviews = vec![block_of(1, points.clone())];
@@ -3075,5 +3130,133 @@ mod tests {
             .find("Rules from overturned decisions")
             .expect("the kept rules");
         assert!(stop < kept, "{task}");
+    }
+
+    /// The lamp issue with a plan of one check and the person's checks
+    /// `persons`, at `stage`.
+    fn lamp_held_to(persons: &[(&str, &str)], stage: Stage) -> Issue {
+        let mut issue = lamp_issue();
+        issue.plan = Some(plan_of(vec!["a dry lamp is refused".into()]));
+        issue.person_checks = persons.iter().map(|(d, p)| Check::new(*d, *p)).collect();
+        issue.stage = stage;
+        issue
+    }
+
+    const PERSONS: [(&str, &str); 2] = [
+        ("a lamp is filled before dusk", "the dusk test"),
+        ("Sam Vimes signs the oil log", ""),
+    ];
+
+    const LISTED: &str = "- a lamp is filled before dusk (shown by: the dusk test)\n\
+                          - Sam Vimes signs the oil log\n";
+
+    #[test]
+    fn a_refiners_brief_lists_the_persons_checks_as_points_its_plan_must_hold() {
+        let task = lamp_task(Role::Refiner, &lamp_held_to(&PERSONS, Stage::Refining));
+        assert!(
+            task.contains(&format!(
+                "The person's checks, each a point your plan must hold:\n{LISTED}"
+            )),
+            "{task}"
+        );
+        // Refined before: the plan it replaces is listed too.
+        assert!(
+            task.contains(
+                "The plan yours replaces had these checks:\n\
+                 - a dry lamp is refused (shown by: the gate test)\n"
+            ),
+            "{task}"
+        );
+    }
+
+    #[test]
+    fn an_authors_brief_lists_the_persons_checks_beside_the_plans() {
+        let task = lamp_task(Role::Author, &lamp_held_to(&PERSONS, Stage::Working));
+        assert!(
+            task.contains(&format!(
+                "- a dry lamp is refused (shown by: the gate test)\n\
+                 The person's checks, each to hold too:\n{LISTED}"
+            )),
+            "{task}"
+        );
+    }
+
+    #[test]
+    fn a_reviewers_brief_lists_the_persons_checks_as_points_to_block_on() {
+        let task = lamp_task(
+            Role::Reviewer,
+            &lamp_held_to(&PERSONS, Stage::InReview { round: 1 }),
+        );
+        assert!(
+            task.contains(&format!(
+                "The person's checks; one the change does not meet is a point to block on:\n\
+                 {LISTED}"
+            )),
+            "{task}"
+        );
+    }
+
+    #[test]
+    fn an_arbiters_brief_lists_the_persons_checks() {
+        let task = lamp_task(
+            Role::Arbiter,
+            &lamp_held_to(&PERSONS, Stage::Arbitration { round: 3 }),
+        );
+        assert!(
+            task.contains(&format!(
+                "- a dry lamp is refused (shown by: the gate test)\n\
+                 The person's checks:\n{LISTED}"
+            )),
+            "{task}"
+        );
+    }
+
+    #[test]
+    fn a_brief_for_an_issue_with_no_persons_checks_has_no_such_part() {
+        for (role, stage) in [
+            (Role::Refiner, Stage::Refining),
+            (Role::Author, Stage::Working),
+            (Role::Reviewer, Stage::InReview { round: 1 }),
+            (Role::Arbiter, Stage::Arbitration { round: 3 }),
+        ] {
+            let task = lamp_task(role, &lamp_held_to(&[], stage));
+            assert!(!task.contains("person's check"), "{role:?}: {task}");
+        }
+    }
+
+    #[test]
+    fn the_persons_checks_too_long_for_the_room_are_cut_and_counted_as_the_plans_are() {
+        let long = two_kb("person's check", 600);
+        let persons: Vec<(&str, &str)> = long.iter().map(|c| (c.as_str(), "")).collect();
+        for (role, stage) in [
+            (Role::Refiner, Stage::Refining),
+            (Role::Author, Stage::Working),
+            (Role::Reviewer, Stage::InReview { round: 1 }),
+            (Role::Arbiter, Stage::Arbitration { round: 3 }),
+        ] {
+            // A few are each cut at 1,000 characters, with the pointer.
+            let few = lamp_task(role, &lamp_held_to(&persons[..3], stage));
+            for check in &long[..3] {
+                let cut = format!("- {}{}\n", &check[..fit::ITEM_CHARS], pointer(31));
+                assert!(few.contains(&cut), "{role:?}: {few:.3000}");
+            }
+            // Many are cut shorter, and those that do not fit under 100 KiB are
+            // left out.
+            let task = lamp_task(role, &lamp_held_to(&persons, stage));
+            assert!(task.len() <= fit::LIMIT, "{role:?}: {} bytes", task.len());
+            assert!(
+                task.contains(&format!("- person's check 1: xxx")) && task.contains(&pointer(31)),
+                "{role:?}"
+            );
+            // Those that do not fit are counted on a line naming temet-work issue.
+            assert!(
+                task.contains(
+                    "more person's checks are left out here; temet-work issue watch#31 lists \
+                     every one whole.\n"
+                ),
+                "{role:?}"
+            );
+            assert!(task.ends_with(&format!("\n\n{STOP}")), "{role:?}");
+        }
     }
 }
