@@ -175,7 +175,9 @@ settings:
 
 A command for an issue at another step is refused, with the step the issue is at. The
 command line exits 0 when the daemon did it, 1 when the daemon refused it, and 2 when the
-command was not understood or no daemon answered.
+command was not understood or no daemon answered. It also exits 2 when its
+output cannot be written, and says why on standard error. A reader that stops reading
+early, as `head` does, is no such failure: the command line says nothing and exits 0.
 
 `temet-work status --json` sends the `view` command (`{"command":"view"}` on the socket)
 and prints the reply as indented JSON: projects with the web addresses of their issues and
