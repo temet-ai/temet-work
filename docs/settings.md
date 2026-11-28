@@ -36,7 +36,8 @@ level, and at each level it reads the role's own value first, then the value for
 role. So when the area gives reviewers `runtime = "codex"` and the project gives
 everyone `runtime = "claude"`, reviewers on that project run Claude, because the project
 is asked before the area. For them to run Codex there, the project names its reviewers
-too.
+too. A setting that is not read at every level is looked up at its own levels only (The
+settings, below).
 
 Only a setting that is read for the role of an agent takes a role: those marked yes under
 Per role in the table below. Every other is the same for every role. A role on one of
@@ -47,25 +48,37 @@ which is the one in effect.
 
 ## The settings
 
-| Setting | Per role | Built in | Read by |
-|---|---|---|---|
-| `runtime` | yes | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
-| `model` | yes | the runtime's own default | the agent's brief, so the runtime adapter. A model belongs to one runtime: `model.<runtime>` (`model.codex`) names it, and a plain `model` is recorded as the global runtime's when it is written ("A model belongs to a runtime", below) |
-| `runner` | yes | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
-| `machine` | yes | none: any machine | the loop, per issue and role, when it picks a work folder (below) |
-| `permission` | yes | `auto` (or `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`) | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
-| `review_rounds` | no | 3 | the loop, per issue |
-| `ci` | no | true | the code-host family, per issue |
-| `deploy`, `verify`, `run_in` | no | none | the deploy part, per issue |
-| `merge` | no | `squash` (or `merge`, `rebase`) | the code host's merge |
-| `remind_after`, `reminders` | yes | 10 minutes, 2 | the runner family, per agent's issue and role |
-| `starts` | yes | 3 agents of one role that ended while one issue waited on them | the loop, per issue and role |
-| `sync_every`, `ci_every` | no | 60 s, 30 s | the tracker family for each project or area; the code-host family for each issue |
-| `investigate` | no | none | the investigator's brief, under each project's name: lines a person adds, such as the parts of the code another team owns |
+| Setting | Per role | Read at | Built in | Read by |
+|---|---|---|---|---|
+| `runtime` | yes | every level | `claude` when the build has it; a build without it must set one globally | the runtime family, which picks its adapter by it (`claude`, `codex`) |
+| `model` | yes | every level | the runtime's own default | the agent's brief, so the runtime adapter. A model belongs to one runtime: `model.<runtime>` (`model.codex`) names it, and a plain `model` is recorded as the global runtime's when it is written ("A model belongs to a runtime", below) |
+| `runner` | yes | every level | `herdr` when the build has it, likewise | the runner family, which picks its adapter by it |
+| `machine` | yes | every level | none: any machine | the loop, per issue and role, when it picks a work folder (below) |
+| `permission` | yes | every level | `auto` (or `default`, `acceptEdits`, `plan`, `dontAsk`, `bypassPermissions`) | the agent's brief; the Claude adapter's permission mode; the Codex adapter ignores it and always runs `--approve-for-me` |
+| `review_rounds` | no | every level | 3 | the loop, per issue |
+| `ci` | no | every level | true | the code-host family, per issue |
+| `deploy`, `verify`, `run_in` | no | every level | none | the deploy part, per issue |
+| `merge` | no | every level | `squash` (or `merge`, `rebase`) | the code host's merge |
+| `remind_after`, `reminders` | yes | every level | 10 minutes, 2 | the runner family, per agent's issue and role |
+| `starts` | yes | every level | 3 agents of one role that ended while one issue waited on them | the loop, per issue and role |
+| `sync_every` | no | project, area, global | 60 s | the tracker family for each project or area |
+| `ci_every` | no | every level | 30 s | the code-host family for each issue |
+| `investigate` | no | project, area, global | none | the investigator's brief, under each project's name: lines a person adds, such as the parts of the code another team owns |
 
 The table is the resolver's: `temet-work settings` lists the same keys, and the code reads
 every one of them through it. A setting with no value and no built-in value, such as
 `model`, is left out of the listing.
+
+Read at names the levels a value is looked up at. `sync_every` and `investigate` are read
+for a project or an area as a whole, so no task or milestone value of either would have an
+effect. Such a value is refused, naming the key and the levels that read it: by `set`, in a
+refiner's plan, and in a `[[milestone]]` table of the configuration file, where it stops
+the daemon at start. A log written before this may hold one. It still replays, and
+`temet-work status` still lists it with who set it. It is not listed as in effect:
+`temet-work settings` shows the value from a level that reads the setting, and leaves the
+setting out when there is none. `temet-work unset` removes it, such as
+`temet-work unset radar#44 sync_every`. A refiner's `set` or plan that names
+`investigate` is refused because only a person sets it.
 
 ## A model belongs to a runtime
 
@@ -109,8 +122,9 @@ say when the group starts an investigator (`docs/configuration.md`).
 An investigator works for its group and on no issue, so its settings (`runtime`, `model`,
 `runner`, `machine`, `permission`, `remind_after`, `reminders`) are read at the project
 level of the first repository the group covers: its first project, else the first project
-of its first area. `investigate` is read at each project's level, for that project's lines. A value at a
-task or milestone level reaches no investigator.
+of its first area. `investigate` is read at each project's level, for that project's lines,
+so one at a task or milestone level is refused (The settings, above). A task or milestone
+value of one of the other settings reaches no investigator.
 
 ## Which machine an agent runs on
 
@@ -230,11 +244,12 @@ temet-work settings radar#44 --role author
 ```
 
 A refiner can set task-level values in its plan, as a `settings:` map next to `checks:`,
-such as a stronger model for an issue it judges hard. That is a decision like any other:
-recorded as set by the refiner, and open to overturning with `temet-work set`. A refiner
-can set and unset the task level of the issue it is refining, and only while that issue is
-refining: once its plan is in, a `set` or `unset` from it is refused with the stage the
-issue is at. No other agent can set anything, and a wider level is a person's.
+of settings read at the task level, such as a stronger model for an issue it judges hard.
+That is a decision like any other: recorded as set by the refiner, and open to overturning
+with `temet-work set`. A refiner can set and unset the task level of the issue it is
+refining, and only while that issue is refining: once its plan is in, a `set` or `unset`
+from it is refused with the stage the issue is at. No other agent can set anything, and a
+wider level is a person's.
 
 A refiner's `model` is for the author. How hard the code is to write is what the refiner
 judges; how strong the review is belongs to the person, so the models of reviewers,
@@ -348,6 +363,11 @@ level. `temet-work status` lists every value with the level it is set at and who
   drops the role for one that is not, so the listings and the parts get the same answer.
   `tests/settings.rs` fails when a reader passes a role the `Spec` does not allow for, or
   passes none for a setting that takes one.
+- Each setting's `Spec` says the levels it is read at (`levels`). `set`, the plan check
+  and the configuration file refuse it at any other (`check_level`), and `World::resolve`
+  passes those levels over, so the listings and the parts get the same answer. `unset`
+  does not check the level. `tests/settings.rs` fails when the table's Read at column and
+  the `Spec`s disagree.
 - Each setting's `Spec` says whether an agent may set it: `May`, `ForAuthor` (a refiner
   may, for the author only: `model`) or `MayNot`. The plan check, `set`, `unset` and the
   replay of a log all read that, so a new key has to say which it is.
@@ -385,6 +405,10 @@ level. `temet-work status` lists every value with the level it is set at and who
   runtime change in the file. Applying a model only when it was set at a level as near as
   the runtime was left out too: in the example above the project's model is nearer than
   the global runtime of reviewers, so a Codex reviewer would still get a Claude model.
+- A logged value at a level that does not read its setting stays in the world, and the
+  resolver passes it over. Dropping it at replay, as a role's value of a setting that
+  takes no role is dropped, was left out: `status` would not show it, and a person could
+  not remove it with `unset`.
 - A plain `model` written where that scope and role run another runtime is refused,
   naming `model.<that runtime>`. Binding it to that role's runtime was left out: refiners
   and these docs read a plain model as the global runtime's, so binding a refiner's `opus`

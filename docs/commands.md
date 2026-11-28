@@ -149,15 +149,19 @@ role at work on the issue. `KEY` is a setting's name, or `model.<runtime>`
 (`model.codex`) for the model of one runtime's agents; a plain `model` is recorded as the
 global runtime's `model.<runtime>` when it is set, and the reply names that key. A value of
 the wrong kind, an unknown key, a runtime or runner the build lacks, a `model.<runtime>`
-for such a runtime, or a plain `model` where that scope and role run a runtime other than
-the global one is refused with the reason, and the command exits 1.
+for such a runtime, a plain `model` where that scope and role run a runtime other than
+the global one, or `set` of a setting at a level that never reads it (`sync_every` and
+`investigate` on an issue or a milestone) is refused with the reason, and the command
+exits 1. `unset` does not check the level, so a person can take away such a value that an
+older log holds.
 
 A refiner may add task-level settings to its plan, other than the nine only a person
 sets: `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`,
-`run_in` and `investigate` (`docs/settings.md`, "Setting them"). What it sets is recorded
-as set by it. Its `model` or `model.<runtime>`, from the plan or from its `set`, is for the
-author only: the models of reviewers, arbiters and refiners are a person's to set, and a
-person's `set` on the issue with no role overturns the refiner's value. A plan with settings:
+`run_in` and `investigate` (`docs/settings.md`, "Setting them"), and other than
+`sync_every`, which no task reads. What it sets is recorded as set by it. Its `model` or
+`model.<runtime>`, from the plan or from its `set`, is for the author only: the models of
+reviewers, arbiters and refiners are a person's to set, and a person's `set` on the issue
+with no role overturns the refiner's value. A plan with settings:
 
 ```yaml
 checks:
