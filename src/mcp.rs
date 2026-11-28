@@ -175,6 +175,20 @@ fn tools() -> Vec<Tool> {
             }, "required": ["rule", "action"]}),
         },
         Tool {
+            name: "refine",
+            description: "A person's: change an issue's title, which is written to its tracker first, and the checks the person holds it to, and send it to a refiner now. checks replaces the person's checks; an empty list removes them all, and leaving it out keeps them. Each check is a done_when and, if named, a proven_by. send hands it to a refiner at once: a new issue is taken for refining, and a refined one is refined again, stopping its agents at work and dropping its pull requests (left open on the code host) and review rounds. A send is refused once a merge has begun, on a done issue and while the daemon is held. Refused from an agent.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "issue": issue_field(),
+                "title": {"type": "string", "description": "The new title; left out, it stays."},
+                "checks": {"type": "array", "items": {"type": "object", "properties": {
+                    "done_when": {"type": "string"},
+                    "proven_by": {"type": "string"}
+                }, "required": ["done_when"]}, "description": "The person's checks, in order."},
+                "send": {"type": "boolean", "description": "Send it to a refiner now."}
+            }, "required": ["issue"]}),
+        },
+        Tool {
             name: "hold",
             description: "A person's: hold the daemon. No issue is taken for refining and no investigation starts. An issue with nothing merged gets no new agent, fix, review round or merge, and its agents are not reminded; agents at work finish their turn. An issue with a pull request merged still finishes: it merges the rest, deploys and is verified. The hold is in the event log, so it outlasts a restart. Refused from an agent.",
             acts: true,
@@ -446,6 +460,29 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
         "investigated" => Command::Investigated {
             group: temet_work_core::ids::GroupId::new(text(args, "group")?),
         },
+        "refine" => Command::Refine {
+            issue: issue(args)?,
+            title: args.get("title").and_then(Value::as_str).map(String::from),
+            checks: args
+                .get("checks")
+                .map(|list| {
+                    list.as_array()
+                        .ok_or("checks is a list")?
+                        .iter()
+                        .map(|c| {
+                            let field = |key: &str| c.get(key).and_then(Value::as_str);
+                            let done_when =
+                                field("done_when").ok_or("each check has a done_when")?;
+                            Ok(temet_work_core::model::Check::new(
+                                done_when,
+                                field("proven_by").unwrap_or_default(),
+                            ))
+                        })
+                        .collect::<Result<_, &str>>()
+                })
+                .transpose()?,
+            send: args.get("send").and_then(Value::as_bool).unwrap_or(false),
+        },
         "hold" => Command::Hold,
         "resume" => Command::Resume,
         other => return Err(format!("no tool {other}")),
@@ -583,7 +620,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 18);
+        assert_eq!(names(Level::Act).len(), 19);
     }
 
     #[test]
@@ -688,6 +725,65 @@ mod tests {
         );
         assert!(names(Level::Act).contains(&"overturn".to_string()));
         assert!(!names(Level::Read).contains(&"proposal".to_string()));
+    }
+
+    #[test]
+    fn refine_is_offered_at_act_only_and_becomes_the_command_lines() {
+        assert!(names(Level::Act).contains(&"refine".to_string()));
+        assert!(!names(Level::Read).contains(&"refine".to_string()));
+        let mut sent = Vec::new();
+        let args = json!({
+            "issue": "ankh#1",
+            "title": "The gate shuts at dusk",
+            "checks": [
+                {"done_when": "the gate shuts at dusk", "proven_by": "the dusk test"},
+                {"done_when": "Sam Vimes signs the log"}
+            ],
+            "send": true
+        });
+        let answer = call(Level::Read, "refine", args.clone(), &mut sent);
+        assert_eq!(answer["result"]["isError"], true);
+        assert!(sent.is_empty());
+        call(Level::Act, "refine", args, &mut sent);
+        call(
+            Level::Act,
+            "refine",
+            json!({"issue": "ankh#1", "checks": []}),
+            &mut sent,
+        );
+        let commands: Vec<_> = sent.iter().map(|r| r.command.clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::Refine {
+                    issue: IssueId::new("ankh", "1"),
+                    title: Some("The gate shuts at dusk".into()),
+                    checks: Some(vec![
+                        temet_work_core::model::Check::new(
+                            "the gate shuts at dusk",
+                            "the dusk test"
+                        ),
+                        temet_work_core::model::Check::new("Sam Vimes signs the log", ""),
+                    ]),
+                    send: true,
+                },
+                Command::Refine {
+                    issue: IssueId::new("ankh", "1"),
+                    title: None,
+                    checks: Some(vec![]),
+                    send: false,
+                },
+            ]
+        );
+        let mut sent = Vec::new();
+        let answer = call(
+            Level::Act,
+            "refine",
+            json!({"issue": "ankh#1", "checks": [{"proven_by": "a test"}]}),
+            &mut sent,
+        );
+        assert_eq!(answer["result"]["isError"], true);
+        assert!(sent.is_empty(), "a check with no done_when is not sent");
     }
 
     #[test]

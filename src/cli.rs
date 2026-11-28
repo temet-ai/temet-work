@@ -36,6 +36,12 @@ temet-work overturn DECISION OPTION REASON
                                             a person's: choose another option of a decision, as
                                             `status` numbers them; REASON is required
 temet-work proposal RULE keep|drop          a person's: keep or drop a rule proposed from an overturn
+temet-work refine ISSUE [--title TEXT] [--check TEXT [--proven-by TEXT]]... [--no-checks] [--send]
+                                            a person's: write the issue's title to its tracker and
+                                            set the checks a person holds it to, each --check
+                                            followed by what proves it if you name it; --check
+                                            replaces them, --no-checks removes them all, and with
+                                            neither they stay; --send hands it to a refiner now
 temet-work hold                             a person's: hold the daemon, so no issue is taken, no
                                             investigation starts, and an issue with nothing merged
                                             gets no new agent, fix, review or merge; agents at
@@ -83,7 +89,7 @@ pub fn json_refused() -> String {
 fn has_json(args: &[String]) -> bool {
     let word = |i: usize| args.get(i).map(String::as_str);
     let before_text = match word(0) {
-        Some("file" | "choose") => 2,
+        Some("file" | "choose" | "refine") => 2,
         Some("set" | "rule" | "overturn") => 3,
         Some("review") if word(2) == Some("block") => 3,
         Some("ready") => args.iter().position(|a| a == REPLY).unwrap_or(args.len()),
@@ -196,6 +202,83 @@ fn choose(args: &[String]) -> Result<Command, String> {
     })
 }
 
+/// Reads `refine ISSUE [--title TEXT] [--check TEXT [--proven-by TEXT]]...
+/// [--no-checks] [--send]`, its flags in any order but each `--proven-by` after
+/// the `--check` it proves. Each flag's text is the argument after it, whatever
+/// it says. A refine that gives none of `--title`, `--check`, `--no-checks` and
+/// `--send` would do nothing, and is refused with the usage.
+fn refine(args: &[String]) -> Result<Command, String> {
+    use temet_work_core::model::Check;
+    let issue = args
+        .get(1)
+        .ok_or_else(|| format!("missing ISSUE\n\n{USAGE}"))?;
+    let issue = IssueId::parse(issue)
+        .ok_or_else(|| format!("{issue} is not an issue; write project#key, such as radar#44"))?;
+    let (mut title, mut checks, mut none, mut send) = (None, Vec::<Check>::new(), false, false);
+    let mut proven = Vec::<bool>::new();
+    let mut rest = args.get(2..).unwrap_or_default().iter();
+    while let Some(flag) = rest.next() {
+        let mut text = || {
+            rest.next()
+                .cloned()
+                .ok_or_else(|| format!("{flag} needs its text"))
+        };
+        match flag.as_str() {
+            "--title" => {
+                if title.replace(text()?).is_some() {
+                    return Err("--title is given twice; give it once".into());
+                }
+            }
+            "--check" => {
+                checks.push(Check::new(text()?, ""));
+                proven.push(false);
+            }
+            "--proven-by" => {
+                let text = text()?;
+                let (Some(check), Some(given)) = (checks.last_mut(), proven.last_mut()) else {
+                    return Err(format!(
+                        "--proven-by says what proves the --check before it, and none comes \
+                         before it\n\n{USAGE}"
+                    ));
+                };
+                if std::mem::replace(given, true) {
+                    return Err(format!(
+                        "--proven-by is given twice for the check \"{}\"; give it once",
+                        check.done_when
+                    ));
+                }
+                check.proven_by = text;
+            }
+            "--no-checks" => none = true,
+            "--send" => send = true,
+            other => {
+                return Err(format!(
+                    "refine takes --title, --check and --proven-by, each followed by its text, \
+                     and --no-checks and --send; {other} is none of them\n\n{USAGE}"
+                ));
+            }
+        }
+    }
+    if none && !checks.is_empty() {
+        return Err(
+            "--no-checks removes every check of the person's and --check gives new ones; give \
+             one or the other"
+                .into(),
+        );
+    }
+    if title.is_none() && checks.is_empty() && !none && !send {
+        return Err(format!(
+            "refine needs at least one of --title, --check, --no-checks and --send\n\n{USAGE}"
+        ));
+    }
+    Ok(Command::Refine {
+        issue,
+        title,
+        checks: (none || !checks.is_empty()).then_some(checks),
+        send,
+    })
+}
+
 /// Reads the arguments after the program name into a request. `by` is the
 /// agent sending it; `read` reads a file. The request carries no secret: the
 /// caller adds the one in [`SECRET_VAR`].
@@ -212,6 +295,12 @@ pub fn request(
             return Err(json_refused());
         }
         return Ok(Request::new(by, choose(args)?));
+    }
+    if args.first().is_some_and(|a| a == "refine") {
+        if has_json(args) {
+            return Err(json_refused());
+        }
+        return Ok(Request::new(by, refine(args)?));
     }
     let (args, role) = take_role(args)?;
     let (args, milestone) = take(&args, "--milestone")?;
@@ -388,6 +477,113 @@ pub(crate) mod tests {
 
     fn no_files(_: &Path) -> Result<String, String> {
         Err("no files in this test".into())
+    }
+
+    #[test]
+    fn refine_reads_its_title_checks_proofs_and_send_in_one_command() {
+        use temet_work_core::model::Check;
+        let read = |line: &[&str]| {
+            let line: Vec<String> = line.iter().map(ToString::to_string).collect();
+            request(&line, None, no_files).map(|r| r.command)
+        };
+        assert_eq!(
+            read(&[
+                "refine",
+                "ankh#1",
+                "--check",
+                "the gate shuts at dusk",
+                "--proven-by",
+                "the dusk test",
+                "--title",
+                "The gate --send shuts",
+                "--check",
+                "--json",
+                "--send",
+            ]),
+            Ok(Command::Refine {
+                issue: IssueId::new("ankh", "1"),
+                title: Some("The gate --send shuts".into()),
+                checks: Some(vec![
+                    Check::new("the gate shuts at dusk", "the dusk test"),
+                    Check::new("--json", ""),
+                ]),
+                send: true,
+            })
+        );
+        assert_eq!(
+            read(&["refine", "ankh#1", "--no-checks"]),
+            Ok(Command::Refine {
+                issue: IssueId::new("ankh", "1"),
+                title: None,
+                checks: Some(vec![]),
+                send: false,
+            })
+        );
+        assert_eq!(
+            read(&["refine", "ankh#1", "--send"]),
+            Ok(Command::Refine {
+                issue: IssueId::new("ankh", "1"),
+                title: None,
+                checks: None,
+                send: true,
+            })
+        );
+        // Each of these exits 2; those that would do nothing give the usage.
+        for (line, says) in [
+            (&["refine", "ankh#1"][..], "needs at least one of --title"),
+            (
+                &["refine", "ankh#1", "--proven-by", "a test"][..],
+                "none comes before it",
+            ),
+            (
+                &[
+                    "refine",
+                    "ankh#1",
+                    "--check",
+                    "a",
+                    "--proven-by",
+                    "b",
+                    "--proven-by",
+                    "c",
+                ][..],
+                "--proven-by is given twice",
+            ),
+            (
+                &["refine", "ankh#1", "--no-checks", "--check", "a"][..],
+                "one or the other",
+            ),
+            (
+                &["refine", "ankh#1", "--title"][..],
+                "--title needs its text",
+            ),
+            (
+                &["refine", "ankh#1", "--title", "a", "--title", "b"][..],
+                "given twice",
+            ),
+            (
+                &["refine", "ankh#1", "--keep"][..],
+                "--keep is none of them",
+            ),
+            (&["refine"][..], "missing ISSUE"),
+            (&["refine", "ankh"][..], "ankh is not an issue"),
+            (
+                &["refine", "--json", "ankh#1", "--send"][..],
+                "--json goes with status only",
+            ),
+        ] {
+            let why = read(line).expect_err("refused");
+            assert!(why.contains(says), "{line:?}: {why}");
+        }
+        for line in [
+            &["refine", "ankh#1"][..],
+            &["refine", "ankh#1", "--proven-by", "x"][..],
+        ] {
+            assert!(
+                read(line).expect_err("refused").ends_with(USAGE),
+                "{line:?}"
+            );
+        }
+        assert!(USAGE.contains("temet-work refine ISSUE [--title TEXT]"));
     }
 
     #[test]
