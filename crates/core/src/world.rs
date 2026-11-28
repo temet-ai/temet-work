@@ -1234,6 +1234,9 @@ impl World {
     /// on that agent. An arbiter that has ruled on the issue has finished its step,
     /// and so has an author on a paused issue that has not heard its fixes. A
     /// group's investigation waits on its investigator until it says it is done.
+    /// Nothing waits on an agent whose step is over for good
+    /// ([`Self::over_for_good`]), such as an old author whose issue works again
+    /// in another folder: it is not reminded, and its stop is asked for again.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
         if self.investigates(agent) {
             return true;
@@ -1241,6 +1244,9 @@ impl World {
         let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
             return false;
         };
+        if self.over_for_good(agent) {
+            return false;
+        }
         match (i.stage, agent.role) {
             (Stage::Refining, Role::Refiner) | (Stage::Working, Role::Author) => true,
             (Stage::Fixing { .. }, Role::Author) => i.told || !self.paused(i),
@@ -1434,9 +1440,9 @@ impl World {
     }
 
     /// Whether nothing will need `agent` again: an agent on an issue that is
-    /// done, deploying or verifying, or back to ready, as after a failed
-    /// verify; any but the refiner on an issue being refined, as after a reopen
-    /// in the tracker; a refiner whose issue's plan is in; an author whose issue holds
+    /// done, deploying or verifying, or back to new or ready, as after a reopen
+    /// in the tracker or a failed verify; any but the refiner on an issue being
+    /// refined; a refiner whose issue's plan is in; an author whose issue holds
     /// other folders than the ones it held; an investigator whose investigation
     /// has ended. An author or reviewer on an issue in review, being fixed or
     /// merging, a refiner while its issue is refining and the investigator of a
@@ -1453,10 +1459,9 @@ impl World {
             return false;
         };
         match i.stage {
-            Stage::Done | Stage::Deploying | Stage::Verifying | Stage::Ready => true,
-            // Back to new after a reopen: its group refines it again at once
-            // when it has room, and the rule for refining applies then.
-            Stage::New => false,
+            // Back to new or ready, every agent on it is from before: a reopen
+            // in the tracker or a failed verify ended their steps.
+            Stage::Done | Stage::Deploying | Stage::Verifying | Stage::New | Stage::Ready => true,
             Stage::Refining => agent.role != Role::Refiner,
             _ => match agent.role {
                 Role::Refiner => i.plan.is_some(),

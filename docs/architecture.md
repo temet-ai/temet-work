@@ -182,24 +182,30 @@ agent's on an issue closed in its tracker or a refiner's once its plan is in, is
 runner family a minute after the last try. It is tried until it works or the runner answers that
 the terminal is gone or unknown, and the agent is then reported ended. As at the stop after a last
 reminder, a loss reported once a refused try may have reached the runner is an ordinary end. The
-tries stop when the
-agent's issue waits on it again, as on a reviewer whose stop failed after a pull request was closed
-and that has since heard the next round: the loop has put it back to work. When the loop asks for
-the same stop before that minute is up, the answer is the last try's reason and nothing is tried.
-While the stop fails, Problems lists `stop AGENT` with the reason the runner family last gave; the
-line goes once the agent has ended, whatever ended it. A replay at start drops effects, so a stop
-that failed or was lost to a restart is asked for again: each round the daemon asks to stop every
-running agent whose step is over for good. That is any agent on an issue that is done, deploying,
-verifying or back to ready after a failed verify; any but the refiner on an issue being refined, as
-again after a reopen in the tracker; a refiner whose issue's plan is in; an author whose issue holds
-other folders than the ones it held; and an investigator whose investigation has ended. It asks on
-a paused issue too, since a stop starts no work. It asks for none an issue still needs: its author
-or reviewer while it is in review, being fixed or merging, its refiner while it is refining, and the
-investigator of a running investigation. An issue back to new after a reopen asks for nothing until
-its group refines it again. An author holds its issue's work folders, one in each repository the issue changes. A merge or a close
-in the tracker takes them from the issue, and no author is placed in one while an agent that held
-it still runs, since that session may still change the folder. A reviewer, refiner, arbiter or
-investigator runs in a folder without holding it, so it keeps no folder from the next author.
+tries stop when the agent's issue waits on it again, as on a reviewer whose stop failed after a
+pull request was closed and that has since heard the next round: the loop has put it back to work.
+When the loop asks for the same stop before that minute is up, the answer is the last try's reason
+and nothing is tried. While the stop fails, Problems lists `stop AGENT`, with the reason the runner
+family gave the last time the loop asked for that stop. The loop asks again each round for an agent
+whose step is over for good (below), so for such an agent the reason is the latest try's. For any
+other, such as a reviewer stopped for a closed pull request while its issue is being fixed, it
+stays the reason of the first try while the runner family keeps trying once a minute. The line goes
+once the agent has ended, whatever ended it.
+
+A replay at start drops effects, so a stop that failed or was lost to a restart is asked for again:
+each round the daemon asks to stop every running agent whose step is over for good. That is any
+agent on an issue that is done, deploying or verifying, or back to new or ready after a reopen in
+the tracker or a failed verify; any but the refiner on an issue being refined; a refiner whose
+issue's plan is in; an author whose issue holds other folders than the ones it held, as after a
+failed verify while that author's stop kept failing; and an investigator whose investigation has
+ended. It asks on a paused issue too, since a stop starts no work. Nothing waits on such an agent:
+it is not reminded, and its end does not count against `starts`. It asks for none an issue still
+needs: its author or reviewer while it is in review, being fixed or merging, its refiner while it
+is refining, and the investigator of a running investigation. An author holds its issue's work
+folders, one in each repository the issue changes. A merge or a close in the tracker takes them
+from the issue, and no author is placed in one while an agent that held it still runs, since that
+session may still change the folder. A reviewer, refiner, arbiter or investigator runs in a folder
+without holding it, so it keeps no folder from the next author.
 
 A group has no coordinator agent: in the research fleet the standing seat waited 25 of its 28
 minutes, and in mike's larger runs such seats were where the token and turn costs came from

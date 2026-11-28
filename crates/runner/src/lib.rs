@@ -2572,11 +2572,17 @@ mod tests {
         );
     }
 
+    /// The problem left once the author of ankh#1, which is being worked on,
+    /// has ended: the issue needs a new one, and these tests build no part
+    /// that starts one.
+    const NEXT_AUTHOR: &str = "start a author on ankh#1";
+
     #[test]
     fn an_agent_at_a_prompt_is_a_problem_naming_agent_folder_and_prompt_until_it_goes() {
         use temet_work_core::Host;
         use temet_work_core::host::Memory;
         let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
         let (mut part, handle) = shared();
         let fake = handle.fake;
         let agent = run(&mut part, &mut w, &["cat"]);
@@ -2611,7 +2617,11 @@ mod tests {
             .stop(&TerminalId("t1".into()))
             .expect("stop");
         host.tick(5).expect("tick");
-        assert!(host.problems().is_empty(), "ended: {:?}", host.problems());
+        assert_eq!(
+            host.problems().keys().collect::<Vec<_>>(),
+            [NEXT_AUTHOR],
+            "ended: its line goes"
+        );
     }
 
     /// The line a Claude session's turn ended on at its usage limit, as the
@@ -2671,6 +2681,7 @@ mod tests {
         use temet_work_core::Host;
         use temet_work_core::host::Memory;
         let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
         let (mut part, handle) = shared();
         let fake = handle.fake;
         let t1 = TerminalId("t1".into());
@@ -2717,7 +2728,11 @@ mod tests {
         );
         fake.lock().expect("lock").stop(&t1).expect("stop");
         host.tick(nov27(16, 53)).expect("tick");
-        assert!(host.problems().is_empty(), "ended: {:?}", host.problems());
+        assert_eq!(
+            host.problems().keys().collect::<Vec<_>>(),
+            [NEXT_AUTHOR],
+            "ended: its line goes"
+        );
     }
 
     #[test]
@@ -3256,6 +3271,48 @@ mod tests {
             };
             assert!(events.contains(&end), "{refusal:?}: {events:?}");
         }
+    }
+
+    #[test]
+    fn stop_agent_of_an_old_author_whose_issue_works_in_another_folder_is_tried_once_a_minute() {
+        let mut w = world();
+        w.apply(&Event::FolderAdded {
+            folder: FolderId::new("f2"),
+            project: ProjectId::new("ankh"),
+            machine: MachineId::new(LOCAL),
+            path: "./f2".into(),
+        });
+        let (mut part, handle) = shared();
+        let author = run(&mut part, &mut w, &["claude"]);
+        // Its issue merged, the stop failed, the verify failed, and the issue
+        // works again in f2, since author-1 still holds f1.
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        if let Some(i) = w.issues.get_mut(&IssueId::new("ankh", "1")) {
+            i.folder = Some(FolderId::new("f2"));
+        }
+        assert!(!w.waiting_on(&w.agents[&author]));
+        step(&mut part, &mut w, 0);
+        refuse_stop(&handle, TIMED_OUT);
+        let stop = Effect::StopAgent {
+            agent: author.clone(),
+        };
+        let asked = |w: &World| w.missing().start.contains(&stop);
+        // Each 2 s for 58 s: a poll, then the stop `World::missing` asks for.
+        for at in (0..=58).step_by(2).map(|s| s * 1_000) {
+            if at > 0 {
+                assert!(!ended(&step(&mut part, &mut w, at), &author), "at {at} ms");
+            }
+            assert!(asked(&w), "at {at} ms");
+            assert_eq!(
+                part.carry_out(&stop, &w),
+                Outcome::Failed(TIMED_OUT.into()),
+                "at {at} ms"
+            );
+        }
+        assert_eq!(stops(&handle), 1, "tried once in the minute");
+        assert!(ended(&step(&mut part, &mut w, 60_000), &author));
+        assert_eq!(stops(&handle), 2);
+        assert!(!asked(&w));
     }
 
     #[test]

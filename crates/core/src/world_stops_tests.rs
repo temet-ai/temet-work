@@ -674,7 +674,58 @@ fn missing_asks_again_to_stop_an_author_whose_issue_holds_another_folder() {
         Some(watch("12")),
         Some("w2"),
     ));
-    assert_eq!(l.replayed().missing().start, [stop("author-1")]);
+    let w = l.replayed();
+    assert_eq!(w.missing().start, [stop("author-1")]);
+    // Its issue waits on author-2 alone, so author-1 is not reminded.
+    assert!(!w.waiting_on(&w.agents[&agent("author-1")]));
+    assert!(w.waiting_on(&w.agents[&agent("author-2")]));
     l.apply(ended("author-1"));
     assert_eq!(l.replayed().missing(), Missing::default());
+}
+
+#[test]
+fn missing_asks_again_to_stop_the_old_author_of_a_reopened_issue_left_in_new() {
+    let stops = |w: &World| -> Vec<Effect> {
+        w.missing()
+            .start
+            .into_iter()
+            .filter(|e| matches!(e, Effect::StopAgent { .. }))
+            .collect()
+    };
+    // Both of the group's refining slots are taken when a person closes
+    // watch#12, author-1's stop fails, and the person reopens it.
+    let mut l = twelve_working();
+    l.apply_all([synced(watch("14"), false), synced(watch("15"), false)]);
+    l.apply(synced(watch("12"), true));
+    l.apply(synced(watch("12"), false));
+    let w = l.replayed();
+    assert_eq!(w.issues[&watch("12")].stage, Stage::New, "waits for a slot");
+    assert_eq!(stops(&w), [stop("author-1")]);
+    assert_eq!(holder(&w, "w1"), None);
+    assert_eq!(w.issues[&watch("13")].stage, Stage::Ready);
+    // Once author-1 ends, watch#13 takes w1.
+    let mut ends = Logged {
+        w: w.clone(),
+        log: l.log.clone(),
+    };
+    assert_eq!(
+        ends.apply(ended("author-1")),
+        [author_of(watch("13"), "w1")]
+    );
+
+    // No group covers it any longer: it stays new, and the stop is still asked.
+    l.apply(Event::GroupCreated {
+        group: GroupId::new("watch"),
+        name: "Night watch".into(),
+        projects: vec![pid("klatch")],
+        areas: Vec::new(),
+        milestones: Vec::new(),
+        refining_at_once: 2,
+        model: None,
+        queue_low: None,
+        investigate_every: None,
+    });
+    let w = l.replayed();
+    assert_eq!(w.issues[&watch("12")].stage, Stage::New);
+    assert_eq!(stops(&w), [stop("author-1")]);
 }
