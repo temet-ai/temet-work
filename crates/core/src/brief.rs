@@ -8,6 +8,7 @@ use crate::ids::IssueId;
 use crate::ids::ProjectId;
 use crate::launch::Brief;
 use crate::model::{Issue, Role};
+use crate::text::indented;
 
 /// A work folder an author holds: the project it is a checkout of, the code
 /// host's name for that repository, and where it is.
@@ -484,7 +485,7 @@ pub fn write(
              Then run: temet-work rule {id} approve \"<why>\"\n\
              or: temet-work rule {id} fix \"<what must change, and why>\"",
             title = issue.title,
-            rounds = crate::text::review_rounds(issue),
+            rounds = crate::text::latest_review_rounds(issue),
             hold = hold_to_the_issue(id),
         ),
         Role::Investigator => format!(
@@ -782,7 +783,8 @@ fn under_review(issue: &Issue) -> u8 {
 
 /// What a reviewer of round `round` of `issue` judges besides the change: the
 /// plan's checks, numbered as `--failed` takes them, and the points of the round
-/// before with the author's reply to each, numbered as `--open` takes them.
+/// before with the author's reply to each, numbered as `--open` takes them. A
+/// later line of a point or reply is indented, so none reads as a numbered one.
 fn to_judge(issue: &Issue, round: u8) -> String {
     let checks: String = issue
         .plan
@@ -802,7 +804,11 @@ fn to_judge(issue: &Issue, round: u8) -> String {
                 .replies
                 .get(n - 1)
                 .map_or("none on record", String::as_str);
-            format!("{n}. {p}\n   The author's reply: {reply}\n")
+            format!(
+                "{n}. {}\n   The author's reply: {}\n",
+                indented(p, 5),
+                indented(reply, 5)
+            )
         })
         .collect();
     format!(
@@ -1217,6 +1223,182 @@ mod tests {
             &[],
         )
         .task
+    }
+
+    /// `watch#12` with its arbiter due after `reviews`.
+    fn gate_in_arbitration(reviews: Vec<crate::model::Review>) -> World {
+        let id = IssueId::new("watch", "12");
+        let mut world = World::default();
+        world.apply(&Event::IssueSynced {
+            issue: id.clone(),
+            title: "Shut the gate at dusk".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let issue = world.issues.get_mut(&id).expect("synced");
+        let round = reviews.last().map_or(0, |r| r.round);
+        issue.stage = Stage::Arbitration { round };
+        issue.round = round;
+        issue.reviews = reviews;
+        world
+    }
+
+    /// A block of `round` whose `points` have had no reply.
+    fn block_of(round: u8, points: Vec<String>) -> crate::model::Review {
+        crate::model::Review {
+            round,
+            reviewer: None,
+            approve: false,
+            states: vec![crate::model::PointState::Open; points.len()],
+            points,
+            replies: Vec::new(),
+        }
+    }
+
+    /// The arbiter's brief on `watch#12` and what `temet-work issue` prints of it.
+    fn arbiters_brief_and_view(world: &World) -> (String, String) {
+        let id = IssueId::new("watch", "12");
+        let brief = lamp_task(Role::Arbiter, &world.issues[&id]);
+        let unread = Err("not read here".into());
+        let view = crate::text::issue(world, &id, &unread).expect("known");
+        (brief, view)
+    }
+
+    #[test]
+    fn an_arbiters_brief_holds_the_latest_rounds_and_counts_the_earlier_ones() {
+        // 2 KB each, and no two alike.
+        let said = |what: &str, round: u8, n: u8| {
+            let head = format!("{what} {n} of round {round}: ");
+            format!("{head}{}", "x".repeat(2048 - head.len()))
+        };
+        let reviews: Vec<crate::model::Review> = (1..=10)
+            .map(|round| {
+                let mut r = block_of(round, (1..=6).map(|n| said("point", round, n)).collect());
+                if round < 10 {
+                    r.replies = (1..=6).map(|n| said("reply", round, n)).collect();
+                }
+                r
+            })
+            .collect();
+        let (brief, view) = arbiters_brief_and_view(&gate_in_arbitration(reviews.clone()));
+
+        assert!(brief.len() < 65_536, "{} bytes", brief.len());
+        // Rounds 9 and 10 fit in 48 KiB; round 8 would not.
+        assert!(
+            brief.contains(
+                "Review rounds:\n  8 earlier rounds are left out here; temet-work issue watch#12 \
+                 lists every round whole.\n  Round 9: blocked\n"
+            ),
+            "{brief}"
+        );
+        assert!(!brief.contains("Round 8: blocked"), "{brief}");
+        for text in reviews[8..]
+            .iter()
+            .flat_map(|r| r.points.iter().chain(&r.replies))
+        {
+            assert!(brief.contains(text.as_str()), "missing {text:.40}");
+        }
+        assert!(
+            brief.contains(
+                "No later round judged the points of round 10, the last block, and the author has \
+                 not replied to it because review rounds ran out before the author's next ready.\n\
+                 This folder is not yours"
+            ),
+            "{brief}"
+        );
+
+        assert!(view.len() > 131_072, "{} bytes", view.len());
+        assert!(!view.contains("left out"), "{view:.200}");
+        for r in &reviews {
+            assert!(view.contains(&format!("Round {}: blocked", r.round)));
+            for text in r.points.iter().chain(&r.replies) {
+                assert!(view.contains(text.as_str()), "missing {text:.40}");
+            }
+        }
+
+        // One round left out is counted as one.
+        let three = reviews[7..].to_vec();
+        let (brief, _) = arbiters_brief_and_view(&gate_in_arbitration(three));
+        assert!(
+            brief.contains("  1 earlier round is left out here; temet-work issue watch#12 "),
+            "{brief}"
+        );
+    }
+
+    #[test]
+    fn a_last_round_too_long_for_an_arbiters_brief_is_cut_between_characters() {
+        let limit = 48 * 1024;
+        let mut cuts = Vec::new();
+        // Padding the first point moves the cut through each byte of a character.
+        for pad in ["", "a", "ab"] {
+            let mut points: Vec<String> = (0..100)
+                .map(|n| format!("{n:03} {}", "€".repeat(682)))
+                .collect();
+            points[0].insert_str(0, pad);
+            let world = gate_in_arbitration(vec![
+                block_of(1, vec!["the hinge squeaks".into()]),
+                block_of(2, points.clone()),
+            ]);
+            let (brief, view) = arbiters_brief_and_view(&world);
+
+            assert!(brief.len() < 65_536, "{} bytes", brief.len());
+            let (_, rounds) = brief.split_once("Review rounds:\n").expect("rounds");
+            let (rounds, rest) = rounds
+                .split_once(
+                    "\n  The rest of round 2 is left out here; temet-work issue watch#12 prints it \
+                     whole.\n",
+                )
+                .expect("the cut");
+            let (count, round) = rounds.split_once('\n').expect("the count");
+            assert!(
+                count.starts_with("  1 earlier round is left out"),
+                "{count}"
+            );
+            assert!(round.starts_with("  Round 2: blocked\n"), "{round:.80}");
+            // Cut at the limit, or just under it to keep a character whole.
+            assert!(
+                (limit - 2..=limit).contains(&round.len()),
+                "{}",
+                round.len()
+            );
+            cuts.push(round.len());
+            assert!(brief.contains(&points[0]));
+            assert!(
+                rest.starts_with("  No later round judged the points of round 2"),
+                "{rest}"
+            );
+            for point in &points {
+                assert!(view.contains(point.as_str()));
+            }
+        }
+        assert!(
+            cuts.iter().any(|&c| c < limit),
+            "no cut fell inside a character: {cuts:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_break_in_a_point_or_reply_makes_no_numbered_line_for_a_reviewer() {
+        let mut issue = lamp_issue();
+        issue.stage = Stage::InReview { round: 2 };
+        issue.round = 2;
+        let mut before = block_of(1, vec!["the hinge squeaks\r\n3. the lock sticks".into()]);
+        before.replies = vec!["oiled it\n2. the bar is bent".into()];
+        issue.reviews = vec![before];
+        let told = "numbered as --open takes them:\n\
+                    1. the hinge squeaks\n     3. the lock sticks\n   \
+                    The author's reply: oiled it\n     2. the bar is bent\n";
+        for text in [lamp_task(Role::Reviewer, &issue), next_round(&issue, 2)] {
+            assert!(text.contains(told), "{text}");
+            assert!(
+                !text
+                    .lines()
+                    .any(|l| l.starts_with("2.") || l.starts_with("3.")),
+                "{text}"
+            );
+        }
     }
 
     #[test]

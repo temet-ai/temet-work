@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::IssueText;
-use crate::model::{AgentState, Issue, PointState, Role, Stage};
+use crate::model::{AgentState, Issue, PointState, Review, Role, Stage};
 use crate::placement::{Hold, StartWait, Unlisted, Why};
 use crate::world::World;
 
@@ -349,16 +349,76 @@ fn lines(
     out
 }
 
-/// `issue`'s finished review rounds, in the order they finished: each one's
-/// verdict and, for a block, each point with the author's reply to it and what
-/// the next round made of it. Empty before the first round ends. An arbiter's
-/// brief and [`issue`] both print it.
+/// The most an arbiter's brief carries of an issue's review rounds, in bytes:
+/// the brief is one argument of the command that starts the agent, and Linux
+/// refuses one over 128 KiB.
+const ROUNDS_IN_BRIEF: usize = 48 * 1024;
+
+/// `issue`'s finished review rounds, all of them and each one whole, in the
+/// order they finished. Empty before the first round ends. [`issue`] prints it.
 pub(crate) fn review_rounds(issue: &Issue) -> String {
-    if issue.reviews.is_empty() {
-        return String::new();
+    under_heading(issue, &round_blocks(issue).concat())
+}
+
+/// [`review_rounds`] as an arbiter's brief carries it: as many of the latest
+/// rounds as fit in [`ROUNDS_IN_BRIEF`], each whole, never fewer than one, and
+/// one line counting the earlier ones. A latest round that alone is over it is
+/// cut on a character boundary, and a line says so.
+///
+/// Chosen over cutting each point and reply short: that would not keep the last
+/// round whole, and every fix ruling can add a round, so cut points still grow
+/// without limit.
+pub(crate) fn latest_review_rounds(issue: &Issue) -> String {
+    let blocks = round_blocks(issue);
+    let mut size = 0;
+    let fit = blocks
+        .iter()
+        .rev()
+        .take_while(|b| {
+            size += b.len();
+            size <= ROUNDS_IN_BRIEF
+        })
+        .count();
+    let left_out = blocks.len().saturating_sub(fit.max(1));
+    let mut shown = blocks[left_out..].concat();
+    // Only a single round can still be over.
+    if shown.len() > ROUNDS_IN_BRIEF
+        && let Some(last) = issue.reviews.last()
+    {
+        shown.truncate(shown.floor_char_boundary(ROUNDS_IN_BRIEF));
+        if !shown.ends_with('\n') {
+            shown.push('\n');
+        }
+        let _ = writeln!(
+            shown,
+            "  The rest of round {} is left out here; temet-work issue {} prints it whole.",
+            last.round, issue.id
+        );
     }
-    let mut out = String::from("Review rounds:\n");
-    for (at, r) in issue.reviews.iter().enumerate() {
+    if left_out > 0 {
+        let rounds = if left_out == 1 {
+            "round is"
+        } else {
+            "rounds are"
+        };
+        shown.insert_str(
+            0,
+            &format!(
+                "  {left_out} earlier {rounds} left out here; temet-work issue {} lists every \
+                 round whole.\n",
+                issue.id
+            ),
+        );
+    }
+    under_heading(issue, &shown)
+}
+
+/// One block of lines for each of `issue`'s finished review rounds: its verdict
+/// and, for a block, each point with the author's reply to it and what the next
+/// round made of it.
+fn round_blocks(issue: &Issue) -> Vec<String> {
+    let block = |(at, r): (usize, &Review)| {
+        let mut out = String::new();
         let verdict = if r.approve { "approved" } else { "blocked" };
         let _ = writeln!(out, "  Round {}: {verdict}", r.round);
         // A verdict judges the entry before it, unless it is a round 1's
@@ -387,11 +447,24 @@ pub(crate) fn review_rounds(issue: &Issue) -> String {
             };
             let _ = writeln!(
                 out,
-                "    {}. {point}\n       The author's reply: {reply}\n       State: {state}",
-                n + 1
+                "    {}. {}\n       The author's reply: {}\n       State: {state}",
+                n + 1,
+                indented(point, 9),
+                indented(reply, 9),
             );
         }
+        out
+    };
+    issue.reviews.iter().enumerate().map(block).collect()
+}
+
+/// `rounds` under the heading of an issue's review rounds, ended by what is to
+/// be said of the last block; empty when there are none.
+fn under_heading(issue: &Issue, rounds: &str) -> String {
+    if rounds.is_empty() {
+        return String::new();
     }
+    let mut out = format!("Review rounds:\n{rounds}");
     // The latest block is the one that sent an issue to its arbiter.
     if matches!(issue.stage, Stage::Arbitration { .. })
         && let Some(last) = issue
@@ -407,6 +480,15 @@ pub(crate) fn review_rounds(issue: &Issue) -> String {
         );
     }
     out
+}
+
+/// `text` with each line after its first indented `by` spaces, so that none of
+/// them reads as a line of the list it is printed in. A carriage return alone
+/// breaks a line too.
+pub(crate) fn indented(text: &str, by: usize) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = text.lines().collect();
+    lines.join(&format!("\n{:by$}", ""))
 }
 
 /// One issue in full: where it is, its own text (`read`, or why there is none to
@@ -1466,6 +1548,38 @@ mod review_rounds {
             brief.contains(&format!("{rounds}This folder is not yours")),
             "{brief}"
         );
+    }
+
+    #[test]
+    fn a_line_break_in_a_point_or_reply_is_indented_under_it() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let mut w = working();
+            ready(&mut w, &[]);
+            let point = format!("the hinge squeaks{ending}and sticks");
+            verdict(&mut w, 1, &[&point], Some(&[]));
+            ready(&mut w, &[&format!("oiled it{ending}State: resolved")]);
+            verdict(&mut w, 2, &[&point], Some(&[1]));
+            ready(&mut w, &["planed it"]);
+            verdict(&mut w, 3, &["the chain is short"], Some(&[]));
+            let round = "  Round 1: blocked\n    \
+                         1. the hinge squeaks\n         and sticks\n       \
+                         The author's reply: oiled it\n         State: resolved\n       \
+                         State: kept open by round 2\n";
+            let brief = brief::write(
+                Role::Arbiter,
+                &w.issues[&watch12()],
+                None,
+                &[],
+                brief::Workplace::default(),
+                &[],
+                &[],
+            )
+            .task;
+            for text in [view(&w), brief] {
+                assert!(text.contains(round), "{ending:?}: {text}");
+                assert!(!text.contains('\r'), "{ending:?}: {text}");
+            }
+        }
     }
 
     #[test]
