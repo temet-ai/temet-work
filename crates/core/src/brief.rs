@@ -349,6 +349,23 @@ fn hold_to_the_issue(issue: &IssueId) -> String {
     )
 }
 
+/// When and how a refiner, author or reviewer records a choice on `issue`. The
+/// arbiter's choice is its ruling, already a decision, and an investigator's
+/// work is the issues it files, so neither hears this.
+fn record_choices(issue: &IssueId) -> String {
+    format!(
+        "When you choose between options a person might weigh differently, such as an approach, a \
+         dependency or a scope cut, record the choice; not every step is one. Run:\n\
+         temet-work choose {issue} --question \"<what you decided>\" --option \"<one option>\" \
+         --option \"<another>\" --took \"<the option you took, as written>\" --why \"<why>\" \
+         --cost low|medium|high\n\
+         The cost is what overturning it would cost: low when nothing done is thrown away, medium \
+         when some work is done again, high when the loop cannot take back what it led to. Its \
+         point is the issue's merge, after which overturning it costs more. A person may overturn \
+         it later. Recording it does not stop you: carry on with your work at once.\n"
+    )
+}
+
 /// What a reviewer does with a point that is not met, or that the plan or a
 /// decision departs from.
 const BLOCK_WHAT_IS_NOT_MET: &str = "\
@@ -443,6 +460,7 @@ pub fn write(
                     "outside this folder",
                 ),
             )),
+            Part::Whole(record_choices(id)),
             Part::Command(format!(
                 "Then send the plan, one entry per check, as YAML on standard input:\n\
                  temet-work plan {id} - <<'PLAN'\n\
@@ -475,6 +493,7 @@ pub fn write(
                 read = read_the_issue(id),
             ))];
             parts.extend(fixes);
+            parts.push(Part::Whole(record_choices(id)));
             parts.push(Part::Whole(
                 "The plan's checks, each to hold before you finish:\n".into(),
             ));
@@ -497,6 +516,7 @@ pub fn write(
                  {BLOCK_WHAT_IS_NOT_MET}\n",
                 hold = hold_to_the_issue(id),
             )));
+            parts.push(Part::Whole(record_choices(id)));
             parts.push(Part::Command(how_to_judge(issue, round, "<what to fix>")));
             parts
         }
@@ -1485,6 +1505,49 @@ mod tests {
         .task
     }
 
+    #[test]
+    fn the_refiner_author_and_reviewer_are_told_to_record_choices_and_carry_on() {
+        let issue = lamp_issue();
+        let mut reviewed = issue.clone();
+        reviewed.stage = Stage::InReview { round: 1 };
+        let mut ruling = issue.clone();
+        ruling.stage = Stage::Arbitration { round: 3 };
+        let world = investigating(None);
+        let looking = Investigating {
+            group: &world.groups[&GroupId::new("watch")],
+            covered: Vec::new(),
+            closed: Vec::new(),
+            notes: Vec::new(),
+            milestone: None,
+            since: Since::First,
+        };
+        let investigator = investigate(&looking, Workplace::default(), &[]).task;
+        for (role, brief) in [
+            ("refiner", lamp_task(Role::Refiner, &issue)),
+            ("author", lamp_task(Role::Author, &issue)),
+            ("reviewer", lamp_task(Role::Reviewer, &reviewed)),
+        ] {
+            for said in [
+                "When you choose between options a person might weigh differently, such as an \
+                 approach, a dependency or a scope cut, record the choice; not every step is one.",
+                "temet-work choose watch#31 --question \"<what you decided>\" --option \
+                 \"<one option>\" --option \"<another>\" --took \"<the option you took, as \
+                 written>\" --why \"<why>\" --cost low|medium|high\n",
+                "Recording it does not stop you: carry on with your work at once.",
+            ] {
+                assert!(brief.contains(said), "{role}: {said}\n{brief}");
+            }
+        }
+        // An arbiter's choice is its ruling, and an investigator files issues.
+        for (role, brief) in [
+            ("arbiter", lamp_task(Role::Arbiter, &ruling)),
+            ("investigator", investigator),
+        ] {
+            assert!(!brief.contains("temet-work choose"), "{role}: {brief}");
+            assert!(!brief.contains("record the choice"), "{role}: {brief}");
+        }
+    }
+
     /// `watch#12` with its arbiter due after `reviews`.
     fn gate_in_arbitration(reviews: Vec<crate::model::Review>) -> World {
         let id = IssueId::new("watch", "12");
@@ -1912,6 +1975,15 @@ mod tests {
              failure it describes in place. Where a point cannot be met, say so in the pull request.\n\
              This folder is yours until the change merges. Make a branch, change the code and open a \
              pull request.\n\
+             When you choose between options a person might weigh differently, such as an approach, \
+             a dependency or a scope cut, record the choice; not every step is one. Run:\n\
+             temet-work choose watch#31 --question \"<what you decided>\" --option \"<one option>\" \
+             --option \"<another>\" --took \"<the option you took, as written>\" --why \"<why>\" \
+             --cost low|medium|high\n\
+             The cost is what overturning it would cost: low when nothing done is thrown away, medium \
+             when some work is done again, high when the loop cannot take back what it led to. Its \
+             point is the issue's merge, after which overturning it costs more. A person may \
+             overturn it later. Recording it does not stop you: carry on with your work at once.\n\
              The plan's checks, each to hold before you finish:\n\
              - a dry lamp is refused (shown by: the dry lamp test)\n\
              When the pull request is open and every check holds, run: temet-work ready watch#31 \
@@ -1932,6 +2004,15 @@ mod tests {
              - clacks (ankh-morpork/clacks): /srv/clacks\n\
              Make the branch and open the pull requests yourself: use the same branch name in every \
              repository and open one pull request in each.\n\
+             When you choose between options a person might weigh differently, such as an approach, \
+             a dependency or a scope cut, record the choice; not every step is one. Run:\n\
+             temet-work choose watch#31 --question \"<what you decided>\" --option \"<one option>\" \
+             --option \"<another>\" --took \"<the option you took, as written>\" --why \"<why>\" \
+             --cost low|medium|high\n\
+             The cost is what overturning it would cost: low when nothing done is thrown away, medium \
+             when some work is done again, high when the loop cannot take back what it led to. Its \
+             point is the issue's merge, after which overturning it costs more. A person may \
+             overturn it later. Recording it does not stop you: carry on with your work at once.\n\
              The plan's checks, each to hold before you finish:\n\
              - a dry lamp is refused (shown by: the dry lamp test)\n\
              When the pull request is open and every check holds, run: temet-work ready watch#31 \
@@ -2059,10 +2140,10 @@ mod tests {
             assert_eq!(
                 author_task_in(Stage::Fixing { round: 1 }, held, &[]),
                 first.replace(
-                    "The plan's checks,",
+                    "When you choose between options",
                     "Earlier work on it came back with these to fix first:\n\
                      - CI check tests failed\n\
-                     The plan's checks,"
+                     When you choose between options"
                 )
             );
         }

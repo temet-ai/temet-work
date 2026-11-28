@@ -587,6 +587,10 @@ pub fn answer(
         }),
         Ok(events) => {
             let changed = changed_setting(&request.command, events.first());
+            let decided = events.iter().find_map(|e| match e {
+                temet_work_core::Event::DecisionMade { decision } => Some(decision.id),
+                _ => None,
+            });
             for event in events {
                 host.handle(now_ms, event)?;
             }
@@ -594,6 +598,13 @@ pub fn answer(
                 return Ok(Reply::Done { text });
             }
             match &request.command {
+                temet_work_core::Command::Choose { .. } => {
+                    if let Some(id) = decided {
+                        return Ok(Reply::Done {
+                            text: format!("decision {} is recorded", id.0),
+                        });
+                    }
+                }
                 temet_work_core::Command::Overturn {
                     decision, option, ..
                 } => {

@@ -183,9 +183,30 @@ pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
             .enumerate()
             .map(|(n, o)| format!("{}={o}", n + 1))
             .collect();
+        // What overturning it costs and the point after which it costs more; a
+        // ruling from an older log has neither.
+        let point = d.point.map(|p| {
+            let passed = world.issues.get(&d.issue).is_some_and(|i| p.passed(i));
+            format!(
+                "point {}{}",
+                p.name(),
+                if passed { " (passed)" } else { "" }
+            )
+        });
+        let costs: Vec<String> = d
+            .cost
+            .map(|c| format!("cost {}", c.name()))
+            .into_iter()
+            .chain(point)
+            .collect();
+        let costs = if costs.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", costs.join(", "))
+        };
         let _ = writeln!(
             out,
-            "  {} {}: {} [{}] chose {chosen}, by {}: {}{overturned}",
+            "  {} {}: {} [{}] chose {chosen}, by {}: {}{costs}{overturned}",
             d.id.0,
             d.issue,
             d.question,
@@ -1715,6 +1736,129 @@ mod review_rounds {
                     || c == '\u{2029}'
             };
             assert!(!text.chars().any(control), "{text:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod decisions {
+    use super::*;
+    use crate::event::Event;
+    use crate::ids::{AgentId, DecisionId, IssueId};
+    use crate::model::{Cost, Decision, DecisionKind, Point};
+
+    fn issue() -> IssueId {
+        IssueId::new("ankh", "1")
+    }
+
+    /// The lines `status` lists under Decisions.
+    fn listed(w: &World) -> Vec<String> {
+        let text = text(w, &BTreeMap::new());
+        let after = text
+            .split("Decisions\n")
+            .nth(1)
+            .expect("a Decisions section");
+        after
+            .lines()
+            .take_while(|l| l.starts_with("  "))
+            .map(String::from)
+            .collect()
+    }
+
+    /// ankh#1, with arbiter-1's approval, author-1's choice of the pigeon and a
+    /// ruling an older log holds, which has no cost or point.
+    fn decided() -> World {
+        let mut w = World::default();
+        let (cost, point) = Decision::ruling_cost(true);
+        let old: Event = serde_json::from_str(
+            r#"{"DecisionMade":{"decision":{"id":3,"issue":{"project":"ankh","key":"1"},"by":"arbiter-1","kind":{"Ruling":{"approve":false}},"question":"Does ankh#1 merge?","options":["merge","fix first"],"chosen":1,"reason":"the bell is cracked","overturned_to":null}}}"#,
+        )
+        .expect("an older line reads");
+        for e in [
+            Event::IssueSynced {
+                issue: issue(),
+                title: "Send word to Pseudopolis".into(),
+                milestone: None,
+                depends_on: vec![],
+                order: 1,
+                closed: false,
+            },
+            Event::DecisionMade {
+                decision: Decision {
+                    id: DecisionId(1),
+                    issue: issue(),
+                    by: AgentId::new("arbiter-1"),
+                    kind: DecisionKind::Ruling { approve: true },
+                    question: "Does ankh#1 merge after 3 review rounds?".into(),
+                    options: vec!["merge".into(), "fix first".into()],
+                    chosen: 0,
+                    reason: "it rings true".into(),
+                    overturned_to: None,
+                    overturn_reason: String::new(),
+                    cost: Some(cost),
+                    point: Some(point),
+                },
+            },
+            Event::DecisionMade {
+                decision: Decision {
+                    id: DecisionId(2),
+                    issue: issue(),
+                    by: AgentId::new("author-1"),
+                    kind: DecisionKind::Choice,
+                    question: "Which way does the clacks message go?".into(),
+                    options: vec!["clacks".into(), "pigeon".into(), "Post Office".into()],
+                    chosen: 1,
+                    reason: "the towers are down".into(),
+                    overturned_to: None,
+                    overturn_reason: String::new(),
+                    cost: Some(Cost::Medium),
+                    point: Some(Point::Merge),
+                },
+            },
+            Event::DecisionOverturned {
+                decision: DecisionId(2),
+                to: 2,
+                reason: "the Post Office delivers".into(),
+                by: "person".into(),
+            },
+            old,
+        ] {
+            w.apply(&e);
+        }
+        w
+    }
+
+    #[test]
+    fn each_decision_lists_its_cost_and_point_and_an_older_ruling_neither() {
+        let mut w = decided();
+        assert_eq!(
+            listed(&w),
+            [
+                "  1 ankh#1: Does ankh#1 merge after 3 review rounds? [1=merge, 2=fix first] chose \
+                 merge, by arbiter-1: it rings true; cost high, point merge",
+                "  2 ankh#1: Which way does the clacks message go? [1=clacks, 2=pigeon, 3=Post \
+                 Office] chose pigeon, by author-1: the towers are down; cost medium, point merge; \
+                 overturned to option 3 (Post Office): the Post Office delivers",
+                "  3 ankh#1: Does ankh#1 merge? [1=merge, 2=fix first] chose fix first, by \
+                 arbiter-1: the bell is cracked",
+            ]
+        );
+        // Merging is not past the merge; deploying, verifying and done are.
+        let stage = |w: &mut World, s| w.issues.get_mut(&issue()).expect("synced").stage = s;
+        stage(&mut w, Stage::Merging);
+        assert!(listed(&w)[0].ends_with("; cost high, point merge"));
+        for s in [Stage::Deploying, Stage::Verifying, Stage::Done] {
+            stage(&mut w, s);
+            let lines = listed(&w);
+            assert!(
+                lines[0].ends_with("; cost high, point merge (passed)"),
+                "{lines:?}"
+            );
+            assert!(
+                lines[1].contains("; cost medium, point merge (passed); overturned"),
+                "{lines:?}"
+            );
+            assert!(lines[2].ends_with(": the bell is cracked"), "{lines:?}");
         }
     }
 }

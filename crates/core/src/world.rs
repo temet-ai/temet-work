@@ -727,20 +727,23 @@ impl World {
             }
             Event::DecisionMade { decision } => {
                 self.decisions.insert(decision.id, decision.clone());
-                // The arbiter's work is done once its ruling is in; a later
-                // arbitration starts a fresh one, which hears that dispute.
-                let done = self.stop(&decision.issue, &[Role::Arbiter]);
-                if let DecisionKind::Ruling { approve } = decision.kind
-                    && let Some(i) = self.issues.get_mut(&decision.issue)
-                    && let Stage::Arbitration { round } = i.stage
-                {
-                    if approve {
-                        out.extend(done);
-                        i.review_ok = true;
-                        Self::try_merge(i, &mut out);
-                    } else {
-                        let points = vec![decision.reason.clone()];
-                        Self::send_back(i, round, points, false, done, &mut out);
+                // A choice is only recorded: the agent that made it carries on,
+                // and no stage or agent changes.
+                if let DecisionKind::Ruling { approve } = decision.kind {
+                    // The arbiter's work is done once its ruling is in; a later
+                    // arbitration starts a fresh one, which hears that dispute.
+                    let done = self.stop(&decision.issue, &[Role::Arbiter]);
+                    if let Some(i) = self.issues.get_mut(&decision.issue)
+                        && let Stage::Arbitration { round } = i.stage
+                    {
+                        if approve {
+                            out.extend(done);
+                            i.review_ok = true;
+                            Self::try_merge(i, &mut out);
+                        } else {
+                            let points = vec![decision.reason.clone()];
+                            Self::send_back(i, round, points, false, done, &mut out);
+                        }
                     }
                 }
             }

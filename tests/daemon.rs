@@ -2075,6 +2075,195 @@ areas = ["guild"]
 
 /// Two issues of one project merge in the same round: their deploys run one
 /// after the other, and both end verified and closed.
+/// author-1's choice on ankh#1, at `cost`: the clacks, the pigeon or the Post Office.
+fn clacks_choice(cost: Option<&str>) -> Command {
+    Command::Choose {
+        issue: IssueId::new("ankh", "1"),
+        question: "Which way does the clacks message go?".into(),
+        options: vec!["clacks".into(), "pigeon".into(), "Post Office".into()],
+        took: "pigeon".into(),
+        why: "the towers are down past Sto Lat".into(),
+        cost: cost.map(String::from),
+    }
+}
+
+/// A host whose ankh#1 is being worked on by author-1, after author-1 has
+/// recorded [`clacks_choice`] at medium cost through the socket's answer; the
+/// log it kept, and the reply to the choice.
+fn chosen() -> (Host, Starts, Kept, String) {
+    use temet_work::socket::{Reply, answer};
+
+    let kept = Kept::default();
+    let (mut host, starts) = host_with(Box::new(kept.clone()));
+    host.tick(0).expect("sync");
+    plan_one_check(&mut host, &starts);
+    let author = AgentId::new("author-1");
+    let issue = IssueId::new("ankh", "1");
+    assert_eq!(host.world().issues[&issue].stage, Stage::Working);
+    let before = host.world().agents[&author].clone();
+    let request = from(&starts, Some("author-1"), clacks_choice(Some("medium")));
+    let reply = answer(&mut host, 1, &request, &Peer::Unchecked).expect("answer");
+    let Reply::Done { text } = reply else {
+        panic!("the choice is refused: {reply:?}");
+    };
+    // The author carries on: its state and its issue's stage are as they were.
+    assert_eq!(host.world().agents[&author], before);
+    assert_eq!(host.world().issues[&issue].stage, Stage::Working);
+    (host, starts, kept, text)
+}
+
+#[test]
+fn an_authors_choice_is_listed_by_status_and_the_view_and_kept_in_the_log() {
+    use temet_work::socket::{Reply, answer};
+    use temet_work_core::Event;
+    use temet_work_core::model::{Cost, DecisionKind, Point};
+
+    let (mut host, starts, kept, reply) = chosen();
+    assert_eq!(reply, "decision 1 is recorded");
+    let mut ask = |by: Option<&str>, command| {
+        let request = from(&starts, by, command);
+        answer(&mut host, 1, &request, &Peer::Unchecked).expect("answer")
+    };
+    let Reply::Done { text } = ask(None, Command::Status) else {
+        panic!("status refused");
+    };
+    assert!(
+        text.contains(
+            "Decisions\n  1 ankh#1: Which way does the clacks message go? [1=clacks, 2=pigeon, \
+             3=Post Office] chose pigeon, by author-1: the towers are down past Sto Lat; cost \
+             medium, point merge\nRules\n"
+        ),
+        "{text}"
+    );
+    let Reply::View { view } = ask(None, Command::View) else {
+        panic!("view refused");
+    };
+    // As `status --json` prints it.
+    let json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string_pretty(&view).expect("json")).expect("reads");
+    assert_eq!(
+        json["decisions"],
+        serde_json::json!([{
+            "id": 1,
+            "issue": "ankh#1",
+            "by": "author-1",
+            "question": "Which way does the clacks message go?",
+            "options": ["clacks", "pigeon", "Post Office"],
+            "chosen": 2,
+            "reason": "the towers are down past Sto Lat",
+            "overturned_to": null,
+            "overturn_reason": "",
+            "cost": "medium",
+            "point": {"at": "merge", "passed": false}
+        }])
+    );
+    // A choice with no cost, sent as a raw socket line, is refused by the loop.
+    let raw = r#"{"by":"author-1","command":{"command":"choose","issue":{"project":"ankh","key":"1"},"question":"Which way?","options":["clacks","pigeon"],"took":"pigeon","why":"it flies"}}"#;
+    let mut bare: Request = serde_json::from_str(raw).expect("a request without a cost reads");
+    bare.secret = from(&starts, Some("author-1"), Command::Status).secret;
+    assert!(matches!(
+        answer(&mut host, 1, &bare, &Peer::Unchecked).expect("answer"),
+        Reply::Refused { why } if why.contains("cost to undo: low, medium or high")
+    ));
+    assert_eq!(host.world().decisions.len(), 1);
+    // One event in the log, and the log alone rebuilds the same decisions.
+    let events = kept.0.lock().expect("log").clone();
+    let made: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::DecisionMade { decision } => Some(decision),
+            _ => None,
+        })
+        .collect();
+    let [decision] = made.as_slice() else {
+        panic!("{made:?}");
+    };
+    assert_eq!(
+        (
+            decision.id.0,
+            &decision.kind,
+            decision.by.0.as_str(),
+            decision.chosen,
+            decision.cost,
+            decision.point
+        ),
+        (
+            1,
+            &DecisionKind::Choice,
+            "author-1",
+            1,
+            Some(Cost::Medium),
+            Some(Point::Merge)
+        )
+    );
+    let (replayed, _) = World::replay(&events);
+    assert_eq!(replayed.decisions, host.world().decisions);
+    // Work carries on: the author's ready is accepted at once.
+    let ready = Command::Ready {
+        issue: IssueId::new("ankh", "1"),
+        pull: Some("57".into()),
+        pulls: Default::default(),
+        replies: Vec::new(),
+    };
+    assert_eq!(
+        answer(
+            &mut host,
+            1,
+            &from(&starts, Some("author-1"), ready),
+            &Peer::Unchecked
+        )
+        .expect("answer"),
+        Reply::Done {
+            text: "ankh#1 is in review, round 1".into()
+        }
+    );
+}
+
+#[test]
+fn a_person_overturns_an_agents_recorded_choice_through_the_daemon() {
+    use temet_work::socket::{Reply, answer};
+
+    let (mut host, starts, _, _) = chosen();
+    let issue = IssueId::new("ankh", "1");
+    let mut ask = |by: Option<&str>, command| {
+        let request = from(&starts, by, command);
+        answer(&mut host, 1, &request, &Peer::Unchecked).expect("answer")
+    };
+    let overturn = Command::Overturn {
+        decision: temet_work_core::ids::DecisionId(1),
+        option: 3,
+        reason: "the Post Office delivers in the rain".into(),
+    };
+    assert!(matches!(
+        ask(Some("author-1"), overturn.clone()),
+        Reply::Refused { why } if why.contains("overturn is a person's")
+    ));
+    assert_eq!(
+        ask(None, overturn),
+        Reply::Done {
+            text: "decision 1 is overturned to option 3".into()
+        }
+    );
+    let Reply::Done { text } = ask(None, Command::Status) else {
+        panic!("status refused");
+    };
+    assert!(
+        text.contains(
+            "chose pigeon, by author-1: the towers are down past Sto Lat; cost medium, point \
+             merge; overturned to option 3 (Post Office): the Post Office delivers in the rain\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "1 proposed: Which way does the clacks message go? Prefer: Post Office. Why: the Post \
+             Office delivers in the rain"
+        ),
+        "{text}"
+    );
+    assert_eq!(host.world().issues[&issue].stage, Stage::Working);
+}
+
 #[test]
 fn two_merges_in_one_project_deploy_one_after_the_other() {
     use std::sync::atomic::{AtomicUsize, Ordering};

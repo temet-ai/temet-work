@@ -4,9 +4,10 @@
 //!
 //! The server has two levels. At `read`, the default, it offers the views:
 //! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
-//! that move work and change settings: `plan`, `ready`, `review`, `retry`, `rule`, `overturn`, `proposal`, `set` and
-//! `unset`. A tool above the server's level is
-//! not listed, and calling it is refused.
+//! that move work, record choices and change settings: `plan`, `ready`, `review`,
+//! `retry`, `rule`, `choose`, `overturn`, `proposal`, `file`, `investigated`, `set`
+//! and `unset`. A tool above the server's level is not listed, and calling it is
+//! refused.
 
 use serde_json::{Value, json};
 use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
@@ -140,6 +141,19 @@ fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {
                 "issue": issue_field(), "approve": {"type": "boolean"}, "reason": {"type": "string"}
             }, "required": ["issue", "approve", "reason"]}),
+        },
+        Tool {
+            name: "choose",
+            description: "An agent's: record a choice you made on the issue you work on, as a decision a person can overturn later. Record a choice between options a person might weigh differently, such as an approach, a dependency or a scope cut, not every step. took is one of the options as written. cost is what overturning it costs: low when nothing done is thrown away, medium when some work is done again, high when the loop cannot take back what it led to. Its point is the issue's merge, after which overturning costs more. Work carries on at once: the reply names the decision.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "issue": issue_field(),
+                "question": {"type": "string", "description": "What you decided, in a line."},
+                "options": {"type": "array", "minItems": 2, "items": {"type": "string"}, "description": "The options you weighed, each once."},
+                "took": {"type": "string", "description": "The option you took, as written among options."},
+                "why": {"type": "string", "description": "Why you took it."},
+                "cost": {"type": "string", "enum": ["low", "medium", "high"], "description": "What overturning it costs. A choice without one is refused."}
+            }, "required": ["issue", "question", "options", "took", "why"]}),
         },
         Tool {
             name: "overturn",
@@ -348,6 +362,37 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                 .ok_or("approve is missing")?,
             reason: text(args, "reason")?,
         },
+        // A field left out is sent empty, and a cost left out as none: the
+        // daemon refuses the choice with the reason, as it does the command line's.
+        "choose" => {
+            let given = |key: &str| {
+                args.get(key)
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_default()
+            };
+            Command::Choose {
+                issue: issue(args)?,
+                question: given("question"),
+                options: args
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .map(|o| {
+                                o.as_str()
+                                    .map(String::from)
+                                    .ok_or_else(|| "each option is text".to_string())
+                            })
+                            .collect::<Result<_, String>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
+                took: given("took"),
+                why: given("why"),
+                cost: args.get("cost").and_then(Value::as_str).map(String::from),
+            }
+        }
         "overturn" => Command::Overturn {
             decision: DecisionId(number(args, "decision")?),
             option: usize::try_from(number(args, "option")?)
@@ -524,7 +569,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 15);
+        assert_eq!(names(Level::Act).len(), 16);
     }
 
     #[test]
@@ -629,6 +674,38 @@ mod tests {
         );
         assert!(names(Level::Act).contains(&"overturn".to_string()));
         assert!(!names(Level::Read).contains(&"proposal".to_string()));
+    }
+
+    #[test]
+    fn choose_is_offered_at_act_becomes_the_command_lines_choice_and_is_refused_at_read() {
+        assert!(names(Level::Act).contains(&"choose".to_string()));
+        assert!(!names(Level::Read).contains(&"choose".to_string()));
+        let args = json!({
+            "issue": "ankh#1",
+            "question": "Which way does the clacks message go?",
+            "options": ["clacks", "pigeon", "Post Office"],
+            "took": "pigeon",
+            "why": "the towers are down",
+            "cost": "medium"
+        });
+        let mut sent = Vec::new();
+        let answer = call(Level::Read, "choose", args.clone(), &mut sent);
+        assert_eq!(answer["result"]["isError"], true);
+        assert!(sent.is_empty());
+        let answer = call(Level::Act, "choose", args.clone(), &mut sent);
+        assert_eq!(answer["result"]["isError"], false);
+        let mut no_cost = args;
+        no_cost.as_object_mut().map(|a| a.remove("cost"));
+        call(Level::Act, "choose", no_cost, &mut sent);
+        let commands: Vec<_> = sent.iter().map(|r| r.command.clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                crate::cli::tests::pigeon(Some("medium")),
+                crate::cli::tests::pigeon(None)
+            ]
+        );
+        assert_eq!(sent[0].by, Some(AgentId::new("reviewer-1")));
     }
 
     #[test]

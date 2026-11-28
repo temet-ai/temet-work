@@ -26,6 +26,12 @@ temet-work review ISSUE block POINT...      what to fix, one argument each; --fa
                                             still not dealt with, each counted from 1
 temet-work rule ISSUE approve REASON
 temet-work rule ISSUE fix REASON
+temet-work choose ISSUE --question TEXT --option TEXT --option TEXT [--option TEXT...]
+           --took TEXT --why TEXT --cost low|medium|high
+                                            an agent's: record a choice on the issue it works on, as
+                                            a decision a person can overturn; --took is one of the
+                                            options as written, --cost what overturning it costs;
+                                            work carries on at once
 temet-work overturn DECISION OPTION REASON
                                             a person's: choose another option of a decision, as
                                             `status` numbers them; REASON is required
@@ -72,7 +78,7 @@ pub fn json_refused() -> String {
 fn has_json(args: &[String]) -> bool {
     let word = |i: usize| args.get(i).map(String::as_str);
     let before_text = match word(0) {
-        Some("file") => 2,
+        Some("file" | "choose") => 2,
         Some("set" | "rule" | "overturn") => 3,
         Some("review") if word(2) == Some("block") => 3,
         Some("ready") => args.iter().position(|a| a == REPLY).unwrap_or(args.len()),
@@ -133,6 +139,58 @@ fn take_numbers(
     Ok((rest, numbers))
 }
 
+/// Reads `choose ISSUE --question TEXT --option TEXT ... --took TEXT --why TEXT
+/// --cost COST`, its flags in any order. Each flag's text is the argument after
+/// it, whatever it says, so a text may be `--json` or `--role`. A flag left out
+/// reads as empty and a cost left out as none, and the daemon refuses the choice
+/// with the reason, as it does a choice from MCP or the socket.
+fn choose(args: &[String]) -> Result<Command, String> {
+    let issue = args
+        .get(1)
+        .ok_or_else(|| format!("missing ISSUE\n\n{USAGE}"))?;
+    let issue = IssueId::parse(issue)
+        .ok_or_else(|| format!("{issue} is not an issue; write project#key, such as radar#44"))?;
+    let (mut question, mut took, mut why, mut cost) = (None, None, None, None);
+    let mut options = Vec::new();
+    let mut rest = args.get(2..).unwrap_or_default().iter();
+    while let Some(flag) = rest.next() {
+        let slot = match flag.as_str() {
+            "--option" | "--question" | "--took" | "--why" | "--cost" => flag.as_str(),
+            other => {
+                return Err(format!(
+                    "choose takes --question, --option, --took, --why and --cost, each followed \
+                     by its text; {other} is none of them\n\n{USAGE}"
+                ));
+            }
+        };
+        let text = rest
+            .next()
+            .ok_or_else(|| format!("{slot} needs its text"))?
+            .clone();
+        let once = match slot {
+            "--option" => {
+                options.push(text);
+                continue;
+            }
+            "--question" => &mut question,
+            "--took" => &mut took,
+            "--why" => &mut why,
+            _ => &mut cost,
+        };
+        if once.replace(text).is_some() {
+            return Err(format!("{slot} is given twice; give it once"));
+        }
+    }
+    Ok(Command::Choose {
+        issue,
+        question: question.unwrap_or_default(),
+        options,
+        took: took.unwrap_or_default(),
+        why: why.unwrap_or_default(),
+        cost,
+    })
+}
+
 /// Reads the arguments after the program name into a request. `by` is the
 /// agent sending it; `read` reads a file. The request carries no secret: the
 /// caller adds the one in [`SECRET_VAR`].
@@ -141,6 +199,15 @@ pub fn request(
     by: Option<String>,
     read: impl Fn(&Path) -> Result<String, String>,
 ) -> Result<Request, String> {
+    let by = by.filter(|b| !b.is_empty()).map(AgentId::new);
+    // Every argument of a choice after its issue is a flag or a flag's text, so
+    // no flag is taken out of it first.
+    if args.first().is_some_and(|a| a == "choose") {
+        if has_json(args) {
+            return Err(json_refused());
+        }
+        return Ok(Request::new(by, choose(args)?));
+    }
     let (args, role) = take_role(args)?;
     let (args, milestone) = take(&args, "--milestone")?;
     let args = args.as_slice();
@@ -301,14 +368,11 @@ pub fn request(
         },
         other => return Err(format!("no command {other}\n\n{USAGE}")),
     };
-    Ok(Request::new(
-        by.filter(|b| !b.is_empty()).map(AgentId::new),
-        command,
-    ))
+    Ok(Request::new(by, command))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn args(s: &str) -> Vec<String> {
@@ -377,6 +441,109 @@ mod tests {
                 .is_err_and(|e| e.contains("needs the reply's text"))
         );
         assert!(ready(&["ready", "ankh#1", "--json", "--reply", "x"]).is_err());
+    }
+
+    /// The words of `author-1`'s choice of the pigeon, with `cost` after it when given.
+    fn choose_words(cost: Option<&str>) -> Vec<String> {
+        let mut words = vec![
+            "choose",
+            "ankh#1",
+            "--question",
+            "Which way does the clacks message go?",
+            "--option",
+            "clacks",
+            "--option",
+            "pigeon",
+            "--option",
+            "Post Office",
+            "--took",
+            "pigeon",
+            "--why",
+            "the towers are down",
+        ];
+        if let Some(cost) = cost {
+            words.extend(["--cost", cost]);
+        }
+        words.into_iter().map(String::from).collect()
+    }
+
+    /// The choice [`choose_words`] reads into.
+    pub(crate) fn pigeon(cost: Option<&str>) -> Command {
+        Command::Choose {
+            issue: IssueId::new("ankh", "1"),
+            question: "Which way does the clacks message go?".into(),
+            options: vec!["clacks".into(), "pigeon".into(), "Post Office".into()],
+            took: "pigeon".into(),
+            why: "the towers are down".into(),
+            cost: cost.map(String::from),
+        }
+    }
+
+    #[test]
+    fn choose_reads_each_option_and_a_missing_cost_as_none() {
+        let r = request(
+            &choose_words(Some("medium")),
+            Some("author-1".into()),
+            no_files,
+        )
+        .expect("request");
+        assert_eq!(r.by, Some(AgentId::new("author-1")));
+        assert_eq!(r.command, pigeon(Some("medium")));
+        // Without --cost the choice still reads, with no cost: the daemon refuses it.
+        let r = request(&choose_words(None), Some("author-1".into()), no_files).expect("request");
+        assert_eq!(r.command, pigeon(None));
+    }
+
+    #[test]
+    fn a_chooses_texts_are_whatever_follows_each_flag() {
+        let line = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let choose = |words: &[&str]| request(&line(words), None, no_files).map(|r| r.command);
+        assert_eq!(
+            choose(&[
+                "choose",
+                "ankh#1",
+                "--cost",
+                "low",
+                "--option",
+                "--role",
+                "--question",
+                "--json",
+                "--option",
+                "--milestone",
+                "--why",
+                "--reply",
+                "--took",
+                "--role",
+            ]),
+            Ok(Command::Choose {
+                issue: IssueId::new("ankh", "1"),
+                question: "--json".into(),
+                options: vec!["--role".into(), "--milestone".into()],
+                took: "--role".into(),
+                why: "--reply".into(),
+                cost: Some("low".into()),
+            })
+        );
+        for (words, refused) in [
+            (
+                &["choose", "--json", "ankh#1"][..],
+                "--json goes with status only",
+            ),
+            (&["choose"][..], "missing ISSUE"),
+            (&["choose", "ankh"][..], "ankh is not an issue"),
+            (&["choose", "ankh#1", "--took"][..], "--took needs its text"),
+            (
+                &["choose", "ankh#1", "pigeon"][..],
+                "pigeon is none of them",
+            ),
+            (
+                &["choose", "ankh#1", "--cost", "low", "--cost", "high"][..],
+                "--cost is given twice",
+            ),
+        ] {
+            let why = choose(words).expect_err("refused");
+            assert!(why.contains(refused), "{words:?}: {why}");
+        }
     }
 
     #[test]

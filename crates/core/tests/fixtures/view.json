@@ -321,8 +321,11 @@
       "reason": "it is easier to undo",
       "overturned_to": null,
       "overturn_reason": "",
-      "cost": null,
-      "point": null
+      "cost": "low",
+      "point": {
+        "at": "merge",
+        "passed": false
+      }
     },
     {
       "id": 2,
@@ -338,8 +341,11 @@
       "reason": "it is easier to undo",
       "overturned_to": 3,
       "overturn_reason": "the guild pays by the bell",
-      "cost": null,
-      "point": null
+      "cost": "low",
+      "point": {
+        "at": "merge",
+        "passed": false
+      }
     },
     {
       "id": 3,

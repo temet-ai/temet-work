@@ -33,6 +33,7 @@ reports its step done.
 | `temet-work retry ISSUE` | a person only | deploying or verifying: runs the deploy (or verify) again, at once unless a deploy or verify of the same project or `run_in` folder is running, and clears its failure count, its ten-minute wait and its reruns in `deploy-handoff.stale`, so a deploy that failed three times gets three fresh tries |
 | `temet-work rule ISSUE approve REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
 | `temet-work rule ISSUE fix REASON` | the arbiter working on ISSUE, or a person | with the arbiter |
+| `temet-work choose ISSUE --question TEXT --option TEXT --option TEXT [--option TEXT ...] --took TEXT --why TEXT --cost low\|medium\|high` | any agent working on ISSUE, whatever its role; not a person, who decides through settings and overturns. It records a choice the agent made as a decision by that agent: the question, the options weighed (at least two, each once), the one it took, given as its text among the options, why, and what overturning it costs. The point is the issue's merge, the only point the loop has. Work carries on at once: the choice moves no stage, stops no agent and asks for no fix or merge. The reply names the decision, as `decision 1 is recorded`. A choice with no cost or another word for it is refused, naming low, medium and high, and so is one whose taken option is not among the options, which the refusal lists, one with an empty question or reason, and one with fewer than two options or an empty or repeated one. Each flag's text is the argument after it, whatever it says | any |
 | `temet-work overturn DECISION OPTION REASON` | a person only; `DECISION` and `OPTION` are the numbers `status` lists (options count from 1), `REASON` is required | any, if the decision exists, the option is another than the one chosen, and the reason is not empty. What it changes depends on the issue: see below |
 | `temet-work proposal RULE keep` | a person only: the rule moves to kept and ends every brief written from then on | the rule is proposed |
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
@@ -59,6 +60,10 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
   and `unset`.
 - `status` (with or without `--json`), `issue`, `screen` and `settings` are open to
   anyone. `set` and `unset` keep their own rule, in the table.
+- `choose` is not a step: any agent working on the issue may record a choice on it. An
+  agent working on another issue is refused with the issue it works on, and so is an id
+  the daemon did not start. A person is refused too: a choice recorded as a person's would
+  have that person overturn themselves.
 - `file` and `investigated` belong to a group's running investigator, which works for its
   group and on no issue. A person, another agent, or an investigator whose investigation
   has ended is refused with the reason; a person files issues in the tracker itself.
@@ -196,7 +201,7 @@ like any other.
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
 `status`, `issue`, `screen` and `settings`; `act` adds `plan`, `ready`, `review`, `rule`,
-`retry`, `overturn`, `proposal`, `file`, `investigated`, `set` and `unset`.
+`choose`, `retry`, `overturn`, `proposal`, `file`, `investigated`, `set` and `unset`.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
@@ -206,15 +211,17 @@ asking the daemon. The build id is the commit the binary was built from, as
 `temet-workd --version` shows it.
 
 A command an agent runs is recorded as that agent's (see "How the daemon knows who sent a
-command"). A ruling is recorded as a decision, listed by `temet-work status` with its
-numbered options, its cost to undo and its point: the issue's merge, after which
-overturning it costs more. An approval costs high, since the loop does not take back a
-merged change, and a send-back costs low, since the author's fix finishes either way and
-the issue merges once the checks pass. `status --json` gives the cost as
-`low`, `medium` or `high`, and the point as `merge` with whether the issue is past it,
-which it is once the issue is deploying, verifying or done. It gives the point no time,
-since nothing in temet-work knows when a merge will happen. A choice that is not a ruling
-has neither, nor has a ruling recorded before rulings kept them.
+command"). A ruling and a choice recorded with `choose` are each a decision, listed by
+`temet-work status` with its numbered options, the option taken, who decided and why, then
+its cost to undo and its point: the issue's merge, after which overturning it costs more,
+as in `cost medium, point merge`, and `point merge (passed)` once the issue is deploying,
+verifying or done. A choice costs what its agent gave. An approval costs high, since the
+loop does not take back a merged change, and a send-back costs low, since the author's fix
+finishes either way and the issue merges once the checks pass. `status --json` gives the
+cost as `low`, `medium` or `high`, and the point as `merge` with whether the issue is past
+it. It gives the point no time, since nothing in temet-work knows when a merge will
+happen. Only a ruling recorded before rulings kept them has neither, and `status` prints
+none for it.
 
 ## What a brief holds
 
@@ -251,12 +258,15 @@ When the plain parts alone would take a text over the limit, as a long list of t
 a person closed can in an investigator's brief, the longest is cut, with a line saying so.
 The command the agent reports with is never cut.
 
-`plan`, `review`, `ready`, `rule` and `overturn` store their text with every control
-character dropped but the line feed and the tab: ESC, NUL, VT, FF, BS, DEL and the C1
+`plan`, `review`, `ready`, `rule`, `choose` and `overturn` store their text with every
+control character dropped but the line feed and the tab: ESC, NUL, VT, FF, BS, DEL and the C1
 controls among them. A carriage return, alone or before a line feed, NEL (U+0085) and the
 line and paragraph separators (U+2028 and U+2029) are stored as a line feed. Briefs,
 messages and `temet-work issue` print text the same way when it was logged before this,
-and the text a code host gives a point to fix.
+and the text a code host gives a point to fix. A choice keeps its question and each option
+on one line, each run of spaces and line breaks in them stored as one space, so that
+`status` lists the decision on one line and `--took` matches an option however it was
+wrapped.
 
 ## Overturning a decision
 
