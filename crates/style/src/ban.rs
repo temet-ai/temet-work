@@ -80,7 +80,8 @@ mod tests {
         );
         assert_eq!(banned(Rgba(0x77450dff)).map(|b| b.name), Some("brown"));
         assert!(banned(Rgba(0x238551ff)).is_some(), "Blueprint's green");
-        assert!(banned(Rgba(0xd41b6fff)).is_none(), "the accent");
+        assert!(banned(Rgba(0x5b21b6ff)).is_none(), "the violet accent");
+        assert!(banned(Rgba(0xd41b6fff)).is_none(), "the magenta accent");
         assert!(banned(Rgba(0xdcbb2aff)).is_none(), "the warning yellow");
     }
 
@@ -88,11 +89,18 @@ mod tests {
     /// one fails the test below once its value changes, so none outlives its fix.
     const REPORTED: [(&str, &str, Rgba); 0] = [];
 
+    /// The hue edge of the one panel the person is in (CutPanel's `here`, Theme/Colours) runs
+    /// through six hues, green among them; it marks where the person is and stands for no
+    /// meaning, so the ban on green against red does not reach it.
+    fn hue_edge(name: &str) -> bool {
+        name.starts_with("--tm-here-")
+    }
+
     #[test]
     fn no_token_colour_is_banned_in_any_theme() {
         let mut found: Vec<String> = Vec::new();
         for (theme, t) in THEMES {
-            for (name, c) in t.colours() {
+            for (name, c) in t.colours().into_iter().filter(|(n, _)| !hue_edge(n)) {
                 let reported = REPORTED.iter().any(|r| (r.0, r.1, r.2) == (theme, name, c));
                 if let Some(b) = banned(c).filter(|_| !reported) {
                     found.push(format!("{theme}: {name} {:08x} is {}", c.0, b.name));
@@ -116,26 +124,44 @@ mod tests {
     }
 
     #[test]
-    fn the_accent_is_the_rules_magenta_in_every_theme() {
+    fn the_accent_is_its_setting_in_every_theme() {
         for (theme, t) in THEMES {
+            let accent = [
+                t.tm_accent_1,
+                t.tm_accent_2,
+                t.tm_accent_3,
+                t.tm_accent_4,
+                t.tm_accent_5,
+                t.tm_accent_6,
+            ];
+            let ramp = [
+                t.bp_palette_blue_1,
+                t.bp_palette_blue_2,
+                t.bp_palette_blue_3,
+                t.bp_palette_blue_4,
+                t.bp_palette_blue_5,
+                t.bp_palette_blue_6,
+            ];
+            assert_eq!(ramp, accent, "{theme}: the blue ramp reads the accent");
             assert_eq!(
-                t.bp_intent_primary_rest,
-                Rgba(0xd41b6fff),
+                t.bp_intent_primary_rest, t.tm_accent_3,
                 "{theme}: the accent as a fill"
             );
             for (what, c) in [
                 ("focus ring", t.bp_emphasis_focus_color),
                 ("accent as text", t.bp_typography_color_primary_rest),
             ] {
-                let (h, s, _) = c.hsl();
                 assert!(
-                    (320.0..345.0).contains(&h) && s > 0.5,
-                    "{theme}: the {what} {:08x} is not magenta",
+                    accent.contains(&c),
+                    "{theme}: the {what} {:08x} is not a step of the accent",
                     c.0
                 );
             }
         }
-        assert_eq!(DARK.bp_typography_color_primary_rest, Rgba(0xf77cb3ff));
+        for step in 1..=6 {
+            let name = format!("--tm-accent-{step}");
+            assert!(SETTINGS.contains(&name.as_str()), "{name} is a setting");
+        }
     }
 
     #[test]

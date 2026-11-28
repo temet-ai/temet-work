@@ -10,7 +10,10 @@
 //! reads no colour or type, so it names the class, and the class resolves to the look the
 //! design system measured for an element with that class.
 
-use gpui::{App, Div, ParentElement, Pixels, SharedString, Styled, Window, div, font, px};
+use gpui::{
+    App, Div, Font, ParentElement, Pixels, SharedString, Styled, StyledText, TextRun, Window, div,
+    font, px,
+};
 
 use crate::theme::look::{self, Look, State};
 use crate::theme::{colour, size, space, text};
@@ -195,34 +198,207 @@ pub enum Class {
     /// `.tm-round-head` on a compact ListRow: a review round's heading line, which starts where
     /// its points' text does.
     RoundHead,
+    /// `.tm-pane-count`: the muted line counting where a pane's checks or decisions stand,
+    /// over the list.
+    PaneCount,
+    /// `.tm-check-clamp` on a check's done-when: its first [`CHECK_LINES`] lines, the last
+    /// ending in an ellipsis when there is more.
+    CheckClamp,
+    /// `.tm-check-toggle-none` on a Button: hidden, it holds the place of the plus a long check
+    /// has, so status tags line up whether a row opens or not.
+    CheckToggleNone,
+}
+
+/// The lines a long done-when shows until its row is opened: `.tm-check-clamp {
+/// -webkit-line-clamp: 3 }`.
+pub const CHECK_LINES: usize = 3;
+/// The lines a long proven-by shows: `.tm-row-meta .tm-check-clamp { -webkit-line-clamp: 2 }`.
+pub const CHECK_META_LINES: usize = 2;
+
+/// One word of [`spans`], with its trailing space, and its class.
+type Word = (SharedString, Option<Class>);
+
+/// The words of `runs`, each with its trailing space.
+fn words_of(runs: Vec<(SharedString, Option<Class>)>) -> Vec<Word> {
+    runs.into_iter()
+        .flat_map(|(text, class)| {
+            text.split_inclusive(' ')
+                .map(|word| (SharedString::from(word.to_string()), class))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// A word as its own element, in its class.
+fn word_element((word, class): Word, cx: &App) -> Div {
+    let el = div().child(word);
+    match class {
+        Some(class) => apply(el, class, cx),
+        None => el,
+    }
+}
+
+/// The face and size a meta's word draws in: the code face for `.tm-mono`, else the text face.
+fn word_run(class: Option<Class>, len: usize, cx: &App) -> (TextRun, Pixels) {
+    let meta = look::get(cx, "CheckList", "tm-check-clamp tm-row-meta", State::Rest);
+    let (family, size) = match class {
+        Some(Class::Mono) => (
+            text::code_family(cx),
+            look::get(cx, "AppShell", "tm-mono tm-props-item", State::Rest).font_size,
+        ),
+        _ => (text::family(cx), meta.font_size),
+    };
+    let run = TextRun {
+        len,
+        font: Font {
+            weight: meta.font_weight,
+            ..font(family)
+        },
+        color: meta.text,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    (run, size)
+}
+
+/// One laid-out line of a meta as one run of text in each face, so its words keep the advances
+/// the faces give them and share one baseline.
+fn line_element(words: Vec<Word>, line: Pixels, cx: &App) -> Div {
+    let mut text = String::new();
+    let mut runs: Vec<TextRun> = Vec::new();
+    for (word, class) in words {
+        let (run, _) = word_run(class, word.len(), cx);
+        text.push_str(&word);
+        match runs.last_mut() {
+            Some(last) if last.font == run.font => last.len += run.len,
+            _ => runs.push(run),
+        }
+    }
+    div()
+        .h(line)
+        .line_height(line)
+        .whitespace_nowrap()
+        .child(StyledText::new(text).with_runs(runs))
+}
+
+/// One line of a meta that holds code. The code face's ascent and descent make it taller than
+/// a line of text alone: the measured meta of a check, which may run over several lines, divided
+/// by its lines of text.
+fn code_line(cx: &App) -> Pixels {
+    let rest = State::Rest;
+    let meta = look::get(cx, "CheckList", "tm-row-main tm-row-meta", rest).height;
+    let text = look::get(cx, "ListRow", "tm-row-main tm-row-meta", rest).height;
+    meta / (meta / text).round().max(1.)
+}
+
+/// How wide a word draws in a meta line, in its face.
+fn word_width(word: &str, class: Option<Class>, window: &Window, cx: &App) -> Pixels {
+    let (run, size) = word_run(class, word.len(), cx);
+    window
+        .text_system()
+        .shape_line(SharedString::from(word.to_string()), size, &[run], None)
+        .width
 }
 
 /// Text in runs, some with a class, flowing and wrapping as one paragraph, as the design
-/// system's composites write `Proven by <span className="tm-mono">...</span>`. Each word is
-/// its own element, so a word in the code face is measured in that face when the line wraps:
-/// GPUI wraps a run of mixed faces by the widths of its first face.
-pub fn spans(runs: Vec<(SharedString, Option<Class>)>, cx: &App) -> Div {
-    let words = runs.into_iter().flat_map(|(text, class)| {
-        text.split_inclusive(' ')
-            .map(|word| {
-                let el = div().child(SharedString::from(word.to_string()));
-                match class {
-                    Some(class) => apply(el, class, cx),
-                    None => el,
+/// system's composites write `Proven by <span className="tm-mono">...</span>`. Each word is its
+/// own element, measured in its own face: GPUI wraps a run of mixed faces by the widths of its
+/// first face.
+///
+/// With the paragraph's `width` known, its words are laid out in lines as a browser lays them
+/// out, a space at the end of a line taking no room, and with `lines` it shows at most that
+/// many, the last ending in an ellipsis when words are left out, as `.tm-row-meta
+/// .tm-check-clamp` shows a long proven-by. Also says whether words were left out. Until the
+/// width is known the words wrap as a flex row.
+pub fn spans(
+    runs: Vec<(SharedString, Option<Class>)>,
+    width: Option<Pixels>,
+    lines: Option<usize>,
+    window: &Window,
+    cx: &App,
+) -> (Div, bool) {
+    let words = words_of(runs);
+    let line = code_line(cx);
+    let Some(width) = width else {
+        let flow = div()
+            .flex()
+            .flex_wrap()
+            .line_height(line)
+            .children(words.into_iter().map(|w| word_element(w, cx)));
+        return (flow, false);
+    };
+    // Each line's words, and how far its last word's text reaches.
+    let mut laid: Vec<(Vec<Word>, Pixels)> = Vec::new();
+    let mut used = Pixels::ZERO;
+    for word in words {
+        let text = word_width(word.0.trim_end(), word.1, window, cx);
+        let whole = word_width(&word.0, word.1, window, cx);
+        match laid.last_mut() {
+            Some((these, end)) if used + text <= width => {
+                *end = used + text;
+                these.push(word);
+            }
+            _ => {
+                laid.push((vec![word], text));
+                used = Pixels::ZERO;
+            }
+        }
+        used += whole;
+    }
+    let cut = lines.is_some_and(|n| laid.len() > n);
+    if let Some(n) = lines.filter(|_| cut) {
+        laid.truncate(n);
+        let dots: SharedString = "\u{2026}".into();
+        let room = width - word_width(&dots, None, window, cx);
+        if let Some((these, end)) = laid.last_mut() {
+            // Words come off the last line until the ellipsis fits after the last one.
+            while these.len() > 1 && *end > room {
+                these.pop();
+                let mut reach = Pixels::ZERO;
+                for (i, w) in these.iter().enumerate() {
+                    let last = i + 1 == these.len();
+                    let shown = if last { w.0.trim_end() } else { &w.0 };
+                    reach += word_width(shown, w.1, window, cx);
                 }
-            })
-            .collect::<Vec<_>>()
+                *end = reach;
+            }
+            if let Some(last) = these.last_mut() {
+                last.0 = last.0.trim_end().to_string().into();
+            }
+            these.push((dots, None));
+        }
+    }
+    let rows = laid.into_iter().map(|(mut these, _)| {
+        // A space at the end of a line takes no room.
+        if let Some(last) = these.last_mut() {
+            last.0 = last.0.trim_end().to_string().into();
+        }
+        line_element(these, line, cx)
     });
-    // A line holding code is the measured line of a meta with code in it, taller than one of
-    // text alone, as the code face's ascent and descent widen the line box. GPUI rounds a line
-    // height to whole pixels, where the story keeps the fraction and a wrapped line lands the
-    // next whole pixel down, so the line is rounded up.
-    let line = look::get(cx, "IssuePane", "tm-row-main tm-row-meta", State::Rest).height;
-    div()
-        .flex()
-        .flex_wrap()
-        .line_height(line.ceil())
-        .children(words)
+    (div().children(rows), cut)
+}
+
+/// How many lines `text` takes at `width` as a check's done-when (`.tm-check-clamp`) wraps it.
+pub fn check_lines(text: &SharedString, width: Pixels, window: &Window, cx: &App) -> usize {
+    let title = look::get(cx, "CheckList", "tm-check-clamp tm-row-title", State::Rest);
+    let run = TextRun {
+        len: text.len(),
+        font: Font {
+            weight: title.font_weight,
+            ..font(text::family(cx))
+        },
+        color: title.text,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_text(text.clone(), title.font_size, &[run], Some(width), None)
+        .map_or(1, |lines| {
+            lines.iter().map(|l| l.wrap_boundaries().len() + 1).sum()
+        })
 }
 
 /// A plain element with a class, as the design system's composites write `<span
@@ -350,6 +526,12 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
                 rest,
             ),
         ),
+        Class::PaneCount => {
+            let count = look::get(cx, "CheckList", "tm-checks tm-pane-count", rest);
+            padded(type_of(el, &count), &count)
+        }
+        Class::CheckClamp => el.line_clamp(CHECK_LINES).text_ellipsis(),
+        Class::CheckToggleNone => el.invisible(),
         Class::Issues | Class::GroupsEmpty | Class::GroupsGroup | Class::NeedsHeading => el,
     }
 }

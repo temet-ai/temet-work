@@ -281,7 +281,7 @@ pub fn project_view() -> ProjectView {
                 issue(
                     "WATCH-39",
                     "Resize no longer clears the duty board",
-                    Stage::Deployed,
+                    Stage::Done,
                     "pseudopolis yard clacks paging and unread counts",
                     None,
                     "2 h ago",
@@ -292,7 +292,7 @@ pub fn project_view() -> ProjectView {
                      Sergeant Colon is scrolling through the night shift's long list of \
                      reports, so that he does not lose his place every time a constable \
                      files one",
-                    Stage::Checks,
+                    Stage::Verifying,
                     "pseudopolis yard clacks paging and unread counts",
                     Some("author · Claude"),
                     "26 min ago",

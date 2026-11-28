@@ -171,7 +171,7 @@ fn milestones_carry_their_counts_due_dates_and_open_issues() {
     let clacks = &page.milestones[1];
     let first = &clacks.issues[0];
     assert_eq!(first.key.as_ref(), "1");
-    assert_eq!(first.stage, Stage::Refining);
+    assert_eq!(first.stage, Stage::New);
     assert_eq!(first.group, None);
     assert_eq!(first.agent, None);
     assert_eq!(first.updated.as_ref(), "12 min ago");
@@ -382,12 +382,95 @@ fn times_and_dates_read_as_the_window_writes_them() {
     assert_eq!(due("next week").as_ref(), "next week");
 }
 
+/// Every issue of `view`, by its id, with the stage the page shows for it and the stage word the
+/// view gives it.
+fn stages_shown(view: &View) -> Vec<(String, Stage, String)> {
+    let mut out = Vec::new();
+    for project in &view.projects {
+        let page = project_view(view, Some(&project.id), NOW).expect("a project");
+        for issue in page.milestones.iter().flat_map(|m| &m.issues) {
+            let id = format!("{}#{}", project.id.0, issue.key);
+            let word = view
+                .issues
+                .iter()
+                .find(|i| i.id == id)
+                .map(|i| serde_json::to_value(i.stage).expect("a word"))
+                .and_then(|w| w.as_str().map(str::to_string))
+                .expect("the issue is in the view");
+            out.push((id, issue.stage, word));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 #[test]
-fn every_word_of_the_view_has_a_stage_and_a_status() {
-    use temet_work_core::view::{StageWord, StateWord};
-    assert_eq!(view_map::stage(StageWord::Fixing), Stage::Working);
-    assert_eq!(view_map::stage(StageWord::Arbitration), Stage::WithArbiter);
-    assert_eq!(view_map::stage(StageWord::Unknown), Stage::Refining);
+fn each_issue_of_the_fixtures_shows_its_own_stage() {
+    for (name, fixture) in [
+        ("current", CURRENT),
+        ("before costs", BEFORE_COSTS),
+        ("before states", BEFORE_STATES),
+    ] {
+        let shown: Vec<_> = stages_shown(&parse(fixture))
+            .into_iter()
+            .map(|(id, stage, word)| (id, stage.name(), word))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("unseen#1".to_string(), "ready", "ready".to_string()),
+                ("watch#1".to_string(), "new", "new".to_string()),
+                ("watch#2".to_string(), "refining", "refining".to_string()),
+                ("watch#3".to_string(), "working", "working".to_string()),
+                ("watch#4".to_string(), "in review", "in_review".to_string()),
+                ("watch#5".to_string(), "fixing", "fixing".to_string()),
+            ],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn each_stage_word_of_the_view_has_its_own_stage() {
+    use temet_work_core::view::StageWord;
+    // The daemon's words, as the view writes them, and the stage of the same name.
+    let words = [
+        ("new", "new"),
+        ("refining", "refining"),
+        ("ready", "ready"),
+        ("working", "working"),
+        ("in_review", "in review"),
+        ("fixing", "fixing"),
+        ("arbitration", "with arbiter"),
+        ("merging", "merging"),
+        ("deploying", "deploying"),
+        ("verifying", "verifying"),
+        ("done", "done"),
+    ];
+    let mut stages = Vec::new();
+    for (word, name) in words {
+        let parsed: StageWord =
+            serde_json::from_value(serde_json::Value::String(word.into())).expect("a stage word");
+        assert_ne!(parsed, StageWord::Unknown, "{word} is a word of the view");
+        let stage = view_map::stage(parsed);
+        assert_eq!(stage.name(), name, "{word}");
+        stages.push(stage);
+    }
+    assert_eq!(
+        stages,
+        Stage::ALL,
+        "every stage, once each, in the daemon's order"
+    );
+    assert_eq!(
+        view_map::stage(StageWord::Unknown),
+        Stage::New,
+        "a word this build lacks reads as the first stage"
+    );
+}
+
+#[test]
+fn every_state_word_of_the_view_has_a_status() {
+    use temet_work_core::view::StateWord;
     assert_eq!(view_map::agent_status(StateWord::Ended), None);
     assert_eq!(
         view_map::agent_status(StateWord::Unknown),

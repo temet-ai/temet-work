@@ -396,6 +396,20 @@ pub mod colour {
     pub fn attention(cx: &App) -> Hsla {
         c(active(cx).tm_attention)
     }
+    /// The six colours of the hue edge on the one panel the person is in (`--tm-here-1` to
+    /// `-6`), in the order the edge runs through them.
+    pub fn here(cx: &App) -> [Hsla; 6] {
+        let t = active(cx);
+        [
+            t.tm_here_1,
+            t.tm_here_2,
+            t.tm_here_3,
+            t.tm_here_4,
+            t.tm_here_5,
+            t.tm_here_6,
+        ]
+        .map(c)
+    }
     /// A segmented control's ground: `.bp6-dark .bp6-segmented-control { background-color:
     /// var(--bp-palette-dark-gray-2) }`, and `var(--bp-palette-light-gray-5)` in Blueprint's
     /// light mode.
@@ -511,6 +525,27 @@ pub mod shape {
     /// A CutPanel's cut corner.
     pub fn cut(cx: &App) -> Pixels {
         size_of(active(cx).tm_cut)
+    }
+}
+
+/// Movements (Theme/Motion). For components only.
+pub mod motion {
+    use std::time::Duration;
+
+    use gpui::App;
+
+    use super::active;
+
+    /// How long the hue edge of the panel the person is in takes to drift one way, before it
+    /// drifts back (`--tm-d-drift`).
+    pub fn drift(cx: &App) -> Duration {
+        active(cx).tm_d_drift
+    }
+    /// The drift's pace, `--tm-ease-linear`: how far along it is for the share of its time gone,
+    /// each from 0 to 1.
+    pub fn drift_ease(cx: &App) -> impl Fn(f32) -> f32 + use<> {
+        let c = active(cx).tm_ease_linear;
+        gpui_base::animation::cubic_bezier(c.0, c.1, c.2, c.3)
     }
 }
 

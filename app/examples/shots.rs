@@ -6,13 +6,27 @@
 //! holds a selected row, a milestone with no issues, a group with no agents and long names. The
 //! `live-` shots draw the checked-in view fixture through `view_map`, as the window draws what
 //! the daemon sends, and the problem and stale states of a daemon that does not answer.
+//!
+//! The `part-` shots draw one part as one of the design system's stories draws it, named after
+//! the story's id, such as `part-temet-stagetag--all-stages-dark`: the part on the page ground,
+//! inset as Storybook insets a story, 1440 px wide.
 
 use std::io::Write;
 use std::sync::Arc;
 
-use gpui::{AppContext, Font, FontWeight, HeadlessAppContext, font, px, size};
+use gpui::{
+    AnyElement, App, AppContext, Context, Font, FontWeight, HeadlessAppContext, IntoElement,
+    ParentElement, Render, Styled, Window, div, font, px, size,
+};
 use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
+use temet_work_app::components::Intent;
+use temet_work_app::components::cut_panel::CutPanel;
+use temet_work_app::components::icon::IconName;
+use temet_work_app::components::stage_tag::{Stage, StageTag};
+use temet_work_app::components::status_tag::{Status, StatusTag};
+use temet_work_app::components::tag::Tag;
+use temet_work_app::composites::check_list::{CheckList, PlanCheck};
 use temet_work_app::composites::issue_pane::IssueTab;
 use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{Grouping, Project};
@@ -199,31 +213,7 @@ fn main() -> gpui::Result<()> {
         if !only.is_empty() && !only.iter().any(|o| o == s.name) {
             continue;
         }
-        let text = Arc::new(gpui_wgpu::CosmicTextSystem::new("Archivo"));
-        let mut cx = HeadlessAppContext::with_platform(
-            text,
-            Arc::new(Assets),
-            gpui_platform::current_headless_renderer,
-        );
-        let faces = cx.update(|cx| -> gpui::Result<String> {
-            gpui_component::init(cx);
-            cx.text_system().add_fonts(assets::faces())?;
-            theme::apply(cx, s.theme).map_err(std::io::Error::other)?;
-            // Each weight of Archivo resolves to a face of its own: 400, 600 and 700.
-            let at = |weight: f32| {
-                cx.text_system().resolve_font(&Font {
-                    weight: FontWeight(weight),
-                    ..font("Archivo")
-                })
-            };
-            let weights = [at(400.), at(600.), at(700.)];
-            let distinct = weights[0] != weights[1] && weights[1] != weights[2];
-            Ok(format!(
-                "text {}, code {}, Archivo 400/600/700 distinct faces: {distinct}",
-                theme::text::family(cx),
-                theme::text::code_family(cx)
-            ))
-        })?;
+        let (mut cx, faces) = headless(s.theme)?;
         let sample_view = if s.needs {
             sample::project_view()
         } else {
@@ -286,20 +276,335 @@ fn main() -> gpui::Result<()> {
             });
             cx.new(|cx| Root::new(page, window, cx))
         })?;
-        // At a scale of 1, so a shot's pixels match the design system's story shots.
-        cx.simulate_window_scale_factor_change(window.into(), 1.);
-        // Two frames: the issue tables measure their width in the first.
-        for _ in 0..2 {
-            cx.run_until_parked();
-            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))?;
+        capture(&mut cx, window.into(), dir, s.name, &faces)?;
+    }
+    for (id, story, height) in PARTS {
+        for theme_name in ["dark", "light"] {
+            let name = format!("part-{id}-{theme_name}");
+            if !only.is_empty() && !only.contains(&name) {
+                continue;
+            }
+            let (mut cx, faces) = headless(theme_name)?;
+            // The story shots are taken with reduced motion, which holds the hue edge still at
+            // its start.
+            cx.update(|cx| cx.set_reduce_motion(true));
+            let window = cx.open_window(size(px(1440.), px(*height)), |window, cx| {
+                let gallery = cx.new(|_| Gallery { story: *story });
+                cx.new(|cx| Root::new(gallery, window, cx))
+            })?;
+            capture(&mut cx, window.into(), dir, &name, &faces)?;
         }
-        cx.run_until_parked();
-        let image = cx.capture_screenshot(window.into())?;
-        let path = format!("{dir}/{}.png", s.name);
-        write_png(&path, image.width(), image.height(), image.as_raw())?;
-        println!("{path}: {}x{}; {faces}", image.width(), image.height());
     }
     Ok(())
+}
+
+/// A headless app with the faces registered and `theme_name` in force; also says which faces
+/// it found.
+fn headless(theme_name: &str) -> gpui::Result<(HeadlessAppContext, String)> {
+    let text = Arc::new(gpui_wgpu::CosmicTextSystem::new("Archivo"));
+    let mut cx = HeadlessAppContext::with_platform(
+        text,
+        Arc::new(Assets),
+        gpui_platform::current_headless_renderer,
+    );
+    let faces = cx.update(|cx| -> gpui::Result<String> {
+        gpui_component::init(cx);
+        cx.text_system().add_fonts(assets::faces())?;
+        theme::apply(cx, theme_name).map_err(std::io::Error::other)?;
+        // Each weight of Archivo resolves to a face of its own: 400, 600 and 700.
+        let at = |weight: f32| {
+            cx.text_system().resolve_font(&Font {
+                weight: FontWeight(weight),
+                ..font("Archivo")
+            })
+        };
+        let weights = [at(400.), at(600.), at(700.)];
+        let distinct = weights[0] != weights[1] && weights[1] != weights[2];
+        Ok(format!(
+            "text {}, code {}, Archivo 400/600/700 distinct faces: {distinct}",
+            theme::text::family(cx),
+            theme::text::code_family(cx)
+        ))
+    })?;
+    Ok((cx, faces))
+}
+
+/// Draws the window's frames and writes the last as a PNG. The issue tables and check lists
+/// measure their width in the first frame and draw to it in the next.
+fn capture(
+    cx: &mut HeadlessAppContext,
+    window: gpui::AnyWindowHandle,
+    dir: &str,
+    name: &str,
+    faces: &str,
+) -> gpui::Result<()> {
+    // At a scale of 1, so a shot's pixels match the design system's story shots.
+    cx.simulate_window_scale_factor_change(window, 1.);
+    for _ in 0..3 {
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))?;
+    }
+    cx.run_until_parked();
+    let image = cx.capture_screenshot(window)?;
+    let path = format!("{dir}/{name}.png");
+    write_png(&path, image.width(), image.height(), image.as_raw())?;
+    println!("{path}: {}x{}; {faces}", image.width(), image.height());
+    Ok(())
+}
+
+/// A story of the design system that a `part-` shot draws.
+#[derive(Clone, Copy, PartialEq)]
+enum Story {
+    StageTagAllStages,
+    StageTagWithRound,
+    TagIntents,
+    CheckListDefault,
+    CheckListFailedAndTimed,
+    CheckListNoChecks,
+    CheckListNotRunYet,
+    CheckListLongChecks,
+    CutPanelPadded,
+    CutPanelAttention,
+    CutPanelHere,
+    CutPanelHereWithAttention,
+    CutPanelMachinesWithOneHere,
+}
+
+/// Each part shot: the story's id, the story, and the frame's height, the same as the story
+/// shot's.
+const PARTS: &[(&str, Story, f32)] = &[
+    ("temet-stagetag--all-stages", Story::StageTagAllStages, 120.),
+    ("temet-stagetag--with-round", Story::StageTagWithRound, 120.),
+    ("temet-tag--intents", Story::TagIntents, 120.),
+    ("temet-checklist--default", Story::CheckListDefault, 300.),
+    (
+        "temet-checklist--failed-and-timed",
+        Story::CheckListFailedAndTimed,
+        300.,
+    ),
+    ("temet-checklist--no-checks", Story::CheckListNoChecks, 300.),
+    (
+        "temet-checklist--not-run-yet",
+        Story::CheckListNotRunYet,
+        300.,
+    ),
+    (
+        "temet-checklist--long-checks",
+        Story::CheckListLongChecks,
+        420.,
+    ),
+    ("temet-cutpanel--padded", Story::CutPanelPadded, 220.),
+    ("temet-cutpanel--attention", Story::CutPanelAttention, 220.),
+    ("temet-cutpanel--here", Story::CutPanelHere, 220.),
+    (
+        "temet-cutpanel--here-with-attention",
+        Story::CutPanelHereWithAttention,
+        220.,
+    ),
+    (
+        "temet-cutpanel--machines-with-one-here",
+        Story::CutPanelMachinesWithOneHere,
+        220.,
+    ),
+];
+
+/// A check as the CheckList stories write one.
+fn check(done_when: &str, proven_by: &str, status: Option<Status>) -> PlanCheck {
+    PlanCheck {
+        done_when: done_when.to_string().into(),
+        proven_by: proven_by.to_string().into(),
+        status,
+        status_text: None,
+    }
+}
+
+/// The checks of a CheckList story, as the story writes them.
+fn checks(story: Story) -> Vec<PlanCheck> {
+    let sign_in = || {
+        check(
+            "Signing in stores a user token in the system keyring",
+            "cargo nextest run -p radar-slack sign_in",
+            Some(Status::Passed),
+        )
+    };
+    let revoked = |status| {
+        check(
+            "A revoked token sends the user back to sign-in",
+            "cargo nextest run -p radar-slack revoked",
+            Some(status),
+        )
+    };
+    match story {
+        Story::CheckListDefault => vec![
+            sign_in(),
+            check(
+                "The token is read back after radar restarts",
+                "restart radar, open #general",
+                Some(Status::Running),
+            ),
+            revoked(Status::Waiting),
+        ],
+        Story::CheckListFailedAndTimed => vec![
+            PlanCheck {
+                status_text: Some("Passed in 41 s".into()),
+                ..sign_in()
+            },
+            revoked(Status::Failed),
+        ],
+        Story::CheckListNotRunYet => vec![
+            check(
+                "Night lamps switch on when the tower's own light sensor reads below the level \
+                 its operator set.",
+                "cargo nextest run -p clacks-lamps sensor_switches_on",
+                None,
+            ),
+            check(
+                "A failed sensor leaves the lamps on the clock, never on all day or off all \
+                 night.",
+                "cargo nextest run -p clacks-lamps failed_sensor_uses_clock",
+                None,
+            ),
+        ],
+        Story::CheckListLongChecks => vec![
+            check(
+                "A message sent from Ankh-Morpork to Genua over the eight towers of the coast \
+                 line arrives with the X-Clacks-Overhead field exactly as the sending tower set \
+                 it: the same value, in the same position in the header, with no extra spaces \
+                 and no second copy of the field. This holds when the message is rerouted by \
+                 the Hub after it has left the first tower, when it waits at any tower during \
+                 fog and is sent on later, and when a tower on the way restarts while the \
+                 message is in its queue.",
+                "cargo nextest run -p clacks-network overhead_survives_eight_towers \
+                 overhead_survives_reroute overhead_survives_fog overhead_survives_restart \
+                 overhead_survives_signal_box",
+                Some(Status::Passed),
+            ),
+            check(
+                "The relay's log line for a hop shows the overhead at debug level and is absent \
+                 at info. At info a tower's log grows by no more lines per message than it did \
+                 before the change, measured over an hour of the recorded Ankh-Morpork traffic \
+                 replayed through a test tower.",
+                "scripts/replay-traffic --line ankh-morpork --hours 1 --level info, then compare \
+                 line counts with the run on main; the counts must match to the line",
+                Some(Status::Waiting),
+            ),
+            check(
+                "No setting turns the copy off on any tower.",
+                "grep for overhead in the tower config schema finds no key",
+                Some(Status::Passed),
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// The CutPanel stories' padded content: `<strong>radar 0.4</strong>` over a muted line.
+fn milestone(cx: &App) -> AnyElement {
+    div()
+        .child(
+            div()
+                .font_weight(theme::text::bold_weight(cx))
+                .child("radar 0.4"),
+        )
+        .child(
+            div()
+                .text_color(theme::colour::muted(cx))
+                .child("7 / 12 done \u{b7} due 12 Dec"),
+        )
+        .into_any_element()
+}
+
+/// One story's part on the page ground, inset as Storybook insets a story.
+struct Gallery {
+    story: Story,
+}
+
+impl Render for Gallery {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use theme::{colour, space, text};
+        let gap = space::s4(cx);
+        let row = || div().flex().flex_wrap().gap(gap);
+        let panel = |attention: bool, here: bool, cx: &App| {
+            CutPanel::new()
+                .padded(true)
+                .attention(attention)
+                .here(here)
+                .child(milestone(cx))
+        };
+        let part: AnyElement = match self.story {
+            Story::StageTagAllStages => row()
+                .children(Stage::ALL.map(StageTag::new))
+                .into_any_element(),
+            Story::StageTagWithRound => row()
+                .child(StageTag::new(Stage::InReview).round(Some(2)))
+                .child(StageTag::new(Stage::Fixing).round(Some(1)))
+                .child(StageTag::new(Stage::WithArbiter).round(Some(3)))
+                .into_any_element(),
+            Story::TagIntents => row()
+                .child(Tag::new("Keyring"))
+                .child(Tag::new("radar 0.4").intent(Intent::Primary))
+                .child(Tag::new("+184").intent(Intent::Success))
+                .child(
+                    Tag::new("high to undo")
+                        .intent(Intent::Warning)
+                        .icon(IconName::WarningSign),
+                )
+                .child(Tag::new("\u{2212}37").intent(Intent::Danger))
+                .into_any_element(),
+            Story::CheckListDefault
+            | Story::CheckListFailedAndTimed
+            | Story::CheckListNoChecks
+            | Story::CheckListNotRunYet
+            | Story::CheckListLongChecks => div()
+                .max_w(theme::size::col_right(cx, window.viewport_size().width))
+                .child(CheckList::new("story", checks(self.story)))
+                .into_any_element(),
+            Story::CutPanelPadded => panel(false, false, cx).into_any_element(),
+            Story::CutPanelAttention => panel(true, false, cx).into_any_element(),
+            Story::CutPanelHere => panel(false, true, cx).into_any_element(),
+            Story::CutPanelHereWithAttention => panel(true, true, cx).into_any_element(),
+            Story::CutPanelMachinesWithOneHere => div()
+                .flex()
+                .flex_col()
+                .children(
+                    [
+                        ("omit", Status::Running, false),
+                        ("mac", Status::Running, true),
+                        ("deus", Status::Idle, false),
+                    ]
+                    .map(|(name, status, here)| {
+                        CutPanel::new().padded(true).here(here).child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(space::s2(cx))
+                                .child(div().font_weight(text::bold_weight(cx)).child(name))
+                                .child(StatusTag::new(status)),
+                        )
+                    }),
+                )
+                .into_any_element(),
+        };
+        // The CutPanel stories are framed 520 px wide.
+        let framed = match self.story {
+            Story::CutPanelPadded
+            | Story::CutPanelAttention
+            | Story::CutPanelHere
+            | Story::CutPanelHereWithAttention
+            | Story::CutPanelMachinesWithOneHere => div().max_w(px(520.)).child(part),
+            _ => div().child(part),
+        };
+        div()
+            .size_full()
+            .bg(colour::page(cx))
+            .text_color(colour::text(cx))
+            .text_size(text::body(cx))
+            .font_family(text::family(cx))
+            .line_height(text::line_height(cx))
+            .p(space::s6(cx))
+            .child(framed)
+    }
 }
 
 fn anyhow_exit(message: &str) -> ! {

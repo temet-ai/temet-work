@@ -81,7 +81,7 @@ stage maps, the design system's part list, the tokens a user may change (`SETTIN
 font files.
 
 Each value in `tokens.rs` is a theme's default. The user picks the theme and can change the
-tokens in `SETTINGS`, such as the attention colour (not built yet).
+tokens in `SETTINGS`, the attention colour and the accent (not built yet).
 `theme::apply` puts a theme in force; the parts read its values through the theme module's
 `colour`, `text`, `shape`, `motion`, `space` and `size` functions, each named for a role on the
 design system's Theme pages. Nothing in the app bakes a token's value in.
@@ -91,17 +91,19 @@ design system's Theme pages. Nothing in the app bakes a token's value in.
 | Surfaces | `--tm-surface-page`, `-panel` (side columns, panels), `-hover`, `-raised` (menus, popovers, pressed), `-toast`, `-tooltip` | plum-tinted greys in the dark theme, light plum in the light one |
 | Edges | `--tm-edge` (panel borders, column rules), `--tm-edge-quiet` (rules between rows), `--bp-surface-border-color-default`, `-strong` | white at 8 to 24% |
 | Text | `--bp-typography-color-default-rest`, `-muted`, `-default-disabled` | |
-| Accent | `--bp-intent-primary-rest` (`#D41B6F`, fills), `--bp-typography-color-primary-rest` (text), `--bp-emphasis-focus-color` (`#F77CB3`, focus ring) | magenta |
+| Accent | `--tm-accent-1` to `-6`, which Blueprint's blue ramp reads: `--bp-intent-primary-rest` (`--tm-accent-3`, fills), `--bp-typography-color-primary-rest` (text), `--bp-emphasis-focus-color` (focus ring) | a setting: deep violet by default (`#5B21B6` as a fill), magenta as the design system's other choice |
 | Intents | `--bp-intent-{success,warning,danger}-{rest,hover,active}` and `--bp-typography-color-{success,warning,danger}-rest` | success blue, warning yellow, danger red |
 | Attention | `--tm-attention` | a theme setting the user can change |
 | Selected row | `--tm-selected-fill`, `--tm-selected-line` | accent wash, accent line |
-| Type | `--tm-font-text`, `--tm-font-figure`, `--tm-font-code`; `--tm-text-page`, `-pane`, `-section`, `-body`, `-small`, `-code`; `--tm-weight-heading`; Blueprint's `--bp-typography-*`, which read them | Archivo for text, Big Shoulders Display for figures, IBM Plex Mono for code, embedded in the app as TTF (`app/assets/fonts`) and registered at startup; controls and page text at 13 px |
+| Hue edge | `--tm-here-1` to `-6`, `--tm-here-width` | the six colours and the width of the edge on the one panel the person is in (CutPanel's `here`) |
+| Type | `--tm-font-text`, `--tm-font-figure`, `--tm-font-code`; `--tm-text-page`, `-pane`, `-section`, `-body`, `-small`, `-code`; `--tm-weight-heading`; Blueprint's `--bp-typography-*`, which read them | Archivo for text, Big Shoulders Display for figures, IBM Plex Mono for code, embedded in the app as TTF (`app/assets/fonts`) and registered at startup; controls and page text at 13 px, section titles at 14 px |
+| Columns | `--tm-col-*`, `--tm-issue-col-*` (IssueTable, with `-milestone`), `--tm-needs-col-count`, `-cost`, `-deadline` (NeedsYou) | |
 | Spacing and sizes | `--bp-surface-spacing` | |
 | Shape | `--bp-surface-border-radius` (2 px), `--tm-cut` (8 px) | |
 | Icons | `@blueprintjs/icons`, 16 and 20 px | SVG files embedded in the app |
-| Motion | `--tm-d-*` durations, `--tm-ease-*` curves, `--tm-rise`, `--tm-slide`; the movements in `motion`: arrive, grow, unfold, fold, show, hide, pane, edge, collapse, buildUp, change, swap | |
+| Motion | `--tm-d-*` durations, `--tm-ease-*` curves, `--tm-rise`, `--tm-slide`; the movements in `motion`: arrive, grow, unfold, fold, show, hide, pane, edge, collapse, buildUp, change, swap | the hue edge drifts one way over `--tm-d-drift` (16 s) at `--tm-ease-linear` and back, and stays still under reduced motion |
 | Status words | StatusTag's map: each status's word, icon and intent | 9 statuses |
-| Stages | StageTag's map: each stage's icon | 7 stages |
+| Stages | StageTag's map: each stage's icon | the daemon's 11 stages, in its order |
 
 ## Components
 
@@ -132,9 +134,9 @@ is closed.
 | Button | `blueprint-button` | `variant` solid, minimal, outlined; `intent` none, primary; `size` small, medium; `icon`; `loading`; `disabled` | `button` |
 | AttentionButton | `temet-attentionbutton` | `size` small | `button` |
 | AttentionText | `temet-attentionbutton` (subcomponent) | | `label` |
-| Tag | `temet-tag` | `minimal`; `intent` none, primary, success, warning, danger; `icon`; `interactive` | `tag` |
+| Tag | `temet-tag` | `minimal`; `intent` none, primary, success, warning, danger; `icon`; `interactive`. Story: Intents. In the dark theme the warning and danger tags are outlined in their colour with no wash; in the light theme the warning tag is a neutral tag and the danger tag keeps its red wash, as the design system measured them | `tag` |
 | StatusTag | `temet-statustag` | `status` (9); `size` medium, large; own word | Tag and Icon |
-| StageTag | `temet-stagetag` | `stage` (7) | Tag and Icon |
+| StageTag | `temet-stagetag` | `stage` (11: new, refining, ready, working, in review, fixing, with arbiter, merging, deploying, verifying, done); `round`, shown after in review, fixing and with arbiter ("fixing, round 1"). Stories: All Stages, With Round. The window maps each of the view's stage words to the stage of the same name (`app/src/view_map.rs`) | Tag and Icon |
 | KeyComboTag | `blueprint-keycombotag` | | `kbd` |
 | Tooltip | `blueprint-tooltip` | `compact`; `placement` | `tooltip` |
 | ProgressBar | `blueprint-progressbar` | `intent` primary; `stripes` off; `animate` off | `progress` |
@@ -160,7 +162,7 @@ is closed.
 | HTMLTable | `blueprint-htmltable` | `compact`; `interactive` | `table`, `virtual_list` |
 | TableRow | `temet-tablerow` | `selected` | `table` |
 | Section, SectionCard | `temet-section` | `compact`; `elevation` 0; `headingLevel`; `rightElement`; `padded` off | |
-| CutPanel | `temet-cutpanel` | `attention`; `padded`; `buildUp` | |
+| CutPanel | `temet-cutpanel` | `attention`; `here`, the moving hue edge on the one panel the person is in, which `attention` overrides; `padded`; `buildUp`. Stories: Padded, Attention, Here, Here With Attention, Machines With One Here | |
 | Disclosure | `temet-disclosure` | `defaultOpen`; `rightElement` | `collapsible` |
 | PlusMinusTree | `temet-plusminustree` | `defaultExpanded`; node `secondaryLabel` | `tree` |
 | Heading | `temet-heading` | page title 20 px, pane title 16 px, section title 14 px with a muted note at the right | |
@@ -183,7 +185,7 @@ is closed.
 | MilestonePanel | one milestone: name, done of total, due date, progress, and its issues | CutPanel, Section, ProgressBar, IssueTable | `temet-milestonepanel` |
 | IssueTable | issues as rows: key, title, stage, agent, updated; optional group rows; one set of column widths in every panel | HTMLTable, TableRow, StageTag | `temet-issuetable` |
 | IssuePane | the side pane for an issue: title, key, stage, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
-| CheckList | a plan's checks: what is done when, its status, and what proves it | ListRow, StatusTag | `temet-checklist` |
+| CheckList | a plan's checks: a line counting them by status, then for each what is done when, what proves it and its status, if it has run. A done-when over three lines and a proven-by over two show their first lines, and plus opens the row whole, minus closes it. Stories: Default, Failed And Timed, No Checks, Not Run Yet, Long Checks | ListRow, StatusTag, Button | `temet-checklist` |
 | ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points, the author's reply and each point's status | Disclosure, ListRow, StatusTag | `temet-reviewrounds` |
 | AgentPane | the side pane for an agent: its role, state, terminal and decisions | Heading, StatusTag, TerminalView, DecisionRow | gap |
 
@@ -199,9 +201,8 @@ is closed.
 ## Gaps in the design system
 
 Each of these goes to the design system as a definition. When the part lands with its story,
-its row above takes the part's id in place of "gap". The composites, AppShell, Heading,
-PropertyList, Meter and ListRow are on the design system's branch `fleet/temet-workers`, which
-has not merged to its main yet, and `crates/style/src/tokens.rs` is synced from that branch.
+its row above takes the part's id in place of "gap". `crates/style/src/tokens.rs` is synced from
+the design system's main at db39ff8.
 
 - TerminalView and AgentPane, once temet-work sends their definitions.
 - NonIdealState has no measured look in the token export, so the window shows a problem with no
@@ -229,3 +230,4 @@ request, beside the main workspace's job. Run the app's tests locally with
 | Every design-system id in this map is in the design system's part list, and each component and composite has that part's name | `review`, against `tokens::PARTS` | built |
 | Every `look::get` the app makes names a look both themes measured | `app/src/theme.rs` tests | built |
 | The window as the design system draws it: each theme at 1440, 1280 and 1700 px wide, each tab of the issue pane, the issues grouped by stage and by group, and nothing waiting on the person, drawn offscreen with GPUI's headless renderer, with no window or compositor, beside the design system's story shots | `cargo run --example shots --features shots -- DIR` in `app/` | built; compared by eye |
+| StageTag, Tag, CheckList and CutPanel as their stories draw them, in each theme at 1440 px: the `part-` shots, named after each story's id (`part-temet-stagetag--all-stages-dark`) | the same command | built; compared by eye |

@@ -89,6 +89,7 @@ pub struct IssuePane {
     issue_key: SharedString,
     title: SharedString,
     stage: Stage,
+    round: Option<usize>,
     facts: Option<Vec<(SharedString, SharedString)>>,
     plan: Option<IssuePlan>,
     pull: Option<IssuePullRequest>,
@@ -109,6 +110,7 @@ impl IssuePane {
             issue_key: issue_key.into(),
             title: title.into(),
             stage,
+            round: None,
             facts: None,
             plan: None,
             pull: None,
@@ -118,6 +120,12 @@ impl IssuePane {
             on_tab_change: None,
             on_overturn: None,
         }
+    }
+
+    /// The review round, shown with the stage as the daemon writes it ("fixing, round 1").
+    pub fn round(mut self, round: Option<usize>) -> Self {
+        self.round = round;
+        self
     }
 
     /// Facts about the issue, such as milestone, agent and round, in a panel above the tabs.
@@ -200,7 +208,7 @@ impl RenderOnce for IssuePane {
                     .items_center()
                     .gap(space::s4(cx))
                     .child(classed(Class::Mono, cx).child(self.issue_key.clone()))
-                    .child(StageTag::new(self.stage)),
+                    .child(StageTag::new(self.stage).round(self.round)),
             );
         let facts = self.facts.map(|facts| {
             let items = facts
@@ -237,7 +245,10 @@ impl RenderOnce for IssuePane {
                 .flex_col()
                 .gap(space::s5(cx))
                 .child(props)
-                .child(CheckList::new(plan.checks));
+                .child(CheckList::new(
+                    SharedString::from(format!("checks-{}", self.issue_key)),
+                    plan.checks,
+                ));
             tabs = tabs.child(Tab::new("plan", "Plan").panel(panel));
         }
         if let Some(pull) = self.pull {

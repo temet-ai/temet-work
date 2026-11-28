@@ -38,21 +38,21 @@ fn s(text: impl Into<String>) -> SharedString {
     SharedString::from(text.into())
 }
 
-/// The page's stage for the view's. The page has seven: a new or ready issue is still with the
-/// refiner's side of the loop, an author fixing review points is working, an issue being
-/// deployed is still merging, and one being verified is in its checks. A word this build lacks
-/// reads as refining, the first stage.
+/// The page's stage for the view's: each of the daemon's eleven words is its own stage. A word
+/// this build lacks, from a newer daemon, reads as new, the first stage.
 pub fn stage(word: StageWord) -> Stage {
     match word {
-        StageWord::New | StageWord::Refining | StageWord::Ready | StageWord::Unknown => {
-            Stage::Refining
-        }
-        StageWord::Working | StageWord::Fixing => Stage::Working,
+        StageWord::New | StageWord::Unknown => Stage::New,
+        StageWord::Refining => Stage::Refining,
+        StageWord::Ready => Stage::Ready,
+        StageWord::Working => Stage::Working,
         StageWord::InReview => Stage::InReview,
+        StageWord::Fixing => Stage::Fixing,
         StageWord::Arbitration => Stage::WithArbiter,
-        StageWord::Verifying => Stage::Checks,
-        StageWord::Merging | StageWord::Deploying => Stage::Merging,
-        StageWord::Done => Stage::Deployed,
+        StageWord::Merging => Stage::Merging,
+        StageWord::Deploying => Stage::Deploying,
+        StageWord::Verifying => Stage::Verifying,
+        StageWord::Done => Stage::Done,
     }
 }
 
