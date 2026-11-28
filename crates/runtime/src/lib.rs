@@ -339,6 +339,14 @@ impl Part for Runtimes {
                 }
             });
         };
+        // A reader's own checkouts are made before anything else, one at a time:
+        // each, once made, offers this start again.
+        if let Some(add) = world.checkout_to_make(&launch, effect) {
+            return Outcome::Done {
+                events: Vec::new(),
+                effects: vec![add],
+            };
+        }
         // A folder on this machine is trusted here before the agent starts in it.
         // One on another machine is trusted there, by the program the runner runs
         // on that machine before the agent's.

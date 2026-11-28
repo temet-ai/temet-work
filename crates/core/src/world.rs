@@ -20,9 +20,9 @@ use crate::ids::{
 use crate::launch::Launch;
 use crate::model::Decision;
 use crate::model::{
-    Addresses, Agent, AgentState, Area, CheckState, ClosedPull, DecisionKind, Folder, Group,
-    INVESTIGATE_EVERY, Investigation, Issue, PointState, Project, Review, Role, Rule, RuleState,
-    Stage,
+    Addresses, Agent, AgentState, Area, CheckState, Checkout, ClosedPull, DecisionKind, Folder,
+    Group, INVESTIGATE_EVERY, Investigation, Issue, PointState, Project, Review, Role, Rule,
+    RuleState, Stage,
 };
 use crate::placement::Unlisted;
 use crate::settings::{self, FILE, Scope, Value};
@@ -63,6 +63,9 @@ pub struct World {
     pub agents: BTreeMap<AgentId, Agent>,
     /// Work folders by id.
     pub folders: BTreeMap<FolderId, Folder>,
+    /// Readers' own checkouts by name: each one made and not yet removed,
+    /// whether it is still to be removed or was kept for a person.
+    pub checkouts: BTreeMap<String, Checkout>,
     /// Decisions by id.
     pub decisions: BTreeMap<DecisionId, Decision>,
     /// Rules proposed from overturned decisions, by id.
@@ -502,6 +505,7 @@ impl World {
                 secret_digest,
                 runtime,
                 model,
+                checkouts,
             } => {
                 // An author holds its issue's folders, one per repository; an
                 // older log's author may name none of them.
@@ -530,6 +534,7 @@ impl World {
                         lost_waited_on: false,
                         runtime: runtime.clone(),
                         model: model.clone(),
+                        checkouts: checkouts.clone(),
                     },
                 );
                 // A new agent hears what its stage needs in its brief.
@@ -549,6 +554,18 @@ impl World {
                     i.told = true;
                 }
             }
+            Event::CheckoutAdded { checkout } => {
+                self.checkouts
+                    .insert(checkout.name.clone(), checkout.clone());
+            }
+            Event::CheckoutRemoved { name } => {
+                self.checkouts.remove(name);
+            }
+            Event::CheckoutKept { name, changes } => {
+                if let Some(c) = self.checkouts.get_mut(name) {
+                    c.kept = Some(changes.clone());
+                }
+            }
             Event::AgentChanged { agent, state, lost } => {
                 let waited_on = self.agents.get(agent).is_some_and(|a| self.waiting_on(a));
                 // An ended session stays ended: an update already on its way when it
@@ -560,6 +577,10 @@ impl World {
                     let ended = *state == AgentState::Ended && waited_on;
                     a.ended_waited_on = ended && !lost;
                     a.lost_waited_on = ended && *lost;
+                    // However it ended, its own checkouts go with it.
+                    if *state == AgentState::Ended {
+                        out.extend(self.remove_checkouts_of(agent));
+                    }
                 }
             }
             Event::Continued { agent, resets_ms } => {
@@ -1122,7 +1143,7 @@ impl World {
         out.retain(|e| !self.waits_for_scope(e));
         self.follow_scope();
         out.extend(self.place());
-        out.retain(|e| !self.waits_for_machine(e));
+        out.retain(|e| !self.waits_for_machine(e) && !self.waits_for_branch(e));
         out
     }
 
@@ -1211,7 +1232,7 @@ impl World {
     }
 
     /// The repositories of the area an issue comes from; empty for a project's issue.
-    fn area_repos(&self, issue: &IssueId) -> Vec<ProjectId> {
+    pub(crate) fn area_repos(&self, issue: &IssueId) -> Vec<ProjectId> {
         self.areas
             .get(&issue.project)
             .map(|a| a.projects.clone())
@@ -1298,6 +1319,7 @@ impl World {
             start: self.stops_again(),
             ..Missing::default()
         };
+        out.start.extend(self.removals());
         out.start.extend(self.missing_investigators());
         for i in self.issues.values().filter(|i| !self.paused(i)) {
             // A merge, deploy or verify lost to a restart or a failure is asked for
@@ -1423,7 +1445,8 @@ impl World {
                 out.start.push(effect);
             }
         }
-        out.start.retain(|e| !self.waits_for_machine(e));
+        out.start
+            .retain(|e| !self.waits_for_machine(e) && !self.waits_for_branch(e));
         out
     }
 
@@ -1480,32 +1503,17 @@ impl World {
         }
     }
 
-    /// The folder an agent of `role` on `issue` runs in: its own, else (for a
-    /// reader) a free one of the issue's project when there is one, so it does not
-    /// work in a folder an author is changing. Only folders on the role's
-    /// `machine` count, when one is set.
-    pub fn folder_for(
-        &self,
-        issue: &Issue,
-        role: Role,
-        folder: Option<&FolderId>,
-    ) -> Option<&Folder> {
-        match folder {
-            Some(f) => self.folders.get(f),
-            None => self
-                .usable_folders(issue, role)
-                .find(|f| f.holder.is_none())
-                .or_else(|| self.usable_folders(issue, role).next()),
-        }
-    }
-
     /// What starting an agent takes: its id, the machine and folder it runs in,
-    /// and its brief. The id is its role and a number, counting every agent of
-    /// that role this world has started (`author-3`). An agent with no work
-    /// folder of its own runs in a folder of its project without holding it.
-    /// `None` when the issue is unknown, or when such an agent has no folder on
-    /// the machine its `machine` setting names. An investigator works for its
-    /// group, not on an issue: it starts through [`World::launch_investigator`].
+    /// its own checkouts and its brief. The id is its role and a number,
+    /// counting every agent of that role this world has started (`author-3`).
+    /// An author runs in its work folder. Every other agent runs in a checkout
+    /// of its own, never in a work folder, since an author may be given that
+    /// folder while it works: one in each repository it reads that has a work
+    /// folder on its machine ([`World::plan_checkouts`]), the first first. With
+    /// none it runs in no folder and is told so. `None` when the issue is
+    /// unknown, or when such an agent has no folder on the machine its
+    /// `machine` setting names. An investigator works for its group, not on an
+    /// issue: it starts through [`World::launch_investigator`].
     pub fn launch(
         &self,
         group: &GroupId,
@@ -1521,12 +1529,12 @@ impl World {
             return None;
         }
         let n = self.agents.values().filter(|a| a.role == role).count() + 1;
-        let place = self.folder_for(i, role, folder);
-        let path = place.map(|f| std::path::PathBuf::from(&f.path));
-        let shared = folder.is_none() && place.is_some_and(|f| f.holder.is_some());
-        // An author holding folders in several repositories is told each one.
-        let held: Vec<brief::Held> = if role == Role::Author {
-            i.folder
+        let agent = AgentId::new(format!("{}-{n}", role.name()));
+        let (machine, checkouts, place) = if role == Role::Author {
+            let place = folder.and_then(|f| self.folders.get(f));
+            // An author holding folders in several repositories is told each one.
+            let held: Vec<brief::Held> = i
+                .folder
                 .iter()
                 .chain(&i.other_folders)
                 .filter_map(|id| self.folders.get(id))
@@ -1538,14 +1546,26 @@ impl World {
                         .map_or_else(String::new, |p| p.repo.clone()),
                     path: f.path.clone(),
                 })
-                .collect()
+                .collect();
+            (
+                place.map_or_else(|| MachineId::new(LOCAL), |f| f.machine.clone()),
+                Vec::new(),
+                brief::Workplace {
+                    folder: place.map(|f| std::path::PathBuf::from(&f.path)),
+                    held,
+                    ..brief::Workplace::default()
+                },
+            )
         } else {
-            Vec::new()
+            let reads = self.reads(i, role);
+            let checkouts = self.plan_checkouts(&agent, self.machine_for(issue, role), &reads);
+            let place = self.place_of(&checkouts, &reads);
+            (Self::machine_of(&checkouts), checkouts, place)
         };
         Some(Launch {
-            agent: AgentId::new(format!("{}-{n}", role.name())),
+            agent,
             group: group.clone(),
-            machine: place.map_or_else(|| MachineId::new(LOCAL), |f| f.machine.clone()),
+            machine,
             folder: folder.cloned(),
             brief: crate::launch::Brief {
                 model: self.setting_text(issue, Some(role), "model"),
@@ -1557,15 +1577,12 @@ impl World {
                     i,
                     self.source_name(issue),
                     &self.area_repos(issue),
-                    brief::Workplace {
-                        folder: path,
-                        shared,
-                        held,
-                    },
+                    place,
                     &self.pulled(i),
                     &self.kept_rules(),
                 )
             },
+            checkouts,
         })
     }
 

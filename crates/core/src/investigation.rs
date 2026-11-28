@@ -7,16 +7,15 @@
 //! replaying the log gives the same state.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use crate::brief;
 use crate::effect::Effect;
 use crate::event::Event;
 use crate::ids::{AgentId, GroupId, IssueId, MachineId, MilestoneId, ProjectId};
 use crate::launch::Launch;
-use crate::model::{AgentState, Folder, Group, Investigation, Issue, Role, Stage};
+use crate::model::{AgentState, Checkout, Group, Investigation, Issue, Role, Stage};
 use crate::settings::Scope;
-use crate::world::{LOCAL, World};
+use crate::world::World;
 
 /// The work queue length under which a group with no work folders starts an
 /// investigator, when its configuration names none.
@@ -233,28 +232,6 @@ impl World {
             .unwrap_or(Scope::Global)
     }
 
-    /// The folder a group's investigator runs in without holding it: a free one
-    /// of the group's first repository, else one an author holds, on the machine
-    /// its `machine` setting names when one does.
-    fn investigator_folder(&self, group: &Group) -> Option<&Folder> {
-        let first = self.group_repos(group).into_iter().next()?;
-        let machine = self
-            .text_at(
-                &Scope::Project(first.clone()),
-                Some(Role::Investigator),
-                "machine",
-            )
-            .map(MachineId::new);
-        let usable = || {
-            self.folders
-                .values()
-                .filter(|f| f.project == first && machine.as_ref().is_none_or(|m| &f.machine == m))
-        };
-        usable()
-            .find(|f| f.holder.is_none())
-            .or_else(|| usable().next())
-    }
-
     /// The milestone an investigator's issue gets when it names none: the last of
     /// its group's, none when the group names none.
     pub fn filing_milestone(&self, group: &Group) -> Option<MilestoneId> {
@@ -268,9 +245,25 @@ impl World {
         let g = self.groups.get(group)?;
         let investigation = self.investigating(group)?;
         let scope = self.agent_scope(group, None);
-        let place = self.investigator_folder(g);
+        // A checkout of its own in each of the group's repositories, at the head
+        // of the default branch, on the machine its `machine` setting names for
+        // the first.
+        let repos = self.group_repos(g);
+        let machine = repos.first().and_then(|first| {
+            self.text_at(
+                &Scope::Project(first.clone()),
+                Some(Role::Investigator),
+                "machine",
+            )
+            .map(MachineId::new)
+        });
+        let reads: Vec<crate::checkouts::Read> = repos.into_iter().map(|r| (r, None)).collect();
+        let checkouts = self.plan_checkouts(&investigation.agent, machine, &reads);
         let sources = self.group_sources(g);
-        let covered = sources.iter().map(|source| self.covered(source)).collect();
+        let covered = sources
+            .iter()
+            .map(|source| self.covered(source, &checkouts))
+            .collect();
         let mut closed: Vec<&Issue> = self
             .issues
             .values()
@@ -289,7 +282,7 @@ impl World {
         Some(Launch {
             agent: investigation.agent.clone(),
             group: group.clone(),
-            machine: place.map_or_else(|| MachineId::new(LOCAL), |f| f.machine.clone()),
+            machine: Self::machine_of(&checkouts),
             folder: None,
             brief: crate::launch::Brief {
                 model: self.text_at(&scope, Some(Role::Investigator), "model"),
@@ -305,24 +298,22 @@ impl World {
                         milestone: self.filing_milestone(g),
                         since: investigation.window(),
                     },
-                    brief::Workplace {
-                        folder: place.map(|f| PathBuf::from(&f.path)),
-                        shared: place.is_some_and(|f| f.holder.is_some()),
-                        held: Vec::new(),
-                    },
+                    self.place_of(&checkouts, &reads),
                     &self.kept_rules(),
                 )
             },
+            checkouts,
         })
     }
 
-    /// One place an investigator files issues in, with the repositories it reads.
-    fn covered(&self, source: &ProjectId) -> brief::Covered {
+    /// One place an investigator files issues in, with the repositories it
+    /// reads, each with the path of its own checkout of it when it has one.
+    fn covered(&self, source: &ProjectId, checkouts: &[Checkout]) -> brief::Covered {
         let folder_of = |p: &ProjectId| {
-            self.folders
-                .values()
-                .find(|f| &f.project == p)
-                .map(|f| f.path.clone())
+            checkouts
+                .iter()
+                .find(|c| &c.project == p)
+                .map(|c| c.path.clone())
         };
         let repos = match self.areas.get(source) {
             Some(a) => a.projects.clone(),

@@ -24,17 +24,34 @@ pub struct Held {
     pub path: String,
 }
 
+/// One of a reader's own checkouts, as its brief names it: the project, the code
+/// host's name for its repository, where it is, and the branch whose fetched
+/// head it was made at (none for the default branch's).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Own {
+    /// The project.
+    pub project: ProjectId,
+    /// The code host's name for the repository.
+    pub repo: String,
+    /// Where it is on the agent's machine.
+    pub path: String,
+    /// The branch it was made at; none for the default branch.
+    pub branch: Option<String>,
+}
+
 /// Where an agent runs.
 #[derive(Debug, Default)]
 pub struct Workplace {
-    /// The folder it runs in.
+    /// The folder it runs in: an author's first work folder, a reader's first
+    /// checkout.
     pub folder: Option<PathBuf>,
-    /// Whether another issue's author holds that folder. An investigator is told
-    /// so; a refiner, reviewer or arbiter is told to leave its folder alone
-    /// either way.
-    pub shared: bool,
     /// An author's work folders, one per repository the plan names.
     pub held: Vec<Held>,
+    /// A reader's own checkouts, the one it starts in first.
+    pub checkouts: Vec<Own>,
+    /// The repositories a reader reads that have no work folder on its machine,
+    /// so it has no checkout of them and reads them on their code hosts.
+    pub without: Vec<ProjectId>,
 }
 
 /// One of an issue's pull requests: the project, the code host's name for its
@@ -106,14 +123,92 @@ fn switch_to(branch: &str) -> String {
     format!("git fetch, then git switch {branch}")
 }
 
-/// What a refiner, reviewer and arbiter are told about the folder they run in.
-/// They hold none, and an author may be given it while they work, so each hears
-/// this whether or not the folder was held at its start.
-const LEAVE_THE_FOLDER: &str = "\
-This folder is not yours: an author may be changing files in it or be given it while you work, and \
-it may be on another issue's branch. Do not switch its branch or change any file in it. Read a \
-pull request's changes from its code host. To run checks, make a separate checkout of the pull \
-request (with none, of the commit you need) outside this folder, and remove it when you are done.";
+/// What every reader is told about its own checkouts: no author works in them,
+/// the daemon removes them, and one with changes is kept for a person.
+const LEAVE_NO_CHANGE: &str = "\
+Each checkout is yours alone: no author works in it, and the daemon removes it when you end. Build \
+and run checks in it as you need; files git ignores, such as a build folder, go with it. Leave no \
+other change in it, because a checkout with changes is kept for a person to look at and remove: no \
+commit, no edited file and no new file git does not ignore.";
+
+/// Where a checkout was made: at a branch's fetched head, or the default
+/// branch's.
+fn made_at(own: &Own) -> String {
+    match &own.branch {
+        Some(b) => format!("at the head of branch {b} as fetched when it was made"),
+        None => "at the head of its default branch as fetched when it was made".into(),
+    }
+}
+
+/// What a reader is told about where it works: its own checkouts, the one it
+/// starts in first, and each repository it has none of, which it reads on its
+/// code host. With none at all it runs in no folder of a project, and is told so.
+fn own_checkouts(place: &Workplace) -> String {
+    let without: String = place
+        .without
+        .iter()
+        .map(|r| {
+            format!(
+                "{r} has no work folder on your machine, so you have no checkout of it: read it on \
+                 its code host.\n"
+            )
+        })
+        .collect();
+    match place.checkouts.as_slice() {
+        [] => format!(
+            "You have no checkout of your own, because no repository you read has a work folder on \
+             your machine, and you run in no folder of a project. Read the code on its code host.\n\
+             {without}"
+        ),
+        [one] => format!(
+            "Your own checkout of {} ({}) is at {}, {}. You start in it. {LEAVE_NO_CHANGE}\n{without}",
+            one.project,
+            one.repo,
+            one.path,
+            made_at(one)
+        ),
+        several => {
+            let list: String = several
+                .iter()
+                .map(|o| format!("- {} ({}): {}, {}\n", o.project, o.repo, o.path, made_at(o)))
+                .collect();
+            format!(
+                "You have your own checkout of each repository you read; you start in the first:\n\
+                 {list}{LEAVE_NO_CHANGE}\n{without}"
+            )
+        }
+    }
+}
+
+/// What a running reviewer is told to do in each of its checkouts on a new
+/// round: fetch, and switch it, detached, to its pull request's new head.
+fn switch_checkouts(own: &[Own]) -> String {
+    let how = |o: &Own| match &o.branch {
+        Some(b) => format!("git fetch origin, then git switch --detach origin/{b}"),
+        None => "git fetch origin, then switch it, detached, to the head of the pull request's \
+                 branch, which its code host names"
+            .into(),
+    };
+    match own {
+        [] => String::new(),
+        [one] => format!(
+            "In your checkout at {}, fetch and switch it, detached, to the pull request's new head: \
+             {}. Leave no change in it.\n",
+            one.path,
+            how(one)
+        ),
+        several => {
+            let list: String = several
+                .iter()
+                .map(|o| format!("- {} at {}: {}\n", o.project, o.path, how(o)))
+                .collect();
+            format!(
+                "In each of your checkouts, fetch and switch it, detached, to its pull request's new \
+                 head. Leave no change in them.\n{list}"
+            )
+        }
+    }
+}
 
 /// What an author is told about making its change, and the end of its brief: the
 /// `ready` command for `issue`. An author on an issue with pull requests is given
@@ -301,24 +396,6 @@ fn authors_work(issue: &IssueId, held: &[Held], pulls: &[Pulled]) -> (String, St
     )
 }
 
-/// Said beside every fetch a brief asks for: an agent told to change no file
-/// would otherwise skip it and read a stale default branch.
-const FETCHING_IS_ALLOWED: &str =
-    "Fetching is allowed: it moves no branch and changes no file an author works on.";
-
-/// Sends a reader to a default branch's head, since the files in a folder may be
-/// on another issue's branch or an older one. `read` says what to read there,
-/// `stand` whose files not to read it from, and `outside` where a separate
-/// checkout goes.
-fn at_the_default_branch(read: &str, stand: &str, outside: &str) -> String {
-    format!(
-        "{read}, not as the files in {stand} stand: fetch, then read with git show from the \
-         remote-tracking branch the fetch updated (a local branch may be behind), or in a separate \
-         checkout of that commit {outside}, which you remove when you are done. \
-         {FETCHING_IS_ALLOWED}"
-    )
-}
-
 /// What a refiner's plain `model` becomes (`docs/settings.md`, "A model belongs
 /// to a runtime").
 const PLAIN_MODEL: &str = "A plain model is recorded as the global runtime's, as \
@@ -402,8 +479,14 @@ pub fn write(
     pulls: &[Pulled],
     rules: &[String],
 ) -> Brief {
-    let Workplace { folder, held, .. } = place;
     let id = &issue.id;
+    let where_you_work = own_checkouts(&place);
+    let in_your_checkout = if place.checkouts.is_empty() {
+        ""
+    } else {
+        ", in your checkout"
+    };
+    let Workplace { folder, held, .. } = place;
     let source = source.map_or_else(
         || format!("issue {} of project {}", id.key, id.project),
         |name| format!("issue {} of {name} in its tracker", id.key),
@@ -422,8 +505,7 @@ pub fn write(
     let area_read = if repos.is_empty() {
         ""
     } else {
-        " Do this for each of the area's repositories the change may touch, at the head of its \
-         own default branch; clone one you have no checkout of, outside this folder."
+        " Do this for each of the area's repositories the change may touch, in your checkout of it."
     };
     let pointer = cut_pointer(id);
     // An author started on an issue that came back hears what to fix first, and
@@ -452,13 +534,9 @@ pub fn write(
         Role::Refiner => vec![
             Part::Whole(format!(
                 "Refine {id}: {title}. It is {source}.\n\
-                 {LEAVE_THE_FOLDER}\n{area_note}Read the issue. {code}{area_read} Change no file here.\n",
+                 {where_you_work}{area_note}Read the issue. Read the code it touches at the head of \
+                 the repository's default branch{in_your_checkout}.{area_read} Change no file.\n",
                 title = issue.title,
-                code = at_the_default_branch(
-                    "Read the code it touches at the current head of the repository's default branch",
-                    "this folder",
-                    "outside this folder",
-                ),
             )),
             Part::Whole(record_choices(id)),
             Part::Command(format!(
@@ -509,9 +587,9 @@ pub fn write(
             ))];
             parts.extend(to_judge(issue, round, &pointer));
             parts.push(Part::Whole(format!(
-                "{LEAVE_THE_FOLDER}\n\
-                 Read the whole change, not only the last commit. Run the checks yourself where you can, \
-                 in that separate checkout.\n\
+                "{where_you_work}\
+                 Read the whole change, not only the last commit. Run the checks yourself where you \
+                 can{in_your_checkout}.\n\
                  {hold}\n\
                  {BLOCK_WHAT_IS_NOT_MET}\n",
                 hold = hold_to_the_issue(id),
@@ -531,7 +609,7 @@ pub fn write(
             ];
             parts.extend(rounds(issue, &pointer));
             parts.push(Part::Whole(format!(
-                "{LEAVE_THE_FOLDER}\n\
+                "{where_you_work}\
                  Read the pull request and the review rounds listed above, with the author's replies; \
                  temet-work issue {id} lists the rounds again. Decide whether it merges.\n\
                  {hold}\n\
@@ -790,12 +868,7 @@ pub enum Since {
 /// or service: the investigator files issues through `temet-work file`.
 pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> Brief {
     let g = what.group;
-    let folder_note = if place.shared {
-        "Another issue's author is changing files in this folder: do not switch its branch or change \
-         anything here.\n"
-    } else {
-        ""
-    };
+    let where_you_work = own_checkouts(&place);
     let covered: String = what
         .covered
         .iter()
@@ -804,7 +877,7 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
                 .repos
                 .iter()
                 .map(|(r, path)| match path {
-                    Some(p) => format!("{r} (a checkout to fetch in is at {p})"),
+                    Some(p) => format!("{r} (your checkout of it is at {p})"),
                     None => r.to_string(),
                 })
                 .collect();
@@ -820,9 +893,7 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
                     .repos
                     .first()
                     .and_then(|(_, p)| p.as_deref())
-                    .map_or_else(String::new, |p| {
-                        format!("; a checkout to fetch in is at {p}")
-                    });
+                    .map_or_else(String::new, |p| format!("; your checkout of it is at {p}"));
                 format!("- {}: {} in its tracker{at}\n", c.source, c.tracker)
             }
         })
@@ -891,8 +962,10 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
         Part::Whole(format!(
             "Investigate for group {name} ({id}): its work queue is short. Find the work that should \
              come next and file an issue for each item.\n\
-             {folder_note}It takes issues from:\n{covered}{milestone}\
-             {docs_and_code}\n\
+             It takes issues from:\n{covered}{milestone}\
+             {where_you_work}\
+             Read each repository's docs and code at the current head of its default branch, in \
+             your checkout of it.\n\
              Read, in this order:\n\
              1. Each project's docs at that head, for work they plan that is not built yet.\n\
              2. {read_open}\n\
@@ -900,12 +973,6 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
              Then file one issue for each planned item no open issue covers, and one for each defect \
              you can show in merged work:\n",
             name = g.name,
-            docs_and_code = at_the_default_branch(
-                "Read each repository's docs and code at the current head of that repository's \
-                 default branch",
-                "a checkout",
-                "outside the checkouts named above and outside the folder you run in",
-            ),
         )),
         Part::Command(format!(
             "temet-work file PROJECT \"<title>\" - <<'BODY'\n\
@@ -1121,7 +1188,7 @@ fn how_to_judge(issue: &Issue, round: u8, what: &str) -> String {
 /// the order they merge: one may have replaced the one it reviewed before. Like
 /// a brief, it is held to [`fit::LIMIT`] bytes, each check, point and reply cut
 /// with a pointer to `temet-work issue`.
-pub fn next_round(issue: &Issue, round: u8, pulls: &[Pulled]) -> String {
+pub fn next_round(issue: &Issue, round: u8, pulls: &[Pulled], own: &[Own]) -> String {
     let id = &issue.id;
     let mut parts = vec![Part::Whole(format!(
         "The author pushed fixes for {id}; this is review round {round}. Review the whole change again, \
@@ -1131,9 +1198,10 @@ pub fn next_round(issue: &Issue, round: u8, pulls: &[Pulled]) -> String {
     ))];
     parts.extend(to_judge(issue, round, &cut_pointer(id)));
     parts.push(Part::Whole(format!(
-        "{LEAVE_THE_FOLDER}\n\
+        "{switch}\
          {hold}\n\
          {BLOCK_WHAT_IS_NOT_MET}\n",
+        switch = switch_checkouts(own),
         hold = hold_to_the_issue(id),
     )));
     parts.push(Part::Command(how_to_judge(
@@ -1212,41 +1280,219 @@ mod tests {
         );
     }
 
+    /// A reader's own checkout of `project`, at `branch` or the default branch.
+    fn own(project: &str, branch: Option<&str>) -> Own {
+        Own {
+            project: ProjectId::new(project),
+            repo: format!("ankh-morpork/{project}"),
+            path: format!("/srv/temet-work-checkouts/l1/{project}-1"),
+            branch: branch.map(String::from),
+        }
+    }
+
+    /// Where a reader with `own` checkouts works, and the repositories it has
+    /// none of.
+    fn in_checkouts(own: Vec<Own>, without: &[&str]) -> Workplace {
+        Workplace {
+            folder: own.first().map(|o| PathBuf::from(&o.path)),
+            checkouts: own,
+            without: without.iter().map(|r| ProjectId::new(*r)).collect(),
+            ..Workplace::default()
+        }
+    }
+
+    /// What a reader was told when it ran in a work folder that was not its
+    /// own, and no reader hears now.
+    const NOT_YOURS: [&str; 5] = [
+        "not yours",
+        "separate checkout",
+        "remove it when you are done",
+        "clone one",
+        "a checkout to fetch in",
+    ];
+
+    /// What every reader with a checkout hears about it.
+    const LEAVE_IT: [&str; 2] = [
+        "Each checkout is yours alone: no author works in it, and the daemon removes it when you \
+         end.",
+        "Leave no other change in it, because a checkout with changes is kept for a person to look at \
+         and remove: no commit, no edited file and no new file git does not ignore.",
+    ];
+
+    fn holds(task: &str, said: &[&str], unsaid: &[&str]) {
+        for line in said {
+            assert!(task.contains(line), "missing {line:?} in:\n{task}");
+        }
+        for line in unsaid {
+            assert!(!task.contains(line), "{line:?} in:\n{task}");
+        }
+    }
+
     #[test]
-    fn a_reader_is_told_to_leave_its_folder_alone_held_or_not() {
+    fn the_reviewers_brief_names_its_checkout_and_has_no_not_yours_text() {
         let issue = lamp_issue();
-        let told = [
-            "an author may be changing files in it or be given it while you work",
-            "Do not switch its branch or change any file in it.",
-            "Read a pull request's changes from its code host.",
-            "To run checks, make a separate checkout of the pull request (with none, of the commit \
-             you need) outside this folder, and remove it when you are done.",
-        ];
-        for role in [Role::Refiner, Role::Reviewer, Role::Arbiter] {
-            for shared in [false, true] {
-                let place = Workplace {
-                    shared,
-                    ..Workplace::default()
-                };
-                let task = write(role, &issue, None, &[], place, &[], &[]).task;
-                for line in told {
-                    assert!(
-                        task.contains(line),
-                        "{role:?}, shared {shared}: missing {line:?} in:\n{task}"
-                    );
-                }
-            }
-        }
-        let reviewer = lamp_task(Role::Reviewer, &issue);
-        assert!(
-            reviewer.contains("Run the checks yourself where you can, in that separate checkout."),
-            "{reviewer}"
+        let brief = write(
+            Role::Reviewer,
+            &issue,
+            None,
+            &[],
+            in_checkouts(vec![own("watch", Some("night"))], &[]),
+            &[],
+            &[],
         );
-        // A running reviewer hears it again on each later round.
-        let again = next_round(&issue, 2, &[]);
-        for line in told {
-            assert!(again.contains(line), "missing {line:?} in:\n{again}");
+        assert_eq!(
+            brief.folder,
+            Some(PathBuf::from("/srv/temet-work-checkouts/l1/watch-1"))
+        );
+        let said = [
+            "Your own checkout of watch (ankh-morpork/watch) is at \
+             /srv/temet-work-checkouts/l1/watch-1, at the head of branch night as fetched when it \
+             was made. You start in it.",
+            LEAVE_IT[0],
+            LEAVE_IT[1],
+            "Run the checks yourself where you can, in your checkout.",
+        ];
+        holds(&brief.task, &said, &NOT_YOURS);
+    }
+
+    #[test]
+    fn the_refiners_brief_names_its_checkouts_at_the_default_branch() {
+        let issue = lamp_issue();
+        let place = in_checkouts(
+            vec![own("watch", None), own("clacks", None)],
+            &["semaphore"],
+        );
+        let repos = [
+            ProjectId::new("watch"),
+            ProjectId::new("clacks"),
+            ProjectId::new("semaphore"),
+        ];
+        let task = write(Role::Refiner, &issue, None, &repos, place, &[], &[]).task;
+        let said = [
+            "You have your own checkout of each repository you read; you start in the first:\n\
+             - watch (ankh-morpork/watch): /srv/temet-work-checkouts/l1/watch-1, at the head of its \
+             default branch as fetched when it was made\n\
+             - clacks (ankh-morpork/clacks): /srv/temet-work-checkouts/l1/clacks-1, at the head of \
+             its default branch as fetched when it was made\n",
+            LEAVE_IT[0],
+            "semaphore has no work folder on your machine, so you have no checkout of it: read it \
+             on its code host.",
+            "Read the code it touches at the head of the repository's default branch, in your \
+             checkout.",
+            "Do this for each of the area's repositories the change may touch, in your checkout of \
+             it.",
+        ];
+        holds(&task, &said, &NOT_YOURS);
+    }
+
+    #[test]
+    fn the_arbiters_brief_names_its_checkout() {
+        let mut issue = lamp_issue();
+        issue.stage = Stage::Arbitration { round: 3 };
+        let place = in_checkouts(vec![own("watch", Some("night"))], &[]);
+        let task = write(Role::Arbiter, &issue, None, &[], place, &[], &[]).task;
+        let said = [
+            "Your own checkout of watch (ankh-morpork/watch) is at \
+             /srv/temet-work-checkouts/l1/watch-1, at the head of branch night as fetched when it \
+             was made.",
+            LEAVE_IT[0],
+            LEAVE_IT[1],
+        ];
+        holds(&task, &said, &NOT_YOURS);
+    }
+
+    #[test]
+    fn a_reader_with_no_checkout_is_told_it_runs_in_no_folder() {
+        let issue = lamp_issue();
+        for role in [Role::Refiner, Role::Reviewer, Role::Arbiter] {
+            let brief = write(
+                role,
+                &issue,
+                None,
+                &[],
+                in_checkouts(vec![], &["watch"]),
+                &[],
+                &[],
+            );
+            assert_eq!(brief.folder, None);
+            let said = [
+                "You have no checkout of your own, because no repository you read has a work folder \
+                 on your machine, and you run in no folder of a project. Read the code on its code \
+                 host.",
+                "watch has no work folder on your machine, so you have no checkout of it",
+            ];
+            holds(&brief.task, &said, &NOT_YOURS);
         }
+    }
+
+    #[test]
+    fn the_investigators_brief_names_its_own_checkouts() {
+        let world = investigating(None);
+        let looking = Investigating {
+            group: &world.groups[&GroupId::new("watch")],
+            covered: vec![Covered {
+                source: ProjectId::new("ankh"),
+                tracker: "city/ankh".into(),
+                area: false,
+                repos: vec![(
+                    ProjectId::new("ankh"),
+                    Some("/srv/temet-work-checkouts/l1/ankh-1".into()),
+                )],
+            }],
+            closed: Vec::new(),
+            notes: Vec::new(),
+            milestone: None,
+            since: Since::First,
+        };
+        let place = in_checkouts(vec![own("ankh", None)], &[]);
+        let brief = investigate(&looking, place, &[]);
+        assert_eq!(
+            brief.folder,
+            Some(PathBuf::from("/srv/temet-work-checkouts/l1/ankh-1"))
+        );
+        let said = [
+            "- ankh: city/ankh in its tracker; your checkout of it is at \
+             /srv/temet-work-checkouts/l1/ankh-1\n",
+            "Your own checkout of ankh (ankh-morpork/ankh) is at \
+             /srv/temet-work-checkouts/l1/ankh-1, at the head of its default branch",
+            LEAVE_IT[0],
+            LEAVE_IT[1],
+            "Read each repository's docs and code at the current head of its default branch, in \
+             your checkout of it.",
+        ];
+        holds(&brief.task, &said, &NOT_YOURS);
+        assert!(
+            !brief.task.contains("Another issue's author"),
+            "{}",
+            brief.task
+        );
+    }
+
+    #[test]
+    fn the_next_round_tells_the_reviewer_to_switch_its_checkout_to_the_new_head() {
+        let issue = lamp_issue();
+        let one = next_round(&issue, 2, &[], &[own("watch", Some("night"))]);
+        let said = [
+            "In your checkout at /srv/temet-work-checkouts/l1/watch-1, fetch and switch it, \
+             detached, to the pull request's new head: git fetch origin, then git switch --detach \
+             origin/night. Leave no change in it.",
+        ];
+        holds(&one, &said, &NOT_YOURS);
+        let two = next_round(
+            &issue,
+            2,
+            &[],
+            &[own("watch", Some("night")), own("clacks", None)],
+        );
+        let said = [
+            "In each of your checkouts, fetch and switch it, detached, to its pull request's new \
+             head. Leave no change in them.\n\
+             - watch at /srv/temet-work-checkouts/l1/watch-1: git fetch origin, then git switch \
+             --detach origin/night\n\
+             - clacks at /srv/temet-work-checkouts/l1/clacks-1: git fetch origin, then switch it, \
+             detached, to the head of the pull request's branch, which its code host names\n",
+        ];
+        holds(&two, &said, &NOT_YOURS);
     }
 
     #[test]
@@ -1298,7 +1544,7 @@ mod tests {
             brief.contains("2. a bell that jams is rung again and then reported (shown by: "),
             "{brief}"
         );
-        let again = next_round(&issue, 2, &[]);
+        let again = next_round(&issue, 2, &[], &[]);
         for line in [
             "run temet-work issue watch#7, which prints the issue's text from its tracker.",
             "Check each of its points and its \"Done is\" line against the change, not only the \
@@ -1373,7 +1619,7 @@ mod tests {
                    fixes it again and the next round judges it again. Every point you leave unnamed \
                    counts as resolved, and a block may consist of kept points alone. An approve passes \
                    every check and resolves every point, and takes neither --failed nor --open.";
-        let again = next_round(&issue, 2, &[]);
+        let again = next_round(&issue, 2, &[], &[]);
         assert!(again.contains(numbered), "{again}");
         assert!(again.ends_with(how), "{again}");
         // A reviewer started on round 2 hears the same in its brief.
@@ -1458,7 +1704,7 @@ mod tests {
             "an arbiter cannot block:\n{brief}"
         );
         assert!(!brief.contains("failure scenario"), "{brief}");
-        let again = next_round(&issue, 2, &[]);
+        let again = next_round(&issue, 2, &[], &[]);
         assert!(
             again.contains("run temet-work issue watch#12, which prints"),
             "{again}"
@@ -1793,7 +2039,7 @@ mod tests {
                     The author's reply: oiled it\n     2. the bar is bent\n";
         for text in [
             lamp_task(Role::Reviewer, &issue),
-            next_round(&issue, 2, &[]),
+            next_round(&issue, 2, &[], &[]),
         ] {
             assert!(text.contains(told), "{text}");
             assert!(
@@ -2342,7 +2588,7 @@ mod tests {
             ),
             "{brief}"
         );
-        let again = next_round(&issue, 2, &[]);
+        let again = next_round(&issue, 2, &[], &[]);
         for line in [
             "A plan check or a recorded decision that departs from a point the issue states, or \
              that leaves any failure the issue describes happening, is a block, even when the plan \
@@ -2371,49 +2617,30 @@ mod tests {
     }
 
     #[test]
-    fn a_refiner_reads_the_default_branch_not_the_files_in_its_folder() {
-        let code = "Read the code it touches at the current head of the repository's default \
-                    branch, not as the files in this folder stand: fetch, then read with git \
-                    show from the remote-tracking branch the fetch updated (a local branch may be \
-                    behind), or in a separate checkout of that commit outside this folder, which \
-                    you remove when you are done. Fetching is allowed: it moves no branch and \
-                    changes no file an author works on.";
-        let each = " Do this for each of the area's repositories the change may touch, at the head \
-                    of its own default branch; clone one you have no checkout of, outside this \
-                    folder.";
+    fn a_refiner_reads_the_default_branch_in_its_own_checkout() {
+        let code = "Read the code it touches at the head of the repository's default branch, in \
+                    your checkout.";
+        let each = " Do this for each of the area's repositories the change may touch, in your \
+                    checkout of it.";
         let area = [ProjectId::new("ui"), ProjectId::new("docs")];
         for repos in [&area[..0], &area[..]] {
-            for shared in [false, true] {
-                let place = Workplace {
-                    shared,
-                    ..Workplace::default()
-                };
-                let task = write(Role::Refiner, &lamp_issue(), None, repos, place, &[], &[]).task;
-                let each = if repos.is_empty() { "" } else { each };
-                let told = format!("Read the issue. {code}{each} Change no file here.\n");
-                assert!(task.contains(&told), "shared {shared}:\n{task}");
-                // Nothing else in the brief sends it to read code.
-                let mut rest = reading(&task);
-                rest.retain(|s| !told.contains(s));
-                assert_eq!(
-                    rest,
-                    ["Read a pull request's changes from its code host."],
-                    "{task}"
-                );
-                assert!(!task.contains("touches in this folder"), "{task}");
-            }
+            let place = in_checkouts(vec![own("watch", None)], &[]);
+            let task = write(Role::Refiner, &lamp_issue(), None, repos, place, &[], &[]).task;
+            let each = if repos.is_empty() { "" } else { each };
+            let told = format!("Read the issue. {code}{each} Change no file.\n");
+            assert!(task.contains(&told), "{task}");
+            // Nothing else in the brief sends it to read code.
+            let mut rest = reading(&task);
+            rest.retain(|s| !told.contains(s));
+            assert_eq!(rest, Vec::<&str>::new(), "{task}");
+            assert!(!task.contains("this folder"), "{task}");
         }
     }
 
     #[test]
-    fn an_investigator_reads_each_checkout_at_its_default_branch() {
-        let docs_and_code = "Read each repository's docs and code at the current head of that \
-                             repository's default branch, not as the files in a checkout stand: \
-                             fetch, then read with git show from the remote-tracking branch the \
-                             fetch updated (a local branch may be behind), or in a separate \
-                             checkout of that commit outside the checkouts named above and outside \
-                             the folder you run in, which you remove when you are done. Fetching is \
-                             allowed: it moves no branch and changes no file an author works on.";
+    fn an_investigator_reads_each_repository_in_its_own_checkout_held_folder_or_not() {
+        let docs_and_code = "Read each repository's docs and code at the current head of its \
+                             default branch, in your checkout of it.";
         for held in [false, true] {
             let mut world = investigating(None);
             world.apply(&Event::FolderAdded {
@@ -2442,16 +2669,34 @@ mod tests {
             let launch = world
                 .launch_investigator(&GroupId::new("watch"))
                 .expect("launch");
-            assert_eq!(launch.brief.folder, Some(PathBuf::from("/srv/ankh/1")));
+            // Its own checkout, never the work folder, held or free.
+            let ankh = "/srv/ankh/temet-work-checkouts/no-log/ankh-1";
+            let ui = "/srv/ui/temet-work-checkouts/no-log/ui-1";
+            assert_eq!(launch.brief.folder, Some(PathBuf::from(ankh)));
+            let made: Vec<(&str, &str, Option<&str>)> = launch
+                .checkouts
+                .iter()
+                .map(|c| (c.path.as_str(), c.from.as_str(), c.branch.as_deref()))
+                .collect();
+            assert_eq!(made, [(ankh, "/srv/ankh/1", None), (ui, "/srv/ui/1", None)]);
             let task = launch.brief.task;
-            // The lines that name a path give it as a place to fetch in.
             let named: Vec<&str> = task.lines().filter(|l| l.contains("/srv/")).collect();
             assert_eq!(
                 named,
                 [
-                    "- ankh: city/ankh in its tracker; a checkout to fetch in is at /srv/ankh/1",
-                    "- guild: GLD in its tracker, for the area's repositories ui (a checkout to \
-                     fetch in is at /srv/ui/1)",
+                    format!("- ankh: city/ankh in its tracker; your checkout of it is at {ankh}"),
+                    format!(
+                        "- guild: GLD in its tracker, for the area's repositories ui (your \
+                         checkout of it is at {ui})"
+                    ),
+                    format!(
+                        "- ankh (city/ankh): {ankh}, at the head of its default branch as fetched \
+                         when it was made"
+                    ),
+                    format!(
+                        "- ui (guild/ui): {ui}, at the head of its default branch as fetched when \
+                         it was made"
+                    ),
                 ],
                 "held {held}:\n{task}"
             );
@@ -2464,7 +2709,15 @@ mod tests {
             // Nothing else in the brief sends it to read docs or code.
             let mut rest = reading(&task);
             rest.retain(|s| !docs_and_code.contains(s));
-            assert_eq!(rest, ["Read, in this order:"], "held {held}:\n{task}");
+            assert_eq!(
+                rest,
+                [
+                    "You have your own checkout of each repository you read; you start in the \
+                     first:",
+                    "Read, in this order:"
+                ],
+                "held {held}:\n{task}"
+            );
         }
     }
 
@@ -2546,7 +2799,8 @@ mod tests {
         for line in [
             "Investigate for group Night watch (watch): its work queue is short.",
             "It takes issues from:\n\
-             - ankh: city/ankh in its tracker; a checkout to fetch in is at /srv/ankh/1\n\
+             - ankh: city/ankh in its tracker; your checkout of it is at \
+             /srv/ankh/temet-work-checkouts/no-log/ankh-1\n\
              - guild: GLD in its tracker, for the area's repositories ui\n",
             "Each issue you file goes in milestone Second, the last the group takes; to file one \
              in another the group takes, add --milestone M. The group takes, first to last: First, \
@@ -2806,7 +3060,7 @@ mod tests {
             ),
         ];
         let reviewer = brief(Role::Reviewer, &issue);
-        let again = next_round(&issue, 2, &[]);
+        let again = next_round(&issue, 2, &[], &[]);
         for text in [&reviewer, &again] {
             for item in &judged {
                 assert!(text.contains(item), "no {item:.60} in:\n{text:.300}");
@@ -2887,7 +3141,7 @@ mod tests {
         issue.stage = Stage::InReview { round: 2 };
         issue.reviews[0].replies = two_kb("reply", 80);
         let reviewer = lamp_task(Role::Reviewer, &issue);
-        let again = next_round(&issue, 2, &[]);
+        let again = next_round(&issue, 2, &[], &[]);
         for (name, text) in [
             ("author", &author),
             ("fixes", &fixed),
@@ -2971,7 +3225,7 @@ mod tests {
         issue.reviews[0].replies = vec!["trimmed it".into()];
         issue.stage = Stage::InReview { round: 2 };
         let reviewer = lamp_task(Role::Reviewer, &issue);
-        let again = next_round(&issue, 2, &[]);
+        let again = next_round(&issue, 2, &[], &[]);
         issue.stage = Stage::Arbitration { round: 1 };
         let arbiter = lamp_task(Role::Arbiter, &issue);
         for (name, text) in [

@@ -1297,6 +1297,7 @@ mod tests {
             secret_digest: None,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         }
     }
 
@@ -2248,6 +2249,7 @@ mod plan_settings {
                 secret_digest: None,
                 runtime: None,
                 model: None,
+                checkouts: Vec::new(),
             },
         ]);
         w
@@ -3362,6 +3364,7 @@ mod ready_in_several_repositories {
             secret_digest: None,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         });
         World::replay(&events).0
     }

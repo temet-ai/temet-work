@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use temet_work_core::brief;
 use temet_work_core::ids::AgentId;
 use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
-use temet_work_core::model::{AgentState, Role};
+use temet_work_core::model::{AgentCheckout, AgentState, Role};
 use temet_work_core::sender::Digest;
 use temet_work_core::settings::{Choice, Scope};
 use temet_work_core::world::LOCAL;
@@ -1228,6 +1228,14 @@ impl Part for Runners {
                                 secret_digest: Some(secret_digest),
                                 runtime: Some(runtime.clone()),
                                 model: brief.model.clone(),
+                                checkouts: launch
+                                    .checkouts
+                                    .iter()
+                                    .map(|c| AgentCheckout {
+                                        project: c.project.clone(),
+                                        path: c.path.clone(),
+                                    })
+                                    .collect(),
                             }],
                             effects: Vec::new(),
                         }
@@ -1278,7 +1286,12 @@ impl Part for Runners {
                     Message {
                         agent: reviewer.id.0.clone(),
                         issue: Some(issue.clone()),
-                        text: brief::next_round(i, *round, &world.pulled(i)),
+                        text: brief::next_round(
+                            i,
+                            *round,
+                            &world.pulled(i),
+                            &world.own_checkouts(reviewer),
+                        ),
                         tells: true,
                     },
                 );
@@ -1564,7 +1577,8 @@ mod tests {
             );
             let screen = part.screen(&reviewer.0).expect("screen");
             let i = &w.issues[&IssueId::new("ankh", "1")];
-            let text = brief::next_round(i, round, &w.pulled(i));
+            let own = w.own_checkouts(&w.agents[&reviewer]);
+            let text = brief::next_round(i, round, &w.pulled(i), &own);
             assert!(screen.contains(&text), "{screen}");
             assert!(
                 screen.contains("- ankh (ankh-morpork/clock): pull request 7\n"),
@@ -1621,7 +1635,9 @@ mod tests {
         }
         let waiting: Vec<&str> = part.outbox.iter().map(|m| m.text.as_str()).collect();
         let i = &w.issues[&IssueId::new("ankh", "1")];
-        assert_eq!(waiting, [brief::next_round(i, 1, &w.pulled(i))]);
+        let reviewer = w.running(&i.id, Role::Reviewer).expect("a reviewer");
+        let own = w.own_checkouts(reviewer);
+        assert_eq!(waiting, [brief::next_round(i, 1, &w.pulled(i), &own)]);
         assert!(waiting[0].contains("pull request 8\n"), "{}", waiting[0]);
     }
 
@@ -1644,6 +1660,7 @@ mod tests {
             secret_digest: None,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         });
         assert_eq!(part.poll(&other, 0).events, vec![]);
         let stop = Effect::StopAgent {

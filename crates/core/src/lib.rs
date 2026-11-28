@@ -6,6 +6,7 @@
 //! part gains.
 
 pub mod brief;
+pub mod checkouts;
 pub mod command;
 pub mod effect;
 pub mod event;

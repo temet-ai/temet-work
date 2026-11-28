@@ -439,6 +439,49 @@ pub struct Agent {
     /// setting while it runs; this stays what it runs.
     #[serde(default)]
     pub model: Option<String>,
+    /// Where its own checkouts are, one in each repository it was given one
+    /// of, the one it started in first; none for an author, which works in its
+    /// work folders, and for an agent from an older log.
+    #[serde(default)]
+    pub checkouts: Vec<AgentCheckout>,
+}
+
+/// Where one of an agent's own checkouts is, as its start recorded it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentCheckout {
+    /// The project it is a checkout of.
+    pub project: ProjectId,
+    /// Where it is on the agent's machine.
+    pub path: String,
+}
+
+/// A reader's own checkout of a repository: a git worktree added from a work
+/// folder's repository before a reviewer, arbiter, refiner or investigator
+/// starts, and removed when it ends (`docs/architecture.md`, "Who
+/// coordinates"). The loop asks for both; a part does the git work.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Checkout {
+    /// Its name: its repository and the lowest number no other checkout of the
+    /// log uses (`watch-1`), so a path is used again once its checkout is gone.
+    pub name: String,
+    /// The agent it is made for.
+    pub agent: AgentId,
+    /// The project it is a checkout of.
+    pub project: ProjectId,
+    /// The machine it is on: the agent's.
+    pub machine: MachineId,
+    /// Where it is on that machine: `temet-work-checkouts/<log id>/<name>`
+    /// beside the work folder it is added from.
+    pub path: String,
+    /// The work folder whose repository it is added from.
+    pub from: String,
+    /// The branch whose fetched head it is made at, for a pull request's
+    /// reader; none for the head of the default branch.
+    pub branch: Option<String>,
+    /// What was found in it when it was kept instead of removed, for a person
+    /// to look at; none while it is to be removed when its agent ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<Vec<String>>,
 }
 
 impl AgentState {

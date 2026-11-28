@@ -84,6 +84,12 @@ fn blocked(w: &mut World, issue: &IssueId, round: u8) -> Vec<Effect> {
         pulls: Default::default(),
         replies: Vec::new(),
     });
+    w.apply(&Event::PullBranch {
+        issue: issue.clone(),
+        repo: issue.project.clone(),
+        number: "1".into(),
+        branch: format!("{}-{}", issue.project, issue.key),
+    });
     w.apply(&Event::ReviewFinished {
         issue: issue.clone(),
         round,
@@ -316,6 +322,7 @@ fn a_plain_model_keeps_the_runtime_it_was_written_for() {
             secret_digest: None,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         },
     ] {
         w.apply(&event);
@@ -477,6 +484,7 @@ fn starts_changes_how_many_agents_of_a_role_are_tried_on_one_issue() {
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     };
     for e in [author(1), author(2)] {
         w.apply(&e);
@@ -710,6 +718,9 @@ fn author(key: &str, folder: &str) -> Effect {
 }
 
 /// The machine and folder path an agent of `role` on ankh#`key` would start in.
+/// The machine an agent of `role` on `ankh#key` runs on, and the work folder it
+/// runs in, for an author, or that its own checkout is added from, for a reader,
+/// which runs in that checkout.
 fn place_of(w: &World, role: Role, key: &str) -> Option<(String, String)> {
     let issue = id("ankh", key);
     let held = (role == Role::Author)
@@ -717,7 +728,13 @@ fn place_of(w: &World, role: Role, key: &str) -> Option<(String, String)> {
         .flatten();
     let launch = w.launch(&GroupId::new("watch"), role, &issue, held.as_ref())?;
     let path = launch.brief.folder?.display().to_string();
-    Some((launch.machine.0, path))
+    if role == Role::Author {
+        return Some((launch.machine.0, path));
+    }
+    let checkout = launch.checkouts.first()?;
+    assert_eq!(path, checkout.path, "a reader runs in its own checkout");
+    assert!(!w.folders.values().any(|f| f.path == path));
+    Some((launch.machine.0, checkout.from.clone()))
 }
 
 fn at(machine: &str, folder: &str) -> Option<(String, String)> {
@@ -895,12 +912,16 @@ fn a_machine_for_one_role_or_one_task_wins_where_the_chain_says() {
 }
 
 #[test]
-fn a_reader_shares_a_held_folder_on_its_machine_before_a_free_one_elsewhere() {
+fn a_readers_checkout_comes_from_a_held_folder_on_its_machine_before_a_free_one_elsewhere() {
     let mut w = machines(&BOTH);
     machine(&mut w, ankh(), None, "mac");
     assert_eq!(plan(&mut w, "1"), vec![author("1", "b-mac")]);
     assert_eq!(place_of(&w, Role::Reviewer, "1"), at("mac", "b-mac"));
-    assert_eq!(w.machine_waits(), vec![], "it can share the folder");
+    assert_eq!(
+        w.machine_waits(),
+        vec![],
+        "its checkout is added from that folder"
+    );
 }
 
 #[test]
@@ -996,6 +1017,12 @@ fn a_machine_no_folder_is_on_keeps_every_agent_waiting_until_one_is() {
         replies: Vec::new(),
     });
     assert_eq!(review, vec![]);
+    w.apply(&Event::PullBranch {
+        issue: issue.clone(),
+        repo: ProjectId::new("ankh"),
+        number: "1".into(),
+        branch: "ankh-1".into(),
+    });
     assert_eq!(place_of(&w, Role::Reviewer, "1"), None);
     let starts_for = |w: &World| -> Vec<Effect> {
         w.missing()
@@ -1232,6 +1259,7 @@ fn refining() -> World {
             secret_digest: None,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         },
     ] {
         w.apply(&event);

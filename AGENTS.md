@@ -41,9 +41,13 @@ workspace of its own that uses both crates, so the workspace tests do not build 
 - Nothing waits on a person. When a choice stops you, take the default you would defend,
   record it as a decision with your reason, and finish your step. Do not stop to ask for
   approval or wait for an answer.
-- A real run goes on a second `temet-workd` started from your branch, with its own
-  `--config`, `--log` and `TEMET_WORK_SOCKET`. Never touch the live `temet-workd` service
-  or `~/.config/temet-work/config.toml`.
+- A real run goes on a second `temet-workd` started from your branch. Its `--config`,
+  `--log`, `TEMET_WORK_SOCKET` and every folder it makes, its work folders too, go under
+  `target/real-run/` in the checkout or work folder you work in; remove that folder before
+  you start one. Git ignores `target/`, so a real run is no change that keeps a reader's
+  checkout, and it goes when the checkout is removed. The second daemon's own reader
+  checkouts, which it puts beside its work folders, end up inside it too. Never touch the
+  live `temet-workd` service or `~/.config/temet-work/config.toml`.
 - After a rebase, push your own branch with `git push --force-with-lease`.
 - A change to what temet-work stores or sends updates `docs/privacy.md` in the same
   commit.

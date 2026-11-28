@@ -147,20 +147,17 @@ picks the checkout, and the entry's own field still says where that checkout is
   Pinned issues of every group count, since a folder serves every group that works its
   project. An unpinned issue never waits because of this: with one folder free, the
   higher-ranked of the two takes it.
-- A refiner, reviewer or arbiter holds no checkout of its own and may share a held one on
-  its machine. If the project has none there, the agent waits. It is not moved to another
-  machine. An issue whose refiner cannot start stays new and takes no refining slot. An
-  author can also be given the folder such an agent already runs in, since that folder is
-  not recorded and does not count as held. So each of the three is told in its brief,
-  whether or not the folder is held, and a reviewer again on each later round, not to
-  switch the folder's branch or change any file in it. It reads a pull request's changes
-  from its code host. To run checks it makes a separate checkout of the pull request (with
-  none, of the commit it needs) outside the folder, and removes it afterwards. That way
-  each folder stays as its last author left it. A folder's files may then be on another
-  issue's branch or an older one, so a refiner is told to read the code its issue touches
-  at the current head of the repository's default branch, in each of an area's repositories
-  the change may touch: it fetches, which moves no branch and changes no file an author
-  works on, then reads with `git show` or in a separate checkout outside the folder.
+- A refiner, reviewer or arbiter holds no work folder and never runs in one, since an author
+  may be given that folder while it works. It runs in checkouts of its own on its machine: git
+  worktrees added from the repositories of the work folders there, made when it starts and
+  removed when it ends (`docs/architecture.md`, "Who coordinates"). A reviewer's and an
+  arbiter's are at the head of each open pull request's branch, and a refiner's at the head of
+  the default branch, in each repository its issue may touch. If none of the repositories it
+  reads has a work folder there, it runs in no folder and reads the code on its code host. It
+  is not moved to another machine. Each is told in its brief where its checkouts are and to
+  leave no change in them, since a checkout with changes is kept for a person; a reviewer is
+  told on each later round to switch its checkout, detached, to the pull request's new head.
+  That way each work folder stays as its last author left it.
 - An author that already holds a folder keeps it when the setting changes. The new value
   applies the next time a folder is picked.
 - A name no folder uses is accepted, because a folder may be listed later. An empty value

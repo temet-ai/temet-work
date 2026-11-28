@@ -4,7 +4,7 @@
 use crate::ids::{
     AgentId, DecisionId, FolderId, GroupId, IssueId, MachineId, MilestoneId, ProjectId, RuleId,
 };
-use crate::model::{AgentState, Decision, Plan, Role, Rule};
+use crate::model::{AgentCheckout, AgentState, Checkout, Decision, Plan, Role, Rule};
 use crate::sender::Digest;
 use crate::settings::{Scope, Value};
 
@@ -193,6 +193,29 @@ pub enum Event {
         /// older logs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// The repository and path of each of its own checkouts, the one it
+        /// starts in first; none for an author, and in older logs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        checkouts: Vec<AgentCheckout>,
+    },
+    /// A reader's own checkout was made, before the reader starts.
+    CheckoutAdded {
+        /// The checkout, with the agent it is for and where it is.
+        checkout: Checkout,
+    },
+    /// A checkout was removed, or found gone.
+    CheckoutRemoved {
+        /// Its name.
+        name: String,
+    },
+    /// A checkout had changes in it, so nothing in it was deleted: it stays
+    /// until a person removes it, and a check at a later start finds it gone or
+    /// clean.
+    CheckoutKept {
+        /// Its name.
+        name: String,
+        /// What was found in it, in a few words each.
+        changes: Vec<String>,
     },
     /// An agent's state changed.
     AgentChanged {

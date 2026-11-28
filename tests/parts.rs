@@ -40,7 +40,9 @@ const UI_WORDS: [&str; 7] = [
 ];
 
 /// Part ids that are everyday words elsewhere: only their crate name counts.
-const WORDS: [&str; 6] = ["store", "style", "tracker", "runner", "runtime", "deploy"];
+const WORDS: [&str; 7] = [
+    "store", "style", "tracker", "runner", "runtime", "deploy", "checkout",
+];
 
 struct Krate {
     name: String,

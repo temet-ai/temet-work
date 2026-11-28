@@ -80,6 +80,7 @@ fn started(id: &str, role: Role, issue: Option<IssueId>, folder: Option<&str>) -
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     }
 }
 

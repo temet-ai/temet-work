@@ -1503,6 +1503,7 @@ mod tests {
                     secret_digest: None,
                     runtime: None,
                     model: None,
+                    checkouts: Vec::new(),
                 },
             ],
         );

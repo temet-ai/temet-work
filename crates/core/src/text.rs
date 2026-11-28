@@ -1177,6 +1177,7 @@ Problems
                     secret_digest: None,
                     runtime: None,
                     model: None,
+                    checkouts: Vec::new(),
                 },
             ]
         };
@@ -1391,6 +1392,7 @@ mod review_rounds {
             secret_digest: None,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         };
         let events = [
             Event::ProjectAdded {
@@ -1546,7 +1548,7 @@ mod review_rounds {
         )
         .task;
         assert!(
-            brief.contains(&format!("{rounds}This folder is not yours")),
+            brief.contains(&format!("{rounds}You have no checkout of your own")),
             "{brief}"
         );
     }

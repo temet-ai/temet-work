@@ -86,6 +86,13 @@ const ERRORED: &str = "errored: ";
 /// How problems from an issue a failed verify sent back are keyed.
 const VERIFY_FAILED: &str = "verify failed: ";
 
+/// How problems from a checkout kept for its changes are keyed.
+const KEPT: &str = "kept checkout: ";
+
+/// How long the host waits after asking to remove a checkout before it asks
+/// again, while the removal keeps failing: a minute.
+pub const REMOVE_AGAIN_MS: u64 = 60_000;
+
 /// The most events and effects one call handles before it stops, so a loop
 /// between parts cannot hang the daemon.
 pub const MAX_STEPS: usize = 10_000;
@@ -101,6 +108,11 @@ pub struct Host {
     parts: Vec<Box<dyn Part>>,
     journal: Box<dyn Journal>,
     problems: BTreeMap<String, String>,
+    /// Whether the first round's sweep of checkouts has been asked for.
+    swept: bool,
+    /// When the removal of each checkout was last asked for, by name, so one
+    /// that keeps failing is asked for once a minute.
+    removals: BTreeMap<String, u64>,
 }
 
 /// What the parts' families offer for the settings that name an adapter, by
@@ -162,10 +174,44 @@ impl Host {
             parts,
             journal,
             problems: BTreeMap::new(),
+            swept: false,
+            removals: BTreeMap::new(),
         };
         host.put_addresses();
         host.report_verify_failed();
+        host.report_kept();
         host
+    }
+
+    /// Lists each checkout kept for its changes as a problem, with its agent
+    /// and path: nothing in it was deleted, and a person removes it. Rebuilt
+    /// from the world after each event, so it survives a restart, and goes once
+    /// a check at a later start finds the checkout gone or clean.
+    fn report_kept(&mut self) {
+        self.problems.retain(|k, _| !k.starts_with(KEPT));
+        for c in self.world.checkouts.values() {
+            let Some(changes) = &c.kept else {
+                continue;
+            };
+            let on = if c.machine.0 == crate::world::LOCAL {
+                String::new()
+            } else {
+                format!(" on {}", c.machine)
+            };
+            let found = if changes.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", changes.join("; "))
+            };
+            self.problems.insert(
+                format!("{KEPT}{}", c.name),
+                format!(
+                    "kept {}{on} ({}'s checkout of {}): it has changes in it{found}, so nothing in \
+                     it was deleted; a person removes it",
+                    c.path, c.agent, c.project
+                ),
+            );
+        }
     }
 
     /// Lists every issue a failed verify sent back and that is not done yet as
@@ -291,6 +337,13 @@ impl Host {
     /// Starts an investigation for each group short of work, then the agents
     /// issues and investigations need and do not have (`World::missing`).
     pub fn recover(&mut self, now_ms: u64) -> Result<(), String> {
+        // The first round removes what a crash or a restart left behind, and
+        // checks each kept checkout again, before any agent starts.
+        if !self.swept {
+            self.swept = true;
+            let sweep = self.world.sweep();
+            self.run(now_ms, sweep.into_iter().rev().map(Work::Effect).collect())?;
+        }
         self.investigations(now_ms, true)?;
         let missing = self.world.missing();
         self.problems.retain(|k, _| !k.starts_with(GAVE_UP));
@@ -321,7 +374,14 @@ impl Host {
                     let effects = self.world.apply_at(now_ms, &e);
                     stack.extend(effects.into_iter().rev().map(Work::Effect));
                 }
-                Work::Effect(effect) => match self.offer(&effect) {
+                // A removal that failed less than a minute ago is not tried
+                // again yet: its problem stays listed.
+                Work::Effect(Effect::RemoveCheckout { checkout })
+                    if self
+                        .removals
+                        .get(&checkout.name)
+                        .is_some_and(|at| now_ms < at.saturating_add(REMOVE_AGAIN_MS)) => {}
+                Work::Effect(effect) => match self.offer_noting(now_ms, &effect) {
                     Outcome::Done { events, effects } => {
                         self.problems.remove(&effect.describe());
                         stack.extend(effects.into_iter().rev().map(Work::Effect));
@@ -339,8 +399,19 @@ impl Host {
             }
         }
         self.report_verify_failed();
+        self.report_kept();
         self.drop_stops_of_ended();
+        let live = &self.world.checkouts;
+        self.removals.retain(|name, _| live.contains_key(name));
         Ok(())
+    }
+
+    /// Offers `effect`, noting when a checkout's removal was asked for.
+    fn offer_noting(&mut self, now_ms: u64, effect: &Effect) -> Outcome {
+        if let Effect::RemoveCheckout { checkout } = effect {
+            self.removals.insert(checkout.name.clone(), now_ms);
+        }
+        self.offer(effect)
     }
 
     /// Drops the problem of each failed stop whose agent has ended, whatever
@@ -390,15 +461,17 @@ impl Host {
     fn report_blocked(&mut self) {
         self.problems.retain(|k, _| !of_a_stopped_agent(k));
         for agent in self.world.agents.values() {
+            // An author runs in its work folder, a reader in its own first
+            // checkout; an agent from an older log may name neither.
             let place = || {
-                agent
-                    .issue
+                let folder = agent
+                    .folder
                     .as_ref()
-                    .and_then(|i| self.world.issues.get(i))
-                    .and_then(|i| self.world.folder_for(i, agent.role, agent.folder.as_ref()))
-                    // A reader's folder is not recorded: name none on another machine.
-                    .filter(|f| f.machine == agent.machine)
-                    .map_or_else(String::new, |f| format!(" in {}", f.path))
+                    .and_then(|f| self.world.folders.get(f))
+                    .map(|f| f.path.as_str());
+                folder
+                    .or_else(|| agent.checkouts.first().map(|c| c.path.as_str()))
+                    .map_or_else(String::new, |p| format!(" in {p}"))
             };
             if let Some((key, line)) = stopped(agent, place) {
                 self.problems.insert(key, line);

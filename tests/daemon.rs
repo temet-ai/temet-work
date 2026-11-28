@@ -6,7 +6,8 @@
     feature = "runner",
     feature = "runtime",
     feature = "codehost",
-    feature = "deploy"
+    feature = "deploy",
+    feature = "checkout"
 ))]
 
 use temet_work::config::Config;
@@ -113,6 +114,15 @@ fn secret(starts: &Starts, agent: &str) -> String {
         .unwrap_or_else(|| panic!("{agent} was not started"))
 }
 
+/// After a ready, the code host's next read, which reports each pull request's
+/// branch: the reviewer starts then, with its checkout at that branch. It runs
+/// before the author hears back, so the client may name the reviewer next.
+fn read_branches_after_ready(host: &mut Host, request: &Request) {
+    if matches!(request.command, Command::Ready { .. }) {
+        host.tick(1).expect("the pull requests' branches are read");
+    }
+}
+
 /// A request from the agent `by`, carrying the secret it was started with, or
 /// from a person.
 fn from(starts: &Starts, by: Option<&str>, command: Command) -> Request {
@@ -204,7 +214,8 @@ fn host_tracking(
                 checks: Checks::Passed,
                 conflicting: false,
                 draft: false,
-                branch: String::new(),
+                // A reviewer's checkout is made at its pull request's branch.
+                branch: "ankh-57".into(),
             },
         )],
         ..FakeCodeHost::default()
@@ -220,6 +231,7 @@ fn host_tracking(
             Box::new(runtimes),
             Box::new(code_hosts),
             Box::new(deploys),
+            Box::new(temet_work_checkout::FakeCheckouts),
         ],
         journal,
     );
@@ -398,6 +410,9 @@ fn a_reviewer_set_to_codex_starts_the_codex_program() {
             replies: Vec::new(),
         },
     );
+    // The reviewer starts once the code host has reported its pull request's
+    // branch, which its checkout is made at.
+    host.tick(0).expect("the pull request's branch is read");
     assert!(host.problems().is_empty(), "{:?}", host.problems());
     let screen = |host: &mut Host, agent: &str| {
         run(
@@ -750,6 +765,9 @@ fn an_issue_goes_from_plan_through_two_review_rounds_with_one_reviewer() {
         run(&mut host, "author-1", ready.clone()),
         "ankh#1 is in review, round 1"
     );
+    // The reviewer starts once the code host has reported its pull request's
+    // branch, which its checkout is made at.
+    host.tick(0).expect("the pull request's branch is read");
     assert!(
         host.world()
             .agents
@@ -1423,6 +1441,7 @@ fn an_agent_commands_arrive_over_ssh_as_its_own() {
         assert!(pending.request.relayed, "marked by the relay");
         assert!(matches!(pending.peer, Peer::Read(_)), "{:?}", pending.peer);
         let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
+        read_branches_after_ready(&mut host, &pending.request);
         pending.answer(reply);
     }
     assert_eq!(
@@ -1890,7 +1909,7 @@ areas = ["guild"]
             checks,
             conflicting: false,
             draft: false,
-            branch: String::new(),
+            branch: format!("gld-1-{number}"),
         }
     }
 
@@ -1943,6 +1962,7 @@ areas = ["guild"]
                 Box::new(fake_runtimes()),
                 Box::new(code_hosts),
                 Box::new(deploy),
+                Box::new(temet_work_checkout::FakeCheckouts),
             ],
             Box::new(kept.clone()),
         );
@@ -2006,6 +2026,9 @@ areas = ["guild"]
             replies: Vec::new(),
         };
         done(run(f, "author-1", ready));
+        // The reviewer starts once the code host has reported each pull
+        // request's branch, which its checkouts are made at.
+        f.host.tick(0).expect("the pull requests' branches are read");
         issue
     }
 
@@ -2353,7 +2376,7 @@ projects = ["ankh"]
                 checks: Checks::Passed,
                 conflicting: false,
                 draft: false,
-                branch: String::new(),
+                branch: format!("ankh-{number}"),
             },
         )
     };
@@ -2390,6 +2413,7 @@ projects = ["ankh"]
             Box::new(fake_runtimes()),
             Box::new(code_hosts),
             Box::new(deploys),
+            Box::new(temet_work_checkout::FakeCheckouts),
         ],
         Box::new(Memory::default()),
     );
@@ -2442,6 +2466,10 @@ projects = ["ankh"]
         };
         run(&mut host, issue, Role::Author, ready);
     }
+    // The reviewers start once the code host has reported their pull requests'
+    // branches, which their checkouts are made at. The same read reports CI
+    // passed, so each merges once it is approved.
+    host.tick(0).expect("the pull requests' branches and CI are read");
     for issue in &issues {
         let approve = Command::Review {
             issue: issue.clone(),
@@ -2451,7 +2479,6 @@ projects = ["ankh"]
         };
         run(&mut host, issue, Role::Reviewer, approve);
     }
-    host.tick(1).expect("CI read, both merge");
     assert_eq!(
         *merged.lock().expect("lock"),
         ["city/ankh", "city/ankh"],
@@ -2531,6 +2558,7 @@ mod senders {
         while !client.is_finished() {
             if let Ok(p) = requests.recv_timeout(std::time::Duration::from_millis(2)) {
                 let reply = answer(host, 1, &p.request, &p.peer).expect("answer");
+                read_branches_after_ready(host, &p.request);
                 seen.push(p.peer.clone());
                 p.answer(reply);
             }
@@ -3010,6 +3038,7 @@ refining_at_once = 2
                 secret_digest: Some(temet_work::peer::digest(secret)),
                 runtime: None,
                 model: None,
+                checkouts: Vec::new(),
             });
         }
         // Decision 1 is the one to overturn; decision 2's rule is proposed too.

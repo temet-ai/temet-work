@@ -75,4 +75,9 @@ pub struct Launch {
     pub folder: Option<crate::ids::FolderId>,
     /// What it is told.
     pub brief: Brief,
+    /// Its own checkouts, for a reader: one in each repository it reads that
+    /// has a work folder on its machine, the one it starts in first. Its
+    /// program runs only once each is made ([`crate::World::checkout_to_make`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkouts: Vec<crate::model::Checkout>,
 }

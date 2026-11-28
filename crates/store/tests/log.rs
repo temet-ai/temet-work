@@ -266,6 +266,10 @@ fn an_agent_started_before_secrets_reads_with_no_digest_runtime_or_model_and_eac
         (&author.secret_digest, &author.runtime, &author.model),
         (&None, &None, &None)
     );
+    assert!(
+        author.checkouts.is_empty(),
+        "an older line has no checkouts"
+    );
     let digest = Digest("ab".repeat(32));
     let event = Event::AgentStarted {
         agent: AgentId::new("reviewer-1"),
@@ -277,6 +281,10 @@ fn an_agent_started_before_secrets_reads_with_no_digest_runtime_or_model_and_eac
         secret_digest: Some(digest.clone()),
         runtime: Some("hex".into()),
         model: Some("anthill".into()),
+        checkouts: vec![temet_work_core::model::AgentCheckout {
+            project: temet_work_core::ids::ProjectId::new("ankh"),
+            path: "/srv/temet-work-checkouts/l1/ankh-1".into(),
+        }],
     };
     log.append(1, &event).expect("append");
     drop(log);
@@ -288,6 +296,7 @@ fn an_agent_started_before_secrets_reads_with_no_digest_runtime_or_model_and_eac
         (reviewer.runtime.as_deref(), reviewer.model.as_deref()),
         (Some("hex"), Some("anthill"))
     );
+    assert_eq!(reviewer.checkouts.len(), 1);
 }
 
 #[test]
@@ -307,6 +316,7 @@ fn replaying_the_log_keeps_whether_an_ended_agent_had_lost_its_program() {
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     });
     let working = applied(0, &events);
     assert_eq!(
@@ -367,6 +377,7 @@ fn replaying_the_log_keeps_an_agents_limit_and_the_reset_it_was_continued_after(
             secret_digest: None,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         },
         limited.clone(),
     ]);
@@ -556,6 +567,7 @@ fn replaying_the_log_gives_the_same_check_states_replies_and_point_states_as_app
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     };
     let mut setup = events();
     // The issue is being refined; its plan comes from the refiner's command.

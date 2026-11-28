@@ -70,6 +70,8 @@ pub fn parts_with(daemon_host: Option<String>, handoff: Option<PathBuf>) -> Vec<
         }
         parts.push(Box::new(deploys));
     }
+    #[cfg(feature = "checkout")]
+    parts.push(Box::new(temet_work_checkout::Checkouts::default()));
     #[cfg(feature = "store")]
     parts.push(Box::new(temet_work_store::Store));
     #[cfg(feature = "style")]

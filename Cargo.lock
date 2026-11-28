@@ -430,6 +430,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha2",
+ "temet-work-checkout",
  "temet-work-codehost",
  "temet-work-codehost-github",
  "temet-work-codehost-gitlab",
@@ -447,6 +448,13 @@ dependencies = [
  "temet-work-tracker-github",
  "temet-work-tracker-jira",
  "toml",
+]
+
+[[package]]
+name = "temet-work-checkout"
+version = "0.0.1"
+dependencies = [
+ "temet-work-core",
 ]
 
 [[package]]

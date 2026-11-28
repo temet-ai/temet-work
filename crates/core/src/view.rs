@@ -511,14 +511,34 @@ fn shown(world: &World, problems: &BTreeMap<String, String>) -> BTreeMap<String,
         .collect()
 }
 
-/// `line` with each work folder's path in it written as `folder ID`. A path that
-/// is a bare name, such as `work`, is a word like any other, so it is replaced
-/// only where a part says it cannot trust it.
+/// `line` with each work folder's path in it written as `folder ID`, and each
+/// reader's checkout's as `checkout AGENT`. A folder's path that is a bare name,
+/// such as `work`, is a word like any other, so it is replaced only where a part
+/// says it cannot trust it.
 fn without_paths(world: &World, line: &str) -> String {
+    let mut line = line.to_string();
+    let mut checkouts: Vec<(&str, &AgentId)> = world
+        .checkouts
+        .values()
+        .map(|c| (c.path.as_str(), &c.agent))
+        .chain(
+            world
+                .agents
+                .values()
+                .flat_map(|a| a.checkouts.iter().map(move |c| (c.path.as_str(), &a.id))),
+        )
+        .collect();
+    // Longest first, so a path inside another is replaced whole.
+    checkouts.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
+    for (path, agent) in checkouts {
+        let path = path.trim_end_matches('/');
+        if path.contains('/') {
+            line = line.replace(path, &format!("checkout {agent}"));
+        }
+    }
     let mut folders: Vec<&model::Folder> = world.folders.values().collect();
     // Longest first, so a folder inside another is replaced whole.
     folders.sort_by_key(|f| std::cmp::Reverse(f.path.len()));
-    let mut line = line.to_string();
     for f in folders {
         let named = format!("folder {}", f.id);
         let path = f.path.trim_end_matches('/');
@@ -890,6 +910,7 @@ mod tests {
                 secret_digest: Some(digest(n)),
                 runtime: runtime.map(String::from),
                 model: model.map(String::from),
+                checkouts: Vec::new(),
             });
             events.push(Event::AgentChanged {
                 agent: AgentId::new(agent),
@@ -1067,10 +1088,14 @@ mod tests {
     #[test]
     fn the_json_holds_no_digest_reset_time_path_fix_or_setting() {
         let host = ticked();
-        for key in ["blocked: reviewer-3", "errored: author-4"] {
-            let line = &host.problems()[key];
-            assert!(line.contains(FOLDER_PATH), "the host names it: {line}");
-        }
+        let line = &host.problems()["errored: author-4"];
+        assert!(line.contains(FOLDER_PATH), "the host names it: {line}");
+        // A reader runs in no work folder: with no checkout on record, its line
+        // names none.
+        assert_eq!(
+            host.problems()["blocked: reviewer-3"],
+            "reviewer-3 is blocked: permission; the daemon cannot answer it"
+        );
         let w = host.world();
         let view = View::new(w, host.problems());
         let json = serde_json::to_string(&view).expect("json");
@@ -1281,6 +1306,7 @@ mod tests {
                 secret_digest: None,
                 runtime: Some(RUNTIME.into()),
                 model: None,
+                checkouts: Vec::new(),
             },
             // A state change that moves no stage changes no issue.
             Event::AgentChanged {
@@ -1525,6 +1551,7 @@ mod tests {
             secret_digest: None,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         };
         let events = [
             added("watch", "fake", "ankh-morpork/watch"),
@@ -1755,6 +1782,54 @@ mod tests {
             author.map(|a| a.state_text.as_str()),
             Some("working: reading folder yard-1/clock.rs and folder inner/face.rs")
         );
+    }
+
+    #[test]
+    fn a_checkouts_path_in_a_problem_line_is_written_as_checkout_and_its_agent() {
+        let mut w = world();
+        let path = "/srv/pseudopolis-yard/temet-work-checkouts/l1/watch-1";
+        w.apply(&Event::CheckoutAdded {
+            checkout: model::Checkout {
+                name: "watch-1".into(),
+                agent: AgentId::new("reviewer-3"),
+                project: ProjectId::new("watch"),
+                machine: MachineId::new("pseudopolis"),
+                path: path.into(),
+                from: FOLDER_PATH.into(),
+                branch: Some("night".into()),
+                kept: None,
+            },
+        });
+        w.apply(&Event::CheckoutKept {
+            name: "watch-1".into(),
+            changes: vec!["1 file changed or not ignored".into()],
+        });
+        let host = Host::new(w, Vec::new(), Box::new(Memory::default()));
+        let mut problems = host.problems().clone();
+        assert!(
+            problems["kept checkout: watch-1"].contains(path),
+            "{problems:?}"
+        );
+        problems.insert(
+            "remove checkout watch-1 of reviewer-3".into(),
+            format!("cannot remove {path}: denied"),
+        );
+        let view = View::new(host.world(), &problems);
+        assert_eq!(
+            view.problems["kept checkout: watch-1"],
+            "kept checkout reviewer-3 on pseudopolis (reviewer-3's checkout of watch): it has \
+             changes in it (1 file changed or not ignored), so nothing in it was deleted; a person \
+             removes it"
+        );
+        assert_eq!(
+            view.problems["remove checkout watch-1 of reviewer-3"],
+            "cannot remove checkout reviewer-3: denied"
+        );
+        let json = serde_json::to_string(&view).expect("json");
+        assert!(!json.contains("temet-work-checkouts"), "{json}");
+        // The text form of status keeps the path.
+        let text = crate::text::text(host.world(), &problems);
+        assert!(text.contains(path), "{text}");
     }
 
     #[test]

@@ -87,6 +87,7 @@ fn tick(w: &mut World, now_ms: u64) -> Vec<Launch> {
                     secret_digest: None,
                     runtime: None,
                     model: None,
+                    checkouts: Vec::new(),
                 });
                 started.push(launch);
             }
@@ -283,6 +284,7 @@ fn out_of_scope_by_project_or_area_leaves_the_queue() {
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     });
     assert_eq!(queued(&w), 3);
 
@@ -1039,8 +1041,10 @@ fn the_investigator_holds_no_folder() {
     assert_eq!(launch.folder, None);
     assert_eq!(
         launch.brief.folder,
-        Some(std::path::PathBuf::from("/srv/ankh/f1")),
-        "it runs in a free folder of the group's first project"
+        Some(std::path::PathBuf::from(
+            "/srv/ankh/temet-work-checkouts/no-log/ankh-1"
+        )),
+        "it runs in its own checkout of the group's first project"
     );
     assert_eq!(launch.machine, MachineId::new("morpork"));
     assert_eq!(w.folders[&FolderId::new("f1")].holder, None);
@@ -1341,6 +1345,7 @@ fn investigating() -> World {
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     });
     w
 }

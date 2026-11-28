@@ -2075,6 +2075,7 @@ mod unknown_adapter {
             secret_digest: None,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         });
         let plan = |key: &str| Command::Plan {
             issue: IssueId::new("radar", "44"),

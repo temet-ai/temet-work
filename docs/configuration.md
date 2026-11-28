@@ -212,16 +212,19 @@ group's lists.
 When the queue holds fewer than `queue_low` issues, the daemon starts one investigator for
 the group. Left out, `queue_low` is twice the work folders of the group's projects and of
 the projects in its areas, or 2 when they have none; 0 starts no investigator. The
-investigator holds no work folder and changes no file: it runs in a free folder of the
-group's first project, or in one an author holds when none is free. It reads each project's
+investigator holds no work folder and runs in none: it runs in checkouts of its own, one in
+each of the group's repositories that has a work folder on its machine, made at the head of the
+default branch when it starts and removed when it ends (`docs/architecture.md`, "Who
+coordinates"). It starts in the first, and reads a repository with no checkout on its code
+host. It reads each project's
 docs for planned work that is not built, the open issues, and the pull requests merged since
 the group's last finished investigation started: one is finished when its investigator ran
 `temet-work investigated`. While none has finished, it reads those merged in the 7 days
 before the group's first investigation started. It files an issue for each planned item no
 open issue covers and for each defect it can show (`temet-work file`, `docs/commands.md`).
-It reads docs and code at the current head of each repository's default branch, not as a
-checkout's files stand: it fetches, then reads with `git show` or in a separate checkout
-outside the checkouts its brief names and the folder it runs in. Each issue it files goes in
+It reads docs and code at the head of each repository's default branch, which its checkouts
+are made at, and leaves no change in them, since a checkout with changes is kept for a person.
+Each issue it files goes in
 the last milestone of the group's list unless it names another the group takes, and is in
 the loop as soon as it is filed. A project's `investigate` setting adds lines to the
 investigator's brief (`docs/settings.md`). Closing an issue is how a person says no to it:

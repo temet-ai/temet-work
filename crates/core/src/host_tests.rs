@@ -43,6 +43,13 @@ impl Part for Brains {
         let Some(launch) = launch else {
             return Outcome::Failed("unknown issue".into());
         };
+        // A reader's program runs only once its checkouts are made.
+        if let Some(add) = world.checkout_to_make(&launch, effect) {
+            return Outcome::Done {
+                events: vec![],
+                effects: vec![add],
+            };
+        }
         let program = Program {
             argv: vec!["agent".into(), launch.brief.task.clone()],
             env: vec![],
@@ -91,10 +98,84 @@ impl Part for Terms {
                 secret_digest: None,
                 runtime: None,
                 model: None,
+                checkouts: launch
+                    .checkouts
+                    .iter()
+                    .map(|c| crate::model::AgentCheckout {
+                        project: c.project.clone(),
+                        path: c.path.clone(),
+                    })
+                    .collect(),
             }],
             effects: vec![],
         }
     }
+}
+
+/// Makes and removes checkouts, as the checkout part does: it fails with the
+/// reason in `fail` while there is one, keeps a checkout while `keep` is set,
+/// and notes each effect it was asked to carry out.
+#[derive(Clone, Default)]
+struct Hands {
+    fail: Arc<Mutex<Option<String>>>,
+    keep: Arc<Mutex<bool>>,
+    asked: Arc<Mutex<Vec<String>>>,
+}
+
+impl Hands {
+    fn failing(&self, why: Option<&str>) {
+        *self.fail.lock().expect("hands") = why.map(String::from);
+    }
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().expect("hands").clone()
+    }
+}
+
+impl Part for Hands {
+    fn id(&self) -> &'static str {
+        "hands"
+    }
+    fn carry_out(&mut self, effect: &Effect, _world: &World) -> Outcome {
+        let (event, then) = match effect {
+            Effect::AddCheckout { checkout, then } => (
+                Event::CheckoutAdded {
+                    checkout: checkout.clone(),
+                },
+                vec![(**then).clone()],
+            ),
+            Effect::RemoveCheckout { checkout } if *self.keep.lock().expect("hands") => (
+                Event::CheckoutKept {
+                    name: checkout.name.clone(),
+                    changes: vec!["1 commit no remote-tracking branch holds".into()],
+                },
+                vec![],
+            ),
+            Effect::RemoveCheckout { checkout } => (
+                Event::CheckoutRemoved {
+                    name: checkout.name.clone(),
+                },
+                vec![],
+            ),
+            _ => return Outcome::NotMine,
+        };
+        self.asked.lock().expect("hands").push(effect.describe());
+        if let Some(why) = self.fail.lock().expect("hands").clone() {
+            return Outcome::Failed(why);
+        }
+        Outcome::Done {
+            events: vec![event],
+            effects: then,
+        }
+    }
+}
+
+/// The parts that start an agent: a runtime, a checkout part and a runner.
+fn starting(hands: &Hands) -> Vec<Box<dyn Part>> {
+    vec![
+        Box::new(Brains),
+        Box::new(hands.clone()),
+        Box::new(Terms::default()),
+    ]
 }
 
 fn setup(refining_at_once: usize) -> Vec<Event> {
@@ -226,10 +307,7 @@ fn each_round_the_parts_addresses_are_put_in_the_world_and_the_first_part_wins()
 #[test]
 fn a_synced_issue_starts_a_refiner_through_the_parts_and_logs_it() {
     let journal = Shared::default();
-    let mut h = host(
-        vec![Box::new(Brains), Box::new(Terms::default())],
-        journal.clone(),
-    );
+    let mut h = host(starting(&Hands::default()), journal.clone());
     h.handle(1, synced("1")).expect("handle");
     let agent = h
         .world()
@@ -240,17 +318,15 @@ fn a_synced_issue_starts_a_refiner_through_the_parts_and_logs_it() {
     assert_eq!(agent.machine, MachineId::new("morpork"));
     assert!(h.problems().is_empty(), "{:?}", h.problems());
     let logged = journal.0.lock().expect("journal").clone();
-    assert_eq!(logged.len(), 5);
-    assert!(matches!(logged[4], Event::AgentStarted { .. }));
+    assert_eq!(logged.len(), 6);
+    assert!(matches!(logged[4], Event::CheckoutAdded { .. }));
+    assert!(matches!(logged[5], Event::AgentStarted { .. }));
 }
 
 #[test]
 fn a_tick_starts_one_investigator_for_a_group_short_of_work_and_logs_its_start_and_end() {
     let journal = Shared::default();
-    let mut h = host(
-        vec![Box::new(Brains), Box::new(Terms::default())],
-        journal.clone(),
-    );
+    let mut h = host(starting(&Hands::default()), journal.clone());
     h.tick(1_000).expect("tick");
     h.tick(2_000).expect("tick");
     let me = AgentId::new("investigator-1");
@@ -264,6 +340,9 @@ fn a_tick_starts_one_investigator_for_a_group_short_of_work_and_logs_its_start_a
                 agent: me.clone(),
                 at_ms: 1_000,
             },
+            Event::CheckoutAdded {
+                checkout: ankh_1(&me),
+            },
             Event::AgentStarted {
                 agent: me.clone(),
                 group: GroupId::new("watch"),
@@ -274,6 +353,10 @@ fn a_tick_starts_one_investigator_for_a_group_short_of_work_and_logs_its_start_a
                 secret_digest: None,
                 runtime: None,
                 model: None,
+                checkouts: vec![crate::model::AgentCheckout {
+                    project: ProjectId::new("ankh"),
+                    path: ANKH_1.into(),
+                }],
             },
         ],
         "one start, the second tick none"
@@ -300,10 +383,7 @@ fn a_tick_starts_one_investigator_for_a_group_short_of_work_and_logs_its_start_a
 
 #[test]
 fn agents_are_numbered_by_role_in_the_order_they_start() {
-    let mut h = host(
-        vec![Box::new(Brains), Box::new(Terms::default())],
-        Shared::default(),
-    );
+    let mut h = host(starting(&Hands::default()), Shared::default());
     h.handle(1, synced("1")).expect("one");
     h.handle(2, synced("2")).expect("two");
     let ids: Vec<&str> = h.world().agents.keys().map(|a| a.0.as_str()).collect();
@@ -408,8 +488,25 @@ fn a_part_that_keeps_asking_for_more_is_stopped() {
     );
 }
 
+/// Where the first checkout of ankh goes, beside its work folder f1.
+const ANKH_1: &str = "/srv/ankh/temet-work-checkouts/no-log/ankh-1";
+
+/// The first checkout of ankh, at the head of its default branch, for `agent`.
+fn ankh_1(agent: &AgentId) -> crate::model::Checkout {
+    crate::model::Checkout {
+        name: "ankh-1".into(),
+        agent: agent.clone(),
+        project: ProjectId::new("ankh"),
+        machine: MachineId::new("morpork"),
+        path: ANKH_1.into(),
+        from: "/srv/ankh/f1".into(),
+        branch: None,
+        kept: None,
+    }
+}
+
 #[test]
-fn an_author_runs_in_its_folder_and_a_refiner_in_any_folder_of_the_project() {
+fn an_author_runs_in_its_folder_and_a_refiner_in_a_checkout_of_its_own() {
     let mut w = World::default();
     for e in setup(1) {
         w.apply(&e);
@@ -438,21 +535,189 @@ fn an_author_runs_in_its_folder_and_a_refiner_in_any_folder_of_the_project() {
         author.brief.folder.as_deref(),
         Some(std::path::Path::new("/srv/ankh/f1"))
     );
+    assert_eq!(author.checkouts, vec![], "an author has no checkout");
     assert!(author.brief.task.contains("the clock strikes thirteen"));
     assert!(author.brief.task.contains("temet-work ready ankh#1"));
     let refiner = w
         .launch(&group, Role::Refiner, &issue, None)
         .expect("refiner");
     assert_eq!(refiner.folder, None, "a refiner holds no folder");
+    assert_eq!(refiner.checkouts, vec![ankh_1(&AgentId::new("refiner-1"))]);
     assert_eq!(
         refiner.brief.folder.as_deref(),
-        Some(std::path::Path::new("/srv/ankh/f1"))
+        Some(std::path::Path::new(ANKH_1))
     );
     assert!(refiner.brief.task.contains("issue 1 of city/ankh"));
     assert!(
         w.launch(&group, Role::Refiner, &IssueId::new("ankh", "9"), None)
             .is_none()
     );
+}
+
+#[test]
+fn a_readers_program_runs_only_after_its_checkout_is_made() {
+    let hands = Hands::default();
+    hands.failing(Some("no space left on device"));
+    let journal = Shared::default();
+    let mut h = host(starting(&hands), journal.clone());
+    h.handle(1, synced("1")).expect("handle");
+    // The checkout could not be made: no program ran, and the problem says why.
+    assert!(h.world().agents.is_empty(), "{:?}", h.world().agents);
+    assert!(h.world().checkouts.is_empty());
+    assert_eq!(
+        h.problems().get("make refiner-1's checkout of ankh"),
+        Some(&"no space left on device".to_string())
+    );
+    let logged = journal.0.lock().expect("journal").clone();
+    assert!(
+        !logged
+            .iter()
+            .any(|e| matches!(e, Event::AgentStarted { .. }))
+    );
+    // A later round tries again, and once the checkout is made the agent starts
+    // in it.
+    hands.failing(None);
+    h.tick(2).expect("tick");
+    let refiner = &h.world().agents[&AgentId::new("refiner-1")];
+    let made: Vec<crate::model::AgentCheckout> = h
+        .world()
+        .checkouts
+        .values()
+        .filter(|c| c.agent == refiner.id)
+        .map(|c| crate::model::AgentCheckout {
+            project: c.project.clone(),
+            path: c.path.clone(),
+        })
+        .collect();
+    assert_eq!(made.len(), 1);
+    assert_eq!(refiner.checkouts, made);
+    assert_eq!(h.problems().get("make refiner-1's checkout of ankh"), None);
+    let logged = journal.0.lock().expect("journal").clone();
+    let added = logged
+        .iter()
+        .position(|e| matches!(e, Event::CheckoutAdded { .. }));
+    let started = logged
+        .iter()
+        .position(|e| matches!(e, Event::AgentStarted { .. }));
+    assert!(added.is_some() && added < started, "{logged:?}");
+}
+
+#[test]
+fn a_readers_end_removes_its_checkout_and_a_failed_removal_is_tried_once_a_minute() {
+    let hands = Hands::default();
+    let mut h = host(starting(&hands), Shared::default());
+    h.handle(1, synced("1")).expect("handle");
+    let refiner = AgentId::new("refiner-1");
+    hands.failing(Some("the folder is busy"));
+    let end = Event::AgentChanged {
+        agent: refiner.clone(),
+        state: AgentState::Ended,
+        lost: false,
+    };
+    h.handle(10_000, end).expect("end");
+    let remove = "remove checkout ankh-1 of refiner-1".to_string();
+    let tries = |hands: &Hands| hands.asked().iter().filter(|a| **a == remove).count();
+    assert_eq!(tries(&hands), 1, "its end asks for the removal");
+    assert_eq!(
+        h.problems().get(&remove),
+        Some(&"the folder is busy".to_string())
+    );
+    // Not again within the minute; the problem stays.
+    h.tick(40_000).expect("tick");
+    assert_eq!(tries(&hands), 1);
+    assert!(h.problems().contains_key(&remove));
+    h.tick(70_000).expect("tick");
+    assert_eq!(tries(&hands), 2, "a minute after the last try");
+    hands.failing(None);
+    h.tick(100_000).expect("tick");
+    assert_eq!(tries(&hands), 2);
+    h.tick(130_000).expect("tick");
+    assert_eq!(tries(&hands), 3);
+    assert!(!h.world().checkouts.values().any(|c| c.agent == refiner));
+    assert!(!h.problems().contains_key(&remove), "{:?}", h.problems());
+    h.tick(200_000).expect("tick");
+    assert_eq!(
+        tries(&hands),
+        3,
+        "a removed checkout is not asked for again"
+    );
+}
+
+#[test]
+fn a_kept_checkout_is_a_problem_after_a_replay_until_a_check_at_start_removes_it() {
+    let refiner = AgentId::new("refiner-1");
+    let mut events = setup(1);
+    events.extend([
+        synced("1"),
+        Event::CheckoutAdded {
+            checkout: ankh_1(&refiner),
+        },
+        Event::AgentStarted {
+            agent: refiner.clone(),
+            group: GroupId::new("watch"),
+            role: Role::Refiner,
+            issue: Some(IssueId::new("ankh", "1")),
+            machine: MachineId::new("morpork"),
+            folder: None,
+            secret_digest: None,
+            runtime: None,
+            model: None,
+            checkouts: vec![crate::model::AgentCheckout {
+                project: ProjectId::new("ankh"),
+                path: ANKH_1.into(),
+            }],
+        },
+        Event::AgentChanged {
+            agent: refiner.clone(),
+            state: AgentState::Ended,
+            lost: false,
+        },
+        Event::CheckoutKept {
+            name: "ankh-1".into(),
+            changes: vec!["1 commit no remote-tracking branch holds".into()],
+        },
+    ]);
+    let (world, _) = World::replay(&events);
+    let hands = Hands::default();
+    *hands.keep.lock().expect("hands") = true;
+    let mut h = Host::new(world, starting(&hands), Box::new(Memory::default()));
+    let line = "kept /srv/ankh/temet-work-checkouts/no-log/ankh-1 on morpork (refiner-1's checkout \
+                of ankh): it has changes in it (1 commit no remote-tracking branch holds), so \
+                nothing in it was deleted; a person removes it";
+    assert_eq!(
+        h.problems()
+            .get("kept checkout: ankh-1")
+            .map(String::as_str),
+        Some(line)
+    );
+    // The first round checks it again; still changed, it is still kept.
+    let removals = |hands: &Hands| -> Vec<String> {
+        hands
+            .asked()
+            .into_iter()
+            .filter(|a| a.starts_with("remove "))
+            .collect()
+    };
+    h.tick(1_000).expect("tick");
+    let remove = "remove checkout ankh-1 of refiner-1".to_string();
+    assert_eq!(removals(&hands), std::slice::from_ref(&remove));
+    assert!(h.problems().contains_key("kept checkout: ankh-1"));
+    // Only at a start: later rounds leave it to a person.
+    h.tick(100_000).expect("tick");
+    assert_eq!(removals(&hands), std::slice::from_ref(&remove));
+    // At the next start the check finds it clean, and removes it.
+    let mut h = Host::new(
+        h.world().clone(),
+        starting(&hands),
+        Box::new(Memory::default()),
+    );
+    *hands.keep.lock().expect("hands") = false;
+    h.tick(200_000).expect("tick");
+    assert!(
+        !h.world().checkouts.contains_key("ankh-1")
+            || h.world().checkouts["ankh-1"].agent != refiner
+    );
+    assert!(!h.problems().contains_key("kept checkout: ankh-1"));
 }
 
 #[test]
@@ -882,6 +1147,7 @@ fn stop_problem_goes_when_the_agent_ends() {
     let mut h = host(
         vec![
             Box::new(Brains),
+            Box::new(Hands::default()),
             Box::new(Terms::default()),
             Box::new(unstoppable),
         ],

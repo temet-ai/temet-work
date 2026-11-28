@@ -3,7 +3,7 @@
 
 use crate::ids::{FolderId, GroupId, IssueId};
 use crate::launch::{Launch, Program};
-use crate::model::Role;
+use crate::model::{Checkout, Role};
 
 /// One thing for the daemon to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +91,21 @@ pub enum Effect {
         /// The agent.
         agent: crate::ids::AgentId,
     },
+    /// Make a reader's own checkout, then offer `then`, the start that asked
+    /// for it, again. The part that makes it reports it added; a start that
+    /// fails after it is made gets the same checkout on its next try.
+    AddCheckout {
+        /// The checkout.
+        checkout: Checkout,
+        /// The start to offer once it is made. Boxed, so the effect stays small.
+        then: Box<Effect>,
+    },
+    /// Remove a checkout whose agent has ended or never started, unless it has
+    /// changes in it: then the part deletes nothing and reports it kept.
+    RemoveCheckout {
+        /// The checkout.
+        checkout: Checkout,
+    },
     /// Run an agent's program in a terminal. The part that turns a brief into
     /// a program asks for this; the part that runs terminals carries it out.
     Run {
@@ -123,6 +138,12 @@ impl Effect {
             Self::Close { issue } => format!("close {issue} in its tracker"),
             Self::ReleaseFolder { folder } => format!("release folder {folder}"),
             Self::Run { launch, .. } => format!("run {}", launch.agent),
+            Self::AddCheckout { checkout, .. } => {
+                format!("make {}'s checkout of {}", checkout.agent, checkout.project)
+            }
+            Self::RemoveCheckout { checkout } => {
+                format!("remove checkout {} of {}", checkout.name, checkout.agent)
+            }
             Self::StopAgent { agent } => format!("stop {agent}"),
         }
     }

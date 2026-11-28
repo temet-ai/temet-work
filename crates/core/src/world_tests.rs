@@ -699,6 +699,7 @@ fn started(agent: &str, role: Role, key: &str) -> Event {
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     }
 }
 
@@ -853,6 +854,7 @@ fn on_watch_12(event: Event) -> Event {
             secret_digest,
             runtime,
             model,
+            checkouts: Vec::new(),
         },
         other => other,
     }
@@ -916,6 +918,16 @@ fn ready_12(w: &World, agent: &str, pull: Option<&str>) -> Result<Vec<Event>, St
         replies: Vec::new(),
     };
     w.events(Some(&AgentId::new(agent)), &ready)
+}
+
+/// The code host's report of the branch of watch#12's pull request `number`.
+fn branch_12(number: &str) -> Event {
+    Event::PullBranch {
+        issue: watch_12(),
+        repo: ProjectId::new("watch"),
+        number: number.into(),
+        branch: format!("watch-12-pr{number}"),
+    }
 }
 
 fn apply_all(w: &mut World, events: &[Event]) -> Vec<Effect> {
@@ -1115,7 +1127,7 @@ fn an_author_told_of_a_closed_pull_request_is_asked_for_a_number() {
 /// as the runner makes it, and the brief of a reviewer newly launched on it.
 fn told_a_reviewer(w: &World, issue: &IssueId, round: u8) -> [String; 2] {
     let i = &w.issues[issue];
-    let again = crate::brief::next_round(i, round, &w.pulled(i));
+    let again = crate::brief::next_round(i, round, &w.pulled(i), &[]);
     [again, launched_task(w, Role::Reviewer, issue)]
 }
 
@@ -1132,16 +1144,20 @@ fn a_reviewer_is_given_the_pull_request_that_replaced_a_closed_one() {
     w.apply(&closed_57());
     let ready = ready_12(&w, "author-1", Some("58")).expect("ready 58");
     let effects = apply_all(&mut w, &ready);
-    assert!(
-        effects.contains(&Effect::StartReview {
-            issue: watch_12(),
-            round: 1
-        }),
-        "{effects:?}"
-    );
+    // Its reviewer starts once the code host has reported 58's branch, which
+    // its checkout is made at.
+    let review = Effect::StartReview {
+        issue: watch_12(),
+        round: 1,
+    };
+    assert!(!effects.contains(&review), "{effects:?}");
+    assert!(!w.missing().start.contains(&review));
+    w.apply(&branch_12("58"));
+    assert!(w.missing().start.contains(&review));
 
     let listed = "Review the pull request listed here. A pull request not listed is not part of \
-                  the change:\n- watch (ankh-morpork/watch): pull request 58\n";
+                  the change:\n- watch (ankh-morpork/watch): pull request 58, branch \
+                  watch-12-pr58\n";
     let [again, brief] = told_a_reviewer(&w, &watch_12(), 1);
     let arbiter = launched_task(&w, Role::Arbiter, &watch_12());
     for text in [again, brief, arbiter] {
@@ -1169,6 +1185,7 @@ fn a_reviewer_of_several_repositories_is_given_the_replacement_of_a_closed_one()
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     });
     let ready = Command::Ready {
         issue: gld(),
@@ -1302,6 +1319,7 @@ fn a_closed_pull_request_in_one_repository_is_reopened_or_replaced_there() {
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     });
     let task = w
         .launch(
@@ -1512,6 +1530,7 @@ fn a_pull_request_closed_with_the_arbiter_goes_back_to_its_author_and_stops_the_
     w.apply(&ended("arbiter-1"));
     let ready = ready_12(&w, "author-1", Some("58")).expect("ready 58");
     apply_all(&mut w, &ready);
+    w.apply(&branch_12("58"));
     assert_eq!(w.issues[&watch_12()].stage, Stage::InReview { round: 3 });
     let effects = w.apply(&block_12(3));
     assert!(starts_an_arbiter(&effects), "{effects:?}");
@@ -1706,6 +1725,7 @@ fn a_reviewer_stopped_for_a_closed_pull_request_does_not_count_against_starts() 
 
         let ready = ready_12(&w, "author-1", Some("58")).expect("ready 58");
         apply_all(&mut w, &ready);
+        w.apply(&branch_12("58"));
         assert_eq!(w.issues[&watch_12()].stage, Stage::InReview { round });
         let missing = w.missing();
         assert_eq!(missing.given_up, Vec::<String>::new(), "{stage:?}");
@@ -2133,6 +2153,12 @@ fn in_review() -> World {
         pulls: Default::default(),
         replies: Vec::new(),
     });
+    w.apply(&Event::PullBranch {
+        issue: issue("1"),
+        repo: ProjectId::new("ankh"),
+        number: "57".into(),
+        branch: "ankh-1-clock".into(),
+    });
     w.apply(&started("reviewer-1", Role::Reviewer, "1"));
     w
 }
@@ -2193,7 +2219,7 @@ fn a_conflict_seen_in_review_or_arbitration_goes_back_with_the_same_round() {
         w.issues[&issue("1")].fix,
         [
             "the pull request conflicts with the branch it merges into: rebase onto that branch, \
-             then push your own branch with `git push --force-with-lease`"
+             then push ankh-1-clock with `git push --force-with-lease`"
         ]
     );
     let mut w = in_review();
@@ -3436,61 +3462,8 @@ fn an_issue_takes_every_folder_on_the_first_repositorys_machine_or_none() {
 
 /// A world with folders `f1` and `f2` where issue 1 is in review: its author
 /// holds `f1` and its reviewer runs, recorded with no folder.
-fn in_review_with_a_second_folder() -> World {
-    let (mut w, _) = World::replay(&[
-        group(&["m1"], 2),
-        folder("f1"),
-        folder("f2"),
-        sync("1", "m1", 1, &[]),
-        planned("1"),
-        started("author-1", Role::Author, "1"),
-        Event::PullRequestReady {
-            issue: issue("1"),
-            pull: Some("57".into()),
-            pulls: Default::default(),
-            replies: Vec::new(),
-        },
-        started("reviewer-1", Role::Reviewer, "1"),
-    ]);
-    assert_eq!(w.folders[&FolderId::new("f2")].holder, None);
-    w.apply(&sync("2", "m1", 2, &[]));
-    w
-}
-
-fn reader_launch(w: &World, role: Role, key: &str) -> crate::launch::Brief {
-    w.launch(&GroupId::new("watch"), role, &issue(key), None)
-        .expect("launch")
-        .brief
-}
-
-#[test]
-fn a_reviewer_in_a_folder_an_author_is_then_given_was_told_to_leave_it_alone() {
-    let mut w = in_review_with_a_second_folder();
-    let leave = "Do not switch its branch or change any file in it.";
-    let before = reader_launch(&w, Role::Reviewer, "1");
-    assert_eq!(before.folder, Some("/srv/ankh/f2".into()));
-    assert!(before.task.contains(leave), "{}", before.task);
-
-    assert_eq!(w.apply(&planned("2")), vec![author("2", "f2")]);
-    let after = reader_launch(&w, Role::Reviewer, "1");
-    assert!(after.task.contains(leave), "{}", after.task);
-}
-
-#[test]
-fn readers_in_every_free_folder_do_not_keep_a_ready_issue_from_its_author() {
-    let mut w = in_review_with_a_second_folder();
-    w.apply(&sync("3", "m1", 3, &[]));
-    w.apply(&started("refiner-3", Role::Refiner, "3"));
-    // f2 is the only free folder, and both running readers are in it.
-    for (role, key) in [(Role::Reviewer, "1"), (Role::Refiner, "3")] {
-        assert_eq!(
-            reader_launch(&w, role, key).folder,
-            Some("/srv/ankh/f2".into())
-        );
-        assert!(w.running(&issue(key), role).is_some());
-    }
-    assert_eq!(w.apply(&planned("2")), vec![author("2", "f2")]);
-}
+#[path = "world_checkouts_tests.rs"]
+mod checkouts;
 
 #[path = "world_scope_tests.rs"]
 mod scope;

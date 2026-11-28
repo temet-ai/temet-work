@@ -22,6 +22,9 @@ fn the_build_returns_each_compiled_in_part_once() {
     if cfg!(feature = "deploy") {
         want.push("deploy");
     }
+    if cfg!(feature = "checkout") {
+        want.push("checkout");
+    }
     if cfg!(feature = "store") {
         want.push("store");
     }

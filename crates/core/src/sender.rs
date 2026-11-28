@@ -252,6 +252,7 @@ mod tests {
             secret_digest: digest,
             runtime: None,
             model: None,
+            checkouts: Vec::new(),
         }
     }
 

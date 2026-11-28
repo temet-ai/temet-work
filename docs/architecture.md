@@ -71,6 +71,7 @@ says what each crate holds today.
 | `temet-work-codehost-github` | codehost only | GitHub pull requests. |
 | `temet-work-codehost-gitlab` | codehost only | GitLab merge requests. |
 | `temet-work-deploy` | core | Runs a project's deploy and verify commands after a merge. |
+| `temet-work-checkout` | core | Makes and removes the checkouts readers run in: git worktrees of a work folder's repository, on this machine or through `ssh MACHINE`. It has no adapters, since git is the only tool. |
 | `temet-work-store` | core | SQLite and the event log. |
 | `temet-work-style` | core | The style guide: tokens, the generated palette, the ban list as data, and the check used when reviewing UI work. |
 | `temet-work-mike` | core | Optional. Reads capture, corrected turns and lessons from a mike proxy as input to the improvement loop. |
@@ -94,6 +95,7 @@ What exists today:
 | `temet-work-codehost-github` | pull requests through `gh`, with whether each is a draft and its branch, merged with `--squash`; passes the contract on recorded output and, read only, against GitHub (`--features live`) |
 | `temet-work-codehost-gitlab` | merge requests through `glab` and its sign-in, with each one's source branch, merged with `--squash`, `--rebase` or neither; a pipeline reads as failed once a job that may not fail has failed; passes the contract on recorded output and, read only, against GitLab (`--features live`) |
 | `temet-work-deploy` | runs the deploy command after a merge and the verify command after a deploy, each on its own thread, one at a time per project and `run_in` folder; a failed deploy is listed as a problem, a failed verify sends the issue back to ready and lists it as a problem until it is done; a handoff line naming a build other than the daemon's runs the deploy again, up to three times, then waits for `temet-work retry ISSUE` |
+| `temet-work-checkout` | makes a reader's checkout with `git fetch` and `git worktree add --detach` in a work folder's repository, at the fetched head of a pull request's branch or of the default branch; removes it with `git worktree remove`, which takes the files git ignores, such as a build under `target/`, with it; keeps one with an uncommitted change, a file git does not ignore or a commit made in it that no remote-tracking branch holds, and deletes nothing in it; reports each checkout added, removed or kept, with what it found; runs the same commands through `ssh MACHINE` for a checkout on another machine; tested against a bare repository under `CARGO_TARGET_TMPDIR` |
 | `temet-work-store` | the event log: one JSON line per event, numbered from 1, synced before it counts; a half-written last line is dropped on reading, a damaged earlier line is an error; replaying the log gives the same state as applying the events |
 | `temet-work-style` | the design system's tokens as Rust constants, written by `scripts/sync-tokens`; the ban list; tests that hold the tokens to the design system's rules. `docs/ui.md` maps the app's parts to the design system |
 | mike | a skeleton |
@@ -204,8 +206,31 @@ needs: its author or reviewer while it is in review, being fixed or merging, its
 is refining, and the investigator of a running investigation. An author holds its issue's work
 folders, one in each repository the issue changes. A merge or a close in the tracker takes them
 from the issue, and no author is placed in one while an agent that held it still runs, since that
-session may still change the folder. A reviewer, refiner, arbiter or investigator runs in a folder
-without holding it, so it keeps no folder from the next author.
+session may still change the folder.
+
+A reviewer, refiner, arbiter or investigator holds no work folder and never runs in one, since
+an author may be given that folder while it works. It runs in checkouts of its own, made when it
+starts and removed when it ends. A checkout is a git worktree, detached, added from the
+repository of a work folder on the agent's machine; adding it changes none of that folder's
+files. A reviewer or arbiter gets one in each repository with an open pull request, at the
+fetched head of that pull request's branch, and starts only once the code host has reported each
+branch, at its next read after `ready`; until then its start waits, as a start waits for a
+machine. A refiner gets one in each repository of its issue, or of its area for an area's issue,
+and an investigator one in each of its group's repositories, both at the head of the default
+branch. The agent starts in the first. A repository with no work folder on the agent's machine
+gets no checkout, and the brief says to read it on its code host. Each checkout goes in
+`temet-work-checkouts/<log id>/<repository>-<n>` beside the work folder it is added from, with
+the lowest `n` no recorded checkout of that log uses, so a path is used again once its checkout
+is gone. The loop asks the checkout part for each checkout before the agent's program runs; when
+one cannot be made, the agent does not start, the failure is listed under Problems, and a later
+round tries again with the same checkout. The agent's start event records the path and
+repository of each. When the agent ends, however it ended, the loop asks for its checkouts to be
+removed; a removal that fails is listed under Problems and asked for again once a minute. A
+checkout with a change in it is kept: the part deletes nothing in it, and Problems lists it with
+its agent and path until a person removes it. The line comes from the event log, so it survives
+a restart. In its first round the daemon asks for the removal of each recorded checkout whose
+agent has ended or never started, as after a crash or a lost removal, and checks each kept one
+again: one found gone is recorded removed, and one found clean is removed.
 
 A group has no coordinator agent: in the research fleet the standing seat waited 25 of its 28
 minutes, and in mike's larger runs such seats were where the token and turn costs came from
@@ -228,7 +253,7 @@ deploy to match main. When the issue is covered again, `World::missing` starts o
 agent its stage needs, or asks for the merge.
 
 When a group's work queue runs short, the daemon starts one investigator for it, which holds
-no folder, reads the group's projects and files the next issues through `temet-work file`
+no folder, reads the group's projects in its own checkouts and files the next issues through `temet-work file`
 (`docs/configuration.md`). The daemon counts the queue, keeps to one investigator per group
 and waits `investigate_every` between investigations; the clock comes into the core as the
 time `Host::tick` takes, and each investigation's start and end times are on its events.

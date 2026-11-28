@@ -29,6 +29,7 @@ fn started(agent: &str, role: Role) -> Event {
         secret_digest: None,
         runtime: None,
         model: None,
+        checkouts: Vec::new(),
     }
 }
 
@@ -92,11 +93,22 @@ fn events(w: &mut World, by: &str, command: &Command) -> Result<Vec<Event>, Stri
 /// Runs `command` from `by`, applies what it becomes and returns what that asks
 /// for.
 fn run(w: &mut World, by: &str, command: &Command) -> Vec<Effect> {
-    events(w, by, command)
+    let mut effects: Vec<Effect> = events(w, by, command)
         .unwrap_or_else(|e| panic!("{by} is refused: {e}"))
         .iter()
         .flat_map(|e| w.apply(e))
-        .collect()
+        .collect();
+    // The code host reports the pull request's branch at its next read, which a
+    // reviewer's or arbiter's checkout is made at.
+    if matches!(command, Command::Ready { .. }) {
+        effects.extend(w.apply(&Event::PullBranch {
+            issue: watch4(),
+            repo: ProjectId::new("watch"),
+            number: "41".into(),
+            branch: "watch-4-bells".into(),
+        }));
+    }
+    effects
 }
 
 fn refused(w: &mut World, by: &str, command: &Command) -> String {
