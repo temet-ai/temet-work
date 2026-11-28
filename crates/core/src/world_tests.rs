@@ -1479,36 +1479,59 @@ fn a_reviewer_stopped_for_a_closed_pull_request_does_not_count_against_starts() 
     assert_eq!(w.missing().start, vec![]);
     assert_eq!(w.missing().given_up.len(), 1);
 
-    // Closed in review, after a failed check, or while merging: the reviewer is
-    // stopped, and the issue gets a new one once ready names 58.
+    // Closed in review, with the arbiter, after a failed check, or while merging:
+    // the reviewer and the arbiter are stopped, and the issue gets a new reviewer
+    // once ready names 58. Outside arbitration the arbiter is one whose stop
+    // failed, so it still runs.
     let in_review = |_: &mut World| {};
+    let with_the_arbiter = |w: &mut World| {
+        for round in 1..=3 {
+            w.apply(&block_12(round));
+            if round < 3 {
+                let ready = ready_12(w, "author-1", None).expect("ready");
+                apply_all(w, &ready);
+            }
+        }
+        assert_eq!(w.issues[&watch_12()].stage, Stage::Arbitration { round: 3 });
+    };
     let fixing = |w: &mut World| {
         w.apply(&failed_rust_12());
+        assert_eq!(w.issues[&watch_12()].stage, Stage::Fixing { round: 1 });
     };
     let merging = |w: &mut World| {
         approve_12(w, 1);
         assert_eq!(w.issues[&watch_12()].stage, Stage::Merging);
     };
-    let stages: [&dyn Fn(&mut World); 3] = [&in_review, &fixing, &merging];
+    let stages: [&dyn Fn(&mut World); 4] = [&in_review, &with_the_arbiter, &fixing, &merging];
     for to in stages {
         let mut w = watch_12_reviewing_57();
         one_start(&mut w);
         to(&mut w);
+        // The round goes on: 3 after arbitration, else 1.
+        let (stage, round) = (w.issues[&watch_12()].stage, w.issues[&watch_12()].round);
+        w.apply(&on_watch_12(started("arbiter-1", Role::Arbiter, "12")));
         let effects = w.apply(&closed_57());
-        assert!(effects.contains(&stop("reviewer-1")), "{effects:?}");
+        for agent in ["reviewer-1", "arbiter-1"] {
+            assert!(
+                effects.contains(&stop(agent)),
+                "{agent} in {stage:?}: {effects:?}"
+            );
+        }
         w.apply(&ended("reviewer-1"));
+        w.apply(&ended("arbiter-1"));
 
         let ready = ready_12(&w, "author-1", Some("58")).expect("ready 58");
         apply_all(&mut w, &ready);
-        assert_eq!(w.issues[&watch_12()].stage, Stage::InReview { round: 1 });
+        assert_eq!(w.issues[&watch_12()].stage, Stage::InReview { round });
         let missing = w.missing();
-        assert_eq!(missing.given_up, Vec::<String>::new());
+        assert_eq!(missing.given_up, Vec::<String>::new(), "{stage:?}");
         assert_eq!(
             missing.start,
             vec![Effect::StartReview {
                 issue: watch_12(),
-                round: 1,
-            }]
+                round,
+            }],
+            "{stage:?}"
         );
         sent_to_58(&w, Role::Reviewer);
     }
