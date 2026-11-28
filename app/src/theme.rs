@@ -785,6 +785,11 @@ pub mod size {
     pub fn tab_indicator(cx: &App) -> Pixels {
         steps(cx, 0.75)
     }
+    /// The space before a tab's count: `.bp6-tab-tag { margin-left: calc(var(--bp-surface-spacing)
+    /// * 2) }`.
+    pub fn tab_tag_gap(cx: &App) -> Pixels {
+        steps(cx, 2.)
+    }
     /// The space after a tag's icon: `.bp6-tag > * { margin-right: var(--bp-surface-spacing) }`.
     pub fn tag_gap(cx: &App) -> Pixels {
         steps(cx, 1.)
@@ -896,9 +901,12 @@ pub mod size {
     pub struct IssueColumns {
         pub key: Pixels,
         pub stage: Pixels,
+        pub milestone: Pixels,
         pub agent: Pixels,
         pub updated: Pixels,
         pub title_min: Pixels,
+        /// The title's least width with the Agent column shown and Updated left out.
+        pub title_narrow: Pixels,
     }
 
     impl IssueColumns {
@@ -906,9 +914,11 @@ pub mod size {
             Self {
                 key: size_of(t.tm_issue_col_key),
                 stage: size_of(t.tm_issue_col_stage),
+                milestone: size_of(t.tm_issue_col_milestone),
                 agent: size_of(t.tm_issue_col_agent),
                 updated: size_of(t.tm_issue_col_updated),
                 title_min: size_of(t.tm_issue_col_title_min),
+                title_narrow: size_of(t.tm_issue_col_title_narrow),
             }
         }
     }

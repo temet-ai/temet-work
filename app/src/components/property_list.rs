@@ -2,19 +2,57 @@
 //! milestone, agent and round. Labels are muted and share one column width, so lists line up
 //! from panel to panel. A value that is a set of tags wraps under itself.
 
+use std::rc::Rc;
+
 use gpui::{
-    AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
+    AnyElement, App, InteractiveElement, IntoElement, ParentElement, RenderOnce, SharedString,
+    StatefulInteractiveElement, Styled, Window, div,
 };
 
 use super::{Class, apply, below_baseline};
 use crate::theme::look::{self, State};
-use crate::theme::{colour, size, space};
+use crate::theme::{Intent, colour, size, space};
 
-/// A value: text, an element, or a set of elements laid out as a wrapping row.
+/// A value: text, an element, a set of elements laid out as a wrapping row, or links.
 pub enum PropertyValue {
     Text(SharedString),
     Element(AnyElement),
     Set(Vec<AnyElement>),
+    Links(Vec<PropertyLink>),
+}
+
+type OnClick = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// A link in a value, as the design system's pages write `<a>` in a PropertyList: in Blueprint's
+/// link colour, underlined under the pointer, such as an issue key that opens that issue.
+pub struct PropertyLink {
+    id: SharedString,
+    text: SharedString,
+    mono: bool,
+    on_click: Option<OnClick>,
+}
+
+impl PropertyLink {
+    /// A link. `id` is its identity in the window, and its selector for a test.
+    pub fn new(id: impl Into<SharedString>, text: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            text: text.into(),
+            mono: false,
+            on_click: None,
+        }
+    }
+
+    /// In the code face, as Blueprint's `Classes.MONOSPACE_TEXT` sets an issue key.
+    pub fn mono(mut self, mono: bool) -> Self {
+        self.mono = mono;
+        self
+    }
+
+    pub fn on_click(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Rc::new(handler));
+        self
+    }
 }
 
 /// A label and its value.
@@ -61,6 +99,16 @@ impl PropertyItem {
     pub fn field(mut self, field: bool) -> Self {
         self.field = field;
         self
+    }
+
+    /// A value that is one link or several, such as the issues an issue waits for.
+    pub fn links(label: impl Into<SharedString>, links: Vec<PropertyLink>) -> Self {
+        Self {
+            label: label.into(),
+            value: PropertyValue::Links(links),
+            mono: false,
+            field: false,
+        }
     }
 
     /// Sets the value in the code face, for keys, branches and folders.
@@ -123,6 +171,11 @@ impl RenderOnce for PropertyList {
                 PropertyValue::Set(els) => {
                     value.flex().flex_wrap().gap(space::s2(cx)).children(els)
                 }
+                PropertyValue::Links(links) => value
+                    .flex()
+                    .flex_wrap()
+                    .gap(space::s2(cx))
+                    .children(links.into_iter().map(|link| anchor(link, cx))),
             };
             let row = div().flex().gap(space::s4(cx));
             let row = if item.field {
@@ -142,4 +195,23 @@ impl RenderOnce for PropertyList {
         });
         div().flex().flex_col().gap(space::s3(cx)).children(rows)
     }
+}
+
+/// A link as Blueprint draws `<a>`: the link colour, no underline until the pointer is over it.
+fn anchor(link: PropertyLink, cx: &App) -> impl IntoElement {
+    let selector = link.id.to_string();
+    let mut el = div()
+        .id(link.id)
+        .debug_selector(|| selector)
+        .text_color(colour::intent_text(cx, Intent::Primary))
+        .cursor_pointer()
+        .hover(|style| style.underline())
+        .child(link.text);
+    if link.mono {
+        el = el.font_family(crate::theme::text::code_family(cx));
+    }
+    if let Some(handler) = link.on_click {
+        el = el.on_click(move |_, window, cx| handler(window, cx));
+    }
+    el
 }

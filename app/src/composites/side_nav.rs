@@ -1,6 +1,7 @@
-//! SideNav (`temet-sidenav`): the left column's areas and their projects, with a count beside
-//! each project that waits on the person, and below them what else the column holds, such as
-//! a GroupList. An area opens and closes with plus and minus. It goes in AppShell's `nav`.
+//! SideNav (`temet-sidenav`): the left column's areas and their projects, then any projects in
+//! no area at the top level, with a count beside each project that waits on the person, and
+//! below them what else the column holds, such as a GroupList. An area opens and closes with
+//! plus and minus. It goes in AppShell's `nav`.
 
 use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
@@ -33,6 +34,7 @@ pub struct SideNavArea {
 #[derive(IntoElement)]
 pub struct SideNav {
     areas: Vec<SideNavArea>,
+    projects: Vec<SideNavProject>,
     selected: Option<SharedString>,
     default_closed: Vec<SharedString>,
     children: Vec<AnyElement>,
@@ -42,10 +44,17 @@ impl SideNav {
     pub fn new(areas: Vec<SideNavArea>) -> Self {
         Self {
             areas,
+            projects: Vec::new(),
             selected: None,
             default_closed: Vec::new(),
             children: Vec::new(),
         }
+    }
+
+    /// Projects in no area, listed after the areas at the top level.
+    pub fn projects(mut self, projects: Vec<SideNavProject>) -> Self {
+        self.projects = projects;
+        self
     }
 
     /// The id of the project on screen.
@@ -81,21 +90,26 @@ impl RenderOnce for SideNav {
             .map(|a| area_key(&a.id))
             .collect::<Vec<_>>();
         let selected = self.selected;
-        let nodes = self.areas.into_iter().map(|area| {
-            TreeNode::new(area_key(&area.id), area.name).child_nodes(area.projects.into_iter().map(
-                |p| {
-                    let mut node = TreeNode::new(p.id.clone(), p.name)
-                        .is_selected(selected.as_ref() == Some(&p.id));
-                    if let Some(icon) = p.icon {
-                        node = node.icon(icon);
-                    }
-                    if p.waiting > 0 {
-                        node = node.secondary_label(Tag::new(p.waiting.to_string()));
-                    }
-                    node
-                },
-            ))
-        });
+        let node = |p: SideNavProject| {
+            let mut node =
+                TreeNode::new(p.id.clone(), p.name).is_selected(selected.as_ref() == Some(&p.id));
+            if let Some(icon) = p.icon {
+                node = node.icon(icon);
+            }
+            if p.waiting > 0 {
+                node = node.secondary_label(Tag::new(p.waiting.to_string()));
+            }
+            node
+        };
+        let mut nodes: Vec<TreeNode> = self
+            .areas
+            .into_iter()
+            .map(|area| {
+                TreeNode::new(area_key(&area.id), area.name)
+                    .child_nodes(area.projects.into_iter().map(node))
+            })
+            .collect();
+        nodes.extend(self.projects.into_iter().map(node));
         div()
             .flex()
             .flex_col()

@@ -14,3 +14,37 @@ pub struct IssueActionsAgent {
     /// Muted text at the right, such as the issue it is on now or "free".
     pub detail: Option<SharedString>,
 }
+
+// A stand-in with the agreed API until the part lands from the board branch.
+#[derive(gpui::IntoElement)]
+pub struct IssueActions {
+    id: gpui::ElementId,
+    on_open: Option<std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>>,
+}
+
+impl IssueActions {
+    pub fn new(
+        id: impl Into<gpui::ElementId>,
+        _stage: crate::components::stage_tag::Stage,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            on_open: None,
+        }
+    }
+    pub fn on_open(
+        mut self,
+        handler: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        self.on_open = Some(std::rc::Rc::new(handler));
+        self
+    }
+}
+
+impl gpui::RenderOnce for IssueActions {
+    fn render(self, _: &mut gpui::Window, _: &mut gpui::App) -> impl gpui::IntoElement {
+        use gpui::InteractiveElement;
+        let _ = &self.on_open;
+        gpui::div().id(self.id)
+    }
+}
