@@ -10,13 +10,14 @@ use super::icon::{Icon, IconName};
 use super::{box_of, type_of};
 use crate::theme::Intent;
 use crate::theme::look::{self, State};
-use crate::theme::text;
+use crate::theme::{size, text};
 
 #[derive(IntoElement)]
 pub struct Callout {
     title: Option<SharedString>,
     intent: Intent,
     icon: Option<IconName>,
+    compact: bool,
     children: Vec<AnyElement>,
 }
 
@@ -26,6 +27,7 @@ impl Callout {
             title: None,
             intent: Intent::None,
             icon: None,
+            compact: false,
             children: Vec::new(),
         }
     }
@@ -38,6 +40,12 @@ impl Callout {
 
     pub fn intent(mut self, intent: Intent) -> Self {
         self.intent = intent;
+        self
+    }
+
+    /// Less padding, as for a short note inside a form, such as DecisionRow's "Not sent".
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
         self
     }
 }
@@ -76,8 +84,25 @@ impl RenderOnce for Callout {
             Intent::Danger => look::get(cx, "Callout", "intent-danger", rest),
         };
         // The look's top padding is also the icon's inset from the top and left edges.
-        let inset = look.padding.top;
+        let mut inset = (look.padding.top, look.padding.top);
         let icon = self.icon.or_else(|| default_icon(self.intent));
+        let mut look = look;
+        if self.compact {
+            // `.bp6-callout.bp6-compact { padding: calc(var(--bp-surface-spacing) * 2) }`, and
+            // with an icon `padding-left: calc(var(--bp-surface-spacing) * 2 + 16px +
+            // var(--bp-surface-spacing) * 2)`, the icon at `left: calc(var(--bp-surface-spacing)
+            // * 2); top: calc(var(--bp-surface-spacing) * 2 + var(--bp-surface-spacing) * 0.5)`.
+            let (pad, drop) = size::callout_compact(cx);
+            look.padding.top = pad;
+            look.padding.right = pad;
+            look.padding.bottom = pad;
+            look.padding.left = match icon {
+                Some(_) => pad + size::icon(cx) + pad,
+                None => pad,
+            };
+            inset = (pad, pad + drop);
+        }
+        let (left, top) = inset;
         box_of(type_of(div(), &look), &look)
             .relative()
             .flex()
@@ -85,8 +110,8 @@ impl RenderOnce for Callout {
             .children(icon.map(|icon| {
                 div()
                     .absolute()
-                    .top(inset)
-                    .left(inset)
+                    .top(top)
+                    .left(left)
                     .child(Icon::new(icon))
             }))
             .children(

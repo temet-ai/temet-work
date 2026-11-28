@@ -342,7 +342,7 @@ fn size_of(token: temet_work_style::Px) -> Pixels {
 pub mod colour {
     use gpui::{App, Hsla};
 
-    use super::{Active, Intent, active, c, is_light};
+    use super::{Active, Intent, active, c, is_light, mixed};
 
     /// The shade over the page behind a modal dialog, such as an Alert (`--tm-backdrop`).
     pub fn backdrop(cx: &App) -> Hsla {
@@ -442,6 +442,79 @@ pub mod colour {
             Intent::Warning => t.bp_intent_warning_rest,
             Intent::Danger => t.bp_intent_danger_rest,
         })
+    }
+    /// A disabled solid button's fill: `.bp6-button:not([class*=bp6-intent-]):disabled {
+    /// background-color: color-mix(in srgb, var(--bp-intent-default-disabled) 20%,
+    /// transparent) }`, 4% in the dark theme.
+    pub fn disabled_fill(cx: &App) -> Hsla {
+        let a = cx.global::<Active>();
+        let share = if is_light(a.name) { 20. } else { 4. };
+        mixed(a.tokens.bp_intent_default_disabled, share)
+    }
+    /// The default border, as a disabled outlined button's: `--bp-surface-border-color-default`.
+    pub fn border(cx: &App) -> Hsla {
+        c(active(cx).bp_surface_border_color_default)
+    }
+    /// A spinner's ring and its moving arc: `.bp6-spinner .bp6-spinner-track { stroke:
+    /// color-mix(in srgb, var(--bp-palette-gray-1) 20%, transparent) }`, the head at 80%.
+    pub fn spinner(cx: &App) -> (Hsla, Hsla) {
+        let t = active(cx);
+        (mixed(t.bp_palette_gray_1, 20.), mixed(t.bp_palette_gray_1, 80.))
+    }
+    /// Text that cannot be used, such as a disabled radio's label.
+    pub fn disabled_text(cx: &App) -> Hsla {
+        c(active(cx).bp_typography_color_default_disabled)
+    }
+    /// A radio's ring when it is not chosen: `.bp6-dark .bp6-control .bp6-control-indicator {
+    /// box-shadow: inset 0 0 0 1px var(--bp-palette-gray-3) }`, `--bp-palette-gray-2` in the
+    /// light theme.
+    pub fn control_ring(cx: &App) -> Hsla {
+        let a = cx.global::<Active>();
+        c(if is_light(a.name) {
+            a.tokens.bp_palette_gray_2
+        } else {
+            a.tokens.bp_palette_gray_3
+        })
+    }
+    /// A chosen radio's fill, its dot and its edge: `.bp6-control input:checked ~
+    /// .bp6-control-indicator { background-color: var(--bp-intent-primary-rest); box-shadow:
+    /// inset 0 0 0 1px color-mix(in srgb, var(--bp-palette-black) 20%, transparent) }`, white at
+    /// 10% in the dark theme, and the dot in `--bp-intent-primary-foreground`.
+    pub fn control_checked(cx: &App) -> (Hsla, Hsla, Hsla) {
+        let a = cx.global::<Active>();
+        let t = &a.tokens;
+        let edge = if is_light(a.name) {
+            mixed(t.bp_palette_black, 20.)
+        } else {
+            mixed(t.bp_palette_white, 10.)
+        };
+        (
+            c(t.bp_intent_primary_rest),
+            c(t.bp_intent_primary_foreground),
+            edge,
+        )
+    }
+    /// A disabled radio's fill, and a disabled chosen one's: `.bp6-control input:disabled ~
+    /// .bp6-control-indicator { background: color-mix(in srgb, var(--bp-palette-gray-3) 15%,
+    /// transparent) }`, and `color-mix(in srgb, var(--bp-intent-primary-rest) 50%,
+    /// transparent)` when chosen, its dot at half its alpha.
+    pub fn control_disabled(cx: &App) -> (Hsla, Hsla, Hsla) {
+        let t = active(cx);
+        (
+            mixed(t.bp_palette_gray_3, 15.),
+            mixed(t.bp_intent_primary_rest, 50.),
+            mixed(t.bp_intent_primary_foreground, 50.),
+        )
+    }
+}
+
+/// A token's colour mixed with transparent, as CSS's `color-mix(in srgb, colour P%,
+/// transparent)`: its alpha scaled to `percent`.
+fn mixed(token: Rgba, percent: f32) -> Hsla {
+    let colour = c(token);
+    Hsla {
+        a: colour.a * percent / 100.,
+        ..colour
     }
 }
 
@@ -757,6 +830,64 @@ pub mod size {
     /// The space above a section's subtitle: `margin-top: calc(var(--bp-surface-spacing) * 0.5)`.
     pub fn section_subtitle_gap(cx: &App) -> Pixels {
         steps(cx, 0.5)
+    }
+    /// A field's text inset past its left icon: `.bp6-input-group .bp6-input:not(:first-child)
+    /// { padding-left: calc(var(--bp-surface-spacing) * 7.5) }`.
+    pub fn input_icon_pad(cx: &App) -> Pixels {
+        steps(cx, 7.5)
+    }
+    /// The space between a label and its field, and after a dialog header's icon:
+    /// `.bp6-form-group label.bp6-label { margin-bottom: var(--bp-surface-spacing) }`,
+    /// `.bp6-dialog-header .bp6-icon { margin-right: calc(var(--bp-surface-spacing) * 4 * 0.5) }`
+    /// is two of them.
+    pub fn label_gap(cx: &App) -> Pixels {
+        steps(cx, 1.)
+    }
+    /// The space under a form group, and a dialog body's and footer's margin:
+    /// `.bp6-form-group { margin: 0 0 calc(var(--bp-surface-spacing) * 4) }`,
+    /// `.bp6-dialog-body { margin: calc(var(--bp-surface-spacing) * 4) }`.
+    pub fn form_gap(cx: &App) -> Pixels {
+        steps(cx, 4.)
+    }
+    /// A radio's circle, the space after it, and the space under each radio: `.bp6-control
+    /// .bp6-control-indicator { font-size: 16px; height: 1em; margin-inline-end:
+    /// calc(var(--bp-surface-spacing) * 2) }`, `.bp6-control { margin-bottom:
+    /// calc(var(--bp-surface-spacing) * 2) }`.
+    pub fn control(cx: &App) -> (Pixels, Pixels) {
+        (steps(cx, 4.), steps(cx, 2.))
+    }
+    /// A chosen radio's dot, across: `.bp6-control.bp6-radio input:checked ~
+    /// .bp6-control-indicator::before { background-image: radial-gradient(fg, fg 28%,
+    /// transparent 32%) }` on the 16 px circle. The gradient's 100% reaches the box's far
+    /// corner, half the diagonal; the dot's edge is taken at 30%, between solid and clear.
+    pub fn control_dot(cx: &App) -> Pixels {
+        steps(cx, 4. * std::f32::consts::SQRT_2 * 0.3)
+    }
+    /// A spinner's radius and line at the icon size: Blueprint draws a circle of radius 45 in
+    /// a view box `R * 2 + stroke` wide, its stroke `min(16, 4 * 100 / size)` units, so 16 units
+    /// at 16 px, in a box of 106.
+    pub fn spinner(cx: &App) -> (Pixels, Pixels) {
+        let side = icon(cx);
+        (side * (45. / 106.), side * (16. / 106.))
+    }
+    /// A compact callout's padding, and how far its icon sits below that:
+    /// `.bp6-callout.bp6-compact { padding: calc(var(--bp-surface-spacing) * 2) }`, its icon at
+    /// `top: calc(var(--bp-surface-spacing) * 2 + var(--bp-surface-spacing) * 0.5)`.
+    pub fn callout_compact(cx: &App) -> (Pixels, Pixels) {
+        (steps(cx, 2.), steps(cx, 0.5))
+    }
+    /// The space between a button's icon and its text: `.bp6-button > * { margin-right:
+    /// calc(var(--bp-surface-spacing) * 2) }`.
+    pub fn button_gap(cx: &App) -> Pixels {
+        steps(cx, 2.)
+    }
+    /// A dialog's width: `.bp6-dialog { width: calc(var(--bp-surface-spacing) * 125) }`.
+    pub fn dialog(cx: &App) -> Pixels {
+        steps(cx, 125.)
+    }
+    /// A dialog that edits a list of long lines, such as RefineDialog (`--tm-dialog-wide`).
+    pub fn dialog_wide(cx: &App) -> Pixels {
+        size_of(active(cx).tm_dialog_wide)
     }
 
     /// The issue table's column widths (`--tm-issue-col-*`). The title takes what is left, and

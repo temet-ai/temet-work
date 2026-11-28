@@ -22,6 +22,7 @@ pub struct PropertyItem {
     label: SharedString,
     value: PropertyValue,
     mono: bool,
+    field: bool,
 }
 
 impl PropertyItem {
@@ -30,6 +31,7 @@ impl PropertyItem {
             label: label.into(),
             value: PropertyValue::Text(value.into()),
             mono: false,
+            field: false,
         }
     }
 
@@ -39,6 +41,7 @@ impl PropertyItem {
             label: label.into(),
             value: PropertyValue::Element(value.into_any_element()),
             mono: false,
+            field: false,
         }
     }
 
@@ -48,7 +51,16 @@ impl PropertyItem {
             label: label.into(),
             value: PropertyValue::Set(values),
             mono: false,
+            field: false,
         }
+    }
+
+    /// A value that is a text field, such as the reason in DecisionRow's overturn confirm:
+    /// its label sits level with the field's middle, where `.tm-overturn-fields { align-items:
+    /// baseline }` puts it beside a text area.
+    pub fn field(mut self, field: bool) -> Self {
+        self.field = field;
+        self
     }
 
     /// Sets the value in the code face, for keys, branches and folders.
@@ -112,10 +124,13 @@ impl RenderOnce for PropertyList {
                     value.flex().flex_wrap().gap(space::s2(cx)).children(els)
                 }
             };
-            div()
-                .flex()
-                .items_start()
-                .gap(space::s4(cx))
+            let row = div().flex().gap(space::s4(cx));
+            let row = if item.field {
+                row.items_center()
+            } else {
+                row.items_start()
+            };
+            row
                 .child(
                     div()
                         .flex_none()

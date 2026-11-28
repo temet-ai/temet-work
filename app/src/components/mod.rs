@@ -28,14 +28,18 @@ pub mod attention_text;
 pub mod button;
 pub mod callout;
 pub mod cut_panel;
+pub mod dialog;
+pub mod form_group;
 pub mod heading;
 pub mod html_table;
 pub mod icon;
+pub mod input_group;
 pub mod list_row;
 pub mod meter;
 pub mod plus_minus_tree;
 pub mod progress_bar;
 pub mod property_list;
+pub mod radio_group;
 pub mod section;
 pub mod segmented_control;
 pub mod stage_tag;
@@ -43,6 +47,7 @@ pub mod status_tag;
 pub mod table_row;
 pub mod tabs;
 pub mod tag;
+pub mod text_area;
 pub mod toast;
 
 /// How far below the top of its line box the baseline of `size` text sits, in the text face in
@@ -195,6 +200,9 @@ pub enum Class {
     DecisionIssue,
     /// `.tm-decision-done`: the note that replaces an overturned decision's action.
     DecisionDone,
+    /// `.tm-decision-deadline`: "Overturn before ...", muted, in a decision's meta line or
+    /// beside its action.
+    DecisionDeadline,
     /// `.tm-round-head` on a compact ListRow: a review round's heading line, which starts where
     /// its points' text does.
     RoundHead,
@@ -207,6 +215,12 @@ pub enum Class {
     /// `.tm-check-toggle-none` on a Button: hidden, it holds the place of the plus a long check
     /// has, so status tags line up whether a row opens or not.
     CheckToggleNone,
+    /// `.tm-refine` on a Dialog: RefineDialog's wide dialog, `--tm-dialog-wide` at most.
+    Refine,
+    /// `.tm-refine-head`: the muted "Done when" and "Proven by" over RefineDialog's checks.
+    RefineHead,
+    /// `.tm-refine-none`: "No checks yet", muted, in place of RefineDialog's checks.
+    RefineNone,
 }
 
 /// The lines a long done-when shows until its row is opened: `.tm-check-clamp {
@@ -517,6 +531,8 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
             el,
             &look::get(cx, "DecisionRow", "tm-decision-done tm-row-end", rest),
         ),
+        // `.tm-decision-deadline { color: muted }`; in the meta line it takes the meta's size.
+        Class::DecisionDeadline => el.text_color(colour::muted(cx)),
         Class::RoundHead => padded(
             el,
             &look::get(
@@ -532,6 +548,24 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
         }
         Class::CheckClamp => el.line_clamp(CHECK_LINES).text_ellipsis(),
         Class::CheckToggleNone => el.invisible(),
-        Class::Issues | Class::GroupsEmpty | Class::GroupsGroup | Class::NeedsHeading => el,
+        Class::RefineHead => {
+            let head = look::get(
+                cx,
+                "RefineDialog",
+                ".tm-refine [class*='tm-']: tm-refine-checks tm-refine-head",
+                rest,
+            );
+            padded(type_of(el, &head), &head)
+        }
+        // Measured nowhere: `.tm-refine-none { padding: var(--tm-space-3) 0; color: muted }`.
+        Class::RefineNone => el
+            .text_color(colour::muted(cx))
+            .py(space::s3(cx)),
+        // Dialog sizes itself for `Refine`, from the window's width.
+        Class::Issues
+        | Class::GroupsEmpty
+        | Class::GroupsGroup
+        | Class::NeedsHeading
+        | Class::Refine => el,
     }
 }
