@@ -28,21 +28,28 @@ pub mod attention_text;
 pub mod button;
 pub mod callout;
 pub mod cut_panel;
+pub mod dialog;
+pub mod form_group;
 pub mod heading;
 pub mod html_table;
 pub mod icon;
+pub mod input_group;
 pub mod list_row;
+pub mod menu;
 pub mod meter;
 pub mod plus_minus_tree;
+pub mod popover;
 pub mod progress_bar;
 pub mod property_list;
 pub mod section;
 pub mod segmented_control;
+pub mod spinner;
 pub mod stage_tag;
 pub mod status_tag;
 pub mod table_row;
 pub mod tabs;
 pub mod tag;
+pub mod text_area;
 pub mod toast;
 
 /// How far below the top of its line box the baseline of `size` text sits, in the text face in
@@ -207,6 +214,14 @@ pub enum Class {
     /// `.tm-check-toggle-none` on a Button: hidden, it holds the place of the plus a long check
     /// has, so status tags line up whether a row opens or not.
     CheckToggleNone,
+    /// `.tm-refine` on a Dialog: RefineDialog's width, `--tm-dialog-wide`, and its look.
+    Refine,
+    /// `.tm-refine-head`: the muted names over RefineDialog's columns, Done when and Proven by.
+    RefineHead,
+    /// `.tm-refine-row`: one check's row in RefineDialog, its fields side by side.
+    RefineRow,
+    /// `.tm-refine-none`: "No checks yet", muted, in place of the rows.
+    RefineNone,
 }
 
 /// The lines a long done-when shows until its row is opened: `.tm-check-clamp {
@@ -532,6 +547,27 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
         }
         Class::CheckClamp => el.line_clamp(CHECK_LINES).text_ellipsis(),
         Class::CheckToggleNone => el.invisible(),
-        Class::Issues | Class::GroupsEmpty | Class::GroupsGroup | Class::NeedsHeading => el,
+        Class::RefineHead => {
+            let head = look::get(
+                cx,
+                "RefineDialog",
+                ".tm-refine [class*='tm-']: tm-refine-checks tm-refine-head",
+                rest,
+            );
+            padded(type_of(el, &head), &head)
+                .flex()
+                .gap(space::s3(cx))
+                .line_height(text::line_height(cx))
+        }
+        // `.tm-refine-row { gap: var(--tm-space-3); margin-bottom: var(--tm-space-3); align-items:
+        // start }`.
+        Class::RefineRow => el.flex().items_start().gap(space::s3(cx)).mb(space::s3(cx)),
+        // `.tm-refine-none { padding: var(--tm-space-3) 0; color: muted }`.
+        Class::RefineNone => el.py(space::s3(cx)).text_color(colour::muted(cx)),
+        Class::Issues
+        | Class::GroupsEmpty
+        | Class::GroupsGroup
+        | Class::NeedsHeading
+        | Class::Refine => el,
     }
 }

@@ -437,6 +437,7 @@ pub fn project_view() -> ProjectView {
                 "round 2 closes",
             ),
         ]),
+        person_checks: Vec::new(),
     };
     let details = HashMap::from([
         (s("WATCH-44"), watch_44),

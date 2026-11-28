@@ -432,6 +432,45 @@ pub mod colour {
             Intent::Danger => t.bp_typography_color_danger_rest,
         })
     }
+    /// Disabled text: a disabled button's word, `--bp-typography-color-default-disabled`.
+    pub fn disabled_text(cx: &App) -> Hsla {
+        c(active(cx).bp_typography_color_default_disabled)
+    }
+    /// A disabled solid button's fill: `color-mix(in srgb, var(--bp-intent-default-disabled)
+    /// 20%, transparent)`, and 4% in Blueprint's dark mode.
+    pub fn disabled_fill(cx: &App) -> Hsla {
+        let a = cx.global::<Active>();
+        let fill = c(a.tokens.bp_intent_default_disabled);
+        let share = if is_light(a.name) { 0.2 } else { 0.04 };
+        Hsla {
+            a: fill.a * share,
+            ..fill
+        }
+    }
+    /// A spinner's turning head and its track: `.bp6-spinner .bp6-spinner-head { stroke:
+    /// color-mix(in srgb, var(--bp-palette-gray-1) 80%, transparent) }` and the track at 20%; in
+    /// Blueprint's dark mode the head is `--bp-palette-gray-3` and the track black at 50%.
+    pub fn spinner(cx: &App) -> (Hsla, Hsla) {
+        let a = cx.global::<Active>();
+        let mixed = |token, share: f32| {
+            let colour = c(token);
+            Hsla {
+                a: colour.a * share,
+                ..colour
+            }
+        };
+        if is_light(a.name) {
+            (
+                mixed(a.tokens.bp_palette_gray_1, 0.8),
+                mixed(a.tokens.bp_palette_gray_1, 0.2),
+            )
+        } else {
+            (
+                c(a.tokens.bp_palette_gray_3),
+                mixed(a.tokens.bp_palette_black, 0.5),
+            )
+        }
+    }
     /// An intent's solid fill, as a solid button or tag shows it.
     pub fn intent_fill(cx: &App, intent: Intent) -> Hsla {
         let t = active(cx);
@@ -526,6 +565,20 @@ pub mod shape {
     pub fn cut(cx: &App) -> Pixels {
         size_of(active(cx).tm_cut)
     }
+    /// The shadow of a surface raised over the page, a popover or a dialog: `--tm-shadow-overlay`.
+    pub fn overlay_shadow(cx: &App) -> Vec<gpui::BoxShadow> {
+        super::active(cx)
+            .tm_shadow_overlay
+            .iter()
+            .map(|s| gpui::BoxShadow {
+                color: super::c(s.colour),
+                offset: gpui::point(super::size_of(s.x), super::size_of(s.y)),
+                blur_radius: super::size_of(s.blur),
+                spread_radius: super::size_of(s.spread),
+                inset: s.inset,
+            })
+            .collect()
+    }
 }
 
 /// Movements (Theme/Motion). For components only.
@@ -583,7 +636,7 @@ pub mod space {
 
 /// Layout sizes: columns, rows, labels. For components and composites.
 pub mod size {
-    use gpui::{App, Pixels, px};
+    use gpui::{App, Pixels, px, relative};
 
     use super::{active, size_of};
 
@@ -757,6 +810,80 @@ pub mod size {
     /// The space above a section's subtitle: `margin-top: calc(var(--bp-surface-spacing) * 0.5)`.
     pub fn section_subtitle_gap(cx: &App) -> Pixels {
         steps(cx, 0.5)
+    }
+
+    /// A wide dialog, such as RefineDialog: `--tm-dialog-wide`, at most the window less
+    /// `--tm-space-6` at each side.
+    pub fn dialog_wide(cx: &App, window: Pixels) -> Pixels {
+        let t = active(cx);
+        size_of(t.tm_dialog_wide).min(window - size_of(t.tm_space_6) * 2.)
+    }
+    /// The room a dialog leaves above and below it: `.bp6-dialog { margin:
+    /// calc(var(--bp-surface-spacing) * 8) 0 }`.
+    pub fn dialog_margin(cx: &App) -> Pixels {
+        steps(cx, 8.)
+    }
+    /// A dialog body's tallest, in a window this tall: `.bp6-dialog-body-scroll-container {
+    /// max-height: 70vh }`.
+    pub fn dialog_body_max(window: Pixels) -> Pixels {
+        window * 0.7
+    }
+    /// RefineDialog's two columns of fields: `.tm-refine-row { grid-template-columns: minmax(0,
+    /// 3fr) minmax(0, 2fr) auto }`, as shares of the row. Laid out as flex bases that shrink by
+    /// their share, they leave the same widths once the gaps and the Delete button are taken.
+    pub fn refine_columns() -> (gpui::DefiniteLength, gpui::DefiniteLength) {
+        let fr = |share: f32| relative(share);
+        (fr(3. / 5.), fr(2. / 5.))
+    }
+    /// A dialog's header, at least: `.bp6-dialog-header { min-height: calc(30px +
+    /// var(--bp-surface-spacing) * 2) }`, a medium button and a spacing step above and below it.
+    pub fn dialog_header(cx: &App) -> Pixels {
+        steps(cx, 7.5 + 2.)
+    }
+    /// The space after a dialog header's icon, and before it the icon's pull to the left:
+    /// `.bp6-dialog-header .bp6-icon { margin-left: calc(var(--bp-surface-spacing) * -1);
+    /// margin-right: calc(var(--bp-surface-spacing) * 4 * 0.5) }`.
+    pub fn dialog_icon(cx: &App) -> (Pixels, Pixels) {
+        (steps(cx, 1.), steps(cx, 2.))
+    }
+    /// The margin around a dialog's body: `.bp6-dialog-body { margin:
+    /// calc(var(--bp-surface-spacing) * 4) }`.
+    pub fn dialog_body(cx: &App) -> Pixels {
+        steps(cx, 4.)
+    }
+    /// The space between a dialog footer's buttons: `.bp6-dialog-footer-actions .bp6-button {
+    /// margin-left: calc(var(--bp-surface-spacing) * 2) }`.
+    pub fn dialog_button_gap(cx: &App) -> Pixels {
+        steps(cx, 2.)
+    }
+    /// A form group's space under it and its label's: `.bp6-form-group { margin: 0 0
+    /// calc(var(--bp-surface-spacing) * 4) }`, `.bp6-form-group label.bp6-label { margin-bottom:
+    /// var(--bp-surface-spacing) }`.
+    pub fn form_group(cx: &App) -> (Pixels, Pixels) {
+        (steps(cx, 4.), steps(cx, 1.))
+    }
+    /// A menu's padding and least width: `.bp6-menu { min-width: calc(var(--bp-surface-spacing)
+    /// * 45); padding: var(--bp-surface-spacing) }`; and a menu divider's margin above and below.
+    pub fn menu(cx: &App) -> (Pixels, Pixels) {
+        (steps(cx, 1.), steps(cx, 45.))
+    }
+    /// The space after a menu item's icon: `.bp6-menu-item > * { margin-right:
+    /// calc(var(--bp-surface-spacing) * 2) }`.
+    pub fn menu_item_gap(cx: &App) -> Pixels {
+        steps(cx, 2.)
+    }
+    /// A menu item's line: `.bp6-menu-item { line-height: 22px }`, five and a half steps.
+    pub fn menu_item_line(cx: &App) -> Pixels {
+        steps(cx, 5.5)
+    }
+    /// The space between a popover and its target: Blueprint's popover offset, written as
+    /// `offset: [0, 4]` in its placement modifiers, one spacing step.
+    pub fn popover_gap(cx: &App) -> Pixels {
+        steps(cx, 1.)
+    }
+    /// A small spinner, as a loading button draws it: `SpinnerSize.SMALL`, five spacing steps.
+    pub fn spinner_small(cx: &App) -> Pixels {
+        steps(cx, 5.)
     }
 
     /// The issue table's column widths (`--tm-issue-col-*`). The title takes what is left, and
