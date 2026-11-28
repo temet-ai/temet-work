@@ -9,7 +9,7 @@ use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
 use temet_work_app::daemon::Daemon;
 use temet_work_app::pages::project::Project;
-use temet_work_app::{launch, sample, theme, view_map};
+use temet_work_app::{install, launch, sample, theme, view_map};
 
 /// The window's app id, which the compositor shows as its class.
 const APP_ID: &str = "temet-work";
@@ -28,12 +28,31 @@ fn sample_mode(args: &[String], env: Option<String>) -> bool {
     args.iter().any(|a| a == "--sample") || env.is_some_and(|v| v == "1")
 }
 
+/// What `--version`, `--build` or `--desktop-entry` prints, when one of them is the first
+/// argument; the app then exits without opening a window.
+fn answer(args: &[String]) -> Option<String> {
+    match args.first().map(String::as_str) {
+        Some("--version") => Some(install::version_line()),
+        Some("--build") => Some(install::BUILD.to_string()),
+        Some("--desktop-entry") => install::started_from().map(|exe| install::desktop_entry(&exe)),
+        _ => None,
+    }
+}
+
+/// How often the window reads the build installed where it was started from.
+const INSTALLED_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(text) = answer(&args) {
+        print!("{}", text.trim_end_matches('\n'));
+        println!();
+        return;
+    }
     // Run again with the text gamma and contrast set, unless the person set them (`launch`).
     if let Some(code) = launch::with_text_rendering() {
         std::process::exit(code);
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let name = theme_name(&args, std::env::var("TEMET_WORK_THEME").ok());
     let sample = sample_mode(&args, std::env::var("TEMET_WORK_SAMPLE").ok());
     gpui_platform::application()
@@ -84,6 +103,36 @@ fn main() {
                         });
                     })
                     .detach();
+                    // A newer build installed where this one was started from: the page says a
+                    // restart picks it up.
+                    if let Some(exe) = install::started_from() {
+                        let shown = page.downgrade();
+                        cx.spawn(async move |cx| {
+                            loop {
+                                cx.background_executor().timer(INSTALLED_EVERY).await;
+                                let path = exe.clone();
+                                let installed = cx
+                                    .background_executor()
+                                    .spawn(async move { install::installed_build(&path) })
+                                    .await;
+                                let update = installed.filter(|b| b != install::BUILD).map(|b| {
+                                    install::newer_build_notice(&b, install::BUILD)
+                                });
+                                if shown
+                                    .update(cx, |page, cx| {
+                                        if page.newer_build() != update.as_ref() {
+                                            page.set_newer_build(update.clone());
+                                            cx.notify();
+                                        }
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        })
+                        .detach();
+                    }
                     page
                 };
                 cx.new(|cx| Root::new(page, window, cx))

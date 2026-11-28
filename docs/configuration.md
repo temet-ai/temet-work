@@ -499,6 +499,7 @@ run_in = "/home/me/src/temet-work-deploy"   # a checkout of its own, never a wor
 deploy = '''
   git pull --ff-only &&
   cargo install --path . --locked --root ~/.local &&
+  scripts/install-app ~/.local &&
   echo "$TEMET_WORK_ISSUE $(~/.local/bin/temet-workd --build)" >> "$TEMET_WORK_HANDOFF" &&
   systemd-run --user --on-active=3 systemctl --user restart temet-workd
 '''
@@ -506,6 +507,11 @@ verify = '''
   test "$(~/.local/bin/temet-workd --build)" = "$(git describe --always --dirty)"
 '''
 ```
+
+`scripts/install-app` builds the desktop app in release and installs `temet-work-app` beside
+the daemon, with its launcher entry, `temet-work.desktop`. A window already open reads the
+installed build once a minute and, when it is not its own, says a restart picks it up.
+`temet-work-app --version` and `--build` print its version and build.
 
 `systemd-run` starts the restart as its own unit, so the restart is not in the daemon's
 control group and is not killed with it. A deploy that handed off but was not followed by

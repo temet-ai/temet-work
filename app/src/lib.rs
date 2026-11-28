@@ -11,6 +11,7 @@ pub mod assets;
 pub mod components;
 pub mod composites;
 pub mod daemon;
+pub mod install;
 pub mod launch;
 pub mod pages;
 pub mod sample;
