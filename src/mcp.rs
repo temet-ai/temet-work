@@ -3,11 +3,11 @@
 //! views and runs the same commands, through the same socket as the command line.
 //!
 //! The server has two levels. At `read`, the default, it offers the views:
-//! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
-//! that move work, record choices and change settings: `plan`, `ready`, `review`,
-//! `retry`, `rule`, `choose`, `overturn`, `proposal`, `file`, `investigated`, `set`
-//! and `unset`. A tool above the server's level is not listed, and calling it is
-//! refused.
+//! `status`, `issue`, `closed`, `screen` and `settings`. At `act` it also offers the
+//! commands that move work, record choices and change settings: `plan`, `ready`,
+//! `review`, `retry`, `rule`, `choose`, `overturn`, `proposal`, `file`,
+//! `investigated`, `set` and `unset`. A tool above the server's level is not listed,
+//! and calling it is refused.
 
 use serde_json::{Value, json};
 use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
@@ -85,6 +85,12 @@ fn tools() -> Vec<Tool> {
             description: "One issue in full: its stage, its text from its tracker's last sync (or why that was not read), plan, pull request, what it is to fix, its review rounds with each point, the author's reply and the point's state, its dependencies and its agents.",
             acts: false,
             schema: json!({"type": "object", "properties": {"issue": issue_field()}, "required": ["issue"]}),
+        },
+        Tool {
+            name: "closed",
+            description: "Every issue a person closed in the projects and areas a group takes issues from, one id and title to a line, in the tracker's order.",
+            acts: false,
+            schema: json!({"type": "object", "properties": {"group": {"type": "string", "description": "The group's id."}}, "required": ["group"]}),
         },
         Tool {
             name: "screen",
@@ -254,6 +260,9 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
         "status" => Command::Status,
         "issue" => Command::Issue {
             issue: issue(args)?,
+        },
+        "closed" => Command::Closed {
+            group: temet_work_core::ids::GroupId::new(text(args, "group")?),
         },
         "screen" => Command::Screen {
             agent: AgentId::new(text(args, "agent")?),
@@ -567,9 +576,9 @@ mod tests {
     fn the_read_level_lists_only_the_views() {
         assert_eq!(
             names(Level::Read),
-            ["status", "issue", "screen", "settings"]
+            ["status", "issue", "closed", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 16);
+        assert_eq!(names(Level::Act).len(), 17);
     }
 
     #[test]
@@ -737,6 +746,19 @@ mod tests {
                     group: temet_work_core::ids::GroupId::new("watch"),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn closed_becomes_the_same_request_the_command_line_sends() {
+        let mut sent = Vec::new();
+        call(Level::Read, "closed", json!({"group": "watch"}), &mut sent);
+        let commands: Vec<Command> = sent.into_iter().map(|r| r.command).collect();
+        assert_eq!(
+            commands,
+            [Command::Closed {
+                group: temet_work_core::ids::GroupId::new("watch"),
+            }]
         );
     }
 

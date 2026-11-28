@@ -577,6 +577,9 @@ pub fn answer(
                 text: temet_work_core::text::issue(host.world(), issue, &host.issue_text(issue))
                     .unwrap_or_default(),
             },
+            temet_work_core::Command::Closed { group } => Reply::Done {
+                text: temet_work_core::text::closed(host.world(), group).unwrap_or_default(),
+            },
             temet_work_core::Command::Screen { agent } => match host.screen(agent) {
                 Ok(text) => Reply::Done { text },
                 Err(why) => Reply::Refused { why },
@@ -832,6 +835,10 @@ mod tests {
         assert_eq!(line(None, Command::Status, &done), None);
         let read = Command::Issue { issue: issue() };
         assert_eq!(line(Some("author-1"), read, &done), None);
+        let closed = Command::Closed {
+            group: temet_work_core::ids::GroupId::new("watch"),
+        };
+        assert_eq!(line(Some("investigator-1"), closed, &done), None);
         assert_eq!(line(None, screen(), &done), None);
         assert_eq!(line(None, settings, &done), None);
 
@@ -856,6 +863,62 @@ mod tests {
         assert_eq!(
             line(None, set, &done).as_deref(),
             Some("request: by=none Set -> done")
+        );
+    }
+
+    #[test]
+    fn the_daemon_answers_closed_with_the_issues_a_person_closed() {
+        use temet_work_core::ids::{GroupId, IssueId, ProjectId};
+        use temet_work_core::{Command, Event, World, host::Memory};
+
+        let ankh = ProjectId::new("ankh");
+        let sync = |closed| Event::IssueSynced {
+            issue: IssueId::new("ankh", "3"),
+            title: "Wind the clock".into(),
+            milestone: None,
+            depends_on: Vec::new(),
+            order: 3,
+            closed,
+        };
+        let (world, _) = World::replay(&[
+            Event::ProjectAdded {
+                project: ankh.clone(),
+                tracker: "fake".into(),
+                name: "ankh-morpork/watch".into(),
+                code_host: None,
+                repo: None,
+            },
+            Event::GroupCreated {
+                group: GroupId::new("watch"),
+                name: "Night watch".into(),
+                projects: vec![ankh],
+                areas: Vec::new(),
+                milestones: Vec::new(),
+                refining_at_once: 1,
+                model: None,
+                queue_low: None,
+                investigate_every: None,
+            },
+            sync(false),
+            sync(true),
+        ]);
+        let mut host = Host::new(world, Vec::new(), Box::new(Memory::default()));
+        let mut ask = |group: &str| {
+            let group = GroupId::new(group);
+            let request = Request::new(None, Command::Closed { group });
+            answer(&mut host, 0, &request, &Peer::Unchecked).expect("logged")
+        };
+        assert_eq!(
+            ask("watch"),
+            Reply::Done {
+                text: "ankh#3 Wind the clock\n".into()
+            }
+        );
+        assert_eq!(
+            ask("guild"),
+            Reply::Refused {
+                why: "there is no group guild".into()
+            }
         );
     }
 

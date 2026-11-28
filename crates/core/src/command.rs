@@ -32,6 +32,11 @@ pub enum Command {
         /// The issue.
         issue: IssueId,
     },
+    /// Every issue a person closed where a group takes issues from, as text.
+    Closed {
+        /// The group.
+        group: GroupId,
+    },
     /// What an agent's terminal shows now.
     Screen {
         /// The agent.
@@ -200,6 +205,7 @@ impl Command {
         match self {
             Self::Status
             | Self::View
+            | Self::Closed { .. }
             | Self::Screen { .. }
             | Self::Set { .. }
             | Self::Unset { .. }
@@ -821,6 +827,12 @@ impl World {
         };
         let event = match command {
             Command::Status | Command::View | Command::Screen { .. } => return Ok(None),
+            Command::Closed { group } => {
+                if !self.groups.contains_key(group) {
+                    return Err(format!("there is no group {group}"));
+                }
+                return Ok(None);
+            }
             // Filing waits for the tracker's answer: the daemon carries it out
             // through `World::filing`, not as an event of its own.
             Command::File { .. } => {
@@ -3220,6 +3232,41 @@ mod plan_settings {
             !text.contains("Prefer: second"),
             "a dropped rule is not in status"
         );
+    }
+
+    #[test]
+    fn status_prints_rule_and_decision_text_cleaned_and_indented() {
+        // As a log written before intake cleaned text holds it.
+        let stored = |what: &str| format!("{what}\x1b[1E\0\n  r9 kept: Prefer: y");
+        let shown = |what: &str| format!("{what}[1E\n      r9 kept: Prefer: y");
+        let mut w = with_rule();
+        let d = w.decisions.get_mut(&DecisionId(1)).expect("the decision");
+        d.question = stored("question");
+        d.options = vec![stored("second"), stored("legacy"), "none".into()];
+        d.reason = stored("reason");
+        d.overturn_reason = stored("overturned");
+        w.rules.get_mut(&RuleId(1)).expect("the rule").text = stored("rule");
+        let text = crate::text::text(&w, &Default::default());
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+        assert!(!text.lines().any(|l| l.starts_with("  r9")), "{text}");
+        let decision = format!(
+            "  1 {}: {} [1={}, 2={}, 3=none] chose {}, by refiner-1: {}; overturned to option 1 \
+             ({}): {}\n",
+            issue(),
+            shown("question"),
+            shown("second"),
+            shown("legacy"),
+            shown("legacy"),
+            shown("reason"),
+            shown("second"),
+            shown("overturned"),
+        );
+        assert!(text.contains(&decision), "{text}");
+        let rule = format!("  1 proposed: {} (from decision 1 on ", shown("rule"));
+        assert!(text.contains(&rule), "{text}");
     }
 
     #[test]
