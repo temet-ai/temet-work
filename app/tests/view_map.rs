@@ -199,7 +199,10 @@ fn needs_you_lists_open_decisions_costliest_first() {
     assert_eq!(first.by.as_ref(), "arbiter-6");
     assert_eq!(first.issue.as_deref(), Some("4"));
     assert_eq!(first.overturn_before.as_deref(), Some("its issue's merge"));
-    assert_eq!(first.weighed.len(), 2);
+    assert!(
+        first.weighed.is_empty() && first.why.is_none(),
+        "Needs you draws the short row; the pane has what was weighed and why"
+    );
     assert_eq!(page.needs[1].decision.cost, Some(UndoCost::Low));
     assert_eq!(
         page.need_project.get("3").map(|p| p.as_ref()),
