@@ -1567,9 +1567,8 @@ impl World {
                 out.start.push(effect);
             }
         }
-        out.start.retain(|e| {
-            !self.waits_for_machine(e) && !self.waits_for_person(e) && !self.waits_for_unassigned(e)
-        });
+        out.start
+            .retain(|e| !self.waits_for_person(e) && !self.waits_for_unassigned(e));
         out
     }
 
@@ -2091,8 +2090,6 @@ impl World {
                 .values()
                 .filter(|i| i.stage == Stage::New && i.group.is_none() && self.in_scope(group, i))
                 .filter(|i| !self.stopped_issues.contains_key(&i.id))
-                // One whose refiner has no folder on its machine takes no slot.
-                .filter(|i| self.has_place(i, Role::Refiner))
                 .collect();
             new.sort_by_key(|i| Self::rank(group, i));
             let take: Vec<IssueId> = new

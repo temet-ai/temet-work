@@ -487,7 +487,7 @@ fn plan() -> Vec<RefineCheck> {
 fn a_title_edit_alone_sends_the_title_and_no_checks() {
     let title = "Store the constable's token";
     let command = refine_command(
-        "watch#WATCH-44",
+        IssueId::new("watch", "WATCH-44"),
         (title, &plan()),
         ("Keep the token  ", &plan()),
         false,

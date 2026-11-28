@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::model::{AgentState, Check};
-use crate::settings::{Scope, Value};
 
 fn refine(title: Option<&str>, checks: Option<&[(&str, &str)]>, send: bool) -> Command {
     Command::Refine {
@@ -287,7 +286,7 @@ fn a_send_on_a_new_issue_starts_a_refiner_past_refining_at_once_whose_brief_hold
 }
 
 #[test]
-fn a_send_on_a_new_issue_is_refused_when_no_group_covers_it_its_refiner_has_no_folder_or_held() {
+fn a_send_on_a_new_issue_is_refused_when_no_group_covers_it_or_held() {
     let mut w = new_with_the_slot_taken();
     w.apply(&sync("3", "m9", 3, &[]));
     let why = refused(
@@ -300,21 +299,6 @@ fn a_send_on_a_new_issue_is_refused_when_no_group_covers_it_its_refiner_has_no_f
         },
     );
     assert!(why.starts_with("no group's scope covers ankh#3"), "{why}");
-
-    let mut pinned = w.clone();
-    pinned.apply(&Event::SettingSet {
-        scope: Scope::Global,
-        role: Some(Role::Refiner),
-        key: "machine".into(),
-        value: Value::Text("klatch".into()),
-        by: "person".into(),
-    });
-    let why = refused(&pinned, &refine(None, None, true));
-    assert!(
-        why.starts_with("ankh#1's refiner has no folder to run in"),
-        "{why}"
-    );
-    assert!(why.contains("klatch"), "{why}");
 
     w.apply(&Event::Held);
     let why = refused(&w, &refine(Some("A gate"), None, true));
