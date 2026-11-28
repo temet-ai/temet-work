@@ -18,20 +18,16 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     match args.first().map(String::as_str) {
-        None | Some("help" | "-h" | "--help") => {
-            println!("{}", cli::USAGE);
-            return ExitCode::SUCCESS;
-        }
+        None | Some("help" | "-h" | "--help") => return output(cli::USAGE),
         Some("mcp") => return mcp(&args[1..]),
         Some("relay") => return relay(&args[1..]),
         Some("trust-folder") => return trust_folder(&args[1..]),
         Some("--version") => {
-            println!(
+            return output(&format!(
                 "temet-work {} ({})",
                 env!("CARGO_PKG_VERSION"),
                 temet_work::BUILD
-            );
-            return ExitCode::SUCCESS;
+            ));
         }
         Some("parts") => {
             let parts = temet_work::parts();
@@ -57,8 +53,10 @@ fn main() -> ExitCode {
             } else {
                 ids.join(", ")
             };
-            println!("temet-work {} (parts: {ids})", env!("CARGO_PKG_VERSION"));
-            return ExitCode::SUCCESS;
+            return output(&format!(
+                "temet-work {} (parts: {ids})",
+                env!("CARGO_PKG_VERSION")
+            ));
         }
         _ => {}
     }
@@ -91,19 +89,13 @@ fn main() -> ExitCode {
         }
     };
     match transport.send(&request) {
-        Ok(Reply::Done { text }) => {
-            println!("{}", text.trim_end());
-            ExitCode::SUCCESS
-        }
+        Ok(Reply::Done { text }) => output(text.trim_end()),
         Ok(Reply::Refused { why }) => {
             eprintln!("refused: {why}");
             ExitCode::from(1)
         }
         Ok(Reply::View { view }) => match serde_json::to_string_pretty(&view) {
-            Ok(json) => {
-                println!("{json}");
-                ExitCode::SUCCESS
-            }
+            Ok(json) => output(&json),
             Err(e) => {
                 eprintln!("the view cannot be written as JSON: {e}");
                 ExitCode::from(2)
@@ -113,6 +105,21 @@ fn main() -> ExitCode {
             eprintln!("{e}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Writes a command's output and a newline to standard output, and says how the
+/// command ends. A reader that stopped reading, as `head` does, has what it
+/// wanted, so a broken pipe is a quiet success.
+fn output(text: &str) -> ExitCode {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match writeln!(out, "{text}").and_then(|()| out.flush()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+            eprintln!("standard output: {e}");
+            ExitCode::from(2)
+        }
+        _ => ExitCode::SUCCESS,
     }
 }
 

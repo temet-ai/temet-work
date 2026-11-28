@@ -1247,6 +1247,75 @@ fn status_json_prints_the_view() {
     assert_eq!(view.issues[0].id, "ankh#1");
 }
 
+/// Runs `status` and `status --json`, each with a standard output from
+/// `stdout`, answers each through the socket and returns how each one ended.
+fn status_writing_to(
+    socket: &str,
+    stdout: impl Fn() -> std::process::Stdio,
+) -> [std::process::Output; 2] {
+    use temet_work::socket;
+
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(socket);
+    let requests = socket::listen(&path).expect("listen");
+    let (mut host, _) = host();
+    host.tick(0).expect("tick");
+    [
+        (&["status"][..], Command::Status),
+        (&["status", "--json"][..], Command::View),
+    ]
+    .map(|(args, command)| {
+        let client = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+            .args(args)
+            .env("TEMET_WORK_SOCKET", &path)
+            .env_remove("TEMET_WORK_DAEMON")
+            .env_remove("TEMET_WORK_AGENT")
+            .env_remove(SECRET_VAR)
+            .stdout(stdout())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("runs");
+        let pending = requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a request");
+        assert_eq!(pending.request.command, command);
+        let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
+        pending.answer(reply);
+        client.wait_with_output().expect("client")
+    })
+}
+
+#[test]
+fn status_to_a_gone_reader_is_a_quiet_success() {
+    let ended = status_writing_to("gone-reader.sock", || {
+        let (reader, writer) = std::io::pipe().expect("pipe");
+        drop(reader);
+        writer.into()
+    });
+    for out in ended {
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_to_a_full_device_is_reported_and_exits_2() {
+    let ended = status_writing_to("full-device.sock", || {
+        std::fs::File::options()
+            .write(true)
+            .open("/dev/full")
+            .expect("/dev/full")
+            .into()
+    });
+    for out in ended {
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "standard output: No space left on device (os error 28)\n"
+        );
+    }
+}
+
 #[test]
 fn json_on_a_command_other_than_status_is_refused_with_the_usage() {
     for args in [
