@@ -1,6 +1,6 @@
 //! Clicks on the Project page, drawn under GPUI's test support with the design system's faces
-//! and no window: a tab, Group by, a row, Overturn with its confirm, and a long check's plus
-//! and minus. Run with
+//! and no window: a tab, Group by, a row, Overturn with its confirm, a long check's plus and
+//! minus, and the issue pane's actions menu moving an issue. Run with
 //! `cargo test --features shots --test clicks`.
 
 use std::sync::Arc;
@@ -10,11 +10,15 @@ use gpui::{
     TestAppContext, TestDispatcher, VisualTestContext, div, px,
 };
 use gpui_component::Root;
+use temet_work_app::components::Intent;
 use temet_work_app::components::status_tag::Status;
 use temet_work_app::composites::check_list::{CheckList, PlanCheck};
 use temet_work_app::composites::issue_pane::IssueTab;
 use temet_work_app::pages::project::{Grouping, Project};
 use temet_work_app::{assets, sample, theme};
+use temet_work_core::Command;
+use temet_work_core::ids::IssueId;
+use temet_work_core::view::StageWord;
 
 /// The page in a test window, drawn.
 fn page() -> (Entity<Project>, &'static mut VisualTestContext) {
@@ -214,4 +218,80 @@ fn plus_opens_a_long_check_and_minus_closes_it() {
     // The short check's button only holds its place: a click on it opens nothing.
     click(vcx, "list-check-1-toggle");
     assert_eq!(height(vcx), closed);
+}
+
+/// What the page sent with its sender, and the answer the sender gives each time.
+fn sending(
+    page: &Entity<Project>,
+    vcx: &mut VisualTestContext,
+    answer: Result<&'static str, &'static str>,
+) -> std::rc::Rc<std::cell::RefCell<Vec<Command>>> {
+    let sent: std::rc::Rc<std::cell::RefCell<Vec<Command>>> = Default::default();
+    let into = sent.clone();
+    vcx.update(|_, cx| {
+        page.update(cx, |p, _| {
+            p.set_sender(move |command, _| {
+                into.borrow_mut().push(command);
+                gpui::Task::ready(answer.map(String::from).map_err(String::from))
+            })
+        })
+    });
+    sent
+}
+
+#[test]
+fn move_to_ready_sends_the_move_and_shows_a_refusal_in_a_danger_toast() {
+    let (page, vcx) = page();
+    let why = "watch#WATCH-44 is in review, round 2: a reviewer is at work";
+    let sent = sending(&page, vcx, Err(why));
+    assert!(
+        vcx.debug_bounds("move-to").is_none(),
+        "the menu starts closed"
+    );
+    click(vcx, "issue-actions");
+    assert!(vcx.read_entity(&page, |p, _| p.actions_open()));
+    click(vcx, "move-to");
+    // The submenu lists the moves the daemon takes for WATCH-44, and no other stage.
+    assert!(vcx.debug_bounds("move-to-new").is_some());
+    assert!(vcx.debug_bounds("move-to-working").is_none());
+    last_click(vcx, "move-to-ready");
+    assert_eq!(
+        sent.borrow().as_slice(),
+        [Command::Move {
+            issue: IssueId::new("watch", "WATCH-44"),
+            stage: StageWord::Ready,
+        }]
+    );
+    let (toast, intent, open) = vcx.read_entity(&page, |p, _| {
+        (p.toast().cloned(), p.toast_intent(), p.actions_open())
+    });
+    assert_eq!(toast.as_deref(), Some(why));
+    assert_eq!(intent, Some(Intent::Danger));
+    assert!(!open, "the menu closes once a stage is picked");
+}
+
+#[test]
+fn an_accepted_move_says_what_the_daemon_said_in_the_plain_toast() {
+    let (page, vcx) = page();
+    let said = "watch#WATCH-44 is new; the move dropped its pull request 212, which is left open \
+                on the code host for you to close or reuse";
+    let sent = sending(&page, vcx, Ok(said));
+    click(vcx, "issue-actions");
+    click(vcx, "move-to");
+    last_click(vcx, "move-to-new");
+    assert_eq!(sent.borrow().len(), 1);
+    let (toast, intent) = vcx.read_entity(&page, |p, _| (p.toast().cloned(), p.toast_intent()));
+    assert_eq!(toast.as_deref(), Some(said));
+    assert_eq!(intent, Some(Intent::None));
+}
+
+#[test]
+fn a_press_outside_the_open_menu_closes_it_and_sends_nothing() {
+    let (page, vcx) = page();
+    let sent = sending(&page, vcx, Ok("unused"));
+    click(vcx, "issue-actions");
+    assert!(vcx.read_entity(&page, |p, _| p.actions_open()));
+    last_click(vcx, "tab-pull");
+    assert!(!vcx.read_entity(&page, |p, _| p.actions_open()));
+    assert!(sent.borrow().is_empty());
 }

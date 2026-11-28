@@ -587,6 +587,11 @@ pub fn answer(
         }),
         Ok(events) => {
             let changed = changed_setting(&request.command, events.first());
+            // What a move drops, read before it is applied.
+            let dropped = match &request.command {
+                temet_work_core::Command::Move { issue, .. } => host.world().open_pulls(issue),
+                _ => Vec::new(),
+            };
             let decided = events.iter().find_map(|e| match e {
                 temet_work_core::Event::DecisionMade { decision } => Some(decision.id),
                 _ => None,
@@ -629,6 +634,11 @@ pub fn answer(
                 temet_work_core::Command::Resume => {
                     return Ok(Reply::Done {
                         text: "resumed: work starts again".into(),
+                    });
+                }
+                temet_work_core::Command::Move { issue, .. } => {
+                    return Ok(Reply::Done {
+                        text: temet_work_core::text::moved(host.world(), issue, &dropped),
                     });
                 }
                 temet_work_core::Command::Investigated { group } => {

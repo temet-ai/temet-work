@@ -341,6 +341,15 @@ pub enum Event {
     Held,
     /// A person lifted the hold with `temet-work resume`.
     Resumed,
+    /// A person moved an issue to another stage with `temet-work move`: back to
+    /// new, to be refined again, or back to ready, for a new author
+    /// ([`crate::World::may_move`] says which moves are taken).
+    Moved {
+        /// The issue.
+        issue: IssueId,
+        /// The stage it goes to.
+        stage: crate::model::Stage,
+    },
     /// The code host reports that the pull request under review conflicts with the
     /// branch it merges into. It goes back to its author at once.
     PullConflicts {

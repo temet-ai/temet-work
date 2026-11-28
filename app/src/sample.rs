@@ -350,6 +350,8 @@ pub fn project_view() -> ProjectView {
             }
         };
     let watch_44 = IssueDetail {
+        id: Some(temet_work_core::ids::IssueId::new("watch", "WATCH-44")),
+        moves: vec![Stage::New, Stage::Ready],
         round: 2,
         plan: Some(IssuePlan {
             folder: Some(s("omit:~/work/watch-2")),

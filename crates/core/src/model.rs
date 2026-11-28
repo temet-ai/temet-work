@@ -190,6 +190,21 @@ pub struct Issue {
     /// Its review rounds, in the order they finished.
     #[serde(default)]
     pub reviews: Vec<Review>,
+    /// A person's last move of it to another stage (`temet-work move`); none
+    /// before any, and in older logs. Every agent of the issue started before
+    /// it has its step over for good.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<Moved>,
+}
+
+/// A person's move of an issue to another stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Moved {
+    /// When: how many events the loop had applied once it applied the move, so
+    /// an agent with a smaller [`Agent::started`] started before it.
+    pub at: u64,
+    /// The stage it was moved to.
+    pub to: Stage,
 }
 
 /// A pull request a person closed without merging: a read in review or the

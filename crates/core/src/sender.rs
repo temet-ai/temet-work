@@ -215,6 +215,7 @@ impl Command {
             Self::Investigated { .. } => "investigated",
             Self::Hold => "hold",
             Self::Resume => "resume",
+            Self::Move { .. } => "move",
         }
     }
 
@@ -581,6 +582,52 @@ mod tests {
             Ok(())
         );
         assert_eq!(w.admit(&sender(None, None, Peer::Unchecked), &keep), Ok(()));
+    }
+
+    #[test]
+    fn a_move_is_refused_from_an_agent_however_it_comes() {
+        let w = world();
+        let back = Command::Move {
+            issue: IssueId::new("ankh", "1"),
+            stage: crate::view::StageWord::New,
+        };
+        let carried = w
+            .admit(&sender(None, Some("a"), Peer::Read(vec![])), &back)
+            .expect_err("refused");
+        assert!(
+            carried.starts_with("move names no agent but carries author-1's secret"),
+            "{carried}"
+        );
+        let inside = w
+            .admit(&sender(None, None, Peer::Read(vec![d("b")])), &back)
+            .expect_err("refused");
+        assert!(
+            inside.starts_with("move names no agent but comes from inside reviewer-1's"),
+            "{inside}"
+        );
+        let above = w
+            .admit(
+                &sender(None, None, unreadable("process 9: gone", vec![d("a")])),
+                &back,
+            )
+            .expect_err("refused");
+        assert!(above.contains("inside author-1's process tree"), "{above}");
+        let unread = w
+            .admit(
+                &sender(None, None, unreadable("process 9: gone", vec![])),
+                &back,
+            )
+            .expect_err("refused");
+        assert!(unread.contains("process 9: gone"), "{unread}");
+        let far = w
+            .admit(&relayed(None, None, Peer::Read(vec![])), &back)
+            .expect_err("refused");
+        assert!(far.contains("temet-work relay"), "{far}");
+        // From a person's shell, outside any agent.
+        assert_eq!(
+            w.admit(&sender(None, None, Peer::Read(vec![])), &back),
+            Ok(())
+        );
     }
 
     #[test]

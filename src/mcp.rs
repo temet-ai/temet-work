@@ -5,14 +5,15 @@
 //! The server has two levels. At `read`, the default, it offers the views:
 //! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
 //! that move work, record choices and change settings: `plan`, `ready`, `review`,
-//! `retry`, `rule`, `choose`, `overturn`, `proposal`, `hold`, `resume`, `file`,
-//! `investigated`, `set` and `unset`. A tool above the server's level is not
+//! `retry`, `rule`, `choose`, `overturn`, `proposal`, `hold`, `resume`, `move`,
+//! `file`, `investigated`, `set` and `unset`. A tool above the server's level is not
 //! listed, and calling it is refused.
 
 use serde_json::{Value, json};
 use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
 use temet_work_core::model::{Check, Plan, Role};
 use temet_work_core::settings::{Target, Value as Setting};
+use temet_work_core::view::StageWord;
 use temet_work_core::{Command, Request, Verdict};
 
 use crate::socket::Reply;
@@ -185,6 +186,15 @@ fn tools() -> Vec<Tool> {
             description: "A person's: lift the hold, so work starts again. Refused from an agent.",
             acts: true,
             schema: json!({"type": "object", "properties": {}}),
+        },
+        Tool {
+            name: "move",
+            description: "A person's: move an issue back to new, so it is refined again from nothing, or back to ready, so a new author does it again from its plan. Its running agents are stopped, its work folders released, and its pull requests, review rounds and fixes dropped; the pull requests stay open on the code host. Any other move is refused with its reason, as is any move once a pull request of the issue has merged. Taken while the daemon is held. Refused from an agent.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {
+                "issue": issue_field(),
+                "stage": {"type": "string", "enum": StageWord::ALL.map(StageWord::name), "description": "The stage to move it to: new or ready are taken; the loop or an agent moves it to the others."}
+            }, "required": ["issue", "stage"]}),
         },
         Tool {
             name: "file",
@@ -411,6 +421,10 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
                 .map_err(|_| "option is too large".to_string())?,
             reason: text(args, "reason")?,
         },
+        "move" => Command::Move {
+            issue: issue(args)?,
+            stage: StageWord::parse(&text(args, "stage")?)?,
+        },
         "proposal" => Command::Proposal {
             rule: RuleId(number(args, "rule")?),
             keep: match text(args, "action")?.as_str() {
@@ -583,7 +597,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 18);
+        assert_eq!(names(Level::Act).len(), 19);
     }
 
     #[test]
@@ -688,6 +702,26 @@ mod tests {
         );
         assert!(names(Level::Act).contains(&"overturn".to_string()));
         assert!(!names(Level::Read).contains(&"proposal".to_string()));
+    }
+
+    #[test]
+    fn move_is_offered_at_act_only_and_becomes_the_command_lines() {
+        let mut sent = Vec::new();
+        call(
+            Level::Act,
+            "move",
+            json!({"issue": "radar#1", "stage": "ready"}),
+            &mut sent,
+        );
+        assert_eq!(
+            sent.iter().map(|r| r.command.clone()).collect::<Vec<_>>(),
+            [Command::Move {
+                issue: IssueId::new("radar", "1"),
+                stage: StageWord::Ready
+            }]
+        );
+        assert!(names(Level::Act).contains(&"move".to_string()));
+        assert!(!names(Level::Read).contains(&"move".to_string()));
     }
 
     #[test]

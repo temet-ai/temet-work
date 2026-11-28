@@ -40,6 +40,11 @@ pub enum IconName {
     InfoSign,
     // A toast's close button, from Blueprint's newer icon set.
     X,
+    // IssueActions: the pane's actions button, Move to, and a submenu's caret, the caret from
+    // Blueprint's newer icon set as MenuItem draws it.
+    More,
+    ArrowRight,
+    CaretRight,
     // Projects in SideNav.
     Console,
     Database,
@@ -51,7 +56,7 @@ pub enum IconName {
 
 impl IconName {
     /// Every icon the app embeds.
-    pub const ALL: [IconName; 32] = [
+    pub const ALL: [IconName; 35] = [
         Self::TickCircle,
         Self::Refresh,
         Self::Time,
@@ -78,6 +83,9 @@ impl IconName {
         Self::WarningSign,
         Self::InfoSign,
         Self::X,
+        Self::More,
+        Self::ArrowRight,
+        Self::CaretRight,
         Self::Console,
         Self::Database,
         Self::Layout,
@@ -115,6 +123,9 @@ impl IconName {
             Self::WarningSign => "warning-sign",
             Self::InfoSign => "info-sign",
             Self::X => "x",
+            Self::More => "more",
+            Self::ArrowRight => "arrow-right",
+            Self::CaretRight => "caret-right",
             Self::Console => "console",
             Self::Database => "database",
             Self::Layout => "layout",

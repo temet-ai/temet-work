@@ -74,7 +74,10 @@
       "agents": [],
       "updated_ms": 1795000900000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "moves": [
+        "new"
+      ]
     },
     {
       "id": "watch#1",
@@ -91,7 +94,8 @@
       "agents": [],
       "updated_ms": 1795000480000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "moves": []
     },
     {
       "id": "watch#2",
@@ -110,7 +114,10 @@
       ],
       "updated_ms": 1795000540000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "moves": [
+        "new"
+      ]
     },
     {
       "id": "watch#3",
@@ -129,7 +136,11 @@
       ],
       "updated_ms": 1795000600000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "moves": [
+        "new",
+        "ready"
+      ]
     },
     {
       "id": "watch#4",
@@ -190,6 +201,10 @@
             }
           ]
         }
+      ],
+      "moves": [
+        "new",
+        "ready"
       ]
     },
     {
@@ -236,7 +251,11 @@
           "state": "failed"
         }
       ],
-      "reviews": []
+      "reviews": [],
+      "moves": [
+        "new",
+        "ready"
+      ]
     }
   ],
   "done": 2,
