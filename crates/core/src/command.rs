@@ -181,6 +181,24 @@ pub enum Command {
         /// The group.
         group: GroupId,
     },
+    /// A person's change to an issue's title and to the checks they hold it to,
+    /// and whether to send it to a refiner now. A new title is written to the
+    /// issue in its tracker before anything is logged.
+    Refine {
+        /// The issue.
+        issue: IssueId,
+        /// The new title; none keeps it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// The person's checks, replacing those the issue has; an empty list
+        /// removes them all, and none keeps them. Each is a done_when and a
+        /// proven_by, which may be empty.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checks: Option<Vec<crate::model::Check>>,
+        /// Whether to send it to a refiner now.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        send: bool,
+    },
     /// A person holds the daemon: nothing new starts, and agents at work finish
     /// their turn ([`World::held`]).
     Hold,
@@ -221,7 +239,8 @@ impl Command {
             | Self::Review { issue, .. }
             | Self::Retry { issue }
             | Self::Rule { issue, .. }
-            | Self::Choose { issue, .. } => Some(issue),
+            | Self::Choose { issue, .. }
+            | Self::Refine { issue, .. } => Some(issue),
         }
     }
 }
@@ -551,6 +570,14 @@ impl World {
             ));
         };
         if agent.role == role && agent.issue.as_ref() == Some(issue) {
+            // A person sent the issue to a refiner after this agent started, so
+            // what it did answered what the send replaced.
+            if self.issues.get(issue).is_some_and(|i| !i.sent_after(agent)) {
+                return Err(format!(
+                    "{step} for {issue} is refused: a person sent {issue} to a refiner after {by} \
+                     started, so {by}'s step is over and its session is stopped"
+                ));
+            }
             return Ok(());
         }
         let working = self
@@ -1149,6 +1176,10 @@ impl World {
                 }
                 Event::Resumed
             }
+            Command::Refine { .. } => match self.refined(by, command)? {
+                Some(event) => event,
+                None => return Ok(None),
+            },
             // A choice moves no work: its agent carries on at once.
             Command::Choose { .. } => Event::DecisionMade {
                 decision: self.choice(by, command)?,

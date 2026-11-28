@@ -16,6 +16,7 @@ pub mod investigation;
 pub mod launch;
 pub mod model;
 pub mod placement;
+pub mod refine;
 pub mod reply;
 pub mod sender;
 pub mod settings;

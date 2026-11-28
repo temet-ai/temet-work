@@ -170,6 +170,7 @@ fn mark(i: &Issue) -> u64 {
         r.states.hash(&mut h);
     }
     (i.verify_failed, i.reopen_due).hash(&mut h);
+    (&i.person_checks, i.sent_at).hash(&mut h);
     h.finish()
 }
 
@@ -441,6 +442,8 @@ impl World {
                     reopen_due: false,
                     review_waived: false,
                     reviews: Vec::new(),
+                    person_checks: Vec::new(),
+                    sent_at: None,
                 });
                 entry.title = title.clone();
                 entry.milestone = milestone.clone();
@@ -596,6 +599,24 @@ impl World {
                     i.plan = Some(plan.clone());
                     i.stage = Stage::Ready;
                     out.extend(done);
+                }
+            }
+            Event::Refined {
+                issue,
+                title,
+                checks,
+                send,
+            } => {
+                if let Some(i) = self.issues.get_mut(issue) {
+                    if let Some(title) = title {
+                        i.title.clone_from(title);
+                    }
+                    if let Some(checks) = checks {
+                        i.person_checks.clone_from(checks);
+                    }
+                }
+                if *send {
+                    self.send_to_refiner(issue, &mut out);
                 }
             }
             Event::PullRequestReady {
@@ -1392,7 +1413,9 @@ impl World {
                 ),
                 _ => continue,
             };
-            if self.running(&i.id, role).is_some() {
+            // One started before a person's send is asked to stop above, and does
+            // not stand in for the agent the send needs.
+            if self.running(&i.id, role).is_some_and(|a| i.sent_after(a)) {
                 // An arbiter whose ruling is in has finished its step, so nothing
                 // reminds or stops it. One still running when the issue waits on an
                 // arbiter again is one whose stop failed, or that an older log left
@@ -1434,11 +1457,12 @@ impl World {
             // the loop stopped because the issue went back to its author. One
             // whose program was lost, as to a reboot, counts toward a limit of
             // its own, so a program lost at the same point every run is not
-            // started forever.
+            // started forever. Those started before a person sent the issue to a
+            // refiner worked on what the send replaced, and count no more.
             let of_role: Vec<&Agent> = self
                 .agents
                 .values()
-                .filter(|a| a.issue.as_ref() == Some(&i.id) && a.role == role)
+                .filter(|a| a.issue.as_ref() == Some(&i.id) && a.role == role && i.sent_after(a))
                 .collect();
             let tried = of_role.iter().filter(|a| a.ended_waited_on).count();
             let lost = of_role.iter().filter(|a| a.lost_waited_on).count();
@@ -1497,6 +1521,11 @@ impl World {
         let Some(i) = agent.issue.as_ref().and_then(|id| self.issues.get(id)) else {
             return false;
         };
+        // A person sent the issue to a refiner after it started: what it was
+        // doing answered what the send replaced.
+        if !i.sent_after(agent) {
+            return true;
+        }
         match i.stage {
             // Back to new or ready, every agent on it is from before: a reopen
             // in the tracker or a failed verify ended their steps.
@@ -1627,6 +1656,85 @@ impl World {
                 agent: a.id.clone(),
             })
             .collect()
+    }
+
+    /// The group a person's send hands `issue` to: the group that took it, or for
+    /// a new issue the first group whose scope covers it. None when no group may
+    /// refine it now.
+    pub(crate) fn sending_group(&self, issue: &Issue) -> Option<GroupId> {
+        match &issue.group {
+            Some(g) if issue.stage != Stage::New => Some(g.clone()),
+            _ => self
+                .groups
+                .values()
+                .find(|g| self.in_scope(g, issue))
+                .map(|g| g.id.clone()),
+        }
+    }
+
+    /// What a person's send (`temet-work refine --send`) does to `issue`: it goes
+    /// to a refiner at once, by the group that took it or, for a new issue, the
+    /// first group whose scope covers it, past that group's `refining_at_once`.
+    /// Its refiner, author, reviewer and arbiter are stopped; each was started
+    /// before the send ([`Issue::sent_after`]), so none is waited on or counted
+    /// again. The plan stays until the new one replaces it. An issue being worked
+    /// on lets its work folders go, which no other author is given until its
+    /// author has ended ([`Self::in_use`]), and drops its pull requests, which
+    /// stay open on the code host, with its review rounds, fixes, approvals and a
+    /// person's waiver, so the next change starts at round 1. A merge is not
+    /// undone: an issue that is finishing or done is not sent, as the command
+    /// already refused.
+    fn send_to_refiner(&mut self, issue: &IssueId, out: &mut Vec<Effect>) {
+        let Some(i) = self.issues.get(issue) else {
+            return;
+        };
+        if i.finishing() || i.stage == Stage::Done {
+            return;
+        }
+        let Some(group) = self.sending_group(i) else {
+            return;
+        };
+        let stops = self.stop(
+            issue,
+            &[Role::Refiner, Role::Author, Role::Reviewer, Role::Arbiter],
+        );
+        let applied = self.applied;
+        let Some(i) = self.issues.get_mut(issue) else {
+            return;
+        };
+        let folders = i.take_folders();
+        if matches!(
+            i.stage,
+            Stage::Working
+                | Stage::Fixing { .. }
+                | Stage::InReview { .. }
+                | Stage::Arbitration { .. }
+        ) {
+            // The change on record answered the plan the send replaces.
+            i.pulls.clear();
+            i.branches.clear();
+            i.closed.clear();
+            i.reviews.clear();
+            i.round = 0;
+            i.fix.clear();
+            i.told = false;
+            i.fix_keeps_round = false;
+            i.review_ok = false;
+            i.checks_ok = None;
+            i.review_waived = false;
+            i.set_checks(CheckState::Waiting);
+        }
+        i.stage = Stage::Refining;
+        i.group = Some(group.clone());
+        i.sent_at = Some(applied);
+        out.extend(stops);
+        self.release(folders, out);
+        out.push(Effect::StartAgent {
+            group,
+            role: Role::Refiner,
+            issue: issue.clone(),
+            folder: None,
+        });
     }
 
     /// Sends an issue back to its author with what to fix, and stops its running

@@ -170,9 +170,24 @@ pub struct Issue {
     /// Its plan's checks, in the plan's order; none before it has a plan.
     #[serde(default)]
     pub checks: Vec<Check>,
+    /// The checks a person holds it to, given with `temet-work refine` and kept
+    /// apart from the plan, in the order given; none in a view from a daemon
+    /// that has no refine.
+    #[serde(default)]
+    pub person_checks: Vec<PersonCheck>,
     /// Its review rounds, in the order they finished.
     #[serde(default)]
     pub reviews: Vec<Review>,
+}
+
+/// One of the checks a person holds an issue to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonCheck {
+    /// What is true when the issue is done.
+    pub done_when: String,
+    /// What proves it; empty when the person named nothing.
+    #[serde(default)]
+    pub proven_by: String,
 }
 
 /// One of a plan's checks.
@@ -615,6 +630,14 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
                 done_when: without_paths(world, &c.done_when),
                 proven_by: without_paths(world, &c.proven_by),
                 state: c.state,
+            })
+            .collect(),
+        person_checks: i
+            .person_checks
+            .iter()
+            .map(|c| PersonCheck {
+                done_when: without_paths(world, &c.done_when),
+                proven_by: without_paths(world, &c.proven_by),
             })
             .collect(),
         reviews: i

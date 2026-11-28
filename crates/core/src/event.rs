@@ -222,6 +222,24 @@ pub enum Event {
         /// The plan.
         plan: Plan,
     },
+    /// A person refined an issue (`temet-work refine`): its title, its person's
+    /// checks, and whether to send it to a refiner now. The title was written to
+    /// the issue in its tracker before this was logged.
+    Refined {
+        /// The issue.
+        issue: IssueId,
+        /// The new title, when it changed; none to keep it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// The person's checks, which replace those it had; an empty list
+        /// removes them all, and none keeps them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checks: Option<Vec<crate::model::Check>>,
+        /// Whether it goes to a refiner now: a new issue is taken for refining,
+        /// and a refined one is refined again.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        send: bool,
+    },
     /// The author opened or updated the pull request.
     PullRequestReady {
         /// The issue.

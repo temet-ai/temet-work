@@ -41,7 +41,7 @@ pub enum Stage {
 }
 
 /// One "Done when" line and what proves it.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Check {
     /// The line from the issue.
     pub done_when: String,
@@ -190,6 +190,18 @@ pub struct Issue {
     /// Its review rounds, in the order they finished.
     #[serde(default)]
     pub reviews: Vec<Review>,
+    /// The checks a person gave it with `temet-work refine`, each a done_when
+    /// and a proven_by with no state. They are kept apart from the plan: a plan
+    /// the refiner writes later does not change them. Empty in older logs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub person_checks: Vec<Check>,
+    /// How many events the loop had applied when a person last sent it to a
+    /// refiner (`temet-work refine --send`). Every agent on it started before
+    /// then is from before the send ([`Issue::sent_after`]): its step is over,
+    /// a plan it sends is refused, and its end counts toward no limit. None
+    /// before a send, and in older logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<u64>,
 }
 
 /// A pull request a person closed without merging: a read in review or the
@@ -297,6 +309,13 @@ impl Issue {
             self.stage,
             Stage::Merging | Stage::Deploying | Stage::Verifying
         ) || !self.merged.is_empty()
+    }
+
+    /// Whether `agent` was started after a person last sent the issue to a
+    /// refiner, or the issue was never sent. An agent started before the send
+    /// worked on what the send replaced.
+    pub fn sent_after(&self, agent: &Agent) -> bool {
+        self.sent_at.is_none_or(|at| agent.started > at)
     }
 
     /// Takes every work folder the issue holds, the first one first.
