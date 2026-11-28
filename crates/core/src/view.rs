@@ -13,9 +13,10 @@
 //! The desktop app reads it, and `temet-work status --json` prints it. It is
 //! built from named fields, so what the log holds for the loop alone stays out:
 //! an agent's secret digest and limit marks, folder paths, a plan's settings and
-//! repositories, what an author is to fix, settings, rules and the waiting list. The problem lines and the
-//! agents' state lines are free text that may name a work folder's path, so they
-//! are taken without it.
+//! repositories, what an author is to fix, settings, rules and the waiting list.
+//! The problem lines, the agents' state lines, the plan's checks, the review
+//! points and the author's replies are free text that may name a work folder's
+//! path, so they are taken without it.
 
 use std::collections::BTreeMap;
 
@@ -524,8 +525,8 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
             .iter()
             .flat_map(|p| &p.checks)
             .map(|c| Check {
-                done_when: c.done_when.clone(),
-                proven_by: c.proven_by.clone(),
+                done_when: without_paths(world, &c.done_when),
+                proven_by: without_paths(world, &c.proven_by),
                 state: c.state,
             })
             .collect(),
@@ -545,8 +546,8 @@ fn issue(world: &World, i: &model::Issue) -> Issue {
                     .iter()
                     .enumerate()
                     .map(|(n, text)| ReviewPoint {
-                        text: text.clone(),
-                        reply: r.replies.get(n).cloned(),
+                        text: without_paths(world, text),
+                        reply: r.replies.get(n).map(|reply| without_paths(world, reply)),
                         state: r.states.get(n).copied(),
                     })
                     .collect(),
@@ -1494,6 +1495,40 @@ mod tests {
             author.map(|a| a.state_text.as_str()),
             Some("working: reading folder yard-1/clock.rs and folder inner/face.rs")
         );
+    }
+
+    #[test]
+    fn a_folders_path_in_a_review_point_reply_or_check_is_written_as_the_folders_id() {
+        let mut w = to_the_first_ready(false);
+        let point = format!("{FOLDER_PATH}/clock.rs:12 drops the round");
+        let reply = format!("{FOLDER_PATH}/clock.rs:12 keeps it now");
+        command(&mut w, "author-2", ready(&[]));
+        command(&mut w, "reviewer-3", block(&[&point], Vec::new()));
+        command(&mut w, "author-2", ready(&[&reply]));
+        let watch4 = IssueId::new("watch", "4");
+        let planned = w.issues.get_mut(&watch4).and_then(|i| i.plan.as_mut());
+        let check = &mut planned.expect("a plan").checks[0];
+        check.done_when = format!("{FOLDER_PATH}/clock.rs keeps the round");
+        check.proven_by = format!("grep round {FOLDER_PATH}/clock.rs");
+        let view = View::new(&w, &BTreeMap::new());
+        let i = issue_of(&view, "watch#4");
+        let shown = &i.reviews[0].points[0];
+        assert_eq!(shown.text, "folder yard-1/clock.rs:12 drops the round");
+        assert_eq!(
+            shown.reply.as_deref(),
+            Some("folder yard-1/clock.rs:12 keeps it now")
+        );
+        assert_eq!(
+            i.checks[0].done_when,
+            "folder yard-1/clock.rs keeps the round"
+        );
+        assert_eq!(i.checks[0].proven_by, "grep round folder yard-1/clock.rs");
+        let json = serde_json::to_string(&view).expect("json");
+        assert!(!json.contains(FOLDER_PATH), "{json}");
+        // The world keeps both as written: the author needs the path to find the
+        // line.
+        let kept = &w.issues[&watch4].reviews[0];
+        assert_eq!((&kept.points, &kept.replies), (&vec![point], &vec![reply]));
     }
 
     #[test]
