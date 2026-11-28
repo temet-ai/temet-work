@@ -200,6 +200,10 @@ impl Command {
             Self::View => "view",
             Self::Issue { .. } => "issue",
             Self::Screen { .. } => "screen",
+            Self::Change { .. } => "change",
+            Self::Show { .. } => "show",
+            Self::Search { .. } => "search",
+            Self::Ci { .. } => "ci",
             Self::Plan { .. } => "plan",
             Self::Ready { .. } => "ready",
             Self::Review { .. } => "review",
@@ -218,8 +222,8 @@ impl Command {
         }
     }
 
-    /// Whether the command changes anything; `status`, `view`, `issue`, `screen`
-    /// and `settings` only read.
+    /// Whether the command changes anything; `status`, `view`, `issue`, `screen`,
+    /// `change`, `show`, `search`, `ci` and `settings` only read.
     pub fn changes(&self) -> bool {
         !matches!(
             self,
@@ -227,7 +231,20 @@ impl Command {
                 | Self::View
                 | Self::Issue { .. }
                 | Self::Screen { .. }
+                | Self::Change { .. }
+                | Self::Show { .. }
+                | Self::Search { .. }
+                | Self::Ci { .. }
                 | Self::Settings { .. }
+        )
+    }
+
+    /// Whether a part answers the command with what it reads from where code
+    /// is kept: `change`, `show`, `search` and `ci` ([`crate::Part::read`]).
+    pub fn reads_code(&self) -> bool {
+        matches!(
+            self,
+            Self::Change { .. } | Self::Show { .. } | Self::Search { .. } | Self::Ci { .. }
         )
     }
 }

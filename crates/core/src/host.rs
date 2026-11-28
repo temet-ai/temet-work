@@ -244,6 +244,22 @@ impl Host {
             .unwrap_or_else(|| Err("no part in this build reads issue text".into()))
     }
 
+    /// The answer to a command that reads code or CI, from the part that reads
+    /// it ([`crate::Part::read`]), or why there is none.
+    pub fn read(&mut self, command: &crate::Command) -> Result<crate::Answer, String> {
+        let world = &self.world;
+        self.parts
+            .iter_mut()
+            .find_map(|p| p.read(world, command))
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "no part in this build answers {}: it reads code and CI through the code-host \
+                     family",
+                    command.name()
+                ))
+            })
+    }
+
     /// Logs and applies `event`, then carries out everything it leads to, and
     /// ends the investigations that it ended (`World::investigation_events`).
     pub fn handle(&mut self, now_ms: u64, event: Event) -> Result<(), String> {

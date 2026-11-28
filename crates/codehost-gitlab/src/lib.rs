@@ -6,7 +6,7 @@
 //! test run, the real transport runs nothing.
 
 use serde_json::Value;
-use temet_work_codehost::{Checks, CodeHost, CodeHostError, Pull, PullState};
+use temet_work_codehost::{CheckRun, Checks, CodeHost, CodeHostError, Pull, PullState};
 
 /// Runs `glab` with arguments and returns what it printed.
 pub trait Transport: Send {
@@ -267,6 +267,18 @@ impl CodeHost for GitLab {
 
     fn address(&self, repo: &str) -> Option<String> {
         Some(format!("https://{}/{repo}", self.host))
+    }
+
+    fn clone_address(&self, repo: &str) -> Option<String> {
+        Some(format!("https://{}/{repo}.git", self.host))
+    }
+
+    fn pull_ref(&self, number: &str) -> String {
+        format!("refs/merge-requests/{number}/head")
+    }
+
+    fn ci(&mut self, _repo: &str, _number: &str) -> Result<Vec<CheckRun>, CodeHostError> {
+        Err(CodeHostError::Other("not built yet".into()))
     }
 
     fn main_pipeline(&mut self, repo: &str, number: &str) -> Result<Checks, CodeHostError> {
