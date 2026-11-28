@@ -344,7 +344,8 @@ pub struct Runners {
     /// once [`STOP_AGAIN_MS`] has passed since that try, by a poll or when the
     /// loop asks again, until the stop works or its runner says the terminal is
     /// gone or unknown; an ask before then answers with that try's reason.
-    /// One its issue waits on again is dropped.
+    /// One its issue waits on again is dropped; one a person stopped never is,
+    /// since nothing waits on it.
     refused: BTreeMap<String, Refused>,
     /// When the latest poll ran. A stop the loop asks for is timed at it: in a
     /// round the effects are carried out right after the polls.
@@ -737,12 +738,19 @@ impl Runners {
     }
 
     /// Sends what is waiting and keeps what the agent cannot take yet, and what
-    /// is about a paused issue ([`World::paused`]). Returns a
-    /// `Told` event for each issue whose message arrived. `seen` holds the states
-    /// this poll has seen that `world` does not have yet.
+    /// is about a paused issue ([`World::paused`]). What waits for an agent a
+    /// person stopped is dropped: it is told nothing more, even while its stop
+    /// keeps failing. Returns a `Told` event for each issue whose message
+    /// arrived. `seen` holds the states this poll has seen that `world` does not
+    /// have yet.
     fn deliver(&mut self, world: &World, seen: &BTreeMap<AgentId, AgentState>) -> Vec<Event> {
         let mut keep = Vec::new();
         let mut told = Vec::new();
+        self.outbox.retain(|m| {
+            world
+                .person_stopped(&AgentId::new(m.agent.clone()))
+                .is_none()
+        });
         for m in std::mem::take(&mut self.outbox) {
             let Some((i, terminal)) = self.terminals.get(&m.agent).cloned() else {
                 keep.push(m);
@@ -792,9 +800,9 @@ impl Runners {
 
     /// Types [`CONTINUE`] into each agent whose limit has reset, once
     /// [`CONTINUE_AFTER_MS`] has passed since the time its error line gave, once
-    /// per limit. Returns a `Continued` event for each, and ends an agent whose
-    /// terminal is gone. An agent whose terminal is busy or cannot be reached
-    /// is tried again at the next poll.
+    /// per limit; never into an agent a person stopped. Returns a `Continued`
+    /// event for each, and ends an agent whose terminal is gone. An agent whose
+    /// terminal is busy or cannot be reached is tried again at the next poll.
     fn continue_after_reset(
         &mut self,
         world: &World,
@@ -804,6 +812,7 @@ impl Runners {
         let due: Vec<(AgentId, u64)> = world
             .agents
             .values()
+            .filter(|a| world.person_stopped(&a.id).is_none())
             .filter_map(|a| {
                 let at = limit_reset(a, seen)?;
                 (now_ms >= at.saturating_add(CONTINUE_AFTER_MS)).then(|| (a.id.clone(), at))
@@ -3224,6 +3233,163 @@ mod tests {
             assert_eq!(step(&mut part, &mut w, at), [], "at {at} ms");
         }
         assert_eq!(stops(&handle), 2);
+    }
+
+    /// An author on ankh#1 while it is worked on, so the issue waits on it,
+    /// stopped by a person at 0 ms: the stop the loop asks for at once fails
+    /// with each of `refusals` in turn.
+    fn persons_stop_refused(refusals: &[RunnerError]) -> (World, Runners, Shared, AgentId) {
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let author = run(&mut part, &mut w, &["claude"]);
+        step(&mut part, &mut w, 0);
+        assert!(w.waiting_on(&w.agents[&author]), "before the stop");
+        for why in refusals {
+            handle
+                .fake
+                .lock()
+                .expect("lock")
+                .fail_next_stop(why.clone());
+        }
+        let asked = w.apply(&Event::AgentStoppedByPerson {
+            agent: author.clone(),
+        });
+        let stop = Effect::StopAgent {
+            agent: author.clone(),
+        };
+        assert_eq!(asked, [stop.clone()]);
+        assert_eq!(
+            part.carry_out(&stop, &w),
+            Outcome::Failed(refusals[0].to_string())
+        );
+        (w, part, handle, author)
+    }
+
+    #[test]
+    fn persons_stop_that_fails_is_tried_again_a_minute_after_the_last_try_until_it_works() {
+        let (mut w, mut part, handle, author) = persons_stop_refused(&[timed_out(), timed_out()]);
+        let stop = Effect::StopAgent {
+            agent: author.clone(),
+        };
+        // The loop asks again each round: within the minute the answer is the
+        // last try's reason, which Problems lists as `stop author-1`.
+        assert_eq!(w.missing().start, [stop.clone()]);
+        assert_eq!(part.carry_out(&stop, &w), Outcome::Failed(TIMED_OUT.into()));
+        assert_eq!(stop.describe(), "stop author-1");
+        assert!(!ended(&step(&mut part, &mut w, 59_999), &author));
+        assert_eq!(stops(&handle), 1, "not tried again within the minute");
+        // Its issue would wait on an author, but not on one a person stopped:
+        // the tries are not dropped.
+        assert!(!ended(&step(&mut part, &mut w, 60_000), &author));
+        assert_eq!(stops(&handle), 2, "tried at the minute, and refused");
+        assert_eq!(part.carry_out(&stop, &w), Outcome::Failed(TIMED_OUT.into()));
+        let events = step(&mut part, &mut w, 120_000);
+        assert_eq!(stops(&handle), 3);
+        assert!(ended(&events, &author), "{events:?}");
+        assert!(
+            matches!(part.screen(&author.0), Err(RunnerError::Unknown(_))),
+            "its terminal is stopped and removed"
+        );
+        let a = &w.agents[&author];
+        assert!(!a.ended_waited_on, "it did not give up: no start is used");
+        for at in [180_000, 240_000] {
+            assert_eq!(step(&mut part, &mut w, at), [], "at {at} ms");
+        }
+        assert_eq!(stops(&handle), 3);
+    }
+
+    #[test]
+    fn persons_stop_answered_gone_or_unknown_ends_the_agent() {
+        for answer in [
+            RunnerError::Gone,
+            RunnerError::Unknown(TerminalId("t1".into())),
+        ] {
+            let (mut w, mut part, handle, author) =
+                persons_stop_refused(&[timed_out(), answer.clone()]);
+            let events = step(&mut part, &mut w, 60_000);
+            assert_eq!(stops(&handle), 2, "{answer:?}");
+            assert!(ended(&events, &author), "{answer:?}: {events:?}");
+        }
+    }
+
+    #[test]
+    fn persons_stop_that_works_ends_the_agent_and_removes_its_terminal() {
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Working);
+        let (mut part, handle) = shared();
+        let author = run(&mut part, &mut w, &["claude"]);
+        let asked = w.apply(&Event::AgentStoppedByPerson {
+            agent: author.clone(),
+        });
+        let [stop] = asked.as_slice() else {
+            panic!("{asked:?}");
+        };
+        let Outcome::Done { events, .. } = part.carry_out(stop, &w) else {
+            panic!("not stopped");
+        };
+        assert!(ended(&events, &author), "{events:?}");
+        assert_eq!(stops(&handle), 1);
+        assert!(matches!(
+            part.screen(&author.0),
+            Err(RunnerError::Unknown(_))
+        ));
+    }
+
+    #[test]
+    fn persons_stop_types_nothing_more_into_the_agent_while_its_stop_keeps_failing() {
+        let issue = IssueId::new("ankh", "1");
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Fixing { round: 1 });
+        let (mut part, handle) = shared();
+        let terminals = handle.fake.clone();
+        let author = run(&mut part, &mut w, &[fake::PROMPT_PROGRAM]);
+        w.issues.get_mut(&issue).expect("there").told = false;
+        let fix = Effect::RequestFix {
+            issue: issue.clone(),
+            points: vec!["no test for a stopped clock".into()],
+        };
+        part.carry_out(&fix, &w);
+        assert_eq!(part.waiting(), 1, "it waits while the author is at a prompt");
+        handle
+            .fake
+            .lock()
+            .expect("lock")
+            .fail_next_stop(timed_out());
+        w.apply(&Event::AgentStoppedByPerson {
+            agent: author.clone(),
+        });
+        let stop = Effect::StopAgent {
+            agent: author.clone(),
+        };
+        assert_eq!(part.carry_out(&stop, &w), Outcome::Failed(TIMED_OUT.into()));
+        // The loop sends it no fix, as it is a person's stopped agent.
+        assert!(!w.missing().start.contains(&fix), "{:?}", w.missing());
+        terminals
+            .lock()
+            .expect("lock")
+            .unblock(&TerminalId("t1".into()));
+        // Between turns for half an hour, its stop failing at every try: no
+        // fix, no reminder and no continue.
+        for (minutes, refuse) in [(0, false), (11, true), (21, true), (31, true)] {
+            if refuse {
+                handle
+                    .fake
+                    .lock()
+                    .expect("lock")
+                    .fail_next_stop(timed_out());
+            }
+            let polled = step(&mut part, &mut w, minutes * 60_000);
+            assert!(
+                !polled.iter().any(|e| matches!(e, Event::Told { .. })),
+                "{polled:?}"
+            );
+        }
+        let screen = screen_of(&terminals);
+        assert!(!screen.contains("stopped clock"), "{screen}");
+        assert!(!screen.contains("still waiting on you"), "{screen}");
+        assert_eq!(continues(&terminals), 0);
+        assert_eq!(part.waiting(), 0, "what waited for it is dropped");
     }
 
     /// A stop of the loop's that fails, then is answered with `answer` at the
