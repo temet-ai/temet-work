@@ -616,7 +616,10 @@ mod tests {
                 .expect_err("refused");
             assert!(carried.contains("carries author-1's secret"), "{carried}");
             let unread = w
-                .admit(&sender(None, None, unreadable("process 7: gone", vec![])), command)
+                .admit(
+                    &sender(None, None, unreadable("process 7: gone", vec![])),
+                    command,
+                )
                 .expect_err("refused");
             assert!(unread.contains("cannot be read"), "{unread}");
             let far = w

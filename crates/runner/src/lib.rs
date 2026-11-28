@@ -3350,7 +3350,11 @@ mod tests {
             points: vec!["no test for a stopped clock".into()],
         };
         part.carry_out(&fix, &w);
-        assert_eq!(part.waiting(), 1, "it waits while the author is at a prompt");
+        assert_eq!(
+            part.waiting(),
+            1,
+            "it waits while the author is at a prompt"
+        );
         handle
             .fake
             .lock()

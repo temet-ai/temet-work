@@ -1188,9 +1188,9 @@ impl World {
                         .map(|at| format!(" at {}", crate::investigation::utc(at)))
                         .unwrap_or_default();
                     let then = match &a.issue {
-                        Some(issue) if self.stopped_issues.contains_key(issue) => format!(
-                            "; temet-work start {issue} lets agents start on {issue} again"
-                        ),
+                        Some(issue) if self.stopped_issues.contains_key(issue) => {
+                            format!("; temet-work start {issue} lets agents start on {issue} again")
+                        }
                         _ => String::new(),
                     };
                     return Err(format!(
@@ -1528,21 +1528,31 @@ mod tests {
     fn stop_and_start_are_a_persons_and_an_agent_is_refused_with_its_own_secret() {
         let mut w = refining();
         let author = AgentId::new("author-1");
-        let why = w.events(Some(&author), &stop("reviewer-1")).expect_err("refused");
+        let why = w
+            .events(Some(&author), &stop("reviewer-1"))
+            .expect_err("refused");
         assert_eq!(
             why,
             "stop is a person's: author-1 is an agent; an agent finishes its step, and a person \
              stops agents from a shell outside any agent's terminal"
         );
-        let why = w.events(Some(&author), &stop("author-1")).expect_err("refused");
-        assert!(why.starts_with("stop is a person's: author-1 is an agent"), "{why}");
+        let why = w
+            .events(Some(&author), &stop("author-1"))
+            .expect_err("refused");
+        assert!(
+            why.starts_with("stop is a person's: author-1 is an agent"),
+            "{why}"
+        );
         w.apply(&Event::AgentStoppedByPerson {
             agent: AgentId::new("refiner-1"),
         });
         let why = w
             .events(Some(&author), &Command::Start { issue: issue() })
             .expect_err("refused");
-        assert!(why.starts_with("start is a person's: author-1 is an agent"), "{why}");
+        assert!(
+            why.starts_with("start is a person's: author-1 is an agent"),
+            "{why}"
+        );
     }
 
     #[test]

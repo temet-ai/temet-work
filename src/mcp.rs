@@ -745,7 +745,12 @@ mod tests {
             assert!(!names(Level::Read).contains(&name.to_string()));
         }
         let mut refused = Vec::new();
-        call(Level::Read, "stop", json!({"agent": "author-3"}), &mut refused);
+        call(
+            Level::Read,
+            "stop",
+            json!({"agent": "author-3"}),
+            &mut refused,
+        );
         assert!(refused.is_empty(), "nothing is sent at read");
     }
 

@@ -691,21 +691,35 @@ fn a_persons_stop_starts_no_agent_on_its_issue_through_rounds_and_a_restart_unti
     // An agent may not stop an agent, even with its own secret; nor may a
     // person's command sent from inside its process tree with both variables
     // unset.
-    let own = ask(&mut host, &from(&starts, Some("refiner-1"), stop.clone()), &Peer::Unchecked);
+    let own = ask(
+        &mut host,
+        &from(&starts, Some("refiner-1"), stop.clone()),
+        &Peer::Unchecked,
+    );
     assert!(
         matches!(&own, Reply::Refused { why } if why.starts_with("stop is a person's: refiner-1 is an agent")),
         "{own:?}"
     );
-    let inside = Peer::Read(vec![temet_work_runner::digest(&secret(&starts, "refiner-1"))]);
+    let inside = Peer::Read(vec![temet_work_runner::digest(&secret(
+        &starts,
+        "refiner-1",
+    ))]);
     let tree = ask(&mut host, &Request::new(None, stop.clone()), &inside);
     assert!(
         matches!(&tree, Reply::Refused { why } if why.starts_with("stop names no agent but comes from inside refiner-1's process tree")),
         "{tree:?}"
     );
-    assert!(host.world().person_stopped(&refiner).is_none(), "neither was taken");
+    assert!(
+        host.world().person_stopped(&refiner).is_none(),
+        "neither was taken"
+    );
 
     // A person's stop reaches the runner, which stops the terminal: the agent ends.
-    let stopped = ask(&mut host, &Request::new(None, stop.clone()), &Peer::Unchecked);
+    let stopped = ask(
+        &mut host,
+        &Request::new(None, stop.clone()),
+        &Peer::Unchecked,
+    );
     assert_eq!(
         stopped,
         Reply::Done {
@@ -724,16 +738,27 @@ fn a_persons_stop_starts_no_agent_on_its_issue_through_rounds_and_a_restart_unti
         host.tick(at).expect("tick");
     }
     assert_eq!(on_issue(&starts), 1, "no fresh refiner");
-    assert_eq!(host.world().issues[&issue].stage, Stage::Refining, "it keeps its stage");
-    let again = ask(&mut host, &Request::new(None, stop.clone()), &Peer::Unchecked);
+    assert_eq!(
+        host.world().issues[&issue].stage,
+        Stage::Refining,
+        "it keeps its stage"
+    );
+    let again = ask(
+        &mut host,
+        &Request::new(None, stop.clone()),
+        &Peer::Unchecked,
+    );
     assert!(
         matches!(&again, Reply::Refused { why } if why.starts_with("refiner-1 is already stopped by a person")),
         "{again:?}"
     );
 
     // Status and the view say so.
-    let Reply::Done { text } = ask(&mut host, &Request::new(None, Command::Status), &Peer::Unchecked)
-    else {
+    let Reply::Done { text } = ask(
+        &mut host,
+        &Request::new(None, Command::Status),
+        &Peer::Unchecked,
+    ) else {
         panic!("no status");
     };
     assert!(
@@ -741,13 +766,28 @@ fn a_persons_stop_starts_no_agent_on_its_issue_through_rounds_and_a_restart_unti
             && text.contains("no agent starts on it until temet-work start ankh#1"),
         "{text}"
     );
-    assert!(text.contains("refiner-1 on ankh#1: ended (on local); stopped by a person at "), "{text}");
-    match ask(&mut host, &Request::new(None, Command::View), &Peer::Unchecked) {
+    assert!(
+        text.contains("refiner-1 on ankh#1: ended (on local); stopped by a person at "),
+        "{text}"
+    );
+    match ask(
+        &mut host,
+        &Request::new(None, Command::View),
+        &Peer::Unchecked,
+    ) {
         Reply::View { view } => {
-            let i = view.issues.iter().find(|i| i.id == "ankh#1").expect("listed");
+            let i = view
+                .issues
+                .iter()
+                .find(|i| i.id == "ankh#1")
+                .expect("listed");
             assert_eq!(i.stopped.as_ref(), Some(&refiner));
             assert!(i.stopped_since.is_some());
-            let a = view.agents.iter().find(|a| a.id == refiner).expect("listed");
+            let a = view
+                .agents
+                .iter()
+                .find(|a| a.id == refiner)
+                .expect("listed");
             assert!(a.stopped_by_person && a.stopped_at.is_some());
         }
         other => panic!("{other:?}"),
@@ -762,14 +802,23 @@ fn a_persons_stop_starts_no_agent_on_its_issue_through_rounds_and_a_restart_unti
         None,
         vec![tracked("city/ankh", "1", 1)],
     );
-    assert_eq!(again.world().stopped_by(&issue), Some(&refiner), "the log keeps it");
+    assert_eq!(
+        again.world().stopped_by(&issue),
+        Some(&refiner),
+        "the log keeps it"
+    );
     again.tick(180_000).expect("tick");
     assert_eq!(on_issue(&starts), 0, "still nothing");
 
     // A person's start: the next round starts a fresh refiner.
     let started = ask(
         &mut again,
-        &Request::new(None, Command::Start { issue: issue.clone() }),
+        &Request::new(
+            None,
+            Command::Start {
+                issue: issue.clone(),
+            },
+        ),
         &Peer::Unchecked,
     );
     assert_eq!(
@@ -779,7 +828,12 @@ fn a_persons_stop_starts_no_agent_on_its_issue_through_rounds_and_a_restart_unti
         }
     );
     again.tick(240_000).expect("tick");
-    assert!(again.world().agents.contains_key(&AgentId::new("refiner-2")));
+    assert!(
+        again
+            .world()
+            .agents
+            .contains_key(&AgentId::new("refiner-2"))
+    );
     assert_eq!(on_issue(&starts), 1);
     let twice = ask(
         &mut again,

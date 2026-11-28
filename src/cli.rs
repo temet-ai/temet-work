@@ -312,9 +312,7 @@ pub fn request(
         "resume" => Command::Resume,
         "stop" | "start" if args.len() != 2 => {
             let what = if name == "stop" { "AGENT" } else { "ISSUE" };
-            return Err(format!(
-                "{name} takes exactly one {what}\n\n{USAGE}"
-            ));
+            return Err(format!("{name} takes exactly one {what}\n\n{USAGE}"));
         }
         "stop" => Command::Stop {
             agent: AgentId::new(arg(1, "AGENT")?),
@@ -428,13 +426,20 @@ pub(crate) mod tests {
                 issue: IssueId::new("ankh", "1")
             })
         );
-        for line in ["stop", "stop author-3 reviewer-1", "start", "start ankh#1 ankh#2"] {
+        for line in [
+            "stop",
+            "stop author-3 reviewer-1",
+            "start",
+            "start ankh#1 ankh#2",
+        ] {
             let why = read(line).expect_err(line);
             assert!(why.contains("takes exactly one"), "{line}: {why}");
         }
         assert!(read("start ankh").is_err(), "an issue is project#key");
         assert!(read("stop author-3 --json").is_err());
-        assert!(USAGE.contains("temet-work stop AGENT ") && USAGE.contains("temet-work start ISSUE "));
+        assert!(
+            USAGE.contains("temet-work stop AGENT ") && USAGE.contains("temet-work start ISSUE ")
+        );
     }
 
     #[test]

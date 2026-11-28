@@ -84,8 +84,14 @@ fn a_person_stop_ends_the_agent_and_its_issue_waits_on_it_no_more() {
     let mut w = working();
     assert!(waited_on(&w, "author-1"));
     let at = 1_795_000_000_000;
-    assert_eq!(w.apply_at(at, &stop("author-1")), vec![stop_effect("author-1")]);
-    assert!(!waited_on(&w, "author-1"), "not reminded or stopped for idling");
+    assert_eq!(
+        w.apply_at(at, &stop("author-1")),
+        vec![stop_effect("author-1")]
+    );
+    assert!(
+        !waited_on(&w, "author-1"),
+        "not reminded or stopped for idling"
+    );
     assert_eq!(w.person_stopped(&AgentId::new("author-1")), Some(Some(at)));
     assert_eq!(w.stopped_by(&issue("1")), Some(&AgentId::new("author-1")));
     // Asked for again each round until it ends, since a stop may fail.
@@ -115,7 +121,11 @@ fn a_person_stop_starts_no_fresh_agent_on_its_issue_whatever_the_role() {
         ("an author while working", working(), "author-1"),
         ("an author while fixing", fixing(), "author-1"),
         ("a reviewer in review", in_review(), "reviewer-1"),
-        ("an arbiter with the arbiter", with_the_arbiter(), "arbiter-1"),
+        (
+            "an arbiter with the arbiter",
+            with_the_arbiter(),
+            "arbiter-1",
+        ),
     ];
     for (what, mut w, agent) in cases {
         let before = w.issues[&issue("1")].clone();
@@ -135,8 +145,18 @@ fn a_person_stop_starts_no_fresh_agent_on_its_issue_whatever_the_role() {
         let after = &w.issues[&issue("1")];
         assert_eq!(after.stage, before.stage, "{what}");
         assert_eq!(
-            (&after.folder, &after.other_folders, &after.plan, after.round),
-            (&before.folder, &before.other_folders, &before.plan, before.round),
+            (
+                &after.folder,
+                &after.other_folders,
+                &after.plan,
+                after.round
+            ),
+            (
+                &before.folder,
+                &before.other_folders,
+                &before.plan,
+                before.round
+            ),
             "{what}"
         );
         let still: Vec<_> = w.folders.values().map(|f| f.holder.clone()).collect();
@@ -167,7 +187,10 @@ fn a_person_stop_lets_the_issues_other_agents_carry_on() {
         "{effects:?}"
     );
     assert_eq!(stage(&w, "1"), Stage::Fixing { round: 1 });
-    assert!(!starts_or_tells(&w.missing().start), "no author for the fix");
+    assert!(
+        !starts_or_tells(&w.missing().start),
+        "no author for the fix"
+    );
 
     // The reviewer is stopped while the author fixes: the author's ready is
     // taken, and starts no reviewer.
@@ -187,16 +210,31 @@ fn a_person_stop_still_asks_for_the_merge_deploy_and_verify() {
     w.apply(&Event::Told { issue: issue("1") });
     w.apply(&stop("author-1"));
     w.apply(&verdict(1, Verdict::Approve));
-    assert!(w.apply(&checks(true)).contains(&Effect::Merge { issue: issue("1") }));
-    assert!(w.missing().start.contains(&Effect::Merge { issue: issue("1") }));
+    assert!(
+        w.apply(&checks(true))
+            .contains(&Effect::Merge { issue: issue("1") })
+    );
+    assert!(
+        w.missing()
+            .start
+            .contains(&Effect::Merge { issue: issue("1") })
+    );
     let merged = w.apply(&Event::Merged {
         issue: issue("1"),
         repo: None,
     });
     assert!(merged.contains(&Effect::Deploy { issue: issue("1") }));
-    assert!(w.missing().start.contains(&Effect::Deploy { issue: issue("1") }));
+    assert!(
+        w.missing()
+            .start
+            .contains(&Effect::Deploy { issue: issue("1") })
+    );
     w.apply(&Event::Deployed { issue: issue("1") });
-    assert!(w.missing().start.contains(&Effect::Verify { issue: issue("1") }));
+    assert!(
+        w.missing()
+            .start
+            .contains(&Effect::Verify { issue: issue("1") })
+    );
 }
 
 #[test]
@@ -228,7 +266,10 @@ fn a_person_start_lets_the_issue_go_on_with_a_fresh_agent_once_the_stopped_one_e
     // failing: its stop is still asked for, and no fresh one starts beside it.
     assert_eq!(w.apply(&start()), vec![]);
     assert_eq!(w.stopped_by(&issue("1")), None);
-    assert!(w.person_stopped(&AgentId::new("author-1")).is_some(), "still stopped");
+    assert!(
+        w.person_stopped(&AgentId::new("author-1")).is_some(),
+        "still stopped"
+    );
     assert_eq!(w.missing().start, vec![stop_effect("author-1")]);
     w.apply(&ended("author-1"));
     // A fresh author, in the issue's folder.
@@ -333,7 +374,10 @@ fn a_person_stop_of_an_investigator_ends_its_investigation_and_the_next_waits() 
     for e in w.investigation_events(ended_at, false) {
         w.apply(&e);
     }
-    assert!(w.investigating(&GroupId::new("watch")).is_none(), "it ended");
+    assert!(
+        w.investigating(&GroupId::new("watch")).is_none(),
+        "it ended"
+    );
     let wait = 30 * 60_000;
     assert!(
         !w.investigation_events(ended_at + wait - 1, true)

@@ -2010,7 +2010,10 @@ mod person_stops {
             issue: IssueId::new("ankh", "1"),
         });
         let status = text(&w, &BTreeMap::new());
-        assert!(status.contains("ankh#1  refining  Mend the clock\n"), "{status}");
+        assert!(
+            status.contains("ankh#1  refining  Mend the clock\n"),
+            "{status}"
+        );
         assert!(status.contains("; stopped by a person at "), "{status}");
     }
 }
