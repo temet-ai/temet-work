@@ -34,10 +34,39 @@ impl UndoCost {
     }
 }
 
+/// Another way a decision could have gone, which the person can switch it to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecisionOption {
+    /// What the app gets back when this option is chosen: the daemon's number for it, from 1.
+    pub id: SharedString,
+    /// The option in words.
+    pub label: SharedString,
+}
+
+/// What the person gives to overturn a decision.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverturnChoice {
+    /// The id of the option to switch to.
+    pub option: SharedString,
+    /// Why, without leading or trailing spaces.
+    pub reason: SharedString,
+}
+
+/// What an overturn's confirm holds so far: the option chosen and the reason typed, either or
+/// both left out. A row given one opens its confirm at first with them filled in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OverturnDraft {
+    pub option: Option<SharedString>,
+    pub reason: Option<SharedString>,
+}
+
 /// A decision an agent has already made and acted on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decision {
-    /// What was decided, in one sentence.
+    /// The question the agent answered, in a line. When given it is the row's title, and
+    /// `took` and the other options show under it.
+    pub question: Option<SharedString>,
+    /// What was decided: the option taken. Without `question` it is the row's title.
     pub took: SharedString,
     /// Who decided: role and runtime, such as "arbiter · Claude".
     pub by: SharedString,
@@ -50,10 +79,16 @@ pub struct Decision {
     pub weighed: Vec<SharedString>,
     /// Why this one was taken.
     pub why: Option<SharedString>,
-    /// The point after which it can no longer be overturned, such as "round 2 closes".
+    /// The other options, without the one taken. With none, the decision cannot be overturned.
+    pub options: Vec<DecisionOption>,
+    /// The point after which it can no longer be overturned, such as "merge".
     pub overturn_before: Option<SharedString>,
-    /// Set once the decision is overturned; it replaces the action.
+    /// Set once the decision is overturned, such as "Overturned"; it replaces the action.
     pub overturned: Option<SharedString>,
+    /// The option the person switched to, once overturned: shown as "Switched to".
+    pub overturned_to: Option<SharedString>,
+    /// Why the person overturned it: shown as "Reason".
+    pub overturn_reason: Option<SharedString>,
 }
 
 type OnOverturn = Rc<dyn Fn(&mut Window, &mut App)>;

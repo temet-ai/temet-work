@@ -7,7 +7,7 @@ use std::rc::Rc;
 use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
 
 use super::check_list::{CheckList, PlanCheck};
-use super::decision_row::{Decision, DecisionRow};
+use super::decision_row::{Decision, DecisionRow, OverturnDraft};
 use super::review_rounds::{ReviewRound, ReviewRounds};
 use crate::components::cut_panel::CutPanel;
 use crate::components::heading::{Heading, HeadingSize};
@@ -74,11 +74,19 @@ pub struct IssuePullRequest {
     pub files: Option<u32>,
 }
 
-/// A decision taken on the issue, with an id to tell it apart.
+/// A decision taken on the issue, with an id to tell it apart, and where its overturn stands
+/// when one is under way.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IssueDecision {
+    /// Unique among the issue's decisions.
     pub id: SharedString,
     pub decision: Decision,
+    /// Opens the row's overturn confirm at first, with these filled in.
+    pub draft: Option<OverturnDraft>,
+    /// Set while the app sends the overturn.
+    pub pending: bool,
+    /// Why the last send failed, such as the daemon's reply.
+    pub error: Option<SharedString>,
 }
 
 type OnTabChange = Rc<dyn Fn(IssueTab, &mut Window, &mut App)>;

@@ -166,6 +166,7 @@ fn row_decision(d: &Decision, agents: &[Agent], issue: Option<SharedString>) -> 
         }
     });
     RowDecision {
+        question: None,
         took: decision_took(d),
         by: who(agents, &d.by.0),
         issue,
@@ -180,6 +181,9 @@ fn row_decision(d: &Decision, agents: &[Agent], issue: Option<SharedString>) -> 
             _ => None,
         },
         overturned,
+        options: Vec::new(),
+        overturned_to: None,
+        overturn_reason: None,
     }
 }
 
@@ -239,10 +243,12 @@ fn groups(view: &View, project: &ProjectId) -> Vec<GroupListGroup> {
                         id: s(a.id.0.clone()),
                         role: s(a.role.clone()),
                         r#where: Some(s(place)),
+                        detail: None,
                         status,
                     })
                 })
                 .collect(),
+            empty: None,
         })
         .collect()
 }
@@ -346,6 +352,9 @@ fn detail(view: &View, issue: &Issue) -> IssueDetail {
         .map(|d| IssueDecision {
             id: s(d.id.to_string()),
             decision: row_decision(d, &view.agents, None),
+            draft: None,
+            pending: false,
+            error: None,
         })
         .collect();
     IssueDetail {

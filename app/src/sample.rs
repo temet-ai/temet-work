@@ -39,6 +39,7 @@ fn agent(id: &str, role: &str, place: &str, status: Status) -> GroupListAgent {
         id: s(id),
         role: s(role),
         r#where: Some(s(place)),
+        detail: None,
         status,
     }
 }
@@ -92,6 +93,7 @@ fn need(
     NeedsYouDecision {
         id: s(id),
         decision: Decision {
+            question: None,
             took: s(took),
             by: s(by),
             issue: Some(s(issue)),
@@ -99,8 +101,11 @@ fn need(
             cost: Some(cost),
             weighed: Vec::new(),
             why: None,
+            options: Vec::new(),
             overturn_before: Some(s(before)),
             overturned: None,
+            overturned_to: None,
+            overturn_reason: None,
         },
     }
 }
@@ -148,6 +153,7 @@ pub fn project_view() -> ProjectView {
                 agent("nw-3", "reviewer", "deus · gpt-5-codex", Status::Waiting),
                 agent("nw-4", "arbiter", "omit · opus", Status::Idle),
             ],
+            empty: None,
         },
         GroupListGroup {
             id: s("yard"),
@@ -167,6 +173,7 @@ pub fn project_view() -> ProjectView {
                     Status::Blocked,
                 ),
             ],
+            empty: None,
         },
         GroupListGroup {
             id: s("mint-audit"),
@@ -176,12 +183,14 @@ pub fn project_view() -> ProjectView {
                 agent("ma-1", "author", "mac · sonnet", Status::Passed),
                 agent("ma-2", "reviewer", "mac · opus", Status::Failed),
             ],
+            empty: None,
         },
         GroupListGroup {
             id: s("day-watch"),
             name: s("day watch"),
             note: Some(s("watch 0.6")),
             agents: Vec::new(),
+            empty: None,
         },
     ];
 
@@ -337,6 +346,7 @@ pub fn project_view() -> ProjectView {
             IssueDecision {
                 id: s(id),
                 decision: Decision {
+                    question: None,
                     took: s(took),
                     by: s(by),
                     issue: None,
@@ -344,9 +354,15 @@ pub fn project_view() -> ProjectView {
                     cost: None,
                     weighed: weighed.iter().map(|w| s(w)).collect(),
                     why: Some(s(why)),
+                    options: Vec::new(),
                     overturn_before: Some(s(before)),
                     overturned: None,
+                    overturned_to: None,
+                    overturn_reason: None,
                 },
+                draft: None,
+                pending: false,
+                error: None,
             }
         };
     let watch_44 = IssueDetail {
