@@ -1,6 +1,7 @@
 //! ReviewRounds (`temet-reviewrounds`): an issue's review rounds: for each round its reviewer
-//! and status, then every point with the author's reply and whether it is open or resolved.
-//! With no rounds it says "Not reviewed yet".
+//! and status, then every point with the author's reply. Only a point in the other state than
+//! most of its round's (open or resolved) says which it is in. With no rounds it says "Not
+//! reviewed yet".
 
 use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div};
 
@@ -41,6 +42,11 @@ impl ReviewRounds {
     }
 }
 
+/// Whether most of a round's points are resolved; a tie counts as open.
+pub fn mostly_resolved(points: &[ReviewPoint]) -> bool {
+    points.iter().filter(|p| p.resolved).count() * 2 > points.len()
+}
+
 impl RenderOnce for ReviewRounds {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let empty = self
@@ -54,17 +60,24 @@ impl RenderOnce for ReviewRounds {
                 .class_name(Class::RoundHead)
                 .meta(r.by)
                 .end(StatusTag::new(r.status));
+            let usual = mostly_resolved(&r.points);
             let points = r.points.into_iter().map(|p| {
-                let status = if p.resolved {
-                    Status::Resolved
-                } else {
-                    Status::Open
-                };
                 let reply = match p.reply {
                     Some(reply) => format!("Author: {reply}"),
                     None => "No reply yet".to_string(),
                 };
-                ListRow::new(p.text).meta(reply).end(StatusTag::new(status))
+                let row = ListRow::new(p.text).meta(reply);
+                // Only a point in the other state than most of its round's says which it is in.
+                if p.resolved == usual {
+                    row
+                } else {
+                    let status = if p.resolved {
+                        Status::Resolved
+                    } else {
+                        Status::Open
+                    };
+                    row.end(StatusTag::new(status))
+                }
             });
             div().child(head).children(points)
         });

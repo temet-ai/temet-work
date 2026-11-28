@@ -1,51 +1,53 @@
-//! Dialog, DialogBody and DialogFooter (`blueprint-dialog`): a modal window over the page, with
-//! a header holding its icon, its title and a close button, a body that scrolls when it is
-//! taller than the window allows, and a footer with its actions at the end. The backdrop shades
-//! the page; a click on it, Escape or the close button closes the dialog.
+//! Dialog (`blueprint-dialog`): a modal window over the page, for a task that needs the
+//! person's full attention, such as editing an issue's plan. A header with its icon, title and
+//! close button, the body, and a footer with its actions at the right, over the backdrop. It
+//! closes on its close button, on Escape and on a click on the backdrop, through `on_close`.
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
 use gpui::{
-    AbsoluteLength, AnyElement, App, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent,
-    ParentElement, Pixels, Point, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
-    Window, anchored, deferred, div,
+    AnyElement, App, FocusHandle, InteractiveElement, IntoElement, ParentElement, Pixels, Point,
+    RenderOnce, SharedString, Styled, Window, anchored, deferred, div,
 };
 
 use super::button::{Button, Variant};
 use super::icon::{Icon, IconName};
 use super::{Class, box_of, type_of};
 use crate::theme::look::{self, State};
-use crate::theme::{colour, size, text};
+use crate::theme::{colour, size, space, text};
 
 type OnClose = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// Whether the dialog was open when last drawn, and the focus it takes on opening, so Escape
+/// reaches it before the person clicks into it.
+struct Opened {
+    open: bool,
+    focus: FocusHandle,
+}
+
 #[derive(IntoElement)]
 pub struct Dialog {
+    id: SharedString,
     is_open: bool,
-    title: SharedString,
+    title: Option<SharedString>,
     icon: Option<IconName>,
     class_name: Option<Class>,
-    focus: Option<FocusHandle>,
     on_close: Option<OnClose>,
+    actions: Vec<AnyElement>,
     children: Vec<AnyElement>,
 }
 
-impl Default for Dialog {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Dialog {
-    pub fn new() -> Self {
+    /// A dialog. `id` names it in the window; its close button is drawn as `{id}-close`.
+    pub fn new(id: impl Into<SharedString>) -> Self {
         Self {
+            id: id.into(),
             is_open: false,
-            title: SharedString::default(),
+            title: None,
             icon: None,
             class_name: None,
-            focus: None,
             on_close: None,
+            actions: Vec::new(),
             children: Vec::new(),
         }
     }
@@ -55,33 +57,34 @@ impl Dialog {
         self
     }
 
-    /// The title in the header, such as "Refine WATCH-12".
+    /// The title, in the header.
     pub fn title(mut self, title: impl Into<SharedString>) -> Self {
-        self.title = title.into();
+        self.title = Some(title.into());
         self
     }
 
-    /// The icon before the title.
+    /// An icon before the title.
     pub fn icon(mut self, icon: IconName) -> Self {
         self.icon = Some(icon);
         self
     }
 
-    /// A class of the design system's own: `Refine` for RefineDialog's width and look.
+    /// A class of the design system's own: `Refine` makes it RefineDialog's wide dialog.
     pub fn class_name(mut self, class: Class) -> Self {
         self.class_name = Some(class);
-        self
-    }
-
-    /// The focus the dialog holds while it is open, so Escape reaches it.
-    pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
-        self.focus = Some(focus.clone());
         self
     }
 
     /// Called by the close button, Escape and a click on the backdrop.
     pub fn on_close(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_close = Some(Rc::new(handler));
+        self
+    }
+
+    /// The footer's buttons, at its right, as Blueprint's `DialogFooter` takes `actions`.
+    /// Without them there is no footer.
+    pub fn actions(mut self, actions: Vec<AnyElement>) -> Self {
+        self.actions = actions;
         self
     }
 }
@@ -94,176 +97,134 @@ impl ParentElement for Dialog {
 
 impl RenderOnce for Dialog {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let opened = window.use_keyed_state(
+            SharedString::from(format!("{}-opened", self.id)),
+            cx,
+            |_, cx| Opened {
+                open: false,
+                focus: cx.focus_handle(),
+            },
+        );
+        let was_open = opened.read(cx).open;
+        let focus = opened.read(cx).focus.clone();
+        if was_open != self.is_open {
+            opened.update(cx, |o, _| o.open = self.is_open);
+            if self.is_open {
+                let focus = focus.clone();
+                window.defer(cx, move |window, cx| window.focus(&focus, cx));
+            }
+        }
         if !self.is_open {
             return div().hidden().into_any_element();
         }
-        let screen = window.viewport_size();
+        let rest = State::Rest;
         let refine = self.class_name == Some(Class::Refine);
         let card = if refine {
-            look::get(cx, "RefineDialog", "tm-refine: tm-refine", State::Rest)
+            look::get(cx, "RefineDialog", "tm-refine: tm-refine", rest)
         } else {
-            look::get(cx, "Dialog", "dialog: default", State::Rest)
+            look::get(cx, "Dialog", "dialog: default", rest)
         };
-        let head = look::get(cx, "Dialog", "dialog-header: default", State::Rest);
-        let (pull, after) = size::dialog_icon(cx);
-        let close = {
-            let mut b = Button::new("dialog-close")
-                .icon(IconName::X)
-                .variant(Variant::Minimal);
-            if let Some(handler) = self.on_close.clone() {
-                b = b.on_click(move |_, window, cx| handler(window, cx));
-            }
-            b
+        let header = look::get(cx, "Dialog", "dialog-header: default", rest);
+        let footer = look::get(cx, "Dialog", "dialog-footer: default", rest);
+        let screen = window.viewport_size();
+        // `.tm-refine { width: min(var(--tm-dialog-wide), calc(100vw - 2 * var(--tm-space-6))) }`.
+        let width = if refine {
+            size::dialog_wide(cx).min(screen.width - space::s6(cx) * 2.)
+        } else {
+            size::dialog(cx)
         };
-        let header = box_of(type_of(div(), &head), &head)
+
+        let close = Button::new(SharedString::from(format!("{}-close", self.id)))
+            .variant(Variant::Minimal)
+            .icon(IconName::X);
+        let close = match self.on_close.clone() {
+            Some(handler) => close.on_click(move |_, window, cx| handler(window, cx)),
+            None => close,
+        };
+        // `.bp6-dialog-header .bp6-icon { margin-left: calc(var(--bp-surface-spacing) * -1);
+        // margin-right: calc(var(--bp-surface-spacing) * 4 * 0.5) }`, in the muted colour.
+        let icon = self.icon.map(|icon| {
+            div()
+                .flex()
+                .flex_none()
+                .ml(-size::label_gap(cx))
+                .mr(size::label_gap(cx) * 2.)
+                .child(Icon::new(icon).color(colour::muted(cx)))
+        });
+        // `.bp6-dialog-header .bp6-heading { font-size: 14px; line-height: inherit }`, a
+        // Blueprint heading's bold weight; cut with an ellipsis.
+        let title = self.title.map(|title| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(text::section(cx))
+                .font_weight(text::bold_weight(cx))
+                .child(title)
+        });
+        let head = box_of(type_of(div(), &header), &header)
             .flex()
             .flex_none()
             .items_center()
-            .min_h(size::dialog_header(cx))
-            .children(self.icon.map(|icon| {
-                div()
-                    .flex_none()
-                    .ml(-pull)
-                    .mr(after)
-                    .child(Icon::new(icon).color(colour::muted(cx)))
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(text::section(cx))
-                    .font_weight(text::heading_weight(cx))
-                    .child(self.title),
-            )
+            .min_h(header.height)
+            .children(icon)
+            .children(title)
             .child(close);
-        // Rounded at the top only, as the dialog's own corners are.
-        let mut header = header;
-        let square = Some(AbsoluteLength::Pixels(Pixels::ZERO));
-        header.style().corner_radii.bottom_left = square;
-        header.style().corner_radii.bottom_right = square;
-        let on_key = self.on_close.clone();
-        let mut dialog = box_of(type_of(div().id("dialog"), &card), &card)
+        // `border-radius: var(--bp-surface-border-radius) var(--bp-surface-border-radius) 0 0`.
+        let mut head = head;
+        let corners = &mut head.style().corner_radii;
+        corners.bottom_left = Some(Pixels::ZERO.into());
+        corners.bottom_right = Some(Pixels::ZERO.into());
+        let body = div().flex_1().m(size::form_gap(cx)).children(self.children);
+        let foot = (!self.actions.is_empty()).then(|| {
+            box_of(type_of(div(), &footer), &footer)
+                .flex()
+                .justify_end()
+                .items_center()
+                .gap(size::alert_button_gap(cx))
+                .children(self.actions)
+        });
+        let card = box_of(type_of(div().id(self.id.clone()), &card), &card)
+            .track_focus(&focus)
             .occlude()
             .flex()
             .flex_col()
-            .max_h(screen.height - size::dialog_margin(cx) * 2.)
+            .w(width)
             .line_height(text::line_height(cx))
-            .when(refine, |d| d.w(size::dialog_wide(cx, screen.width)))
-            .on_key_down(move |event: &KeyDownEvent, window, cx| {
+            .child(head)
+            .child(body)
+            .children(foot);
+
+        let on_close = self.on_close;
+        let on_escape = on_close.clone();
+        let mut backdrop = div()
+            .id(SharedString::from(format!("{}-backdrop", self.id)))
+            .occlude()
+            .w(screen.width)
+            .h(screen.height)
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(colour::backdrop(cx))
+            .capture_key_down(move |event, window, cx| {
                 if event.keystroke.key == "escape"
-                    && let Some(handler) = &on_key
+                    && let Some(handler) = on_escape.as_ref()
                 {
+                    cx.stop_propagation();
                     handler(window, cx);
                 }
             })
-            .child(header)
-            .children(self.children);
-        if let Some(focus) = &self.focus {
-            dialog = dialog.track_focus(focus);
+            .child(card);
+        if let Some(handler) = on_close {
+            // A click on the backdrop, not on the dialog, which occludes it.
+            backdrop = backdrop.on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                handler(window, cx)
+            });
         }
-        let on_backdrop = self.on_close;
-        deferred(
-            anchored().position(Point::default()).child(
-                div()
-                    .id("dialog-backdrop")
-                    .occlude()
-                    .w(screen.width)
-                    .h(screen.height)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(colour::backdrop(cx))
-                    .on_click(move |_, window, cx| {
-                        if let Some(handler) = &on_backdrop {
-                            handler(window, cx);
-                        }
-                    })
-                    .child(dialog),
-            ),
-        )
-        .with_priority(1)
-        .into_any_element()
-    }
-}
-
-/// A dialog's body: its fields, with Blueprint's margin around them, scrolling once it is taller
-/// than the dialog's room (`.bp6-dialog-body-scroll-container { max-height: 70vh; overflow: auto;
-/// padding: calc(var(--bp-surface-spacing) * 4) }`).
-#[derive(IntoElement)]
-pub struct DialogBody {
-    children: Vec<AnyElement>,
-}
-
-impl Default for DialogBody {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DialogBody {
-    pub fn new() -> Self {
-        Self {
-            children: Vec::new(),
-        }
-    }
-}
-
-impl ParentElement for DialogBody {
-    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
-        self.children.extend(elements);
-    }
-}
-
-impl RenderOnce for DialogBody {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        div()
-            .id("dialog-body")
-            .flex_1()
-            .min_h_0()
-            .max_h(size::dialog_body_max(window.viewport_size().height))
-            .overflow_y_scroll()
-            .p(size::dialog_body(cx))
-            .children(self.children)
-    }
-}
-
-/// A dialog's footer: its actions at the end, on the footer's measured ground under a rule.
-#[derive(IntoElement)]
-pub struct DialogFooter {
-    actions: Vec<AnyElement>,
-}
-
-impl Default for DialogFooter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DialogFooter {
-    pub fn new() -> Self {
-        Self {
-            actions: Vec::new(),
-        }
-    }
-
-    /// The buttons at the end, in order.
-    pub fn actions(mut self, actions: impl IntoIterator<Item = AnyElement>) -> Self {
-        self.actions.extend(actions);
-        self
-    }
-}
-
-impl RenderOnce for DialogFooter {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let foot = look::get(cx, "Dialog", "dialog-footer: default", State::Rest);
-        box_of(type_of(div(), &foot), &foot)
-            .flex()
-            .flex_none()
-            .justify_end()
-            .gap(size::dialog_button_gap(cx))
-            .children(self.actions)
+        deferred(anchored().position(Point::default()).child(backdrop))
+            .with_priority(1)
+            .into_any_element()
     }
 }

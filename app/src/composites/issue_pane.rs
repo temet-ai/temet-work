@@ -1,15 +1,23 @@
-//! IssuePane (`temet-issuepane`): the right column: the selected issue's title, key and stage,
-//! with its actions menu behind a button at the right of its head, its facts, then its plan, pull
-//! request, review rounds and decisions as tabs. A tab shows only when its data is given.
+//! IssuePane (`temet-issuepane`): the right column: the selected issue's title, key and stage
+//! with its round, its actions menu behind a button, then its facts, plan, pull request, review
+//! rounds and decisions as tabs, each with its count; with only one of those it shows it with no
+//! tab row. A tab shows only when its data is given.
+//!
+//! The head stays put with a quiet rule under it, and the facts, tabs and content scroll in
+//! their own area under it (`tm-issue-scroll`), so the close button is always in view and nothing
+//! passes under the head. With `on_close` the head has a close button, and q closes the pane
+//! unless the focus is in a text field, where q is typed. It goes in AppShell's `side_fit`.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    App, FocusHandle, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
+    AnyElement, App, ElementId, FocusHandle, InteractiveElement, IntoElement, ParentElement,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div,
 };
 
 use super::check_list::{CheckList, PlanCheck};
-use super::decision_row::{Decision, DecisionRow};
+use super::decision_row::{Decision, DecisionRow, OverturnChoice, OverturnDraft};
 use super::issue_actions::IssueActions;
 use super::review_rounds::{ReviewRound, ReviewRounds};
 use crate::components::button::{Button, Size, Variant};
@@ -80,15 +88,24 @@ pub struct IssuePullRequest {
     pub files: Option<u32>,
 }
 
-/// A decision taken on the issue, with an id to tell it apart.
+/// A decision taken on the issue, with an id to tell it apart, and where its overturn stands
+/// when one is under way.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IssueDecision {
+    /// Unique among the issue's decisions.
     pub id: SharedString,
     pub decision: Decision,
+    /// Opens the row's overturn confirm at first, with these filled in.
+    pub draft: Option<OverturnDraft>,
+    /// Set while the app sends the overturn.
+    pub pending: bool,
+    /// Why the last send failed, such as the daemon's reply.
+    pub error: Option<SharedString>,
 }
 
 type OnTabChange = Rc<dyn Fn(IssueTab, &mut Window, &mut App)>;
-type OnOverturn = Rc<dyn Fn(&SharedString, &mut Window, &mut App)>;
+type OnOverturn = Rc<dyn Fn(&SharedString, &OverturnChoice, &mut Window, &mut App)>;
+type OnClose = Rc<dyn Fn(&mut Window, &mut App)>;
 type OnActions = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
@@ -97,7 +114,7 @@ pub struct IssuePane {
     title: SharedString,
     stage: Stage,
     round: Option<usize>,
-    facts: Option<Vec<(SharedString, SharedString)>>,
+    facts: Option<Vec<PropertyItem>>,
     plan: Option<IssuePlan>,
     pull: Option<IssuePullRequest>,
     rounds: Option<Vec<ReviewRound>>,
@@ -105,10 +122,13 @@ pub struct IssuePane {
     tab: Option<IssueTab>,
     on_tab_change: Option<OnTabChange>,
     on_overturn: Option<OnOverturn>,
+    on_close: Option<OnClose>,
     actions: Option<IssueActions>,
     actions_open: bool,
     on_actions: Option<OnActions>,
     actions_focus: Option<FocusHandle>,
+    here: bool,
+    shared_deadline: Option<SharedString>,
 }
 
 impl IssuePane {
@@ -130,10 +150,13 @@ impl IssuePane {
             tab: None,
             on_tab_change: None,
             on_overturn: None,
+            on_close: None,
             actions: None,
             actions_open: false,
             on_actions: None,
             actions_focus: None,
+            here: false,
+            shared_deadline: None,
         }
     }
 
@@ -169,8 +192,9 @@ impl IssuePane {
         self
     }
 
-    /// Facts about the issue, such as milestone, agent and round, in a panel above the tabs.
-    pub fn facts(mut self, facts: Vec<(SharedString, SharedString)>) -> Self {
+    /// Facts about the issue, such as its milestone, group and agents, in a panel above the
+    /// tabs.
+    pub fn facts(mut self, facts: Vec<PropertyItem>) -> Self {
         self.facts = Some(facts);
         self
     }
@@ -210,12 +234,34 @@ impl IssuePane {
         self
     }
 
-    /// Called with a decision's id by its Overturn button.
+    /// Called with a decision's id and the option and reason given, once its overturn is
+    /// confirmed. Without it the decisions have no Overturn button.
     pub fn on_overturn(
         mut self,
-        handler: impl Fn(&SharedString, &mut Window, &mut App) + 'static,
+        handler: impl Fn(&SharedString, &OverturnChoice, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_overturn = Some(Rc::new(handler));
+        self
+    }
+
+    /// Closes the pane. With it the head has a close button, and q closes the pane unless the
+    /// focus is in a text field.
+    pub fn on_close(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_close = Some(Rc::new(handler));
+        self
+    }
+
+    /// A deadline the screen already states for every open decision, such as Needs you's
+    /// "overturn before merge": decisions with it leave it out, and only one whose deadline
+    /// differs shows its own.
+    pub fn shared_deadline(mut self, deadline: Option<SharedString>) -> Self {
+        self.shared_deadline = deadline;
+        self
+    }
+
+    /// Marks the facts panel with CutPanel's `here` edge, as the item the person is in.
+    pub fn here(mut self, here: bool) -> Self {
+        self.here = here;
         self
     }
 }
@@ -233,29 +279,73 @@ pub fn tabs_shown(plan: bool, pull: bool, rounds: bool, decisions: bool) -> Vec<
     .collect()
 }
 
+/// The deadline every open decision shares, which the rows then leave out; none when there is
+/// one open decision or fewer, or they differ.
+pub fn one_deadline(decisions: &[Decision]) -> Option<SharedString> {
+    let open: Vec<&Decision> = decisions
+        .iter()
+        .filter(|d| d.overturned.is_none())
+        .collect();
+    let first = open.first()?.overturn_before.clone();
+    (open.len() > 1 && open.iter().all(|d| d.overturn_before == first))
+        .then_some(first)
+        .flatten()
+}
+
+/// What closes the pane on q: the latest `on_close`, read by an observer of every keystroke the
+/// app takes, which lives as long as the pane is drawn.
+struct CloseOnQ {
+    on_close: Rc<RefCell<Option<OnClose>>>,
+    _keys: Subscription,
+}
+
+/// Whether a keystroke closes the pane: a q with no modifier but shift, typed outside a text
+/// field (an `Input` key context on the focused path).
+pub fn closes(key: &str, command: bool, in_field: bool) -> bool {
+    key == "q" && !command && !in_field
+}
+
 impl RenderOnce for IssuePane {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let key = self.issue_key.clone();
+        if let Some(on_close) = self.on_close.clone() {
+            let id = ElementId::Name(SharedString::from(format!("pane-q-{key}")));
+            let state = window.use_keyed_state(id, cx, |_, cx| CloseOnQ {
+                on_close: Rc::default(),
+                _keys: cx.observe_keystrokes(|this: &mut CloseOnQ, event, window, cx| {
+                    let m = &event.keystroke.modifiers;
+                    let in_field = event.context_stack.iter().any(|c| c.contains("Input"));
+                    let command = m.control || m.alt || m.platform;
+                    if !closes(&event.keystroke.key, command, in_field) {
+                        return;
+                    }
+                    let handler = this.on_close.borrow().clone();
+                    if let Some(handler) = handler {
+                        handler(window, cx);
+                    }
+                }),
+            });
+            *state.read(cx).on_close.borrow_mut() = Some(on_close);
+        }
+
         let shown = tabs_shown(
             self.plan.is_some(),
             self.pull.is_some(),
             self.rounds.is_some(),
             self.decisions.is_some(),
         );
-        let titles = div()
-            .flex_1()
-            .min_w_0()
-            .child(Heading::new(self.title).size(HeadingSize::Pane))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(space::s4(cx))
-                    .child(classed(Class::Mono, cx).child(self.issue_key.clone()))
-                    .child(StageTag::new(self.stage).round(self.round)),
-            );
+        let close = self.on_close.clone().map(|on_close| {
+            Button::new(SharedString::from(format!("pane-close-{key}")))
+                .variant(Variant::Minimal)
+                .size(Size::Small)
+                .icon(IconName::Cross)
+                .on_click(move |_, window, cx| on_close(window, cx))
+        });
         // The design system's head buttons: a small minimal button with More, opening the menu
-        // below it, its right edge on the button's.
+        // below it, its right edge on the button's; then the close button.
         let actions_focus = self.actions_focus;
+        let on_actions = self.on_actions;
+        let actions_open = self.actions_open;
         let actions = self.actions.map(|menu| {
             let mut button = Button::new("issue-actions")
                 .icon(IconName::More)
@@ -266,60 +356,77 @@ impl RenderOnce for IssuePane {
             }
             let mut popover = Popover::new("issue-actions-popover")
                 .placement(Placement::BottomEnd)
-                .is_open(self.actions_open)
+                .is_open(actions_open)
                 .content(menu)
                 .child(button);
-            if let Some(handler) = self.on_actions {
+            if let Some(handler) = on_actions {
                 popover = popover.on_interaction(move |open, window, cx| handler(open, window, cx));
             }
             popover
         });
-        let head = div()
+        let buttons = (actions.is_some() || close.is_some()).then(|| {
+            div()
+                .flex()
+                .flex_none()
+                .gap(space::s1(cx))
+                .children(actions)
+                .children(close)
+        });
+        let head = classed(Class::IssueHead, cx)
             .flex()
+            .flex_none()
+            .justify_between()
             .items_start()
             .gap(space::s4(cx))
-            .child(titles)
-            .children(actions);
+            .debug_selector(|| "pane-head".to_string())
+            .child(
+                div()
+                    .min_w_0()
+                    .child(Heading::new(self.title).size(HeadingSize::Pane))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::s4(cx))
+                            .child(classed(Class::Mono, cx).child(key.clone()))
+                            .child(StageTag::new(self.stage).round(self.round)),
+                    ),
+            )
+            .children(buttons);
         let facts = self.facts.map(|facts| {
-            let items = facts
-                .into_iter()
-                .map(|(label, value)| PropertyItem::new(label, value))
-                .collect();
-            CutPanel::new().padded(true).child(PropertyList::new(items))
+            CutPanel::new()
+                .padded(true)
+                .here(self.here)
+                .child(PropertyList::new(facts))
         });
 
-        let mut tabs = Tabs::new(SharedString::from(format!("tabs-{}", self.issue_key)));
-        if let Some(open) = self.tab.filter(|t| shown.contains(t)) {
-            tabs = tabs.selected_tab_id(open.id());
-        }
-        if let Some(handler) = self.on_tab_change {
-            tabs = tabs.on_change(move |id, window, cx| {
-                if let Some(tab) = IssueTab::from_id(id) {
-                    handler(tab, window, cx);
-                }
-            });
-        }
+        // Each tab's panel and its count.
+        let mut panels: Vec<(IssueTab, &'static str, Option<usize>, AnyElement)> = Vec::new();
         if let Some(plan) = self.plan {
-            let props = PropertyList::new(
-                [
-                    plan.folder
-                        .map(|folder| PropertyItem::new("Folder", folder).mono(true)),
-                    plan.merge.map(|merge| PropertyItem::new("Merge", merge)),
-                ]
-                .into_iter()
-                .flatten()
-                .collect(),
-            );
+            let props = [
+                plan.folder
+                    .map(|folder| PropertyItem::new("Folder", folder).mono(true)),
+                plan.merge.map(|merge| PropertyItem::new("Merge", merge)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+            let count = plan.checks.len();
             let panel = div()
                 .flex()
                 .flex_col()
                 .gap(space::s5(cx))
-                .child(props)
+                .children((!props.is_empty()).then(|| PropertyList::new(props)))
                 .child(CheckList::new(
-                    SharedString::from(format!("checks-{}", self.issue_key)),
+                    SharedString::from(format!("checks-{key}")),
                     plan.checks,
                 ));
-            tabs = tabs.child(Tab::new("plan", "Plan").panel(panel));
+            panels.push((
+                IssueTab::Plan,
+                "Plan",
+                Some(count),
+                panel.into_any_element(),
+            ));
         }
         if let Some(pull) = self.pull {
             let ci = pull.ci.map(|status| match pull.ci_text {
@@ -347,35 +454,97 @@ impl RenderOnce for IssuePane {
                 .flatten()
                 .collect(),
             );
-            tabs = tabs.child(Tab::new("pull", "Pull request").panel(props));
+            panels.push((
+                IssueTab::Pull,
+                "Pull request",
+                None,
+                props.into_any_element(),
+            ));
         }
         if let Some(rounds) = self.rounds {
-            tabs = tabs.child(Tab::new("review", "Review").panel(ReviewRounds::new(rounds)));
+            let count = rounds.len();
+            panels.push((
+                IssueTab::Review,
+                "Review",
+                Some(count),
+                ReviewRounds::new(rounds).into_any_element(),
+            ));
         }
         if let Some(decisions) = self.decisions {
+            let plain: Vec<Decision> = decisions.iter().map(|d| d.decision.clone()).collect();
+            let open = plain.iter().filter(|d| d.overturned.is_none()).count();
+            let shared = one_deadline(&plain).is_some();
+            let screen = self.shared_deadline;
             let empty = decisions
                 .is_empty()
                 .then(|| ListRow::new("No decisions yet"));
             let on_overturn = self.on_overturn;
             let rows = decisions.into_iter().map(|d| {
-                let row = DecisionRow::new(d.id.clone(), d.decision);
+                let mut decision = d.decision;
+                // A deadline the screen states, or every decision here shares, is not said again.
+                if shared || (screen.is_some() && decision.overturn_before == screen) {
+                    decision.overturn_before = None;
+                }
+                let row = DecisionRow::new(d.id.clone(), decision)
+                    .default_draft(d.draft)
+                    .pending(d.pending)
+                    .error(d.error);
                 match on_overturn.clone() {
                     Some(handler) => {
                         let id = d.id;
-                        row.on_overturn(move |window, cx| handler(&id, window, cx))
+                        row.on_overturn(move |choice, window, cx| handler(&id, choice, window, cx))
                     }
                     None => row,
                 }
             });
             let panel = div().children(empty).children(rows);
-            tabs = tabs.child(Tab::new("decisions", "Decisions").panel(panel));
+            panels.push((
+                IssueTab::Decisions,
+                "Decisions",
+                Some(open),
+                panel.into_any_element(),
+            ));
         }
+
+        let content = if panels.len() == 1 {
+            panels.pop().map(|(_, _, _, panel)| panel)
+        } else if panels.is_empty() {
+            None
+        } else {
+            let mut tabs = Tabs::new(SharedString::from(format!("tabs-{key}")));
+            if let Some(open) = self.tab.filter(|t| shown.contains(t)) {
+                tabs = tabs.selected_tab_id(open.id());
+            }
+            if let Some(handler) = self.on_tab_change {
+                tabs = tabs.on_change(move |id, window, cx| {
+                    if let Some(tab) = IssueTab::from_id(id) {
+                        handler(tab, window, cx);
+                    }
+                });
+            }
+            for (tab, title, count, panel) in panels {
+                let count = count.filter(|n| *n > 0).map(|n| n.to_string());
+                tabs = tabs.child(Tab::new(tab.id(), title).tag_content(count).panel(panel));
+            }
+            Some(tabs.into_any_element())
+        };
+
+        let scroll = classed(Class::IssueScroll, cx)
+            .id(SharedString::from(format!("pane-scroll-{key}")))
+            .debug_selector(|| "pane-scroll".to_string())
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .gap(space::s5(cx))
+            .overflow_y_scroll()
+            .children(facts)
+            .children(content);
         div()
             .flex()
             .flex_col()
-            .gap(space::s5(cx))
+            .min_h_0()
+            .debug_selector(|| "pane".to_string())
             .child(head)
-            .children(facts)
-            .children((!shown.is_empty()).then_some(tabs))
+            .child(scroll)
     }
 }

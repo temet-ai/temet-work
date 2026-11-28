@@ -1,7 +1,7 @@
 //! IssueTable (`temet-issuetable`): issues as a table of key, title, stage, agent and last
-//! change. Every table takes the theme's column widths, so columns line up from panel to panel.
-//! A narrow table leaves out the Agent column. With no issues it draws no table and no head
-//! row, only "No issues".
+//! change, and the milestone when asked. Every table takes the theme's column widths, so columns
+//! line up from panel to panel. A narrow table leaves out the Updated column, and a narrower one
+//! the Agent column too. With no issues it draws no table and no head row, only "No issues".
 
 use std::rc::Rc;
 
@@ -26,6 +26,8 @@ pub struct IssueSummary {
     pub stage: Stage,
     /// The agent group working on it, for grouping by group.
     pub group: Option<SharedString>,
+    /// Its milestone, shown in the Milestone column when `show_milestone` is set.
+    pub milestone: Option<SharedString>,
     /// The agent holding it, role and runtime; the table shows None when there is none.
     pub agent: Option<SharedString>,
     /// How long ago it changed, such as "4 min ago".
@@ -37,7 +39,8 @@ type OnSelect = Rc<dyn Fn(&SharedString, &mut Window, &mut App)>;
 /// How the table puts its issues under group rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupBy {
-    /// A row per stage, in the order of the stages, and no Stage column.
+    /// A row per stage, from the furthest along (done) to the first (new), and no Stage
+    /// column.
     Stage,
     /// A row per agent group, in the order the groups first appear.
     Group,
@@ -50,8 +53,10 @@ pub fn grouped(
     by: GroupBy,
 ) -> Vec<(Option<Stage>, SharedString, Vec<IssueSummary>)> {
     match by {
+        // The furthest stage first, so the issues closest to shipping come first.
         GroupBy::Stage => Stage::ALL
             .into_iter()
+            .rev()
             .map(|stage| {
                 let these: Vec<IssueSummary> = issues
                     .iter()
@@ -99,6 +104,7 @@ pub struct IssueTable {
     selected: Option<SharedString>,
     on_select: Option<OnSelect>,
     show_agent: Option<bool>,
+    show_milestone: bool,
 }
 
 impl IssueTable {
@@ -112,6 +118,7 @@ impl IssueTable {
             selected: None,
             on_select: None,
             show_agent: None,
+            show_milestone: false,
         }
     }
 
@@ -137,35 +144,82 @@ impl IssueTable {
         self
     }
 
-    /// Whether the Agent column shows. Left out, it shows when the table is wide enough to
-    /// leave the title its room.
+    /// Whether the Agent column shows. Left out, it shows unless the title would lose its room
+    /// even without the Updated column. Set it false when no agent runs, so a column of None
+    /// takes no room.
     pub fn show_agent(mut self, show: bool) -> Self {
         self.show_agent = Some(show);
         self
     }
+
+    /// Shows a Milestone column after the title, for a table not grouped by milestone.
+    pub fn show_milestone(mut self, show: bool) -> Self {
+        self.show_milestone = show;
+        self
+    }
 }
 
-/// Whether a table `width` wide leaves the title its least width with the Agent column shown.
-pub fn agent_fits(width: Pixels, columns: &IssueColumns, show_stage: bool) -> bool {
-    let stage = if show_stage {
-        columns.stage
+/// Which of the two optional columns a table has room for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Room {
+    /// Agent and Updated.
+    Both,
+    /// Agent alone.
+    Agent,
+    /// Neither.
+    Neither,
+}
+
+/// The room a table `width` wide has, with the Stage and Milestone columns as given: Updated
+/// needs the title's least width beside it, Agent alone its narrow width.
+pub fn room(width: Pixels, columns: &IssueColumns, show_stage: bool, show_milestone: bool) -> Room {
+    let mut fixed = columns.key + columns.agent;
+    if show_stage {
+        fixed += columns.stage;
+    }
+    if show_milestone {
+        fixed += columns.milestone;
+    }
+    if width >= fixed + columns.updated + columns.title_min {
+        Room::Both
+    } else if width >= fixed + columns.title_narrow {
+        Room::Agent
     } else {
-        Pixels::ZERO
-    };
-    width >= columns.key + stage + columns.agent + columns.updated + columns.title_min
+        Room::Neither
+    }
+}
+
+/// Whether the Agent and Updated columns show: Agent as asked, else when there is room for it;
+/// Updated when Agent is left out by request or there is room for both.
+pub fn optional_columns(show_agent: Option<bool>, room: Room) -> (bool, bool) {
+    let agent = show_agent.unwrap_or(room != Room::Neither);
+    let updated = show_agent == Some(false) || room == Room::Both;
+    (agent, updated)
+}
+
+/// The columns a table draws, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Columns {
+    pub stage: bool,
+    pub milestone: bool,
+    pub agent: bool,
+    pub updated: bool,
 }
 
 /// The column widths, `None` for the title, which takes what is left.
-pub fn colgroup(columns: &IssueColumns, show_stage: bool, show_agent: bool) -> Vec<Option<Pixels>> {
-    let mut widths = vec![Some(columns.key), None];
-    if show_stage {
-        widths.push(Some(columns.stage));
+pub fn colgroup(widths: &IssueColumns, shown: Columns) -> Vec<Option<Pixels>> {
+    let mut out = vec![Some(widths.key), None];
+    for (show, width) in [
+        (shown.stage, widths.stage),
+        (shown.milestone, widths.milestone),
+        (shown.agent, widths.agent),
+        (shown.updated, widths.updated),
+    ] {
+        if show {
+            out.push(Some(width));
+        }
     }
-    if show_agent {
-        widths.push(Some(columns.agent));
-    }
-    widths.push(Some(columns.updated));
-    widths
+    out
 }
 
 impl RenderOnce for IssueTable {
@@ -180,19 +234,32 @@ impl RenderOnce for IssueTable {
         // The table's width, measured after layout; until then it is taken as wide.
         let width: Entity<Pixels> = window.use_keyed_state(self.id.clone(), cx, |_, _| Pixels::MAX);
         let measured = *width.read(cx);
-        let show_agent = self
-            .show_agent
-            .unwrap_or_else(|| agent_fits(measured, &columns, true));
-
         let show_stage = self.group_by != Some(GroupBy::Stage);
+        let show_milestone = self.show_milestone;
+        let (show_agent, show_updated) = optional_columns(
+            self.show_agent,
+            room(measured, &columns, show_stage, show_milestone),
+        );
+        let shown = Columns {
+            stage: show_stage,
+            milestone: show_milestone,
+            agent: show_agent,
+            updated: show_updated,
+        };
+
         let mut heads = vec![Th::new("Key"), Th::new("Title")];
         if show_stage {
             heads.push(Th::new("Stage"));
         }
+        if show_milestone {
+            heads.push(Th::new("Milestone"));
+        }
         if show_agent {
             heads.push(Th::new("Agent"));
         }
-        heads.push(Th::new("Updated"));
+        if show_updated {
+            heads.push(Th::new("Updated"));
+        }
 
         let selected = self.selected;
         let on_select = self.on_select;
@@ -213,18 +280,24 @@ impl RenderOnce for IssueTable {
             if show_stage {
                 row = row.child(Td::element(StageTag::new(issue.stage)));
             }
+            if show_milestone {
+                row = row.child(Td::new(issue.milestone.unwrap_or_default()));
+            }
             if show_agent {
                 let agent = issue.agent.unwrap_or_else(|| "None".into());
                 row = row.child(Td::new(agent).class_name(Class::IssueQuiet));
             }
-            row.child(Td::new(issue.updated).class_name(Class::IssueQuiet))
+            if show_updated {
+                row = row.child(Td::new(issue.updated).class_name(Class::IssueQuiet));
+            }
+            row
         };
 
         let mut table = HTMLTable::new()
             .compact(true)
             .interactive(on_select.is_some())
             .class_name(Class::Issues)
-            .colgroup(colgroup(&columns, show_stage, show_agent))
+            .colgroup(colgroup(&columns, shown))
             .thead(heads);
         if let Some(by) = self.group_by {
             // Each group is a body of its own, under a row with its stage or name and count.
@@ -235,12 +308,13 @@ impl RenderOnce for IssueTable {
                         .into_any_element(),
                     None => name.clone().into_any_element(),
                 };
-                let head =
-                    TableRow::new(SharedString::from(format!("group-{name}"))).head(Th::element(
-                        classed(Class::IssueGroup, cx)
-                            .child(label)
-                            .child(classed(Class::IssueCount, cx).child(count(issues.len()))),
-                    ));
+                // A stage's count is StageCounts' to say; a group's is said only here.
+                let tally = stage
+                    .is_none()
+                    .then(|| classed(Class::IssueCount, cx).child(count(issues.len())));
+                let head = TableRow::new(SharedString::from(format!("group-{name}"))).head(
+                    Th::element(classed(Class::IssueGroup, cx).child(label).children(tally)),
+                );
                 table = table.tbody(std::iter::once(head).chain(issues.into_iter().map(row)));
             }
         } else {

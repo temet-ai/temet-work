@@ -74,7 +74,7 @@ impl RenderOnce for NeedsYou {
             match self.on_overturn.clone() {
                 Some(handler) => {
                     let id = n.id;
-                    row.on_overturn(move |window, cx| handler(&id, window, cx))
+                    row.on_overturn(move |_, window, cx| handler(&id, window, cx))
                 }
                 None => row,
             }

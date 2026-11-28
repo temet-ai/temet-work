@@ -16,9 +16,11 @@ pub struct GroupListAgent {
     pub id: SharedString,
     /// The agent's role in its group, such as author or reviewer.
     pub role: SharedString,
-    /// Where it runs, such as "omit · opus". It moves under the role when it does not fit
-    /// beside it, and is cut with an ellipsis only when longer than the line.
+    /// Where it runs or what it is on, such as "clacks#219" or "free". It stays on the role's
+    /// line and is cut with an ellipsis when it does not fit; hover shows `detail`.
     pub r#where: Option<SharedString>,
+    /// The full text shown on hover over `where`; `where` when left out.
+    pub detail: Option<SharedString>,
     pub status: Status,
 }
 
@@ -30,6 +32,15 @@ pub struct GroupListGroup {
     /// Muted text at the right of the name, such as the milestone the group works on.
     pub note: Option<SharedString>,
     pub agents: Vec<GroupListAgent>,
+    /// The muted line in place of the agent rows when there are none, such as "No agents
+    /// running · 324 ended"; "No agents" when left out.
+    pub empty: Option<SharedString>,
+}
+
+/// What an agent row carries while it is dragged onto an IssueCard: the agent's id.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentDrag {
+    pub id: SharedString,
 }
 
 #[derive(IntoElement)]
@@ -63,10 +74,11 @@ impl RenderOnce for GroupList {
                         .note
                         .map(|note| classed(Class::GroupsNote, cx).child(note)),
                 );
+            let none = group.empty.unwrap_or_else(|| "No agents".into());
             let empty = group.agents.is_empty().then(|| {
                 ListRow::new("")
                     .compact(true)
-                    .meta("No agents")
+                    .meta(none)
                     .class_name(Class::GroupsGroup)
                     .class_name(Class::GroupsEmpty)
             });

@@ -1,0 +1,151 @@
+#!/usr/bin/env node
+// scripts/sample-view: writes app/assets/sample-view.json, a made-up daemon view in the shape of
+// the design system's radar page data (ui/src/pages/radar/data.ts), so the window draws the same
+// data as the page's stories through view_map.
+//
+//   scripts/sample-view [design-system-ui-folder]
+//
+// The folder is the design system's ui/ checkout: the argument, else TEMET_DESIGN_UI, else the
+// "ui" entry of ~/.config/temet-design/config.json. Node strips data.ts's types itself.
+//
+// The view is the stopped daemon's, as the radar page's default stories draw it: no agent runs,
+// and every agent the data names has ended, among 324 ended in all. `sample::running` in the app
+// starts the seven running agents of the data on it. The clock is SAMPLE_NOW below, the same as
+// `sample::NOW_MS`: each issue's "6 min ago" becomes a time that many minutes before it.
+"use strict";
+
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { pathToFileURL } = require("node:url");
+
+const ROOT = path.join(__dirname, "..");
+const OUT = path.join(ROOT, "app", "assets", "sample-view.json");
+/** 28 Nov 2026 13:30 UTC, in milliseconds since 1970. */
+const SAMPLE_NOW = 1795872600000;
+
+function uiFolder() {
+  if (process.argv[2]) return process.argv[2];
+  if (process.env.TEMET_DESIGN_UI) return process.env.TEMET_DESIGN_UI;
+  const config = path.join(os.homedir(), ".config", "temet-design", "config.json");
+  const ui = fs.existsSync(config) && JSON.parse(fs.readFileSync(config, "utf8")).ui;
+  if (!ui) throw new Error("name the design system's ui/ folder: scripts/sample-view FOLDER");
+  return ui;
+}
+
+/** "6 min ago", "2 h ago" or "just now", as minutes before the clock. */
+function minutes(ago) {
+  if (ago === "just now") return 0;
+  const m = /^(\d+) (min|h|d) ago$/.exec(ago);
+  if (!m) throw new Error(`a time the script cannot read: ${ago}`);
+  return Number(m[1]) * { min: 1, h: 60, d: 1440 }[m[2]];
+}
+
+const ROUND_STAGES = ["in review", "fixing", "with arbiter"];
+/** The daemon's stage word for a stage name. */
+const stageWord = (s) => ({ "in review": "in_review", "with arbiter": "arbitration" })[s] ?? s;
+const checkState = (s) => (s == null ? null : s);
+const verdict = (status) => ({ passed: "approve", blocked: "block" })[status] ?? "pending";
+
+async function main() {
+  const ui = uiFolder();
+  const data = await import(pathToFileURL(path.join(ui, "src", "pages", "radar", "data.ts")).href);
+  const { project, milestones, group, doneCount, endedAgents, issues, decisions, runningAgents } = data;
+
+  // Every agent the data names, then made-up ones of the same roles, up to the ended count.
+  const named = new Map();
+  const name = (id) => {
+    if (!named.has(id)) named.set(id, { id, role: id.replace(/-\d+$/, "") });
+  };
+  for (const a of runningAgents) name(a.id);
+  for (const d of decisions) name(d.by);
+  for (const i of issues) for (const r of i.reviews) if (r.by) name(r.by);
+  const roles = ["author", "reviewer", "refiner", "investigator", "arbiter"];
+  for (let n = 1; named.size < endedAgents; n++) name(`${roles[n % roles.length]}-${n}`);
+  const running = new Map(runningAgents.map((a) => [a.id, a]));
+  const agents = [...named.values()].map((a, n) => {
+    const r = running.get(a.id);
+    return {
+      id: a.id,
+      group: group.id,
+      role: a.role,
+      issue: r ? r.issue : null,
+      machine: "local",
+      folder: null,
+      state: "ended",
+      state_text: "ended",
+      started: n + 1,
+      runtime: "claude",
+      model: r ? r.model : "opus",
+    };
+  });
+
+  const ids = (key) => {
+    const own = runningAgents.filter((a) => a.issue === key).map((a) => a.id);
+    return own;
+  };
+  const view = {
+    projects: [
+      {
+        id: project.id,
+        tracker_name: project.tracker.replace(/^GitHub /, ""),
+        issues_url: project.issuesUrl,
+        code_url: `https://${project.codeHost}`,
+        area: null,
+      },
+    ],
+    milestones: milestones.map((m) => ({ project: project.id, id: m.id, done: m.done, total: m.total, due: null })),
+    groups: [{ id: group.id, name: group.name, projects: [project.id], milestones: group.milestones, refining_at_once: group.refiningAtOnce }],
+    issues: issues.map((i) => ({
+      id: i.key,
+      title: i.title,
+      stage: stageWord(i.stage),
+      stage_text: ROUND_STAGES.includes(i.stage) && i.round ? `${i.stage}, round ${i.round}` : i.stage,
+      milestone: i.milestone,
+      group: i.group,
+      depends_on: i.dependsOn,
+      round: i.round,
+      pulls: i.pull ? [{ repo: project.id, number: String(i.pull.number), merged: i.pull.merged }] : [],
+      review_ok: false,
+      checks_ok: i.checksOk,
+      agents: ids(i.key),
+      updated_ms: SAMPLE_NOW - minutes(i.updated) * 60000,
+      checks: i.checks.map((c) => ({ done_when: c.doneWhen, proven_by: c.provenBy, state: checkState(c.status) })),
+      reviews: i.reviews
+        .filter((r) => r.status !== "inProgress")
+        .map((r) => ({
+          round: r.round,
+          reviewer: r.by,
+          verdict: verdict(r.status),
+          points: r.points.map((p) => ({ text: p.text, reply: p.reply ?? null, state: p.resolved ? "resolved" : "open" })),
+        })),
+    })),
+    done: doneCount,
+    agents,
+    decisions: decisions.map((d) => ({
+      id: d.id,
+      issue: d.issue,
+      by: d.by,
+      question: d.question,
+      options: d.options,
+      chosen: d.chosen + 1,
+      reason: d.reason,
+      overturned_to: d.overturnedTo == null ? null : d.overturnedTo + 1,
+      overturn_reason: d.overturnReason,
+      cost: d.cost,
+      point: { at: d.point, passed: false },
+    })),
+    problems: {},
+    held: false,
+    held_since: null,
+  };
+  fs.writeFileSync(OUT, `${JSON.stringify(view, null, 1)}\n`);
+  console.log(
+    `sample-view: ${view.issues.length} issues, ${view.decisions.length} decisions, ${view.agents.length} agents, ${view.done} done -> ${path.relative(ROOT, OUT)}`,
+  );
+}
+
+main().catch((e) => {
+  console.error(`sample-view: ${e.message}`);
+  process.exit(1);
+});

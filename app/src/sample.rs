@@ -1,540 +1,126 @@
-//! Sample data for the window's `--sample` mode, the tests and the screenshot tool: one project
-//! with made-up Discworld names, already in the shape of the parts' props. The daemon's view is
-//! mapped into the same shape in `view_map.rs`.
-
-use std::collections::HashMap;
+//! Sample data for the window's `--sample` mode, the tests and the screenshot tool: the same data
+//! as the design system's radar page stories (`ui/src/pages/radar/data.ts`, made-up Discworld
+//! names), as a daemon view that the window maps through `view_map` as it maps the daemon's.
+//!
+//! `assets/sample-view.json` is written by `scripts/sample-view` from the design system's data:
+//! the stopped daemon's view, as the page's default stories draw it, with no agent running and
+//! 324 ended. [`running`] starts the data's seven agents on it, with the two issues their
+//! refiners took and the daemon's two problems, as the stories with the daemon running draw it.
 
 use gpui::SharedString;
+use temet_work_core::View;
+use temet_work_core::ids::{AgentId, GroupId};
+use temet_work_core::view::{StageWord, StateWord};
 
-use crate::components::icon::IconName;
-use crate::components::stage_tag::Stage;
-use crate::components::status_tag::Status;
-use crate::composites::check_list::PlanCheck;
-use crate::composites::decision_row::{Decision, UndoCost};
-use crate::composites::group_list::{GroupListAgent, GroupListGroup};
-use crate::composites::issue_actions::IssueActionsAgent;
-use crate::composites::issue_pane::{IssueDecision, IssuePlan, IssuePullRequest};
-use crate::composites::issue_table::IssueSummary;
-use crate::composites::meter_list::MeterListItem;
-use crate::composites::needs_you::NeedsYouDecision;
-use crate::composites::page_header::PageFact;
-use crate::composites::review_rounds::{ReviewPoint, ReviewRound};
-use crate::composites::side_nav::{SideNavArea, SideNavProject};
-use crate::pages::project::{IssueDetail, Milestone, ProjectView};
+use crate::pages::project::ProjectView;
+use crate::view_map;
 
-fn s(text: &str) -> SharedString {
-    SharedString::from(text.to_string())
+/// The view the design system's data has, written by `scripts/sample-view`.
+const SAMPLE_VIEW: &str = include_str!("../assets/sample-view.json");
+
+/// The sample's clock: 28 Nov 2026 13:30 UTC, in milliseconds since 1970, the same as
+/// `scripts/sample-view` takes. Each issue changed the data's "6 min ago" before it.
+pub const NOW_MS: u64 = 1_795_872_600_000;
+
+/// The stopped daemon's view: no agent runs.
+pub fn view() -> View {
+    serde_json::from_str(SAMPLE_VIEW).expect("the sample view parses")
 }
 
-/// An agent as an issue's actions menu lists it, with the issue it is on, or "free".
-fn actions_agent(id: &str, on: &str) -> IssueActionsAgent {
-    IssueActionsAgent {
-        id: s(id),
-        label: s(id),
-        detail: Some(s(on)),
-    }
-}
+/// The agents the data runs while the daemon runs: id, issue, model, state, and what each is
+/// doing as the daemon says it.
+const RUNNING: [(&str, &str, &str, StateWord, &str); 7] = [
+    (
+        "author-71",
+        "clacks#212",
+        "opus",
+        StateWord::Working,
+        "fixing round 1",
+    ),
+    (
+        "investigator-6",
+        "clacks#212",
+        "sonnet",
+        StateWord::Working,
+        "reading the Quirm logs",
+    ),
+    ("author-69", "clacks#215", "opus", StateWord::Working, ""),
+    (
+        "reviewer-74",
+        "clacks#201",
+        "opus",
+        StateWord::Working,
+        "round 2",
+    ),
+    ("reviewer-75", "clacks#203", "sonnet", StateWord::Idle, ""),
+    ("refiner-82", "clacks#224", "opus", StateWord::Working, ""),
+    (
+        "refiner-83",
+        "clacks#226",
+        "sonnet",
+        StateWord::Blocked,
+        "the issue names no tower",
+    ),
+];
 
-fn project(id: &str, icon: IconName, waiting: usize) -> SideNavProject {
-    SideNavProject {
-        id: s(id),
-        name: s(id),
-        icon: Some(icon),
-        waiting,
-    }
-}
+/// The daemon's problems while it runs, as the data has them.
+const PROBLEMS: [(&str, &str); 2] = [
+    (
+        "tracker",
+        "GitHub answered 502 three times; the next read is in 2 min",
+    ),
+    (
+        "start reviewer on clacks#203",
+        "the runner could not open a terminal: no free slot on local; it tries again when one frees",
+    ),
+];
 
-fn agent(id: &str, role: &str, place: &str, status: Status) -> GroupListAgent {
-    GroupListAgent {
-        id: s(id),
-        role: s(role),
-        r#where: Some(s(place)),
-        status,
-    }
-}
-
-fn issue(
-    key: &str,
-    title: &str,
-    stage: Stage,
-    group: &str,
-    agent: Option<&str>,
-    updated: &str,
-) -> IssueSummary {
-    IssueSummary {
-        key: s(key),
-        title: s(title),
-        stage,
-        group: Some(s(group)),
-        agent: agent.map(s),
-        updated: s(updated),
-    }
-}
-
-fn meter(label: &str, value: f32, reading: &str, note: Option<&str>) -> MeterListItem {
-    MeterListItem {
-        id: s(label),
-        label: s(label),
-        value,
-        reading: s(reading),
-        note: note.map(s),
-    }
-}
-
-fn check(done_when: &str, proven_by: &str, status: Status) -> PlanCheck {
-    PlanCheck {
-        done_when: s(done_when),
-        proven_by: s(proven_by),
-        status: Some(status),
-        status_text: None,
-    }
-}
-
-/// A decision with only what NeedsYou shows: who, on which issue, its cost and deadline.
-fn need(
-    id: &str,
-    issue: &str,
-    by: &str,
-    cost: UndoCost,
-    took: &str,
-    before: &str,
-) -> NeedsYouDecision {
-    NeedsYouDecision {
-        id: s(id),
-        decision: Decision {
-            took: s(took),
-            by: s(by),
-            issue: Some(s(issue)),
-            at: None,
-            cost: Some(cost),
-            weighed: Vec::new(),
-            why: None,
-            overturn_before: Some(s(before)),
-            overturned: None,
-        },
-    }
-}
-
-/// The issue selected when the window opens.
-pub fn selected() -> Option<SharedString> {
-    Some(s("WATCH-44"))
-}
-
-/// The watch project: two areas, four agent groups (one with no agents, one with long names),
-/// three machines (one full) and three limits, four decisions that need the person, and three
-/// milestones, the last with no issues yet. WATCH-44 has a plan, a pull request, two review
-/// rounds and two decisions; WATCH-47 has only its facts.
-pub fn project_view() -> ProjectView {
-    let areas = vec![
-        SideNavArea {
-            id: s("ankh-morpork"),
-            name: s("ankh-morpork"),
-            projects: vec![
-                project("watch", IconName::Console, 2),
-                project("post-office", IconName::Database, 1),
-                project("mint", IconName::Search, 1),
-                project("unseen-university", IconName::Link, 0),
-            ],
-        },
-        SideNavArea {
-            id: s("lancre"),
-            name: s("lancre"),
-            projects: vec![
-                project("castle", IconName::Layout, 0),
-                project("coven", IconName::Desktop, 0),
-                project("bridge", IconName::Box, 0),
-            ],
-        },
-    ];
-
-    let groups = vec![
-        GroupListGroup {
-            id: s("night-watch"),
-            name: s("night watch"),
-            note: Some(s("watch 0.4, 0.5")),
-            agents: vec![
-                agent("nw-1", "refiner", "omit · opus", Status::Idle),
-                agent("nw-2", "author", "omit · sonnet", Status::Running),
-                agent("nw-3", "reviewer", "deus · gpt-5-codex", Status::Waiting),
-                agent("nw-4", "arbiter", "omit · opus", Status::Idle),
-            ],
-        },
-        GroupListGroup {
-            id: s("yard"),
-            name: s("pseudopolis yard clacks paging and unread counts"),
-            note: Some(s("watch 0.4, 0.5")),
-            agents: vec![
-                agent(
-                    "py-1",
-                    "reviewer",
-                    "deus · claude-sonnet-5 · watch-58-semaphore-copy",
-                    Status::Waiting,
-                ),
-                agent(
-                    "py-2",
-                    "author",
-                    "omit · claude-opus-5 · watch-42-cursor-row",
-                    Status::Blocked,
-                ),
-            ],
-        },
-        GroupListGroup {
-            id: s("mint-audit"),
-            name: s("mint audit"),
-            note: Some(s("mint 1.2")),
-            agents: vec![
-                agent("ma-1", "author", "mac · sonnet", Status::Passed),
-                agent("ma-2", "reviewer", "mac · opus", Status::Failed),
-            ],
-        },
-        GroupListGroup {
-            id: s("day-watch"),
-            name: s("day watch"),
-            note: Some(s("watch 0.6")),
-            agents: Vec::new(),
-        },
-    ];
-
-    // Each agent holds a slot on the machine it runs on, the first word of where it runs.
-    let machines = [("omit", 6), ("deus", 4), ("mac", 2)]
-        .into_iter()
-        .map(|(machine, slots)| {
-            let used = groups
-                .iter()
-                .flat_map(|g| &g.agents)
-                .filter(|a| {
-                    a.r#where
-                        .as_ref()
-                        .is_some_and(|w| w.split(" · ").next() == Some(machine))
-                })
-                .count();
-            meter(
-                machine,
-                used as f32 / slots as f32,
-                &format!("{used} / {slots} slots"),
-                None,
-            )
-        })
-        .collect();
-    let limits = vec![
-        meter("Claude 5 h", 0.62, "62%", Some("resets 14:20")),
-        meter("Claude 7 d", 0.41, "41%", Some("resets Mon 09:00")),
-        meter("Codex 5 h", 0.18, "18%", Some("resets 15:05")),
-    ];
-
-    let needs = vec![
-        need(
-            "n1",
-            "WATCH-51",
-            "arbiter · Claude",
-            UndoCost::High,
-            "Page the tower list 200 at a time instead of loading all",
-            "merge, in about 20 min",
-        ),
-        need(
-            "n2",
-            "MINT-209",
-            "reviewer · Claude",
-            UndoCost::High,
-            "Skip the flaky coin-count end-to-end test for this pull request",
-            "deploy to staging",
-        ),
-        need(
-            "n3",
-            "WATCH-44",
-            "arbiter · Claude",
-            UndoCost::Medium,
-            "Refuse to store the token when the keyring is locked",
-            "round 2 closes",
-        ),
-        need(
-            "n4",
-            "POST-318",
-            "author · Claude",
-            UndoCost::Low,
-            "Keep the old /letters route as a redirect for one release",
-            "the next release",
-        ),
-    ];
-
-    let milestones = vec![
-        Milestone {
-            name: s("watch 0.4"),
-            due: Some(s("12 Dec")),
-            done: 1,
-            total: 5,
-            issues: vec![
-                issue(
-                    "WATCH-44",
-                    "Signing in at the Watch House stores a token that outlives a restart",
-                    Stage::InReview,
-                    "night watch",
-                    Some("reviewer · Codex"),
-                    "4 min ago",
-                ),
-                issue(
-                    "WATCH-51",
-                    "Clacks tower list pages past 1,000 towers",
-                    Stage::WithArbiter,
-                    "night watch",
-                    Some("arbiter · Claude"),
-                    "11 min ago",
-                ),
-                issue(
-                    "WATCH-47",
-                    "Show unread counts per beat in the side bar",
-                    Stage::Refining,
-                    "night watch",
-                    Some("refiner · Claude"),
-                    "20 min ago",
-                ),
-                issue(
-                    "WATCH-39",
-                    "Resize no longer clears the duty board",
-                    Stage::Done,
-                    "pseudopolis yard clacks paging and unread counts",
-                    None,
-                    "2 h ago",
-                ),
-                issue(
-                    "WATCH-42",
-                    "Keep the cursor row when a report arrives from Pseudopolis Yard while \
-                     Sergeant Colon is scrolling through the night shift's long list of \
-                     reports, so that he does not lose his place every time a constable \
-                     files one",
-                    Stage::Verifying,
-                    "pseudopolis yard clacks paging and unread counts",
-                    Some("author · Claude"),
-                    "26 min ago",
-                ),
-            ],
-        },
-        Milestone {
-            name: s("watch 0.5"),
-            due: Some(s("16 Jan")),
-            done: 0,
-            total: 2,
-            issues: vec![
-                issue(
-                    "WATCH-55",
-                    "Search reports across every connected clacks tower",
-                    Stage::Working,
-                    "night watch",
-                    Some("author · Claude"),
-                    "1 min ago",
-                ),
-                issue(
-                    "WATCH-58",
-                    "Selecting text copies it over the semaphore",
-                    Stage::Merging,
-                    "pseudopolis yard clacks paging and unread counts",
-                    Some("reviewer · Claude"),
-                    "8 min ago",
-                ),
-            ],
-        },
-        Milestone {
-            name: s("watch 0.6"),
-            due: Some(s("20 Feb")),
-            done: 0,
-            total: 0,
-            issues: Vec::new(),
-        },
-    ];
-
-    let decision =
-        |id: &str, by: &str, at: &str, took: &str, weighed: &[&str], why: &str, before: &str| {
-            IssueDecision {
-                id: s(id),
-                decision: Decision {
-                    took: s(took),
-                    by: s(by),
-                    issue: None,
-                    at: Some(s(at)),
-                    cost: None,
-                    weighed: weighed.iter().map(|w| s(w)).collect(),
-                    why: Some(s(why)),
-                    overturn_before: Some(s(before)),
-                    overturned: None,
-                },
-            }
+/// `view` with the daemon running: the data's seven agents at work, the two new issues their
+/// refiners took now refining in the group, changed just now, and the daemon's problems.
+pub fn running(mut view: View) -> View {
+    let group = view
+        .groups
+        .first()
+        .map_or_else(|| GroupId::new("grand-trunk"), |g| g.id.clone());
+    for (id, issue, model, state, doing) in RUNNING {
+        let Some(agent) = view.agents.iter_mut().find(|a| a.id.0 == id) else {
+            continue;
         };
-    let watch_44 = IssueDetail {
-        id: Some(temet_work_core::ids::IssueId::new("watch", "WATCH-44")),
-        moves: vec![Stage::New, Stage::Ready],
-        // It is in review, so only a reviewer on another issue of its group and project may be
-        // assigned to it; the author and reviewer on it now may be unassigned.
-        assignable: vec![actions_agent("py-1", "watch#58")],
-        assigned: vec![
-            actions_agent("nw-2", "watch#44"),
-            actions_agent("nw-3", "watch#44"),
-        ],
-        round: 2,
-        plan: Some(IssuePlan {
-            folder: Some(s("omit:~/work/watch-2")),
-            merge: Some(s("squash after CI and one approval")),
-            checks: vec![
-                check(
-                    "Signing in stores a token in the system keyring",
-                    "cargo nextest run -p watch-house sign_in",
-                    Status::Passed,
-                ),
-                check(
-                    "The token is read back after the Watch House restarts",
-                    "cargo nextest run -p watch-house token_survives_restart",
-                    Status::Running,
-                ),
-                check(
-                    "A revoked token sends the constable back to sign-in",
-                    "cargo nextest run -p watch-house revoked",
-                    Status::Waiting,
-                ),
-            ],
-        }),
-        pull: Some(IssuePullRequest {
-            number: 212,
-            repo: None,
-            merged: None,
-            branch: Some(s("watch-44-keyring-token")),
-            ci: Some(Status::Passed),
-            ci_text: Some(s("CI passed in 3 m 12 s")),
-            lines: Some((184, 37)),
-            files: Some(6),
-        }),
-        rounds: Some(vec![
-            ReviewRound {
-                round: 1,
-                by: s("reviewer · Codex"),
-                status: Status::Blocked,
-                points: vec![
-                    ReviewPoint {
-                        text: s(
-                            "The token is written to ~/.config in plain text when the keyring is locked.",
-                        ),
-                        reply: Some(s("Now refuses to store and asks to unlock the keyring.")),
-                        resolved: true,
-                    },
-                    ReviewPoint {
-                        text: s("No test for a revoked token."),
-                        reply: Some(s("Added watch-house revoked.")),
-                        resolved: true,
-                    },
-                ],
-            },
-            ReviewRound {
-                round: 2,
-                by: s("reviewer · Codex"),
-                status: Status::InProgress,
-                points: vec![ReviewPoint {
-                    text: s("sign_in() swallows the keyring error and returns Ok(())."),
-                    reply: None,
-                    resolved: false,
-                }],
-            },
-        ]),
-        decisions: Some(vec![
-            decision(
-                "d1",
-                "author · Claude",
-                "10:41",
-                "Store the token in the system keyring (Secret Service on Linux, Keychain on macOS)",
-                &[
-                    "Keyring",
-                    "Encrypted file in ~/.config",
-                    "Ask on every start",
-                ],
-                "Survives restarts, needs no key of our own, and is where other desktop apps keep tokens.",
-                "the pull request merges",
-            ),
-            decision(
-                "d2",
-                "arbiter · Claude",
-                "10:52",
-                "Refuse to store the token when the keyring is locked",
-                &["Refuse and ask", "Fall back to a file"],
-                "A plain-text fallback is the thing round 1 blocked.",
-                "round 2 closes",
-            ),
-        ]),
-        person_checks: Vec::new(),
-    };
-    let details = HashMap::from([
-        (s("WATCH-44"), watch_44),
-        (
-            s("WATCH-51"),
-            IssueDetail {
-                round: 3,
-                ..IssueDetail::default()
-            },
-        ),
-        (
-            s("WATCH-39"),
-            IssueDetail {
-                round: 1,
-                ..IssueDetail::default()
-            },
-        ),
-        (
-            s("WATCH-42"),
-            IssueDetail {
-                round: 1,
-                ..IssueDetail::default()
-            },
-        ),
-        (
-            s("WATCH-58"),
-            IssueDetail {
-                round: 2,
-                ..IssueDetail::default()
-            },
-        ),
-    ]);
-
-    // Which project each decision that needs the person belongs to, and the decision in an
-    // issue's pane that is the same one, so overturning either overturns both.
-    let need_project = HashMap::from([
-        (s("n1"), s("watch")),
-        (s("n2"), s("mint")),
-        (s("n3"), s("watch")),
-        (s("n4"), s("post-office")),
-    ]);
-    let same_decision = HashMap::from([(s("n3"), (s("WATCH-44"), s("d2")))]);
-
-    ProjectView {
-        need_project,
-        same_decision,
-        areas,
-        project: s("watch"),
-        groups,
-        machines,
-        limits,
-        title: s("watch"),
-        facts: vec![
-            PageFact {
-                label: s("Issues"),
-                value: s("tracker.example.com/projects/WATCH"),
-                icon: Some(IconName::Link),
-            },
-            PageFact {
-                label: s("Code"),
-                value: s("git.example.com/ankh-morpork/watch"),
-                icon: Some(IconName::GitBranch),
-            },
-        ],
-        needs,
-        milestones,
-        details,
-    }
-}
-
-/// The same project with nothing waiting on the person: no decisions to read, and no project
-/// counts in the side column.
-pub fn without_needs(mut view: ProjectView) -> ProjectView {
-    view.needs.clear();
-    for area in &mut view.areas {
-        for project in &mut area.projects {
-            project.waiting = 0;
+        agent.issue = Some(issue.to_string());
+        agent.model = Some(model.to_string());
+        agent.state = state;
+        agent.state_text = doing.to_string();
+        if let Some(i) = view.issues.iter_mut().find(|i| i.id == issue) {
+            let agent = AgentId::new(id);
+            if !i.agents.contains(&agent) {
+                i.agents.push(agent);
+            }
+            if id.starts_with("refiner") && i.stage == StageWord::New {
+                i.stage = StageWord::Refining;
+                i.stage_text = "refining".into();
+                i.group = Some(group.clone());
+                i.updated_ms = Some(NOW_MS);
+            }
         }
     }
+    view.problems = PROBLEMS
+        .iter()
+        .map(|(name, text)| (name.to_string(), text.to_string()))
+        .collect();
     view
+}
+
+/// The page's view of the stopped daemon's sample.
+pub fn project_view() -> ProjectView {
+    view_map::project_view(&view(), None, NOW_MS).expect("the sample has a project")
+}
+
+/// The page's view of the sample with the daemon running.
+pub fn running_view() -> ProjectView {
+    view_map::project_view(&running(view()), None, NOW_MS).expect("the sample has a project")
+}
+
+/// The issue open in the pane when the window opens, as the radar page opens it.
+pub fn selected() -> Option<SharedString> {
+    Some("clacks#212".into())
 }

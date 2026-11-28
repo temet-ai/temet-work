@@ -2,7 +2,6 @@
 session_id:
   - 7d0707d6-9b74-4137-9184-72c6591eeaed
   - fec79389-b50c-4e28-8f21-c56c628a5232
-  - 7d4c9131-a05c-43ac-ba6d-09406c95b2c6
 ---
 
 # temet-work's UI parts
@@ -124,19 +123,17 @@ GroupList `tm-groups-head`; a class with no measured look follows its rule in `t
 `blueprint-overrides.css`.
 
 Where the radar page and a part's own stories draw a part differently, the window follows the
-radar page, because the page is the screen the window reproduces. Its Alert asks with the primary
-intent and no icon, and its Toast has the Notifications icon and no intent. A person's request the
-daemon refuses, or that gets no reply, shows in a Toast with the danger intent and the WarningSign
-icon, naming the action and the agent. The page closes the
-toast after 5000 ms; no motion token holds that duration yet, so the window's toast stays until it
-is closed.
+radar page, because the page is the screen the window reproduces. The Alert asks with the primary
+intent and no icon, and the Toast has the Notifications icon and no intent; the page closes a
+toast after 5000 ms, and no motion token holds that duration yet, so the window's toast stays until
+it is closed. The Project page draws no Alert now, since it sends no overturn until temet-work#238. A person's request the daemon refuses, or that gets no reply, shows in a Toast with the danger intent and the WarningSign icon.
 
 | Part | Design system id | Variants temet-work uses | GPUI basis |
 |---|---|---|---|
-| AppShell | `temet-appshell` | regions: nav bar, main area, side pane, optional top bar | |
-| Icon | `blueprint-icon` | 16, 20 px | `icon` |
-| Button | `blueprint-button` | `variant` solid, minimal, outlined; `intent` none, primary; `size` small, medium; `icon`; `loading`; `disabled` | `button` |
-| AttentionButton | `temet-attentionbutton` | `size` small | `button` |
+| AppShell | `temet-appshell` | regions: nav bar, main area, side pane, optional top bar; `sideOver`, the pane over the right of the main column, where only a wide child (StageBoard) runs under it (`wide_child`); a side holding IssuePane neither pads nor scrolls and ends where the pane ends, no taller than the window, with an edge under it (`side_fit`, `.tm-shell-pane:has(.tm-issue-pane)`) | |
+| Icon | `blueprint-icon` | 16, 20 px; `intent`, as ProblemList draws its icon in the danger colour | `icon` |
+| Button | `blueprint-button` | `variant` solid, minimal, outlined; `intent` none, primary; `size` small, medium; `icon`; `loading`; `disabled`. Only the primary solid button was measured disabled; the others follow Blueprint's `.bp6-button:disabled` rules. A loading button draws Blueprint's spinner standing still | `button` |
+| AttentionButton | `temet-attentionbutton` | `size` small; `loading`, drawn as a disabled small outlined Button with its spinner | `button` |
 | AttentionText | `temet-attentionbutton` (subcomponent) | | `label` |
 | Tag | `temet-tag` | `minimal`; `intent` none, primary, success, warning, danger; `icon`; `interactive`. Story: Intents. In the dark theme the warning and danger tags are outlined in their colour with no wash; in the light theme the warning tag is a neutral tag and the danger tag keeps its red wash, as the design system measured them | `tag` |
 | StatusTag | `temet-statustag` | `status` (9); `size` medium, large; own word | Tag and Icon |
@@ -144,34 +141,35 @@ is closed.
 | KeyComboTag | `blueprint-keycombotag` | | `kbd` |
 | Tooltip | `blueprint-tooltip` | `compact`; `placement` | `tooltip` |
 | ProgressBar | `blueprint-progressbar` | `intent` primary; `stripes` off; `animate` off | `progress` |
-| Spinner | `blueprint-spinner` | `size`; in a loading Button at `SpinnerSize.SMALL`. The head stands still: no motion token holds Blueprint's 500 ms turn | `canvas` |
+| Spinner | `blueprint-spinner` | in a loading Button only, standing still: no motion token holds Blueprint's 500 ms turn | `canvas` |
 | Divider | `blueprint-divider` | | `separator` |
-| InputGroup | `temet-inputgroup` | `leftIcon` (search); `size` small, medium; `fill`; `disabled`. It draws a `FieldState`, the text a page keeps while the person edits it | `input` |
-| TextArea | `blueprint-textarea` | `fill`; `autoResize`, always on; `disabled`; `className` `tm-mono` for a proven-by in the code face | `input` (`Textarea`) |
-| FormGroup | `blueprint-formgroup` | `label` | |
+| InputGroup | `temet-inputgroup` | `leftIcon` (search); `size` small, medium; `intent` danger; `fill`; `disabled`. Stories: Labelled, Small, Disabled. Its box is the measured look; gpui-component's single-line input, without its own box, edits the text, held under the field's id | `input` (Input) |
+| TextArea | `blueprint-textarea` | `fill`; `autoResize`; `disabled`; the code face with `className` `Mono` (`.tm-refine-row textarea.tm-mono`). Story: Auto Resize. Its box is the measured `fill` look at rest and in focus; disabled it takes the disabled InputGroup's look, which Blueprint draws with the same rules | `input` (Textarea) |
 | HTMLSelect | `blueprint-htmlselect` | | `select` |
 | Switch | `blueprint-switch` | | `switch` |
 | Checkbox | `blueprint-checkbox` | | `checkbox` |
 | SegmentedControl | `blueprint-segmentedcontrol` | `intent` primary; `size` small | `button` (ToggleGroup) |
-| Tabs, Tab | `blueprint-tabs` | `renderActiveTabPanelOnly` | `tab` |
-| Menu, MenuItem, MenuDivider | `blueprint-menu` | MenuItem `icon`, `text`, children as a submenu with its caret, opened by a click and to the item's left, since the pane that holds IssueActions is at the window's right edge. No look is measured for a menu: it is the raised surface with the overlay edge measured on the Dialog, padded and sized by Blueprint's rules in spacing steps. MenuDivider is a rule between groups, as IssueActions puts one between Refine and Move to | |
+| Tabs, Tab | `blueprint-tabs` | `renderActiveTabPanelOnly`; Tab `tagContent`, a count in a minimal Tag, primary while its tab is open | `tab` |
+| Menu, MenuItem, MenuDivider | `blueprint-menu` | MenuItem `icon`, `text`, `label` (muted text at the right), children as a submenu with its caret, opened by a click and to the item's left, since the pane that holds IssueActions is at the window's right edge. No look is measured for a menu: it is the raised surface with the overlay edge measured on the Dialog, padded and sized by Blueprint's rules in spacing steps. MenuDivider is a rule between groups, as IssueActions puts one between Refine and Move to | |
 | Navbar, NavbarGroup, NavbarHeading, NavbarDivider | `blueprint-navbar` | NavbarGroup `align` right | `title_bar` |
 | Popover | `blueprint-popover` | `placement` bottom-end; `isOpen` and `onInteraction`, so the page holds whether it is open; no arrow, one menu padding from its target. A press outside it asks to close it | |
 | ContextMenu | `blueprint-contextmenu` | | `menu` |
 | Alert | `blueprint-alert` | `intent` primary; `cancelButtonText`, `confirmButtonText` | `dialog` |
-| Dialog, DialogBody, DialogFooter | `blueprint-dialog` | `isOpen`, `title`, `icon`, `onClose` (close button, Escape, backdrop), `className` `tm-refine`; DialogFooter `actions` | |
+| Dialog | `blueprint-dialog` | `title`; `icon`; `className` `Refine` (`.tm-refine`, `--tm-dialog-wide`); the footer's `actions`, as `DialogFooter` takes them. Closes on its close button, Escape and a click on the backdrop | |
+| FormGroup | `blueprint-formgroup` | `label`. No measured look: Blueprint's `.bp6-form-group` and `label.bp6-label` rules | |
+| RadioGroup, Radio | `blueprint-radiogroup` | `label`; `inline`; `disabled`; `selectedValue`. Stories: Options, Inline, Disabled. No measured look: the circle, its accent fill and dot follow Blueprint's `.bp6-control.bp6-radio` rules with the theme's tokens | |
 | Toast, OverlayToaster | `blueprint-toast` | `icon`; `position` bottom-right; no `timeout` (no duration token) | `notification` |
-| Callout | `blueprint-callout` | `intent`; `compact` | `alert` |
+| Callout | `blueprint-callout` | `intent`; `compact`, padded by Blueprint's `.bp6-callout.bp6-compact` rules | `alert` |
 | NonIdealState | `blueprint-nonidealstate` | | `empty` |
 | Omnibar | `blueprint-omnibar` | | `command` |
 | HTMLTable | `blueprint-htmltable` | `compact`; `interactive` | `table`, `virtual_list` |
-| TableRow | `temet-tablerow` | `selected` | `table` |
+| TableRow | `temet-tablerow` | `selected`; a row with a click handler takes the focus, by Tab or a click, and Enter or Space clicks it (`tabIndex={0}`) | `table` |
 | Section, SectionCard | `temet-section` | `compact`; `elevation` 0; `headingLevel`; `rightElement`; `padded` off | |
 | CutPanel | `temet-cutpanel` | `attention`; `here`, the moving hue edge on the one panel the person is in, which `attention` overrides; `padded`; `buildUp`. Stories: Padded, Attention, Here, Here With Attention, Machines With One Here | |
 | Disclosure | `temet-disclosure` | `defaultOpen`; `rightElement` | `collapsible` |
 | PlusMinusTree | `temet-plusminustree` | `defaultExpanded`; node `secondaryLabel` | `tree` |
 | Heading | `temet-heading` | page title 20 px, pane title 16 px, section title 14 px with a muted note at the right | |
-| PropertyList | `temet-propertylist` | label and value pairs, labels muted in a fixed column | `description_list` |
+| PropertyList | `temet-propertylist` | label and value pairs, labels muted in a fixed column; a value may be a set (`tm-props-set`) or links, as the radar page writes `<a>` (Blueprint's link colour, underlined under the pointer, the code face for an issue key) | `description_list` |
 | Meter | `temet-meter` | name and value on one line, ProgressBar under them | |
 | ListRow | `temet-listrow` | a row outside a table with a quiet rule above: title, muted meta line, muted detail line, an end element | |
 | TerminalView | gap | an agent's terminal screen, read only, in the mono face | |
@@ -180,27 +178,28 @@ is closed.
 
 | Part | What it is | Built from | Design system |
 |---|---|---|---|
-| SideNav | the guide's nav bar, the left column's areas and projects: an area is a group label that opens and closes, a project an item with its icon, name and a count of what waits on a person; two levels at most; past about five areas, an area selector at the top (`docs/areas.md`) | PlusMinusTree, Tag, Tooltip, Icon, HTMLSelect | `temet-sidenav` |
+| SideNav | the guide's nav bar, the left column's areas and projects: an area is a group label that opens and closes, a project an item with its icon, name and a count of what waits on a person; `projects`, those in no area, at the top level after the areas; two levels at most; past about five areas, an area selector at the top (`docs/areas.md`). Stories: Projects, No Areas | PlusMinusTree, Tag, Tooltip, Icon, HTMLSelect | `temet-sidenav` |
 | TopBar | across the window: the app's sections and search; needed once the app has a second section, such as settings (`docs/settings.md`) | Navbar, NavbarGroup, NavbarHeading, Button, InputGroup, Omnibar | `temet-topbar` |
 | GroupList | the left column's groups: each group's name and milestone, and its agents with role, machine and model, and status | Heading, ListRow, StatusTag | `temet-grouplist` |
-| MeterList | the left column's machines (build slots in use) and limits (use per window, when it resets) | Heading, Meter | `temet-meterlist` |
-| PageHeader | the top of the main area: the project or area name, where its issues and code are, and the controls for the whole page | Heading, Icon, SegmentedControl, Button | `temet-pageheader` |
-| NeedsYou | the decisions that wait on a person, costliest to undo first | CutPanel (`attention`, `buildUp`), AttentionText, DecisionRow | `temet-needsyou` |
-| DecisionRow | one agent decision: who, when, what it took, the cost to undo, what it weighed and why, the deadline and Overturn | ListRow, Tag, PropertyList, AttentionText, AttentionButton | `temet-decisionrow` |
-| MilestonePanel | one milestone: name, done of total, due date, progress, and its issues | CutPanel, Section, ProgressBar, IssueTable | `temet-milestonepanel` |
-| IssueTable | issues as rows: key, title, stage, agent, updated; optional group rows; one set of column widths in every panel | HTMLTable, TableRow, StageTag | `temet-issuetable` |
-| IssuePane | the side pane for an issue: title, key, stage, its actions menu behind a small minimal button with More at the right of its head, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Button, Popover, IssueActions, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
+| MeterList | the left column's machines (build slots in use) and limits (use per window, when it resets); not on the Project page, whose view holds neither | Heading, Meter | `temet-meterlist` |
+| PageHeader | the top of the main area: the project or area name, where its issues and code are, and the controls for the whole page in a row after `actionsLabel`, such as View and, on the list, a muted "Group by" (`Classes.TEXT_MUTED`, `Class::TextMuted`) and Group by | Heading, Icon, SegmentedControl, Button | `temet-pageheader` |
+| NeedsYou | the decisions that wait on a person, costliest to undo first. The window keeps this form, from before the design system drew Needs you by issue; that redesign is temet-work#258 | CutPanel (`attention`, `buildUp`), AttentionText, DecisionRow | `temet-needsyou` |
+| DecisionRow | one agent decision: who, when, the cost to undo, the agent's question with what it took, the other options and why (or what it weighed), the deadline and Overturn; Overturn opens a confirm in the row: the option to switch to, a reason, Cancel and Overturn, busy while sent, the failure above the buttons. Without a question, the short form: what it took as the title and the button at the right. Stories: Short, Overturn Ready, No Options, With Question, With Question Overturning, One Other Option, Sending, Not Sent, Sent | ListRow, Tag, PropertyList, Button, AttentionButton, RadioGroup, TextArea, Callout | `temet-decisionrow` |
+| RefineDialog | an issue's title and its plan's checks, each a done-when and a proven-by in the code face, added and deleted in place; Save, and Save and send to refiner, both waiting for a title; closed unsaved by its close button, Escape and Cancel; while its `refine` is answered the buttons are busy and the fields take no edit, and a refusal's reason shows over the fields. Stories: Default, No Plan | Dialog, FormGroup, InputGroup, TextArea, Button, Callout | `temet-refinedialog` |
 | IssueActions | what a person can do to an issue, as one menu. The design system's has Open, Refine, Move to, Assign and Unassign, each shown only when its handler is given; the daemon has commands for Refine (`temet-work refine`), Move to (`temet-work move`), Assign (`temet-work assign`) and Unassign (`temet-work unassign`), so the window gives those four, Refine first with a divider after it. Refine opens RefineDialog. Move to's submenu lists the stages the daemon says the issue may move to, each with its stage's icon and name (`move_to`), and a pick sends the move. Assign's submenu lists the agents the daemon says may be assigned to the issue (`assignable`) and Unassign's the agents working on it, each with the issue it is on now, and a pick sends the command. Stories: In Pane, No Agents | Menu, MenuItem, MenuDivider, Icon | `temet-issueactions` |
-| RefineDialog | an issue's title and its checks for the person to edit, each check a done-when and a proven-by with Delete, then Add check; Cancel, Save and "Save and send to refiner", the last two disabled while the title is empty and busy while their `refine` is answered; a refusal's reason over the fields | Dialog, DialogBody, DialogFooter, FormGroup, InputGroup, TextArea, Button, Callout | `temet-refinedialog` |
-| CheckList | a plan's checks: a line counting them by status, then for each what is done when, what proves it and its status, if it has run. A done-when over three lines and a proven-by over two show their first lines, and plus opens the row whole, minus closes it. Stories: Default, Failed And Timed, No Checks, Not Run Yet, Long Checks | ListRow, StatusTag, Button | `temet-checklist` |
-| ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points, the author's reply and each point's status | Disclosure, ListRow, StatusTag | `temet-reviewrounds` |
+| MilestonePanel | one milestone: name, done of total, due date, progress, and its issues; `note`, muted after the figures, such as "no group takes it". Stories: Default, Not Taken | CutPanel, Section, ProgressBar, IssueTable | `temet-milestonepanel` |
+| IssueTable | issues as rows: key, title, stage, agent, updated; `showMilestone`, a Milestone column; `showAgent`; a narrow table leaves out Updated, a narrower one Agent too; optional group rows, stages from the furthest along, a stage's row with no count (StageCounts says it), a group's with its count; one set of column widths in every panel. Story: By Stage With Milestone | HTMLTable, TableRow, StageTag | `temet-issuetable` |
+| IssuePane | the side pane for an issue: a head that stays put with a quiet rule under it (title, key, stage with its round, `actions` behind a button and, with `onClose`, a close button with the tooltip "Close (q)"; q closes it unless the focus is in a text field), then in its own scroll area the facts panel (CutPanel `here`) and tabs with their counts for its plan, pull request, review rounds and decisions; one of them alone has no tab row; `sharedDeadline`, which its decisions leave out. Stories: Decisions, Plan, Review, Pull Request, Facts Only, No Decisions, In The Shell | Heading, StageTag, Tabs, Tooltip, Popover, Button, CutPanel, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
+| CheckList | a plan's checks: for each, what is done when, what proves it and its status, if it has run. A done-when over three lines and a proven-by over two show their first lines; a click on the row opens it whole and another closes it, and its plus or minus, for the keyboard, shows on the row under the pointer and while it is open (`.tm-reveal`). Stories: Default, Failed And Timed, No Checks, Not Run Yet, Long Checks | ListRow, StatusTag, Button | `temet-checklist` |
+| ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points and the author's reply; only a point in the other state than most of its round's says whether it is open or resolved | Disclosure, ListRow, StatusTag | `temet-reviewrounds` |
+| ProblemList | what the daemon reports wrong now, above Needs you: a row each with what it is about, in the code face, and what is wrong; nothing when there is no problem. Its Send buttons come with temet-work#256. Story: Default | CutPanel, Heading, Icon, ListRow | `temet-problemlist` |
 | AgentPane | the side pane for an agent: its role, state, terminal and decisions | Heading, StatusTag, TerminalView, DecisionRow | gap |
 
 ## Pages
 
 | Page | What it shows | Built from | Design system |
 |---|---|---|---|
-| Project | one project: the nav bar, groups, machines and limits on the left (a list the view has no data for is left out); the project's milestones and issues in the middle; the selected issue or agent on the right (`docs/objects.md`); RefineDialog over it, opened from the issue's actions | AppShell, SideNav, GroupList, MeterList, PageHeader, NeedsYou, MilestonePanel, IssueTable, IssuePane, IssueActions, RefineDialog, AgentPane, Callout, Alert, Toast | `pages-temet-work-radar` (RadarScreen) |
+| Project | one project: SideNav, the stages' counts and the groups on the left; the page head with View (Board, List) and, on the list, Group by; the daemon's problems and Needs you; the issues as a StageBoard with the pane over its right, or as milestone panels, or one table grouped by stage or group; the selected issue on the right (`docs/objects.md`). One place for each fact: decisions in Needs you, agents in the left column, stage counts in StageCounts. The pane's actions send `move`, `assign` and `unassign` and open RefineDialog, whose Save sends `refine`; each answer shows in a Toast, a refusal with the danger intent. The board's cards have no actions menu yet, and the page passes no overturn until #238 | AppShell, SideNav, StageCounts, GroupList, PageHeader, SegmentedControl, ProblemList, NeedsYou, StageBoard, IssueCard, IssueActions, MilestonePanel, IssueTable, IssuePane, RefineDialog, Callout, Toast | `pages-temet-work-radar` (RadarScreen) |
 | Area | one area: its projects' milestones as a list, its tracker and code-host groups in the page header (`docs/areas.md`) | AppShell, SideNav, PageHeader, MilestonePanel | gap |
 | Settings | the settings chain, global down to one task (`docs/settings.md`) | not defined yet | gap |
 | Rules | rules with where they came from, their state and what measures them (`docs/objects.md`) | not defined yet | gap |
@@ -236,5 +235,5 @@ request, beside the main workspace's job. Run the app's tests locally with
 | A part uses no layer above its own; a composite sets no colour, type, shape or motion and uses the UI library only through components; a page and the plumbing draw nothing of their own | `review` | built |
 | Every design-system id in this map is in the design system's part list, and each component and composite has that part's name | `review`, against `tokens::PARTS` | built |
 | Every `look::get` the app makes names a look both themes measured | `app/src/theme.rs` tests | built |
-| The window as the design system draws it: each theme at 1440, 1280 and 1700 px wide, each tab of the issue pane, the issues grouped by stage and by group, nothing waiting on the person, and RefineDialog open and with a refusal, drawn offscreen with GPUI's headless renderer, with no window or compositor, beside the design system's story shots | `cargo run --example shots --features shots -- DIR` in `app/` | built; compared by eye |
-| StageTag, Tag, CheckList, CutPanel and RefineDialog as their stories draw them, in each theme at 1440 px: the `part-` shots, named after each story's id (`part-temet-stagetag--all-stages-dark`) | the same command | built; compared by eye |
+| The window as the design system draws it: each theme at 1440, 1280 and 1700 px wide, each tab of the issue pane, the issues grouped by stage and by group, and nothing waiting on the person, drawn offscreen with GPUI's headless renderer, with no window or compositor, beside the design system's story shots | `cargo run --example shots --features shots -- DIR` in `app/` | built; compared by eye |
+| StageTag, Tag, CheckList, CutPanel, TextArea, InputGroup, RadioGroup, RefineDialog and DecisionRow as their stories draw them, in each theme at 1440 px: the `part-` shots, named after each story's id (`part-temet-stagetag--all-stages-dark`) | the same command | built; compared by eye |

@@ -1,6 +1,7 @@
 //! Tabs and Tab (`blueprint-tabs`): a row of tabs over panels that share one place, such as an
 //! issue's Plan, Pull request, Review and Decisions. Only the open tab's panel is drawn
-//! (`renderActiveTabPanelOnly`).
+//! (`renderActiveTabPanelOnly`). A tab may carry a count after its title (`tagContent`), a
+//! minimal tag in the accent while the tab is open.
 
 use std::rc::Rc;
 
@@ -9,12 +10,15 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, div,
 };
 
+use super::tag::Tag;
+use crate::theme::look::{self, State};
 use crate::theme::{Intent, colour, size};
 
 /// One tab: its id, its title and its panel.
 pub struct Tab {
     id: SharedString,
     title: SharedString,
+    tag_content: Option<SharedString>,
     panel: Option<AnyElement>,
 }
 
@@ -23,8 +27,15 @@ impl Tab {
         Self {
             id: id.into(),
             title: title.into(),
+            tag_content: None,
             panel: None,
         }
+    }
+
+    /// A count after the title, such as how many checks a plan has, in a minimal tag.
+    pub fn tag_content(mut self, content: Option<impl Into<SharedString>>) -> Self {
+        self.tag_content = content.map(Into::into);
+        self
     }
 
     /// What the tab shows when it is open.
@@ -78,9 +89,12 @@ impl Tabs {
 
 impl RenderOnce for Tabs {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // Tabs have no measured look: Blueprint's `.bp6-tab` rules, in the theme's roles. The
-        // open tab's title and the line under it are the accent as text.
-        let accent = colour::intent_text(cx, Intent::Primary);
+        // The open tab's title and the line under it are the accent as text; a tab's count is a
+        // minimal tag, primary while its tab is open (Blueprint's TabTitle).
+        let plain = look::get(cx, "Tab", "default", State::Rest);
+        let chosen = look::get(cx, "Tab", "selected", State::Rest);
+        let accent = chosen.text;
+        let indicator = colour::intent_text(cx, Intent::Primary);
         let open = self
             .selected_tab_id
             .filter(|id| self.tabs.iter().any(|t| &t.id == id))
@@ -98,9 +112,21 @@ impl RenderOnce for Tabs {
                 .items_center()
                 .flex_none()
                 .line_height(size::tab_line(cx))
+                .text_size(plain.font_size)
+                .text_color(plain.text)
                 .whitespace_nowrap()
                 .cursor_pointer()
-                .child(tab.title);
+                .child(tab.title)
+                .children(tab.tag_content.map(|count| {
+                    let intent = if is_open {
+                        Intent::Primary
+                    } else {
+                        Intent::None
+                    };
+                    div()
+                        .ml(size::tab_tag_gap(cx))
+                        .child(Tag::new(count).intent(intent))
+                }));
             if is_open {
                 panel = tab.panel;
                 title = title.text_color(accent).child(
@@ -110,7 +136,7 @@ impl RenderOnce for Tabs {
                         .right_0()
                         .bottom_0()
                         .h(size::tab_indicator(cx))
-                        .bg(accent),
+                        .bg(indicator),
                 );
             } else {
                 title = title.hover(move |style| style.text_color(accent));

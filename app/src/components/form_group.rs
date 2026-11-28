@@ -1,23 +1,17 @@
-//! FormGroup (`blueprint-formgroup`): a field with its label over it, as the RefineDialog's
-//! Title. Blueprint's rules place it: the label a spacing step above the field, and four steps
-//! under the group (`.bp6-form-group`, `label.bp6-label`).
+//! FormGroup (`blueprint-formgroup`): a field with its label above it, such as RefineDialog's
+//! Title. The design system measured no look for it; it follows Blueprint's rules for
+//! `.bp6-form-group` and `label.bp6-label`.
 
 use gpui::{
     AnyElement, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
 };
 
-use crate::theme::{colour, size, text};
+use crate::theme::size;
 
 #[derive(IntoElement)]
 pub struct FormGroup {
     label: Option<SharedString>,
     children: Vec<AnyElement>,
-}
-
-impl Default for FormGroup {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl FormGroup {
@@ -28,10 +22,16 @@ impl FormGroup {
         }
     }
 
-    /// The field's name, over it.
+    /// The field's label, over it.
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
         self
+    }
+}
+
+impl Default for FormGroup {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -43,20 +43,14 @@ impl ParentElement for FormGroup {
 
 impl RenderOnce for FormGroup {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (under, label_gap) = size::form_group(cx);
-        let label = self.label.map(|label| {
-            div()
-                .mb(label_gap)
-                .text_color(colour::text(cx))
-                .text_size(text::body(cx))
-                .line_height(text::line_height(cx))
-                .child(label)
-        });
         div()
             .flex()
             .flex_col()
-            .mb(under)
-            .children(label)
+            .mb(size::form_gap(cx))
+            .children(
+                self.label
+                    .map(|label| div().mb(size::label_gap(cx)).child(label)),
+            )
             .children(self.children)
     }
 }

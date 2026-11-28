@@ -5,8 +5,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
-    Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
+    div,
 };
 
 use super::{Class, apply, baseline, below_baseline, padded, type_of};
@@ -249,7 +250,10 @@ impl RenderOnce for TableRow {
         let selector = format!("{}", self.id);
         let mut row = div()
             .id(self.id)
-            .debug_selector(|| selector)
+            .debug_selector({
+                let selector = selector.clone();
+                || selector
+            })
             .flex()
             .items_start()
             .w_full()
@@ -266,7 +270,22 @@ impl RenderOnce for TableRow {
             row = row.cursor_pointer().hover(move |style| style.bg(hover));
         }
         if let Some(handler) = self.on_click {
-            row = row.on_click(move |event, window, cx| handler(event, window, cx));
+            // A row that opens something takes the focus by Tab, and Enter or Space on it
+            // clicks it, as the design system's rows do (`tabIndex={0}`).
+            let focus = window.use_keyed_state(
+                ElementId::Name(format!("{selector}-focus").into()),
+                cx,
+                |_, cx| cx.focus_handle().tab_stop(true),
+            );
+            let focus = focus.read(cx).clone();
+            // A click puts the focus on the row, as a browser does, so Tab goes on from it.
+            let on_press = focus.clone();
+            row = row
+                .track_focus(&focus)
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    on_press.focus(window, cx)
+                })
+                .on_click(move |event, window, cx| handler(event, window, cx));
         }
         row
     }
