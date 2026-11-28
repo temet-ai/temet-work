@@ -89,11 +89,14 @@ fn events(w: &mut World, by: &str, command: &Command) -> Result<Vec<Event>, Stri
     w.events(Some(&AgentId::new(by)), command)
 }
 
-/// Runs `command` from `by` and applies what it becomes.
-fn run(w: &mut World, by: &str, command: &Command) {
-    for e in events(w, by, command).unwrap_or_else(|e| panic!("{by} is refused: {e}")) {
-        w.apply(&e);
-    }
+/// Runs `command` from `by`, applies what it becomes and returns what that asks
+/// for.
+fn run(w: &mut World, by: &str, command: &Command) -> Vec<Effect> {
+    events(w, by, command)
+        .unwrap_or_else(|e| panic!("{by} is refused: {e}"))
+        .iter()
+        .flat_map(|e| w.apply(e))
+        .collect()
 }
 
 fn refused(w: &mut World, by: &str, command: &Command) -> String {
@@ -573,4 +576,153 @@ fn the_next_round_resolves_each_point_or_keeps_it_open() {
         ]
     );
     assert!(rounds[2].is_empty(), "an approve raises no point");
+}
+
+/// The arbiter's brief as the world writes it when `effects` ask for one, which
+/// must be for `agent`, who then starts.
+fn arbiter_brief(w: &mut World, effects: &[Effect], agent: &str) -> String {
+    let group = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::StartAgent {
+                group,
+                role: Role::Arbiter,
+                ..
+            } => Some(group.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no arbiter is asked for: {effects:?}"));
+    let launch = w
+        .launch(&group, Role::Arbiter, &watch4(), None)
+        .expect("a launch");
+    assert_eq!(launch.agent, AgentId::new(agent));
+    w.apply(&started(agent, Role::Arbiter));
+    launch.brief.task
+}
+
+/// `watch#4` blocked in each of its three rounds, round 2 keeping a point of
+/// round 1 open and round 3 one of round 2, with what the third block asks for.
+fn blocked_three_times() -> (World, Vec<Effect>) {
+    let mut w = refining(3);
+    run(&mut w, "refiner-1", &plan());
+    w.apply(&started("author-2", Role::Author));
+    w.apply(&started("reviewer-3", Role::Reviewer));
+    run(&mut w, "author-2", &ready(&[]));
+    run(
+        &mut w,
+        "reviewer-3",
+        &block(&["the bell is cracked", "the rope is frayed"], &[], &[]),
+    );
+    run(
+        &mut w,
+        "author-2",
+        &ready(&["recast the bell", "the rope stays: it was checked"]),
+    );
+    run(
+        &mut w,
+        "reviewer-3",
+        &block(&["the clapper is loose"], &[], &[2]),
+    );
+    run(
+        &mut w,
+        "author-2",
+        &ready(&["tightened it", "a new rope is on order"]),
+    );
+    let effects = run(
+        &mut w,
+        "reviewer-3",
+        &block(&["the tower leans"], &[], &[1]),
+    );
+    (w, effects)
+}
+
+/// Rounds 1 and 2 of [`blocked_three_times`] as an arbiter's brief lists them.
+const FIRST_TWO_ROUNDS: &str = "Review rounds:\n  \
+    Round 1: blocked\n    \
+    1. the bell is cracked\n       The author's reply: recast the bell\n       \
+    State: resolved by round 2\n    \
+    2. the rope is frayed\n       The author's reply: the rope stays: it was checked\n       \
+    State: kept open by round 2\n  \
+    Round 2: blocked\n    \
+    1. the clapper is loose\n       The author's reply: tightened it\n       \
+    State: kept open by round 3\n    \
+    2. the rope is frayed\n       The author's reply: a new rope is on order\n       \
+    State: resolved by round 3\n";
+
+#[test]
+fn an_arbiter_is_given_every_review_round_with_each_reply_and_state() {
+    let (mut w, effects) = blocked_three_times();
+    let brief = arbiter_brief(&mut w, &effects, "arbiter-1");
+    let third = "  Round 3: blocked\n    \
+        1. the tower leans\n       The author's reply: none on record\n       \
+        State: not judged by a later round\n    \
+        2. the clapper is loose\n       The author's reply: none on record\n       \
+        State: not judged by a later round\n  \
+        No later round judged the points of round 3, the last block, and the author has not \
+        replied to it because review rounds ran out before the author's next ready.\n";
+    assert!(
+        brief.contains(&format!("{FIRST_TWO_ROUNDS}{third}")),
+        "{brief}"
+    );
+    let (_, last) = brief.split_once("Round 3: blocked").expect("round 3");
+    assert!(!last.contains("kept open"), "{brief}");
+    assert!(!last.contains("resolved by"), "{brief}");
+    assert!(
+        brief.contains(
+            "Read the pull request and the review rounds listed above, with the author's \
+             replies; temet-work issue watch#4 lists the rounds again. Decide whether it merges."
+        ),
+        "{brief}"
+    );
+    assert!(
+        !brief.contains("the review points and the author's answers"),
+        "{brief}"
+    );
+}
+
+#[test]
+fn a_second_arbiter_is_given_every_review_round_with_the_replies_to_the_ruled_one() {
+    let (mut w, effects) = blocked_three_times();
+    arbiter_brief(&mut w, &effects, "arbiter-1");
+    run(
+        &mut w,
+        "arbiter-1",
+        &Command::Rule {
+            issue: watch4(),
+            approve: false,
+            reason: "a leaning tower drops its bell".into(),
+        },
+    );
+    w.apply(&Event::AgentChanged {
+        agent: AgentId::new("arbiter-1"),
+        state: AgentState::Ended,
+    });
+    run(
+        &mut w,
+        "author-2",
+        &ready(&["propped the tower", "pinned the clapper"]),
+    );
+    // Round 4 keeps the clapper open.
+    let effects = run(
+        &mut w,
+        "reviewer-3",
+        &block(&["the prop is rotten"], &[], &[2]),
+    );
+    let brief = arbiter_brief(&mut w, &effects, "arbiter-2");
+    let later = "  Round 3: blocked\n    \
+        1. the tower leans\n       The author's reply: propped the tower\n       \
+        State: resolved by round 4\n    \
+        2. the clapper is loose\n       The author's reply: pinned the clapper\n       \
+        State: kept open by round 4\n  \
+        Round 4: blocked\n    \
+        1. the prop is rotten\n       The author's reply: none on record\n       \
+        State: not judged by a later round\n    \
+        2. the clapper is loose\n       The author's reply: none on record\n       \
+        State: not judged by a later round\n  \
+        No later round judged the points of round 4, the last block, and the author has not \
+        replied to it because review rounds ran out before the author's next ready.\n";
+    assert!(
+        brief.contains(&format!("{FIRST_TWO_ROUNDS}{later}")),
+        "{brief}"
+    );
 }

@@ -353,13 +353,16 @@ pub fn write(
         Role::Arbiter => format!(
             "Review rounds on {id} ({title}) ran out. It is {source}.\n\
              {to_review}The plan's checks:\n{checks}\
+             {rounds}\
              {LEAVE_THE_FOLDER}\n\
-             Read the pull request, the review points and the author's answers. Decide whether it merges.\n\
+             Read the pull request and the review rounds listed above, with the author's replies; \
+             temet-work issue {id} lists the rounds again. Decide whether it merges.\n\
              {hold}\n\
              {FIX_WHAT_IS_NOT_MET}\n\
              Then run: temet-work rule {id} approve \"<why>\"\n\
              or: temet-work rule {id} fix \"<what must change, and why>\"",
             title = issue.title,
+            rounds = crate::text::review_rounds(issue),
             hold = hold_to_the_issue(id),
         ),
         Role::Investigator => format!(
