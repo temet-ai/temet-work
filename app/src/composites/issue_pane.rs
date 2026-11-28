@@ -1,6 +1,6 @@
 //! IssuePane (`temet-issuepane`): the right column: the selected issue's title, key and stage,
-//! its facts, then its plan, pull request, review rounds and decisions as tabs. A tab shows only
-//! when its data is given.
+//! with its actions menu behind a button at the right of its head, its facts, then its plan, pull
+//! request, review rounds and decisions as tabs. A tab shows only when its data is given.
 
 use std::rc::Rc;
 
@@ -8,10 +8,14 @@ use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Wi
 
 use super::check_list::{CheckList, PlanCheck};
 use super::decision_row::{Decision, DecisionRow};
+use super::issue_actions::IssueActions;
 use super::review_rounds::{ReviewRound, ReviewRounds};
+use crate::components::button::{Button, Size, Variant};
 use crate::components::cut_panel::CutPanel;
 use crate::components::heading::{Heading, HeadingSize};
+use crate::components::icon::IconName;
 use crate::components::list_row::ListRow;
+use crate::components::popover::{Placement, Popover};
 use crate::components::property_list::{PropertyItem, PropertyList};
 use crate::components::stage_tag::{Stage, StageTag};
 use crate::components::status_tag::{Status, StatusTag};
@@ -83,6 +87,7 @@ pub struct IssueDecision {
 
 type OnTabChange = Rc<dyn Fn(IssueTab, &mut Window, &mut App)>;
 type OnOverturn = Rc<dyn Fn(&SharedString, &mut Window, &mut App)>;
+type OnActions = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct IssuePane {
@@ -98,6 +103,9 @@ pub struct IssuePane {
     tab: Option<IssueTab>,
     on_tab_change: Option<OnTabChange>,
     on_overturn: Option<OnOverturn>,
+    actions: Option<IssueActions>,
+    actions_open: bool,
+    on_actions: Option<OnActions>,
 }
 
 impl IssuePane {
@@ -119,7 +127,29 @@ impl IssuePane {
             tab: None,
             on_tab_change: None,
             on_overturn: None,
+            actions: None,
+            actions_open: false,
+            on_actions: None,
         }
+    }
+
+    /// The issue's actions menu, behind a button at the right of the head.
+    pub fn actions(mut self, actions: IssueActions) -> Self {
+        self.actions = Some(actions);
+        self
+    }
+
+    /// Whether the actions menu is open: its Popover's `isOpen`, which the page holds.
+    pub fn actions_open(mut self, open: bool) -> Self {
+        self.actions_open = open;
+        self
+    }
+
+    /// Called with the state the person asks the actions menu for: its Popover's
+    /// `onInteraction`.
+    pub fn on_actions(mut self, handler: impl Fn(bool, &mut Window, &mut App) + 'static) -> Self {
+        self.on_actions = Some(Rc::new(handler));
+        self
     }
 
     /// The review round, shown with the stage as the daemon writes it ("fixing, round 1").
@@ -200,7 +230,9 @@ impl RenderOnce for IssuePane {
             self.rounds.is_some(),
             self.decisions.is_some(),
         );
-        let head = div()
+        let titles = div()
+            .flex_1()
+            .min_w_0()
             .child(Heading::new(self.title).size(HeadingSize::Pane))
             .child(
                 div()
@@ -210,6 +242,30 @@ impl RenderOnce for IssuePane {
                     .child(classed(Class::Mono, cx).child(self.issue_key.clone()))
                     .child(StageTag::new(self.stage).round(self.round)),
             );
+        // The design system's head buttons: a small minimal button with More, opening the menu
+        // below it, its right edge on the button's.
+        let actions = self.actions.map(|menu| {
+            let mut popover = Popover::new("issue-actions-popover")
+                .placement(Placement::BottomEnd)
+                .is_open(self.actions_open)
+                .content(menu)
+                .child(
+                    Button::new("issue-actions")
+                        .icon(IconName::More)
+                        .variant(Variant::Minimal)
+                        .size(Size::Small),
+                );
+            if let Some(handler) = self.on_actions {
+                popover = popover.on_interaction(move |open, window, cx| handler(open, window, cx));
+            }
+            popover
+        });
+        let head = div()
+            .flex()
+            .items_start()
+            .gap(space::s4(cx))
+            .child(titles)
+            .children(actions);
         let facts = self.facts.map(|facts| {
             let items = facts
                 .into_iter()

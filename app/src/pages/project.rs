@@ -1,10 +1,15 @@
 //! Project (`pages-temet-work-radar`): one project: the areas, projects, agent groups, machines
 //! and limits on the left; what needs the person and the project's issues in the middle; the
-//! selected issue on the right.
+//! selected issue on the right, with its actions menu, whose Move to sends `temet-work move` to
+//! the daemon as a person's request and shows the daemon's answer in a toast.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
-use gpui::{App, Context, IntoElement, ParentElement, Render, SharedString, Window};
+use gpui::{App, Context, IntoElement, ParentElement, Render, SharedString, Task, Window};
+use temet_work_core::Command;
+use temet_work_core::ids::IssueId;
+use temet_work_core::view::StageWord;
 
 use crate::components::Intent;
 use crate::components::alert::Alert;
@@ -12,8 +17,10 @@ use crate::components::app_shell::AppShell;
 use crate::components::callout::Callout;
 use crate::components::icon::IconName;
 use crate::components::segmented_control::{SegmentedControl, SegmentedControlOption};
+use crate::components::stage_tag::Stage;
 use crate::components::toast::{OverlayToaster, Toast};
 use crate::composites::group_list::{GroupList, GroupListGroup};
+use crate::composites::issue_actions::IssueActions;
 use crate::composites::issue_pane::{
     IssueDecision, IssuePane, IssuePlan, IssuePullRequest, IssueTab,
 };
@@ -76,6 +83,10 @@ pub struct Milestone {
 /// What an issue has beyond its row: its review round, and the parts of its pane it has so far.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct IssueDetail {
+    /// The issue as the daemon's commands name it; none when there is no daemon to send to.
+    pub id: Option<IssueId>,
+    /// The stages a person may move it to, as the daemon lists them; Move to offers these.
+    pub moves: Vec<Stage>,
     /// The review round it is in; 0 before its first review.
     pub round: usize,
     pub plan: Option<IssuePlan>,
@@ -225,6 +236,34 @@ impl Ask {
 /// The note that replaces an overturned decision's action.
 pub const OVERTURNED: &str = "Overturned just now";
 
+/// Sends a command to the daemon as a person's request: the daemon's text when it did it, or why
+/// it was not done, such as its refusal.
+pub type Sender = Rc<dyn Fn(Command, &mut App) -> Task<Result<String, String>>>;
+
+/// A toast: its message, and its intent, danger for a command the daemon did not do.
+#[derive(Clone, Debug, PartialEq)]
+struct Toasted {
+    message: SharedString,
+    intent: Intent,
+}
+
+/// The view's stage word for a stage, as `move` takes it.
+fn word(stage: Stage) -> StageWord {
+    match stage {
+        Stage::New => StageWord::New,
+        Stage::Refining => StageWord::Refining,
+        Stage::Ready => StageWord::Ready,
+        Stage::Working => StageWord::Working,
+        Stage::InReview => StageWord::InReview,
+        Stage::Fixing => StageWord::Fixing,
+        Stage::WithArbiter => StageWord::Arbitration,
+        Stage::Merging => StageWord::Merging,
+        Stage::Deploying => StageWord::Deploying,
+        Stage::Verifying => StageWord::Verifying,
+        Stage::Done => StageWord::Done,
+    }
+}
+
 /// The Project page: a window's view, holding what it shows and what the person has chosen.
 pub struct Project {
     view: ProjectView,
@@ -244,7 +283,11 @@ pub struct Project {
     /// The decisions in issues' panes that are overturned, by issue key and id.
     overturned_decisions: HashSet<(SharedString, SharedString)>,
     /// The toast on show.
-    toast: Option<SharedString>,
+    toast: Option<Toasted>,
+    /// Whether the selected issue's actions menu is open.
+    actions_open: bool,
+    /// How a command reaches the daemon; none on sample data.
+    sender: Option<Sender>,
 }
 
 impl Project {
@@ -261,7 +304,78 @@ impl Project {
             overturned_needs: HashSet::new(),
             overturned_decisions: HashSet::new(),
             toast: None,
+            actions_open: false,
+            sender: None,
         }
+    }
+
+    /// Sends the page's commands to the daemon with `sender`.
+    pub fn set_sender(
+        &mut self,
+        sender: impl Fn(Command, &mut App) -> Task<Result<String, String>> + 'static,
+    ) {
+        self.sender = Some(Rc::new(sender));
+    }
+
+    /// Whether the selected issue's actions menu is open.
+    pub fn actions_open(&self) -> bool {
+        self.actions_open
+    }
+
+    /// Opens or closes the selected issue's actions menu.
+    pub fn set_actions_open(&mut self, open: bool) {
+        self.actions_open = open;
+    }
+
+    /// The command that moves the selected issue to `stage`, when the daemon gave its id.
+    pub fn move_command(&self, stage: Stage) -> Option<Command> {
+        let key = self.selection.key()?;
+        let issue = self.view.details.get(key)?.id.clone()?;
+        Some(Command::Move {
+            issue,
+            stage: word(stage),
+        })
+    }
+
+    /// Moves the selected issue to `stage`: the menu closes, and the command goes to the daemon.
+    /// Its answer shows in a toast: the new stage and any pull request left open, or in a danger
+    /// toast why it was not done. An accepted move shows in the issue's stage from the next view.
+    pub fn move_to(&mut self, stage: Stage, cx: &mut Context<Self>) {
+        self.actions_open = false;
+        let Some(command) = self.move_command(stage) else {
+            return;
+        };
+        let Some(sender) = self.sender.clone() else {
+            self.sent(Err(
+                "no daemon to send the move to: the window shows sample data".into(),
+            ));
+            return;
+        };
+        let task = sender(command, cx);
+        cx.spawn(async move |page, cx| {
+            let answer = task.await;
+            page.update(cx, |page, cx| {
+                page.sent(answer);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shows the daemon's answer to a command: its text in the page's toast, or why it was not
+    /// done in a danger toast.
+    pub fn sent(&mut self, answer: Result<String, String>) {
+        self.toast = Some(match answer {
+            Ok(text) => Toasted {
+                message: text.into(),
+                intent: Intent::None,
+            },
+            Err(why) => Toasted {
+                message: why.into(),
+                intent: Intent::Danger,
+            },
+        });
     }
 
     /// A page with no view yet: it draws `notice` alone until [`Project::set_view`] gives it one.
@@ -369,7 +483,10 @@ impl Project {
         if let Some(decision) = &ask.decision {
             self.overturned_decisions.insert(decision.clone());
         }
-        self.toast = Some(ask.done().into());
+        self.toast = Some(Toasted {
+            message: ask.done().into(),
+            intent: Intent::None,
+        });
     }
 
     pub fn cancel(&mut self) {
@@ -382,7 +499,12 @@ impl Project {
 
     /// The toast on show.
     pub fn toast(&self) -> Option<&SharedString> {
-        self.toast.as_ref()
+        self.toast.as_ref().map(|t| &t.message)
+    }
+
+    /// The intent of the toast on show: danger for a command the daemon did not do.
+    pub fn toast_intent(&self) -> Option<Intent> {
+        self.toast.as_ref().map(|t| t.intent)
     }
 
     /// The decisions in Needs you that are not overturned, in order.
@@ -429,6 +551,7 @@ impl Project {
         let changed = self.selection.select(key);
         if changed {
             self.tab = None;
+            self.actions_open = false;
         }
         changed
     }
@@ -620,7 +743,20 @@ impl Render for Project {
         });
         if let Some((milestone, issue)) = found {
             let detail = view.details.get(&issue.key).cloned().unwrap_or_default();
-            let pane = IssuePane::new(issue.key.clone(), issue.title.clone(), issue.stage)
+            // Move to offers what the daemon takes; with nothing to offer there is no menu.
+            let actions = (detail.id.is_some() && !detail.moves.is_empty()).then(|| {
+                let page = page.clone();
+                IssueActions::new(issue.stage)
+                    .move_to(detail.moves.clone())
+                    .on_move(move |stage, _: &mut Window, cx: &mut App| {
+                        page.update(cx, |p, cx| {
+                            p.move_to(stage, cx);
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+            });
+            let mut pane = IssuePane::new(issue.key.clone(), issue.title.clone(), issue.stage)
                 .round(Some(detail.round))
                 .facts(issue_facts(milestone, issue, Some(&detail)))
                 .plan(detail.plan)
@@ -640,6 +776,19 @@ impl Render for Project {
                         .ok();
                     }
                 });
+            if let Some(actions) = actions {
+                let page = page.clone();
+                pane = pane
+                    .actions(actions)
+                    .actions_open(self.actions_open)
+                    .on_actions(move |open, _: &mut Window, cx: &mut App| {
+                        page.update(cx, |p, cx| {
+                            p.set_actions_open(open);
+                            cx.notify();
+                        })
+                        .ok();
+                    });
+            }
             shell = shell.side(pane);
         }
 
@@ -653,10 +802,17 @@ impl Render for Project {
             .on_confirm(update(Project::confirm))
             .children(self.asking.as_ref().map(|ask| ask.question()));
         let mut toaster = OverlayToaster::new();
-        if let Some(message) = &self.toast {
+        if let Some(toast) = &self.toast {
+            // The page's own toast has the Notifications icon and no intent, as the radar
+            // page's has; a command the daemon did not do is a danger toast with a warning.
+            let icon = match toast.intent {
+                Intent::Danger => IconName::WarningSign,
+                _ => IconName::Notifications,
+            };
             toaster = toaster.child(
-                Toast::new(message.clone())
-                    .icon(IconName::Notifications)
+                Toast::new(toast.message.clone())
+                    .icon(icon)
+                    .intent(toast.intent)
                     .on_dismiss(update(Project::dismiss_toast)),
             );
         }

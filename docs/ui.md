@@ -149,9 +149,9 @@ is closed.
 | Checkbox | `blueprint-checkbox` | | `checkbox` |
 | SegmentedControl | `blueprint-segmentedcontrol` | `intent` primary; `size` small | `button` (ToggleGroup) |
 | Tabs, Tab | `blueprint-tabs` | `renderActiveTabPanelOnly` | `tab` |
-| Menu, MenuItem, MenuDivider | `blueprint-menu` | | `menu` |
+| Menu, MenuItem, MenuDivider | `blueprint-menu` | MenuItem `icon`, `text`, children as a submenu with its caret, opened by a click and to the item's left, since the pane that holds IssueActions is at the window's right edge. No look is measured for a menu: it is the raised surface with the overlay edge measured on the Dialog, padded and sized by Blueprint's rules in spacing steps. MenuDivider is not built yet | |
 | Navbar, NavbarGroup, NavbarHeading, NavbarDivider | `blueprint-navbar` | NavbarGroup `align` right | `title_bar` |
-| Popover | `blueprint-popover` | | `popover` |
+| Popover | `blueprint-popover` | `placement` bottom-end; `isOpen` and `onInteraction`, so the page holds whether it is open; no arrow, one menu padding from its target. A press outside it asks to close it | |
 | ContextMenu | `blueprint-contextmenu` | | `menu` |
 | Alert | `blueprint-alert` | `intent` primary; `cancelButtonText`, `confirmButtonText` | `dialog` |
 | Dialog | `blueprint-dialog` | | `dialog` |
@@ -184,7 +184,8 @@ is closed.
 | DecisionRow | one agent decision: who, when, what it took, the cost to undo, what it weighed and why, the deadline and Overturn | ListRow, Tag, PropertyList, AttentionText, AttentionButton | `temet-decisionrow` |
 | MilestonePanel | one milestone: name, done of total, due date, progress, and its issues | CutPanel, Section, ProgressBar, IssueTable | `temet-milestonepanel` |
 | IssueTable | issues as rows: key, title, stage, agent, updated; optional group rows; one set of column widths in every panel | HTMLTable, TableRow, StageTag | `temet-issuetable` |
-| IssuePane | the side pane for an issue: title, key, stage, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
+| IssuePane | the side pane for an issue: title, key, stage, its actions menu behind a small minimal button with More at the right of its head, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Button, Popover, IssueActions, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
+| IssueActions | what a person can do to an issue, as one menu. The design system's has Open, Refine, Move to, Assign and Unassign, each shown only when its handler is given; the daemon has a command for Move to alone (`temet-work move`), so the window gives that one. Move to's submenu lists the stages the daemon says the issue may move to, each with its stage's icon and name (`move_to`), and a pick sends the move. Story: In Pane | Menu, MenuItem, Icon | `temet-issueactions` |
 | CheckList | a plan's checks: a line counting them by status, then for each what is done when, what proves it and its status, if it has run. A done-when over three lines and a proven-by over two show their first lines, and plus opens the row whole, minus closes it. Stories: Default, Failed And Timed, No Checks, Not Run Yet, Long Checks | ListRow, StatusTag, Button | `temet-checklist` |
 | ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points, the author's reply and each point's status | Disclosure, ListRow, StatusTag | `temet-reviewrounds` |
 | AgentPane | the side pane for an agent: its role, state, terminal and decisions | Heading, StatusTag, TerminalView, DecisionRow | gap |

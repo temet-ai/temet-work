@@ -469,3 +469,73 @@ fn no_answer_in_time_marks_it_stale(cx: &mut TestAppContext) {
     answered(cx, &socket);
     assert_eq!(state(cx, &daemon), (Some(second), None, false));
 }
+
+/// Sends `command` the way the window sends a person's command and waits for its answer.
+fn sent(cx: &mut TestAppContext, path: PathBuf, command: Command) -> Result<String, Problem> {
+    cx.executor().allow_parking();
+    let answer: Rc<std::cell::RefCell<Option<Result<String, Problem>>>> = Rc::default();
+    let into = answer.clone();
+    let executor = cx.executor();
+    cx.foreground_executor()
+        .spawn(async move {
+            let got = temet_work_app::daemon::send(path, command, &executor).await;
+            *into.borrow_mut() = Some(got);
+        })
+        .detach();
+    until(cx, |_| answer.borrow().is_some());
+    answer.borrow_mut().take().expect("answered")
+}
+
+#[gpui::test]
+fn a_move_goes_as_a_persons_request_and_a_refusal_comes_back_as_its_reason(
+    cx: &mut TestAppContext,
+) {
+    use temet_work_core::ids::IssueId;
+    use temet_work_core::view::StageWord;
+
+    let why = "watch#12 is merging: the loop cannot undo a merge, so it moves no issue once its \
+               merge has begun";
+    let socket = Socket::serve(vec![
+        line(&Reply::Refused { why: why.into() }),
+        line(&Reply::Done {
+            text: "watch#12 is ready".into(),
+        }),
+    ]);
+    let back = Command::Move {
+        issue: IssueId::new("watch", "12"),
+        stage: StageWord::Ready,
+    };
+    let refused = sent(cx, socket.path.clone(), back.clone());
+    let seen = socket.next_seen();
+    let json: serde_json::Value = serde_json::from_str(&seen.request).expect("json");
+    assert_eq!(json["by"], serde_json::Value::Null, "a person's request");
+    assert_eq!(json["command"]["command"], "move");
+    assert_eq!(json["command"]["stage"], "ready");
+    let request: Request = serde_json::from_str(&seen.request).expect("a request");
+    assert_eq!(request, Request::new(None, back.clone()));
+    assert_eq!(
+        refused.as_ref().map_err(Problem::reason),
+        Err(why.to_string()),
+        "the daemon's reason, word for word"
+    );
+    assert_eq!(
+        sent(cx, socket.path.clone(), back),
+        Ok("watch#12 is ready".into())
+    );
+}
+
+#[gpui::test]
+fn a_move_to_a_socket_that_does_not_answer_says_so(cx: &mut TestAppContext) {
+    use temet_work_core::ids::IssueId;
+    use temet_work_core::view::StageWord;
+
+    let folder = Folder::new();
+    let path = folder.join("nobody.sock");
+    let back = Command::Move {
+        issue: IssueId::new("watch", "12"),
+        stage: StageWord::New,
+    };
+    let problem = sent(cx, path.clone(), back).expect_err("no daemon");
+    assert_eq!(problem, Problem::NoSocket { path: path.clone() });
+    assert_eq!(problem.reason(), format!("no socket at {}", path.display()));
+}

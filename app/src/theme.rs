@@ -697,6 +697,26 @@ pub mod size {
     pub fn toast_button_pad(cx: &App) -> Pixels {
         steps(cx, 1.25)
     }
+    /// A menu's padding: `.bp6-menu { padding: var(--bp-surface-spacing) }`; also the space
+    /// between a popover and its target.
+    pub fn menu_pad(cx: &App) -> Pixels {
+        steps(cx, 1.)
+    }
+    /// A menu's narrowest: `.bp6-menu { min-width: calc(var(--bp-surface-spacing) * 45) }`.
+    pub fn menu_width(cx: &App) -> Pixels {
+        steps(cx, 45.)
+    }
+    /// A menu item's padding above and below, and at each side: `.bp6-menu-item { padding:
+    /// var(--bp-surface-spacing) calc(var(--bp-surface-spacing) * 2) }`. The side padding is
+    /// also the space after its icon and its text: `.bp6-menu-item > * { margin-right:
+    /// calc(var(--bp-surface-spacing) * 2) }`.
+    pub fn menu_item_pad(cx: &App) -> (Pixels, Pixels) {
+        (steps(cx, 1.), steps(cx, 2.))
+    }
+    /// A menu item's line: `.bp6-menu-item { line-height: 22px }`, five and a half spacing steps.
+    pub fn menu_item_line(cx: &App) -> Pixels {
+        steps(cx, 5.5)
+    }
     /// A tab's line: `.bp6-tab { line-height: 30px }`, seven and a half spacing steps.
     pub fn tab_line(cx: &App) -> Pixels {
         steps(cx, 7.5)

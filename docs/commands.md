@@ -259,6 +259,8 @@ none for it.
   limit is still sent `continue` once the limit resets, since its turn is under way.
 - The trackers still sync, deploys and verifies run, `retry` works, and stops the loop
   asks for, such as of an agent whose step is over, still go out.
+- A person's `move` is taken: the issue's agents are stopped and its folders released at
+  once, and no refiner or author starts on it until the resume (see "Moving an issue").
 
 The hold is an event in the log, so a restart keeps it and the time it began. `status`
 begins with a line saying the daemon is held, since when, and that `temet-work resume`

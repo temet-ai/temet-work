@@ -27,6 +27,7 @@ use temet_work_app::components::stage_tag::{Stage, StageTag};
 use temet_work_app::components::status_tag::{Status, StatusTag};
 use temet_work_app::components::tag::Tag;
 use temet_work_app::composites::check_list::{CheckList, PlanCheck};
+use temet_work_app::composites::issue_actions::IssueActions;
 use temet_work_app::composites::issue_pane::IssueTab;
 use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{Grouping, Project};
@@ -67,6 +68,8 @@ struct Shot {
     selected: &'static str,
     overturn: Overturn,
     source: Source,
+    /// Whether the selected issue's actions menu is open.
+    actions: bool,
 }
 
 /// How far the shot has gone with overturning WATCH-51's decision in Needs you.
@@ -91,6 +94,7 @@ const fn shot(name: &'static str, theme: &'static str, width: f32, height: f32) 
         selected: "WATCH-44",
         overturn: Overturn::None,
         source: Source::Sample,
+        actions: false,
     }
 }
 
@@ -156,9 +160,23 @@ const SHOTS: &[Shot] = &[
         ..shot("light-1440-overturn-done", "light", 1440., 900.)
     },
     Shot {
+        actions: true,
+        ..shot("dark-1440-actions", "dark", 1440., 900.)
+    },
+    Shot {
+        actions: true,
+        ..shot("light-1440-actions", "light", 1440., 900.)
+    },
+    Shot {
         source: Source::Live,
         selected: "4",
         ..shot("live-dark-1440", "dark", 1440., 900.)
+    },
+    Shot {
+        source: Source::Live,
+        selected: "4",
+        actions: true,
+        ..shot("live-dark-1440-actions", "dark", 1440., 900.)
     },
     Shot {
         source: Source::Live,
@@ -272,6 +290,7 @@ fn main() -> gpui::Result<()> {
                 if s.overturn == Overturn::Done {
                     page.confirm();
                 }
+                page.set_actions_open(s.actions);
                 page
             });
             cx.new(|cx| Root::new(page, window, cx))
@@ -368,6 +387,7 @@ enum Story {
     CutPanelHere,
     CutPanelHereWithAttention,
     CutPanelMachinesWithOneHere,
+    IssueActionsInPane,
 }
 
 /// Each part shot: the story's id, the story, and the frame's height, the same as the story
@@ -405,6 +425,11 @@ const PARTS: &[(&str, Story, f32)] = &[
         "temet-cutpanel--machines-with-one-here",
         Story::CutPanelMachinesWithOneHere,
         220.,
+    ),
+    (
+        "temet-issueactions--in-pane",
+        Story::IssueActionsInPane,
+        200.,
     ),
 ];
 
@@ -558,6 +583,16 @@ impl Render for Gallery {
             | Story::CheckListLongChecks => div()
                 .max_w(theme::size::col_right(cx, window.viewport_size().width))
                 .child(CheckList::new("story", checks(self.story)))
+                .into_any_element(),
+            // The story's issue is ready; the window offers the one move the daemon takes from
+            // ready, back to new, and has none of Refine, Assign or Unassign.
+            Story::IssueActionsInPane => div()
+                .flex()
+                .child(
+                    IssueActions::new(Stage::Ready)
+                        .move_to(vec![Stage::New])
+                        .on_move(|_, _, _| {}),
+                )
                 .into_any_element(),
             Story::CutPanelPadded => panel(false, false, cx).into_any_element(),
             Story::CutPanelAttention => panel(true, false, cx).into_any_element(),
