@@ -110,6 +110,10 @@ pub trait Tracker: Send {
     /// already open counts as reopened.
     fn reopen(&mut self, project: &str, key: &str) -> Result<(), TrackerError>;
 
+    /// Gives an issue a new title, for a person's refine. An error, `NotFound`
+    /// among them, when the tracker has no such issue or refuses the title.
+    fn retitle(&mut self, project: &str, key: &str, title: &str) -> Result<(), TrackerError>;
+
     /// Files a new open issue in the project, in `milestone` when one is named,
     /// and returns it as the tracker will list it.
     fn create(
@@ -188,6 +192,9 @@ pub struct FakeTracker {
     /// Open issues its list of a project leaves out, as (project, key), as
     /// GitHub's leaves out an open pull request; asked about, each is open.
     pub unlisted: Vec<(String, String)>,
+    /// Titles its list still gives issues after a retitle, as (project, key,
+    /// title), as Jira's search does for a while after a write.
+    pub stale_titles: Vec<(String, String, String)>,
 }
 
 impl Default for FakeTracker {
@@ -206,6 +213,7 @@ impl FakeTracker {
             comments: Vec::new(),
             reopen_refused: None,
             unlisted: Vec::new(),
+            stale_titles: Vec::new(),
         }
     }
 }
@@ -226,7 +234,16 @@ impl Tracker for FakeTracker {
             .iter()
             .filter(|(p, i)| p == project && !i.closed)
             .filter(|(p, i)| !self.unlisted.contains(&(p.clone(), i.key.clone())))
-            .map(|(_, i)| i.clone())
+            .map(|(p, i)| {
+                let stale = self
+                    .stale_titles
+                    .iter()
+                    .find(|(sp, key, _)| sp == p && key == &i.key);
+                TrackedIssue {
+                    title: stale.map_or_else(|| i.title.clone(), |(_, _, t)| t.clone()),
+                    ..i.clone()
+                }
+            })
             .collect())
     }
 
@@ -284,6 +301,16 @@ impl Tracker for FakeTracker {
             return Err(e.clone());
         }
         issue.1.closed = false;
+        Ok(())
+    }
+
+    fn retitle(&mut self, project: &str, key: &str, title: &str) -> Result<(), TrackerError> {
+        let issue = self
+            .issues
+            .iter_mut()
+            .find(|(p, i)| p == project && i.key == key)
+            .ok_or_else(|| TrackerError::NotFound(format!("{project}#{key}")))?;
+        issue.1.title = title.to_string();
         Ok(())
     }
 
@@ -438,6 +465,21 @@ pub mod contract {
             )?;
         }
         if let Some(key) = harness.writable_issue() {
+            let title = "Contract check: a new title";
+            tracker
+                .retitle(&project, &key, title)
+                .map_err(|e| format!("retitle: {e}"))?;
+            let retitled = tracker
+                .issues(&project)
+                .map_err(|e| format!("issues after retitle: {e}"))?;
+            ensure(
+                retitled.iter().any(|i| i.key == key && i.title == title),
+                "a retitled issue is then listed with its new title",
+            )?;
+            ensure(
+                tracker.retitle(&project, "999999999", title).is_err(),
+                "retitling an issue the tracker does not have is an error",
+            )?;
             tracker
                 .comment(&project, &key, "contract check")
                 .map_err(|e| format!("comment: {e}"))?;
@@ -501,6 +543,23 @@ pub struct Trackers {
     /// at once; later ones wait for `sync_every`, so a tracker slow to list a
     /// reopened issue is not asked again at every poll.
     reopened: BTreeSet<IssueId>,
+    /// The titles a person's refine wrote, by issue, kept until a sync lists
+    /// them or [`KEEP_WRITTEN_MS`] have passed ([`Trackers::keep_written`]).
+    written: BTreeMap<IssueId, Written>,
+}
+
+/// How long the family keeps a title a person's refine wrote against a sync
+/// that still lists the old one: ten minutes. Jira's search is not
+/// read-after-write, and ten minutes covers its lag without hiding a later
+/// edit in the tracker for long.
+pub const KEEP_WRITTEN_MS: u64 = 10 * 60 * 1000;
+
+/// A title a person's refine wrote to an issue's tracker.
+struct Written {
+    title: String,
+    /// When it was written: the time of the first poll after the write, since
+    /// a carried-out effect has no time. None until that poll.
+    at_ms: Option<u64>,
 }
 
 /// An issue's text, as a sync read it.
@@ -719,6 +778,35 @@ impl Trackers {
             .map_err(|e| format!(", which the {tracker_id} tracker cannot confirm closed: {e}"))
     }
 
+    /// `open`, the issues the tracker of `source` lists now, with the title a
+    /// person's refine wrote to an issue in place of the one listed while the
+    /// write is under [`KEEP_WRITTEN_MS`] old, so a search that is not yet
+    /// read-after-write does not put the old title back. A listing that gives
+    /// the written title ends the wait; after the wait the tracker's title
+    /// counts, as for an edit made there since.
+    fn keep_written(
+        &mut self,
+        source: &ProjectId,
+        mut open: Vec<TrackedIssue>,
+        now_ms: u64,
+    ) -> Vec<TrackedIssue> {
+        for t in &mut open {
+            let id = IssueId::new(source.0.clone(), t.key.as_str());
+            let Some(w) = self.written.get(&id) else {
+                continue;
+            };
+            let young = w
+                .at_ms
+                .is_none_or(|at| now_ms.saturating_sub(at) < KEEP_WRITTEN_MS);
+            if t.title != w.title && young {
+                t.title.clone_from(&w.title);
+            } else {
+                self.written.remove(&id);
+            }
+        }
+        open
+    }
+
     /// Adds a tracker. The root package calls this once per compiled-in adapter.
     pub fn add(&mut self, adapter: Box<dyn Tracker>) {
         self.adapters.push(adapter);
@@ -790,6 +878,13 @@ impl Part for Trackers {
         let waiting = |id: &IssueId| world.issues.get(id).is_some_and(|i| i.reopen_due);
         self.tried.retain(waiting);
         self.reopened.retain(waiting);
+        for w in self.written.values_mut() {
+            w.at_ms.get_or_insert(now_ms);
+        }
+        self.written.retain(|_, w| {
+            w.at_ms
+                .is_none_or(|at| now_ms.saturating_sub(at) < KEEP_WRITTEN_MS)
+        });
         let sources = sources(world);
         for (source, tracker_id, name) in sources.iter().cloned() {
             let every = self
@@ -820,6 +915,11 @@ impl Part for Trackers {
             };
             match tracker.issues(&name) {
                 Ok(open) => {
+                    let open = self.keep_written(&source, open, now_ms);
+                    let Some(tracker) = self.adapters.iter_mut().find(|a| a.id() == tracker_id)
+                    else {
+                        continue;
+                    };
                     self.errors.remove(&source);
                     let mut unsure = Vec::new();
                     // Closed by the loop, still open in the tracker: the close failed; try again.
@@ -958,7 +1058,7 @@ impl Part for Trackers {
 
     fn carry_out(&mut self, effect: &Effect, world: &World) -> Outcome {
         let source = match effect {
-            Effect::Close { issue } => &issue.project,
+            Effect::Close { issue } | Effect::Retitle { issue, .. } => &issue.project,
             Effect::File { source, .. } => source,
             _ => return Outcome::NotMine,
         };
@@ -1004,6 +1104,22 @@ impl Part for Trackers {
             Effect::Close { issue } => match tracker.close(&name, &issue.key) {
                 Ok(()) => Outcome::done(),
                 Err(e) => Outcome::Failed(e.to_string()),
+            },
+            Effect::Retitle { issue, title } => match tracker.retitle(&name, &issue.key, title) {
+                Ok(()) => {
+                    self.written.insert(
+                        issue.clone(),
+                        Written {
+                            title: title.clone(),
+                            at_ms: None,
+                        },
+                    );
+                    Outcome::done()
+                }
+                Err(e) => Outcome::Failed(format!(
+                    "the {tracker_id} tracker did not take the title of issue {} of {name}: {e}",
+                    issue.key
+                )),
             },
             _ => Outcome::NotMine,
         }
@@ -1321,6 +1437,9 @@ mod tests {
         fn reopen(&mut self, project: &str, key: &str) -> Result<(), TrackerError> {
             self.fake().reopen(project, key)
         }
+        fn retitle(&mut self, project: &str, key: &str, title: &str) -> Result<(), TrackerError> {
+            self.fake().retitle(project, key, title)
+        }
         fn create(
             &mut self,
             project: &str,
@@ -1378,6 +1497,9 @@ mod tests {
         }
         fn close(&mut self, project: &str, key: &str) -> Result<(), TrackerError> {
             self.shared.close(project, key)
+        }
+        fn retitle(&mut self, project: &str, key: &str, title: &str) -> Result<(), TrackerError> {
+            self.shared.retitle(project, key, title)
         }
         fn reopen(&mut self, project: &str, key: &str) -> Result<(), TrackerError> {
             self.shared.reopen(project, key)?;
@@ -2357,6 +2479,134 @@ mod tests {
         assert_eq!(
             depends_on("No dependencies here, see #5."),
             Vec::<String>::new()
+        );
+    }
+
+    /// A part over the fake, synced once into `w`, with the fake still in reach.
+    fn retitled_world() -> (World, Trackers, Shared) {
+        let mut w = configured();
+        let shared = Shared(std::sync::Arc::new(std::sync::Mutex::new(fake())));
+        let mut part = Trackers::default().every(0);
+        part.add(Box::new(shared.clone()));
+        let first = part.poll(&w, 0).events;
+        apply(&mut w, &first);
+        assert_eq!(w.issues[&IssueId::new("ankh", "2")].title, "issue 2");
+        (w, part, shared)
+    }
+
+    fn retitle(key: &str, title: &str) -> Effect {
+        Effect::Retitle {
+            issue: IssueId::new("ankh", key),
+            title: title.into(),
+        }
+    }
+
+    /// Writes `title` to ankh#2 through the part, and applies the refine that
+    /// follows, as the daemon does.
+    fn write_title(w: &mut World, part: &mut Trackers, title: &str) {
+        assert_eq!(part.carry_out(&retitle("2", title), w), Outcome::done());
+        w.apply(&Event::Refined {
+            issue: IssueId::new("ankh", "2"),
+            title: Some(title.into()),
+            checks: None,
+            send: false,
+        });
+    }
+
+    fn titles(events: &[Event]) -> Vec<(String, &str)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::IssueSynced { issue, title, .. } => {
+                    Some((issue.to_string(), title.as_str()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_retitle_writes_the_title_to_the_tracker_and_an_unknown_issue_fails() {
+        let (mut w, mut part, shared) = retitled_world();
+        write_title(&mut w, &mut part, "The gate shuts at dusk");
+        let listed = shared.fake().issues("ankh/morpork").expect("issues");
+        assert!(
+            listed
+                .iter()
+                .any(|t| t.key == "2" && t.title == "The gate shuts at dusk")
+        );
+        assert_eq!(
+            part.poll(&w, 1).events,
+            vec![],
+            "the next sync finds nothing changed"
+        );
+        let Outcome::Failed(why) = part.carry_out(&retitle("9", "A lamp"), &w) else {
+            panic!("an unknown issue is retitled");
+        };
+        assert_eq!(
+            why,
+            "the fake tracker did not take the title of issue 9 of ankh/morpork: not found: \
+             ankh/morpork#9"
+        );
+    }
+
+    #[test]
+    fn a_sync_that_still_lists_the_old_title_does_not_put_it_back_for_ten_minutes() {
+        let (mut w, mut part, shared) = retitled_world();
+        write_title(&mut w, &mut part, "The gate shuts at dusk");
+        shared
+            .fake()
+            .stale_titles
+            .push(("ankh/morpork".into(), "2".into(), "issue 2".into()));
+        // The first poll after the write is when it was written.
+        let start = 1_000;
+        assert_eq!(titles(&part.poll(&w, start).events), vec![]);
+        assert_eq!(
+            titles(&part.poll(&w, start + KEEP_WRITTEN_MS - 1).events),
+            vec![]
+        );
+        assert_eq!(
+            w.issues[&IssueId::new("ankh", "2")].title,
+            "The gate shuts at dusk"
+        );
+        // Ten minutes on, the tracker's title counts again.
+        let events = part.poll(&w, start + KEEP_WRITTEN_MS).events;
+        assert_eq!(titles(&events), vec![("ankh#2".to_string(), "issue 2")]);
+    }
+
+    #[test]
+    fn once_a_sync_lists_the_written_title_a_later_edit_in_the_tracker_comes_through() {
+        let (mut w, mut part, shared) = retitled_world();
+        write_title(&mut w, &mut part, "The gate shuts at dusk");
+        shared
+            .fake()
+            .stale_titles
+            .push(("ankh/morpork".into(), "2".into(), "issue 2".into()));
+        assert_eq!(titles(&part.poll(&w, 10).events), vec![]);
+        // The search catches up: the written title is listed.
+        shared.fake().stale_titles.clear();
+        assert_eq!(titles(&part.poll(&w, 20).events), vec![]);
+        // A person edits it in the tracker a minute later: it comes through.
+        shared
+            .fake()
+            .retitle("ankh/morpork", "2", "The gate shuts at nine")
+            .expect("edit");
+        let events = part.poll(&w, 60_020).events;
+        assert_eq!(
+            titles(&events),
+            vec![("ankh#2".to_string(), "The gate shuts at nine")]
+        );
+    }
+
+    #[test]
+    fn passes_the_tracker_contract_with_a_retitle() {
+        let mut tracker = fake();
+        contract::check(&mut tracker, &Writable).expect("the contract");
+        assert!(
+            tracker
+                .issues
+                .iter()
+                .any(|(_, i)| i.key == "2" && i.title.starts_with("Contract"))
         );
     }
 }

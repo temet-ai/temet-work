@@ -41,6 +41,15 @@ pub enum Effect {
         /// Its milestone, if any.
         milestone: Option<crate::ids::MilestoneId>,
     },
+    /// Give an issue a new title in its tracker, for a person's refine. The
+    /// daemon carries it out before the refine is logged, and refuses the refine
+    /// when it fails.
+    Retitle {
+        /// The issue.
+        issue: IssueId,
+        /// Its new title.
+        title: String,
+    },
     /// Ask the issue's author to fix what the review or the checks found.
     RequestFix {
         /// The issue.
@@ -115,6 +124,7 @@ impl Effect {
             Self::StartAgent { role, issue, .. } => format!("start a {} on {issue}", role.name()),
             Self::Investigate { group } => format!("start an investigator for {group}"),
             Self::File { source, title, .. } => format!("file \"{title}\" in {source}"),
+            Self::Retitle { issue, .. } => format!("retitle {issue} in its tracker"),
             Self::RequestFix { issue, .. } => format!("send the fixes for {issue} to its author"),
             Self::StartReview { issue, round } => format!("start review round {round} of {issue}"),
             Self::Merge { issue } => format!("merge {issue}"),

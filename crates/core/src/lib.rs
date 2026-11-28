@@ -17,6 +17,7 @@ pub mod launch;
 pub mod model;
 mod moves;
 pub mod placement;
+pub mod refine;
 pub mod reply;
 pub mod sender;
 pub mod settings;

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{AppContext, Entity, TestAppContext};
 use temet_work_app::daemon::{Daemon, Problem};
-use temet_work_core::command::{VIEW_DEADLINE, VIEW_PERIOD};
+use temet_work_core::command::{COMMAND_DEADLINE, VIEW_DEADLINE, VIEW_PERIOD};
 use temet_work_core::event::Event;
 use temet_work_core::ids::ProjectId;
 use temet_work_core::{Command, Reply, Request, View, World};
@@ -538,4 +538,67 @@ fn a_move_to_a_socket_that_does_not_answer_says_so(cx: &mut TestAppContext) {
     let problem = sent(cx, path.clone(), back).expect_err("no daemon");
     assert_eq!(problem, Problem::NoSocket { path: path.clone() });
     assert_eq!(problem.reason(), format!("no socket at {}", path.display()));
+}
+
+fn refine_command() -> Command {
+    Command::Refine {
+        issue: temet_work_core::ids::IssueId::new("watch", "WATCH-12"),
+        title: Some("Sam Vimes keeps the night watch's keys".into()),
+        checks: None,
+        send: true,
+    }
+}
+
+#[gpui::test]
+fn a_command_is_sent_as_a_persons_request_and_done_is_its_answer(cx: &mut TestAppContext) {
+    let socket = Socket::serve(vec![line(&Reply::Done {
+        text: "refined watch#WATCH-12".into(),
+    })]);
+    let answer = sent(cx, socket.path.clone(), refine_command());
+    assert_eq!(answer, Ok("refined watch#WATCH-12".into()));
+    let seen = socket.next_seen();
+    let request: Request = serde_json::from_str(&seen.request).expect("a request");
+    assert_eq!(request, Request::new(None, refine_command()));
+    assert_eq!(seen.rest, "", "the send wrote more than one line");
+}
+
+#[gpui::test]
+fn a_refused_command_gives_the_reason_word_for_word(cx: &mut TestAppContext) {
+    let why = "watch#WATCH-12 is merging: a merge is not undone".to_string();
+    let socket = Socket::serve(vec![line(&Reply::Refused { why: why.clone() })]);
+    let answer = sent(cx, socket.path.clone(), refine_command());
+    assert_eq!(answer, Err(Problem::Refused { why: why.clone() }));
+    assert_eq!(answer.unwrap_err().reason(), why);
+}
+
+#[gpui::test]
+fn a_command_waits_the_command_deadline_not_the_views(cx: &mut TestAppContext) {
+    let socket = Socket::serve(vec![Answer::Silent]);
+    cx.executor().allow_parking();
+    let answer: Rc<std::cell::RefCell<Option<Result<String, Problem>>>> = Rc::default();
+    let into = answer.clone();
+    let executor = cx.executor();
+    let path = socket.path.clone();
+    cx.foreground_executor()
+        .spawn(async move {
+            let got = temet_work_app::daemon::send(path, refine_command(), &executor).await;
+            *into.borrow_mut() = Some(got);
+        })
+        .detach();
+    cx.run_until_parked();
+    socket.heard(1);
+    wait(cx, VIEW_DEADLINE);
+    assert!(
+        answer.borrow().is_none(),
+        "a command outwaits the view's deadline"
+    );
+    wait(cx, COMMAND_DEADLINE - VIEW_DEADLINE - TICK);
+    assert!(answer.borrow().is_none(), "before the command's deadline");
+    wait(cx, TICK);
+    assert_eq!(
+        answer.borrow_mut().take(),
+        Some(Err(Problem::NoAnswer {
+            within: COMMAND_DEADLINE
+        }))
+    );
 }

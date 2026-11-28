@@ -658,6 +658,17 @@ pub fn issue(
             let _ = writeln!(out, "  - {}", indented(&check, 4));
         }
     }
+    if !i.person_checks.is_empty() {
+        let _ = writeln!(out, "Person's checks:");
+        for c in &i.person_checks {
+            let check = if c.proven_by.trim().is_empty() {
+                c.done_when.clone()
+            } else {
+                format!("{} (shown by: {})", c.done_when, c.proven_by)
+            };
+            let _ = writeln!(out, "  - {}", indented(&check, 4));
+        }
+    }
     if !i.fix.is_empty() {
         let _ = writeln!(out, "To fix:");
         for p in &i.fix {
@@ -689,6 +700,77 @@ pub fn issue(
         role,
     ));
     Some(out)
+}
+
+/// What a person's refine of `id` did, from the world `before` it and the
+/// world after: the new title, the person's checks, and for a send the stage,
+/// the agents it stopped and each pull request it dropped from the record,
+/// which stays open on the code host.
+pub fn refined(before: &World, world: &World, id: &crate::ids::IssueId) -> String {
+    let (Some(was), Some(now)) = (before.issues.get(id), world.issues.get(id)) else {
+        return format!("there is no issue {id}");
+    };
+    let mut said = Vec::new();
+    if now.title != was.title {
+        said.push(format!("its title is now \"{}\" in its tracker", now.title));
+    }
+    if now.person_checks != was.person_checks {
+        said.push(match now.person_checks.len() {
+            0 => "it has no person's checks now".to_string(),
+            1 => "it has 1 person's check".to_string(),
+            n => format!("it has {n} person's checks"),
+        });
+    }
+    if now.moved != was.moved {
+        said.push(format!(
+            "it is {}, and a refiner starts with a new brief",
+            stage(now.stage)
+        ));
+        let stopped: Vec<String> = before
+            .agents
+            .values()
+            .filter(|a| a.issue.as_ref() == Some(id) && a.state != AgentState::Ended)
+            .map(|a| a.id.to_string())
+            .collect();
+        if !stopped.is_empty() {
+            said.push(format!(
+                "{} {} stopped",
+                and_list(&stopped),
+                if stopped.len() == 1 { "is" } else { "are" }
+            ));
+        }
+        let left: Vec<String> = before
+            .pulls_of(was)
+            .into_iter()
+            .filter(|(repo, number)| now.pulls.get(*repo) != Some(*number))
+            .map(|(repo, number)| format!("{repo} #{number}"))
+            .collect();
+        if !left.is_empty() {
+            let (what, are, them) = if left.len() == 1 {
+                ("pull request", "is", "it")
+            } else {
+                ("pull requests", "are", "them")
+            };
+            said.push(format!(
+                "{what} {} {are} left open on the code host and dropped from the record; close \
+                 {them} there if no longer wanted",
+                and_list(&left),
+            ));
+        }
+    }
+    if said.is_empty() {
+        return format!("nothing changed on {id}");
+    }
+    format!("{id}: {}", said.join("; "))
+}
+
+/// `items` joined as a list in words: `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// An issue's own text between a line that says where it came from and a line
@@ -1922,6 +2004,34 @@ mod review_rounds {
             "{shown}"
         );
         assert!(!shown.lines().any(|l| l.starts_with("2.")), "{shown}");
+    }
+
+    #[test]
+    fn the_issue_view_prints_the_persons_checks_under_a_heading_of_their_own() {
+        let mut w = working();
+        if let Some(i) = w.issues.get_mut(&watch12()) {
+            i.plan = Some(Plan {
+                checks: vec![Check::new("the gate shuts", "the dusk test")],
+                ..Plan::default()
+            });
+            i.person_checks = vec![
+                Check::new("a lamp is filled\nbefore dusk", "the dusk test"),
+                Check::new("Sam Vimes signs the oil log", ""),
+            ];
+        }
+        let shown = view(&w);
+        assert!(
+            shown.contains(
+                "Plan:\n  - the gate shuts (shown by: the dusk test)\n\
+                 Person's checks:\n  - a lamp is filled\n    before dusk (shown by: the dusk test)\n\
+                 \x20 - Sam Vimes signs the oil log\n"
+            ),
+            "{shown}"
+        );
+        if let Some(i) = w.issues.get_mut(&watch12()) {
+            i.person_checks.clear();
+        }
+        assert!(!view(&w).contains("Person's checks"));
     }
 
     #[test]

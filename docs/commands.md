@@ -17,6 +17,7 @@ session_id:
   - 7d4c9131-a05c-43ac-ba6d-09406c95b2c6
   - eb217f0e-246e-4b24-827a-85da18bcc2dc
   - 56dbd668-cf30-4780-8eee-7f993b8fe0f4
+  - 4d123743-0a41-4a7c-ace3-66065682cc3b
 ---
 
 # Commands
@@ -46,6 +47,7 @@ reports its step done.
 | `temet-work overturn DECISION OPTION REASON` | a person only; `DECISION` and `OPTION` are the numbers `status` lists (options count from 1), `REASON` is required | any, if the decision exists, the option is another than the one chosen, and the reason is not empty. What it changes depends on the issue: see below |
 | `temet-work proposal RULE keep` | a person only: the rule moves to kept and ends every brief written from then on | the rule is proposed |
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
+| `temet-work refine ISSUE [--title TEXT] [--check TEXT [--proven-by TEXT]]... [--no-checks] [--send]` | a person only: a new title is written to the issue in its tracker first, and the checks the person holds the issue to are kept on it, apart from the plan. Each `--check` is one check's done-when, and a `--proven-by` right after it says what proves it. `--check` replaces the person's checks, `--no-checks` removes them all, and with neither they stay. `--send` hands the issue to a refiner now (see "Refining an issue"). One with none of the four exits 2 with the usage, and so does a `--proven-by` with no `--check` before it. The reply says what changed, and for a send which agents were stopped and which pull requests stay open on the code host | any, to save the title and checks; for `--send`, any stage before merging, with no pull request merged, while the daemon is not held |
 | `temet-work hold` | a person only: until a person resumes the daemon, no issue is taken, no investigation starts, and an issue with nothing merged gets no new agent, fix, review round or merge; agents at work finish their turn (see "Holding the daemon") | no issue: while the daemon is not held |
 | `temet-work resume` | a person only: work starts again | no issue: while the daemon is held |
 | `temet-work move ISSUE STAGE` | a person only. `STAGE` is one of the view's stage words: `new`, `refining`, `ready`, `working`, `in_review`, `fixing`, `arbitration`, `merging`, `deploying`, `verifying`, `done`; another word is refused with a list of them. Back to new the issue is refined again; back to ready a new author does it again from its plan (see "Moving an issue") | to new: refining, ready, working, in review, fixing or with the arbiter; to ready: working, in review, fixing or with the arbiter; either only while none of its pull requests has merged. Every other move is refused with its reason |
@@ -82,14 +84,16 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
 - `file` and `investigated` belong to a group's running investigator, which works for its
   group and on no issue. A person, another agent, or an investigator whose investigation
   has ended is refused with the reason; a person files issues in the tracker itself.
-- `hold`, `resume`, `move`, `stop` and `start` are a person's alone, as `retry`, `overturn`
-  and `proposal` are. An agent is refused, even with its own secret: it finishes its step,
-  and a person stops agents from a shell outside any agent's terminal.
-- After a person moves an issue, a step from an agent that started before the move is
-  refused, and so are its `choose` and a refiner's `set`, with a reason that names the
-  move: `plan for radar#44 is refused: a person moved radar#44 to new after refiner-3
-  started, so its step is over and its session is being stopped; refiner-5 is working on
-  it now`.
+- `hold`, `resume`, `move`, `refine`, `stop` and `start` are a person's alone, as `retry`,
+  `overturn` and `proposal` are. An agent is refused, even with its own secret: it
+  finishes its step, a refiner sends its plan with `plan`, and a person stops agents from
+  a shell outside any agent's terminal.
+- After a person moves an issue or sends it to a refiner, a step from an agent that started
+  before the move or the send is refused, and so are its `choose` and a refiner's `set`,
+  with a reason that names it: `plan for radar#44 is refused: a person moved radar#44 to
+  new after refiner-3 started, so its step is over and its session is being stopped;
+  refiner-5 is working on it now`, or `... a person sent radar#44 to a refiner after
+  refiner-3 started ...`.
 
 ## How the daemon knows who sent a command
 
@@ -122,7 +126,7 @@ itself is in no log, reply, status or issue text.
   while it waits for the reply.
 - A command that names no agent is a person's. It may read from anywhere. A command that
   changes something (`rule`, `overturn`, `retry`, `proposal`, `hold`, `resume`, `move`,
-  `stop`, `start`, `set` and `unset`) is
+  `refine`, `stop`, `start`, `set` and `unset`) is
   refused when it carries an agent's secret; when, on Linux, the sending process or one of
   its parents holds a secret this daemon issued, which still holds after the agent unsets
   both variables with `env -u`; when the sending process cannot be read; or when it came
@@ -228,7 +232,7 @@ like any other.
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
 `status`, `issue`, `closed`, `screen`, `settings`, `change`, `show`, `search` and `ci`, each
 answering with its command's text; `act` adds `plan`, `ready`, `review`, `rule`,
-`choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `move`, `stop`, `start`, `file`, `investigated`,
+`choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `move`, `refine`, `stop`, `start`, `file`, `investigated`,
 `set` and `unset`. A tool above the server's level is not listed, and calling it is refused.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
@@ -438,13 +442,68 @@ a person, names the agent and since when, and that `temet-work start ISSUE` lets
 `stopped`, the first agent a person stopped on it since it last started, or `null`, and
 `stopped_since`. A view from a daemon older than this reads as nothing stopped.
 
+
+## Refining an issue
+
+`temet-work refine` lets a person correct an issue's title and say what they hold it to,
+as the window's Refine dialog does with Save, and hand it to a refiner, as it does with
+"Save and send to refiner". It is one event in the log, holding the issue, the new title
+when it changed, the person's checks when given, and whether it was sent.
+
+- The title is written to the issue in its tracker before anything is logged: GitHub
+  through `gh issue edit KEY --repo NAME --title TITLE`, Jira as the issue's summary. When
+  the tracker refuses it or cannot be reached, the refine is refused with the tracker's
+  reason and nothing is logged. Once written, `status`, `issue` and `status --json` show
+  it at once. It is stored with control characters dropped and each run of spaces and line
+  breaks as one space; an empty title is refused, and one equal to the issue's is not
+  written again. A sync that still lists the old title just after the write, as Jira's
+  search does for a while, does not put it back: the tracker family keeps the written
+  title until a sync lists it or ten minutes have passed, after which an edit made in the
+  tracker counts again.
+- The person's checks are each a done-when and a proven-by, which may be empty. They are
+  kept on the issue apart from the plan: a plan the refiner writes later does not change
+  them. Each is stored with control characters dropped as a plan's checks are, and one with
+  an empty done-when is refused. `temet-work issue` prints them under "Person's checks",
+  and `status --json` gives them as `person_checks`. The refiner, author, reviewer and
+  arbiter each find them in their brief (see "What a brief holds").
+- A refine that changes nothing and sends nothing logs nothing, and the reply says so.
+
+`--send` hands the issue to a refiner at once, whatever the group's `refining_at_once`:
+
+- A new issue is taken for refining by the first group whose scope covers it.
+- A ready issue goes back to refining. Its plan stays until the new plan replaces it, and
+  the refiner's brief lists that plan's checks as the plan it replaces.
+- On an issue whose refiner is still writing the plan, that refiner is stopped and a fresh
+  one starts with the new brief. A plan the stopped refiner sends is refused.
+- An issue that is working, being fixed, in review or with the arbiter goes back to
+  refining. Its author, reviewer and arbiter are stopped at once. Once the new plan is in,
+  the issue is ready and gets a new author as any ready issue does.
+
+At any stage a send takes the issue back as a move does (see "Moving an issue"): every
+agent on it is stopped and its step is over for good, its work folders are released and
+given to no author, this issue's next one included, until its author has ended, and its
+pull requests are dropped from the record and left open on the code host, with its points
+to fix, approval, check results, waived review and review rounds, so the next change
+starts at round 1. The reply names each pull request left open, to close there if no
+longer wanted. Unlike a move to new, the issue keeps its group and its plan, each check
+waiting, until the new plan replaces it. The send is logged as a move to refining, so
+neither the end of an agent from before it nor that of an earlier agent counts toward
+`starts`. A send is refused, with the
+reason, while the daemon is held (resume it, or save without send); on an issue that is
+merging, deploying, being verified or done, or that has a pull request merged, since a merge
+is not undone and a done issue is worked again by reopening it in its tracker; on a new
+issue no group's scope covers, or one that has left its group's scope; and when its refiner
+has no folder on the machine its `machine` setting names. A refine without `--send` on such
+an issue still saves its title and checks.
+
 ## What a brief holds
 
 Every brief, next-round message and fix message is held to 100 KiB (102,400 bytes). A
 brief is one argument of the command that starts its agent, and Linux refuses one over
 128 KiB; the two messages reach a running agent through herdr-core and add to its context.
 
-A plan check (its done_when and proven_by together), kept rule, review point, point to fix
+A plan check or a person's check (its done_when and proven_by together), kept rule, review
+point, point to fix
 or author's reply of more than 1,000 characters is printed as its first 1,000 characters,
 followed by `(cut here; temet-work issue ISSUE prints it whole)`, or for a rule
 `(cut here; temet-work status prints it whole, under Rules)`, or for a closed issue's id
@@ -455,7 +514,13 @@ indented under it, so that none reads as another item of its list.
 The parts of a brief take the room in this order:
 
 1. The role's own text, its commands and the pull requests, whole.
-2. The checks and the points it judges or answers, with the author's replies. When they
+2. The checks and the points it judges or answers, with the author's replies: the plan's
+   checks, then the person's checks given with `refine`, then the round before's points.
+   A refiner's brief lists the person's checks as points its plan must hold, and the
+   checks of the plan a send replaces; an author's lists them beside the plan's as checks to
+   hold too; a reviewer's as the person's checks, one the change does not meet being a point
+   to block on; an arbiter's as the person's checks. A brief for an issue with no person's
+   checks has no such part. When they
    do not fit at 1,000 characters each, each is cut shorter, to no less than 200 bytes;
    when they do not fit at that, the last are left out, and a line counts them and names
    `temet-work issue`.
@@ -478,7 +543,7 @@ When the plain parts alone would take a text over the limit, as long `investigat
 settings can in an investigator's brief, the longest is cut, with a line saying so.
 The command the agent reports with is never cut.
 
-`plan`, `review`, `ready`, `rule`, `choose` and `overturn` store their text with every
+`plan`, `review`, `ready`, `rule`, `choose`, `overturn` and `refine` store their text with every
 control character dropped but the line feed and the tab: ESC, NUL, VT, FF, BS, DEL and the C1
 controls among them. A carriage return, alone or before a line feed, NEL (U+0085) and the
 line and paragraph separators (U+2028 and U+2029) are stored as a line feed. Briefs,

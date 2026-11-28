@@ -3516,3 +3516,6 @@ mod readers;
 
 #[path = "world_person_stop_tests.rs"]
 mod person_stop;
+
+#[path = "world_refine_tests.rs"]
+mod refine;

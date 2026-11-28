@@ -1,6 +1,7 @@
-//! Menu and MenuItem (`blueprint-menu`): a list of actions on the raised surface, each item with
-//! its icon and text, and an item with items of its own opening them as a submenu beside it,
-//! with a caret at its end, as Blueprint's `<MenuItem>` with children does.
+//! Menu, MenuItem and MenuDivider (`blueprint-menu`): a list of actions on the raised surface,
+//! each item with its icon and text, and an item with items of its own opening them as a submenu
+//! beside it, with a caret at its end, as Blueprint's `<MenuItem>` with children does. A divider
+//! is a rule between groups of items.
 //!
 //! No look was measured for a menu, so it follows Blueprint's rules with the theme's roles: the
 //! menu on the raised surface (`--tm-surface-raised`, which menus take) in the text colour, an
@@ -22,10 +23,10 @@ use crate::theme::{colour, shape, size, text};
 
 type OnClick = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
-/// A menu: its items, in order.
+/// A menu: its items and dividers, in order.
 #[derive(IntoElement, Default)]
 pub struct Menu {
-    items: Vec<MenuItem>,
+    items: Vec<AnyElement>,
 }
 
 impl Menu {
@@ -34,13 +35,36 @@ impl Menu {
     }
 
     pub fn child(mut self, item: MenuItem) -> Self {
-        self.items.push(item);
+        self.items.push(item.into_any_element());
         self
     }
 
     pub fn children(mut self, items: impl IntoIterator<Item = MenuItem>) -> Self {
-        self.items.extend(items);
+        self.items
+            .extend(items.into_iter().map(IntoElement::into_any_element));
         self
+    }
+
+    /// A rule after the items so far, before the next group.
+    pub fn divider(mut self) -> Self {
+        self.items.push(MenuDivider.into_any_element());
+        self
+    }
+}
+
+/// A rule between groups of items: `.bp6-menu-divider { border-top: 1px solid; margin:
+/// var(--bp-surface-spacing) calc(var(--bp-surface-spacing) * -1) }`, in the panel edge.
+#[derive(IntoElement)]
+pub struct MenuDivider;
+
+impl RenderOnce for MenuDivider {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pad = size::menu_pad(cx);
+        div()
+            .border_t(shape::border(cx))
+            .border_color(colour::edge(cx))
+            .my(pad)
+            .mx(-pad)
     }
 }
 

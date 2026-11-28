@@ -1,8 +1,9 @@
 //! IssueActions (`temet-issueactions`): what a person can do to an issue, as one menu. The design
 //! system's menu has Open, Refine, Move to a stage, Assign and Unassign, and shows an item only
-//! when its handler is given; the daemon has a command for Move to alone (`temet-work move`), so
-//! that is the one the window gives. Move to opens a submenu of the stages the issue may move to,
-//! each with its stage's icon and name.
+//! when its handler is given; the daemon has commands for Refine (`temet-work refine`) and Move to
+//! (`temet-work move`), so those are the ones the window gives, Refine first and a divider
+//! between them. Refine opens RefineDialog. Move to opens a submenu of the stages the issue may
+//! move to, each with its stage's icon and name.
 
 use std::rc::Rc;
 
@@ -13,12 +14,14 @@ use crate::components::menu::{Menu, MenuItem};
 use crate::components::stage_tag::Stage;
 
 type OnMove = Rc<dyn Fn(Stage, &mut Window, &mut App)>;
+type OnRefine = Rc<dyn Fn(&mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct IssueActions {
     stage: Stage,
     move_to: Option<Vec<Stage>>,
     on_move: Option<OnMove>,
+    on_refine: Option<OnRefine>,
 }
 
 impl IssueActions {
@@ -28,6 +31,7 @@ impl IssueActions {
             stage,
             move_to: None,
             on_move: None,
+            on_refine: None,
         }
     }
 
@@ -40,6 +44,13 @@ impl IssueActions {
     /// Moves the issue to another stage. Without it there is no Move to.
     pub fn on_move(mut self, handler: impl Fn(Stage, &mut Window, &mut App) + 'static) -> Self {
         self.on_move = Some(Rc::new(handler));
+        self
+    }
+
+    /// Opens the issue's title and checks for editing, as RefineDialog. Without it there is no
+    /// Refine.
+    pub fn on_refine(mut self, handler: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_refine = Some(Rc::new(handler));
         self
     }
 
@@ -63,6 +74,17 @@ impl RenderOnce for IssueActions {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let stages = self.stages();
         let mut menu = Menu::new();
+        let refine = self.on_refine.is_some();
+        if let Some(on_refine) = self.on_refine {
+            menu = menu.child(
+                MenuItem::new("issue-actions-refine", "Refine")
+                    .icon(IconName::Edit)
+                    .on_click(move |_, window, cx| on_refine(window, cx)),
+            );
+        }
+        if refine && self.on_move.is_some() {
+            menu = menu.divider();
+        }
         if let Some(on_move) = self.on_move {
             let items = stages.into_iter().map(|stage| {
                 let handler = on_move.clone();

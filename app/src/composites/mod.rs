@@ -12,5 +12,6 @@ pub mod meter_list;
 pub mod milestone_panel;
 pub mod needs_you;
 pub mod page_header;
+pub mod refine_dialog;
 pub mod review_rounds;
 pub mod side_nav;

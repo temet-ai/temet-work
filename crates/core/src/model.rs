@@ -41,7 +41,7 @@ pub enum Stage {
 }
 
 /// One "Done when" line and what proves it.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Check {
     /// The line from the issue.
     pub done_when: String,
@@ -190,9 +190,15 @@ pub struct Issue {
     /// Its review rounds, in the order they finished.
     #[serde(default)]
     pub reviews: Vec<Review>,
-    /// A person's last move of it to another stage (`temet-work move`); none
-    /// before any, and in older logs. Every agent of the issue started before
-    /// it has its step over for good.
+    /// The checks a person gave it with `temet-work refine`, each a done_when
+    /// and a proven_by with no state. They are kept apart from the plan: a plan
+    /// the refiner writes later does not change them. Empty in older logs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub person_checks: Vec<Check>,
+    /// A person's last move of it to another stage (`temet-work move`), or send
+    /// of it to a refiner (`temet-work refine --send`), which is kept as a move
+    /// to refining; none before any, and in older logs. Every agent of the issue
+    /// started before it has its step over for good.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved: Option<Moved>,
 }

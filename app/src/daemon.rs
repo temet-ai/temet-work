@@ -8,7 +8,8 @@
 //!
 //! A command the person gives in the window, such as moving an issue, goes the same way: one
 //! `Request { by: None, command }` line, as a person's request, and one `Reply` line back within
-//! [`VIEW_DEADLINE`] ([`send`]): the daemon's text when it did it, or why it was not done.
+//! [`COMMAND_DEADLINE`] ([`send`]): the daemon's text when it did it, or why it was not done. A
+//! command waits longer than a view, since a refine that changes a title waits for the tracker.
 //!
 //! The `Reply` match has no wildcard arm: a reply the core adds stops this file compiling until
 //! the app says what it does with it. A reply line of a kind this build's core lacks, as a newer
@@ -22,7 +23,7 @@ use std::time::Duration;
 
 use futures_channel::oneshot;
 use gpui::{BackgroundExecutor, Context, FutureExt, Task, Timeout};
-use temet_work_core::command::{VIEW_DEADLINE, VIEW_PERIOD};
+use temet_work_core::command::{COMMAND_DEADLINE, VIEW_DEADLINE, VIEW_PERIOD};
 use temet_work_core::{Command, Reply, Request, View};
 
 /// Why the entity has no view, or why the one it holds is stale.
@@ -168,13 +169,13 @@ impl Daemon {
 
 /// Sends `command` to the daemon at `path` as a person's request, and gives the daemon's text
 /// when it did it, or why it was not done: its refusal, no socket, or no answer once
-/// [`VIEW_DEADLINE`] has passed on `executor`'s clock.
+/// [`COMMAND_DEADLINE`] has passed on `executor`'s clock.
 pub async fn send(
     path: PathBuf,
     command: Command,
     executor: &BackgroundExecutor,
 ) -> Result<String, Problem> {
-    let reply = over_socket(path, command, executor).await?;
+    let reply = over_socket(path, command, COMMAND_DEADLINE, executor).await?;
     match reply {
         Reply::Done { text } => Ok(text),
         Reply::Refused { why } => Err(Problem::Refused { why }),
@@ -192,7 +193,7 @@ pub async fn send(
 /// The read's own timeout is the same deadline in real time: it gives the same answer and ends
 /// the thread, which under a fake clock is all it does.
 async fn ask(path: PathBuf, executor: &BackgroundExecutor) -> Result<View, Problem> {
-    match over_socket(path, Command::View, executor).await? {
+    match over_socket(path, Command::View, VIEW_DEADLINE, executor).await? {
         Reply::View { view } => Ok(view),
         Reply::Refused { why } => Err(Problem::Refused { why }),
         Reply::Done { text } => Err(Problem::Unreadable {
@@ -202,37 +203,41 @@ async fn ask(path: PathBuf, executor: &BackgroundExecutor) -> Result<View, Probl
 }
 
 /// One request: `command` as a person's to the socket at `path`, and the reply line read, or
-/// [`Problem::NoAnswer`] once [`VIEW_DEADLINE`] has passed on `executor`'s clock.
+/// [`Problem::NoAnswer`] once `deadline` has passed on `executor`'s clock.
 async fn over_socket(
     path: PathBuf,
     command: Command,
+    deadline: Duration,
     executor: &BackgroundExecutor,
 ) -> Result<Reply, Problem> {
     let (answer, answered) = oneshot::channel();
     let reader = std::thread::Builder::new()
-        .name("temet-work-view".into())
-        .spawn(move || read(&path, &command, answer));
+        .name("temet-work-socket".into())
+        .spawn(move || read(&path, &command, deadline, answer));
     if let Err(e) = reader {
         return Err(Problem::Unreadable { why: e.to_string() });
     }
-    match answered.with_timeout(VIEW_DEADLINE, executor).await {
+    match answered.with_timeout(deadline, executor).await {
         Ok(Ok(answer)) => answer,
         Ok(Err(oneshot::Canceled)) => Err(Problem::Unreadable {
             why: "the thread reading the socket stopped without an answer".into(),
         }),
-        Err(Timeout) => Err(Problem::NoAnswer {
-            within: VIEW_DEADLINE,
-        }),
+        Err(Timeout) => Err(Problem::NoAnswer { within: deadline }),
     }
 }
 
 /// The reading thread: connects to the socket at `path`, hands the answer over, and only then
 /// closes the connection, so whoever waits for the connection to end (the app's tests do) finds
 /// the answer already handed over.
-fn read(path: &Path, command: &Command, answer: oneshot::Sender<Result<Reply, Problem>>) {
+fn read(
+    path: &Path,
+    command: &Command,
+    deadline: Duration,
+    answer: oneshot::Sender<Result<Reply, Problem>>,
+) {
     match UnixStream::connect(path) {
         Ok(stream) => {
-            let _ = answer.send(exchange(&stream, command));
+            let _ = answer.send(exchange(&stream, command, deadline));
             drop(stream);
         }
         Err(_) => {
@@ -244,20 +249,16 @@ fn read(path: &Path, command: &Command, answer: oneshot::Sender<Result<Reply, Pr
 }
 
 /// Writes `command` to `stream` as a person's request and reads the reply, waiting at most
-/// [`VIEW_DEADLINE`] on each write and read.
-fn exchange(stream: &UnixStream, command: &Command) -> Result<Reply, Problem> {
+/// `deadline` on each write and read.
+fn exchange(stream: &UnixStream, command: &Command, deadline: Duration) -> Result<Reply, Problem> {
     let failed = |e: io::Error| match e.kind() {
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => Problem::NoAnswer {
-            within: VIEW_DEADLINE,
-        },
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+            Problem::NoAnswer { within: deadline }
+        }
         _ => Problem::Unreadable { why: e.to_string() },
     };
-    stream
-        .set_write_timeout(Some(VIEW_DEADLINE))
-        .map_err(failed)?;
-    stream
-        .set_read_timeout(Some(VIEW_DEADLINE))
-        .map_err(failed)?;
+    stream.set_write_timeout(Some(deadline)).map_err(failed)?;
+    stream.set_read_timeout(Some(deadline)).map_err(failed)?;
     let request = Request::new(None, command.clone());
     let line =
         serde_json::to_string(&request).map_err(|e| Problem::Unreadable { why: e.to_string() })?;

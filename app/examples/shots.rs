@@ -29,6 +29,7 @@ use temet_work_app::components::tag::Tag;
 use temet_work_app::composites::check_list::{CheckList, PlanCheck};
 use temet_work_app::composites::issue_actions::IssueActions;
 use temet_work_app::composites::issue_pane::IssueTab;
+use temet_work_app::composites::refine_dialog::{RefineCheck, RefineDialog, RefineDraft};
 use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{Grouping, Project};
 use temet_work_app::{launch, sample, theme, view_map};
@@ -70,6 +71,17 @@ struct Shot {
     source: Source,
     /// Whether the selected issue's actions menu is open.
     actions: bool,
+    refine: Refine,
+}
+
+/// How far the shot has gone with refining the selected issue.
+#[derive(Clone, Copy, PartialEq)]
+enum Refine {
+    None,
+    /// RefineDialog is open.
+    Open,
+    /// The daemon refused what it sent.
+    Refused,
 }
 
 /// How far the shot has gone with overturning WATCH-51's decision in Needs you.
@@ -95,6 +107,7 @@ const fn shot(name: &'static str, theme: &'static str, width: f32, height: f32) 
         overturn: Overturn::None,
         source: Source::Sample,
         actions: false,
+        refine: Refine::None,
     }
 }
 
@@ -166,6 +179,18 @@ const SHOTS: &[Shot] = &[
     Shot {
         actions: true,
         ..shot("light-1440-actions", "light", 1440., 900.)
+    },
+    Shot {
+        refine: Refine::Open,
+        ..shot("dark-1440-refine", "dark", 1440., 900.)
+    },
+    Shot {
+        refine: Refine::Open,
+        ..shot("light-1440-refine", "light", 1440., 900.)
+    },
+    Shot {
+        refine: Refine::Refused,
+        ..shot("dark-1440-refine-refused", "dark", 1440., 900.)
     },
     Shot {
         source: Source::Live,
@@ -293,6 +318,16 @@ fn main() -> gpui::Result<()> {
                 page.set_actions_open(s.actions);
                 page
             });
+            if s.refine != Refine::None {
+                page.update(cx, |page, cx| {
+                    page.open_refine(&selected.clone().into(), window, cx);
+                    if s.refine == Refine::Refused {
+                        page.set_refine_not_done(
+                            "the daemon is held: resume it, or Save without send",
+                        );
+                    }
+                });
+            }
             cx.new(|cx| Root::new(page, window, cx))
         })?;
         capture(&mut cx, window.into(), dir, s.name, &faces)?;
@@ -308,7 +343,12 @@ fn main() -> gpui::Result<()> {
             // its start.
             cx.update(|cx| cx.set_reduce_motion(true));
             let window = cx.open_window(size(px(1440.), px(*height)), |window, cx| {
-                let gallery = cx.new(|_| Gallery { story: *story });
+                let draft = (*story == Story::RefineDialogDefault)
+                    .then(|| RefineDraft::new(REFINE_TITLE, &refine_checks(), window, cx));
+                let gallery = cx.new(|_| Gallery {
+                    story: *story,
+                    draft,
+                });
                 cx.new(|cx| Root::new(gallery, window, cx))
             })?;
             capture(&mut cx, window.into(), dir, &name, &faces)?;
@@ -388,6 +428,7 @@ enum Story {
     CutPanelHereWithAttention,
     CutPanelMachinesWithOneHere,
     IssueActionsInPane,
+    RefineDialogDefault,
 }
 
 /// Each part shot: the story's id, the story, and the frame's height, the same as the story
@@ -431,7 +472,35 @@ const PARTS: &[(&str, Story, f32)] = &[
         Story::IssueActionsInPane,
         200.,
     ),
+    (
+        "temet-refinedialog--default",
+        Story::RefineDialogDefault,
+        900.,
+    ),
 ];
+
+/// RefineDialog's story: clacks#219's title and three checks.
+const REFINE_TITLE: &str =
+    "Night lamps switch on by the clock instead of the light reading at each tower";
+
+fn refine_checks() -> Vec<RefineCheck> {
+    vec![
+        RefineCheck::new(
+            "Night lamps switch on when the tower's own light sensor reads below the level its \
+             operator set.",
+            "cargo nextest run -p clacks-lamps sensor_switches_on",
+        ),
+        RefineCheck::new(
+            "A failed sensor leaves the lamps on the clock, never on all day or off all night.",
+            "cargo nextest run -p clacks-lamps failed_sensor_uses_clock",
+        ),
+        RefineCheck::new(
+            "The six \u{dc}berwald towers with older controllers stay on the clock, and the plan \
+             says so.",
+            "docs/handbook/lamps.md, read in review",
+        ),
+    ]
+}
 
 /// A check as the CheckList stories write one.
 fn check(done_when: &str, proven_by: &str, status: Option<Status>) -> PlanCheck {
@@ -542,6 +611,8 @@ fn milestone(cx: &App) -> AnyElement {
 /// One story's part on the page ground, inset as Storybook insets a story.
 struct Gallery {
     story: Story,
+    /// RefineDialog's draft, for its story.
+    draft: Option<RefineDraft>,
 }
 
 impl Render for Gallery {
@@ -584,12 +655,13 @@ impl Render for Gallery {
                 .max_w(theme::size::col_right(cx, window.viewport_size().width))
                 .child(CheckList::new("story", checks(self.story)))
                 .into_any_element(),
-            // The story's issue is ready; the window offers the one move the daemon takes from
-            // ready, back to new, and has none of Refine, Assign or Unassign.
+            // The story's issue is ready; the window offers Refine and the one move the daemon
+            // takes from ready, back to new, and has neither Assign nor Unassign.
             Story::IssueActionsInPane => div()
                 .flex()
                 .child(
                     IssueActions::new(Stage::Ready)
+                        .on_refine(|_, _| {})
                         .move_to(vec![Stage::New])
                         .on_move(|_, _, _| {}),
                 )
@@ -598,6 +670,10 @@ impl Render for Gallery {
             Story::CutPanelAttention => panel(true, false, cx).into_any_element(),
             Story::CutPanelHere => panel(false, true, cx).into_any_element(),
             Story::CutPanelHereWithAttention => panel(true, true, cx).into_any_element(),
+            Story::RefineDialogDefault => match &self.draft {
+                Some(draft) => RefineDialog::new("clacks#219", draft).into_any_element(),
+                None => div().into_any_element(),
+            },
             Story::CutPanelMachinesWithOneHere => div()
                 .flex()
                 .flex_col()
