@@ -46,7 +46,9 @@ impl World {
             return Err(format!("{agent} is not an agent this daemon started"));
         };
         if a.state == AgentState::Ended {
-            return Err(format!("{agent} has ended; only a running agent is assigned"));
+            return Err(format!(
+                "{agent} has ended; only a running agent is assigned"
+            ));
         }
         match a.role {
             Role::Author => {
@@ -362,7 +364,3 @@ fn article(role: Role) -> &'static str {
         Role::Refiner | Role::Reviewer => "a",
     }
 }
-
-#[cfg(test)]
-#[path = "world_assign_tests.rs"]
-mod tests;

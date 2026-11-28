@@ -11,7 +11,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use temet_work_core::brief;
-use temet_work_core::ids::AgentId;
+use temet_work_core::ids::{AgentId, IssueId};
 use temet_work_core::launch::{AGENT_VAR, SECRET_VAR};
 use temet_work_core::model::{AgentState, Role};
 use temet_work_core::sender::Digest;
@@ -234,11 +234,15 @@ pub fn latest_of(updates: &[Update], terminal: &TerminalId) -> Option<Status> {
 struct Message {
     agent: String,
     /// The issue it is about; none for an investigator's.
-    issue: Option<temet_work_core::ids::IssueId>,
+    issue: Option<IssueId>,
     text: String,
     /// Whether it is what the issue's stage needs the agent to hear, so its
     /// arrival counts as told. A reminder does not.
     tells: bool,
+    /// Whether it is the brief for the issue a person moved its agent to
+    /// ([`Effect::Brief`]), so its arrival is reported as
+    /// [`Event::Briefed`].
+    briefs: bool,
 }
 
 /// The count of reminders to an agent its issue waits on. A reminder's turn
@@ -549,6 +553,7 @@ impl Runners {
                             |issue| brief::nudge(a.role, issue),
                         ),
                         tells: false,
+                        briefs: false,
                     },
                 ));
                 continue;
@@ -748,6 +753,17 @@ impl Runners {
                 keep.push(m);
                 continue;
             };
+            // A message about an issue its agent no longer works on is dropped:
+            // a person moved the agent to another issue or took it off this
+            // one, and its commands for this one are refused.
+            if let Some(issue) = &m.issue
+                && world
+                    .agents
+                    .get(&AgentId::new(m.agent.clone()))
+                    .is_some_and(|a| !a.works_on(issue))
+            {
+                continue;
+            }
             // A message about a paused issue, as while the daemon is held, waits
             // until the issue is no longer paused: the loop sends no fix or
             // round to one, and one queued before the pause waits the same.
@@ -771,6 +787,10 @@ impl Runners {
             }
             match self.adapters[i].send(&terminal, &m.text, true) {
                 Ok(()) if m.tells => told.extend(m.issue.map(|issue| Event::Told { issue })),
+                Ok(()) if m.briefs => told.extend(m.issue.map(|issue| Event::Briefed {
+                    agent: AgentId::new(m.agent),
+                    issue,
+                })),
                 Ok(()) => {}
                 // The terminal is gone, so its agent has ended; the loop starts and
                 // tells the next one.
@@ -788,6 +808,36 @@ impl Runners {
         }
         self.outbox = keep;
         told
+    }
+
+    /// Queues the brief for the issue a person moved `agent` to
+    /// ([`World::moved_brief`]), built from the issue as it is now, in place of
+    /// any brief or next-round message still waiting for it, then sends what
+    /// can be sent. Nothing is queued for an agent whose brief has reached it,
+    /// or that no longer works on `issue`. Returns what arrived, as
+    /// [`Self::deliver`] does.
+    fn brief_moved(&mut self, world: &World, agent: &AgentId, issue: &IssueId) -> Vec<Event> {
+        let Some(text) = world
+            .agents
+            .get(agent)
+            .filter(|a| a.awaits_brief() && a.issue.as_ref() == Some(issue))
+            .and_then(|_| world.moved_brief(agent))
+        else {
+            return Vec::new();
+        };
+        self.outbox
+            .retain(|m| !(m.agent == agent.0 && (m.briefs || m.tells)));
+        self.queue(
+            world,
+            &BTreeMap::new(),
+            Message {
+                agent: agent.0.clone(),
+                issue: Some(issue.clone()),
+                text,
+                tells: false,
+                briefs: true,
+            },
+        )
     }
 
     /// Types [`CONTINUE`] into each agent whose limit has reset, once
@@ -1263,6 +1313,7 @@ impl Part for Runners {
                         issue: Some(issue.clone()),
                         text: brief::fixes(i, &world.repos_of(i), points),
                         tells: true,
+                        briefs: false,
                     },
                 );
                 Outcome::Done {
@@ -1279,6 +1330,14 @@ impl Part for Runners {
                 ) else {
                     return Outcome::NotMine;
                 };
+                // A reviewer a person moved here hears the round in its brief,
+                // built now, so it names the round and pull requests to review.
+                if reviewer.awaits_brief() {
+                    return Outcome::Done {
+                        events: self.brief_moved(world, &reviewer.id, issue),
+                        effects: Vec::new(),
+                    };
+                }
                 // A next-round message still waiting may name a pull request
                 // since replaced, which the reviewer must not act on: this one
                 // takes its place. A reminder stays.
@@ -1292,6 +1351,7 @@ impl Part for Runners {
                         issue: Some(issue.clone()),
                         text: brief::next_round(i, *round, &world.pulled(i)),
                         tells: true,
+                        briefs: false,
                     },
                 );
                 Outcome::Done {
@@ -1299,6 +1359,12 @@ impl Part for Runners {
                     effects: Vec::new(),
                 }
             }
+            // A person moved a running agent onto `issue`: it hears the brief a
+            // fresh agent there would start with once its turn ends.
+            Effect::Brief { agent, issue } => Outcome::Done {
+                events: self.brief_moved(world, agent, issue),
+                effects: Vec::new(),
+            },
             // The loop asks again for a stop that failed, as `World::missing`
             // does at every round: within a minute of the last try the answer
             // is that try's reason, and a poll makes the next try.
@@ -1749,6 +1815,186 @@ mod tests {
         for e in events {
             w.apply(e);
         }
+    }
+
+    /// ankh#1 and ankh#2 of group watch in review round 1, each with its author
+    /// in a folder of its own, and a reviewer started on each through `part`:
+    /// reviewer-1 on ankh#1 in terminal t1, reviewer-2 on ankh#2 in t2.
+    fn two_in_review(part: &mut Runners) -> World {
+        let mut w = world();
+        w.apply(&Event::FolderAdded {
+            folder: FolderId::new("f2"),
+            project: ProjectId::new("ankh"),
+            machine: MachineId::new(LOCAL),
+            path: ".".into(),
+        });
+        w.apply(&Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![ProjectId::new("ankh")],
+            areas: Vec::new(),
+            milestones: Vec::new(),
+            refining_at_once: 2,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        });
+        w.apply(&Event::IssueSynced {
+            issue: IssueId::new("ankh", "2"),
+            title: "Ring the bell".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 2,
+            closed: false,
+        });
+        for key in ["1", "2"] {
+            w.apply(&Event::PlanWritten {
+                issue: IssueId::new("ankh", key),
+                plan: Default::default(),
+            });
+        }
+        for key in ["1", "2"] {
+            w.apply(&Event::PullRequestReady {
+                issue: IssueId::new("ankh", key),
+                pull: Some(format!("5{key}")),
+                pulls: Default::default(),
+                replies: Vec::new(),
+            });
+            let launch = w
+                .launch(
+                    &GroupId::new("watch"),
+                    Role::Reviewer,
+                    &IssueId::new("ankh", key),
+                    None,
+                )
+                .expect("launch");
+            let run = Effect::Run {
+                launch: Box::new(launch),
+                before: None,
+                program: Program {
+                    argv: vec!["cat".into()],
+                    env: vec![],
+                },
+                runtime: "fake".into(),
+            };
+            let Outcome::Done { events, .. } = part.carry_out(&run, &w) else {
+                panic!("not started");
+            };
+            apply(&mut w, &events);
+        }
+        w
+    }
+
+    #[test]
+    fn an_assigned_reviewer_hears_its_brief_after_its_turn_ends_and_only_then_may_judge() {
+        let (mut part, handle) = shared();
+        let mut w = two_in_review(&mut part);
+        let t1 = TerminalId("t1".into());
+        let moved = AgentId::new("reviewer-1");
+        // reviewer-1 is in a turn on ankh#1.
+        handle.fake.lock().expect("lock").keep_working(&t1);
+        let round = Effect::StartReview {
+            issue: IssueId::new("ankh", "1"),
+            round: 1,
+        };
+        part.carry_out(&round, &w);
+        step(&mut part, &mut w, 0);
+        assert!(matches!(w.agents[&moved].state, AgentState::Working { .. }));
+
+        let assigned = w.apply(&Event::Assigned {
+            issue: IssueId::new("ankh", "2"),
+            agent: moved.clone(),
+            from: IssueId::new("ankh", "1"),
+        });
+        let brief = Effect::Brief {
+            agent: moved.clone(),
+            issue: IssueId::new("ankh", "2"),
+        };
+        assert!(assigned.contains(&brief), "{assigned:?}");
+        assert_eq!(
+            part.carry_out(&brief, &w),
+            Outcome::Done {
+                events: vec![],
+                effects: vec![]
+            },
+            "it waits for the turn to end"
+        );
+        assert_eq!(part.waiting(), 1);
+        // A next round of ankh#2 while it waits gives way to the brief, built
+        // again: the brief names the round.
+        let next = Effect::StartReview {
+            issue: IssueId::new("ankh", "2"),
+            round: 1,
+        };
+        part.carry_out(&next, &w);
+        assert_eq!(part.waiting(), 1, "one brief waits, no next-round message");
+        let approve = temet_work_core::Command::Review {
+            issue: IssueId::new("ankh", "2"),
+            verdict: temet_work_core::Verdict::Approve,
+            failed: Vec::new(),
+            open: Vec::new(),
+        };
+        assert!(w.events(Some(&moved), &approve).is_err(), "no brief yet");
+
+        handle.fake.lock().expect("lock").unblock(&t1);
+        let events = step(&mut part, &mut w, 1_000);
+        assert!(
+            events.contains(&Event::Briefed {
+                agent: moved.clone(),
+                issue: IssueId::new("ankh", "2"),
+            }),
+            "{events:?}"
+        );
+        assert_eq!(part.waiting(), 0);
+        let screen = screen_of(&handle.fake);
+        let text = w.moved_brief(&moved).expect("a brief");
+        assert!(screen.ends_with(&text), "{screen}");
+        assert!(text.starts_with("A person moved you from ankh#1 to ankh#2"));
+        assert!(w.events(Some(&moved), &approve).is_ok(), "taken after it");
+        // Delivered once: the loop asks for no brief again.
+        assert!(!w.missing().start.contains(&brief));
+    }
+
+    #[test]
+    fn a_message_about_an_issue_an_assigned_or_unassigned_agent_left_is_dropped() {
+        let (mut part, handle) = shared();
+        let mut w = two_in_review(&mut part);
+        let t2 = TerminalId("t2".into());
+        handle.fake.lock().expect("lock").keep_working(&t2);
+        let round = Effect::StartReview {
+            issue: IssueId::new("ankh", "2"),
+            round: 1,
+        };
+        part.carry_out(&round, &w);
+        part.carry_out(&round, &w);
+        assert_eq!(
+            part.waiting(),
+            1,
+            "a second next-round message waits for reviewer-2"
+        );
+        // A person moves reviewer-1 onto ankh#2, so reviewer-2 is unassigned.
+        w.apply(&Event::Assigned {
+            issue: IssueId::new("ankh", "2"),
+            agent: AgentId::new("reviewer-1"),
+            from: IssueId::new("ankh", "1"),
+        });
+        assert!(w.agents[&AgentId::new("reviewer-2")].unassigned);
+        handle.fake.lock().expect("lock").unblock(&t2);
+        let events = step(&mut part, &mut w, 1_000);
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Told { .. })),
+            "{events:?}"
+        );
+        assert_eq!(part.waiting(), 0, "dropped, not sent");
+        let screen = handle
+            .fake
+            .lock()
+            .expect("fake")
+            .screen(&t2)
+            .expect("screen");
+        let i = &w.issues[&IssueId::new("ankh", "2")];
+        let text = brief::next_round(i, 1, &w.pulled(i));
+        assert_eq!(screen.matches(&text).count(), 1, "the first only: {screen}");
     }
 
     #[test]

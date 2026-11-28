@@ -662,6 +662,115 @@ fn a_persons_hold_starts_nothing_through_rounds_and_a_restart_until_a_resume() {
     ));
 }
 
+#[test]
+fn a_persons_assign_and_unassign_reach_the_daemon_and_exit_0_and_an_agents_are_refused_with_1() {
+    use temet_work::socket;
+
+    let config = format!("{CONFIG}refining_at_once = 2\n");
+    let (mut host, starts) = host_from(
+        World::default(),
+        Box::new(Memory::default()),
+        fake_runtimes(),
+        &config,
+        None,
+        vec![tracked("city/ankh", "1", 1), tracked("city/ankh", "2", 2)],
+    );
+    host.tick(0).expect("tick");
+    let on = |host: &Host, id: &str| host.world().agents[&AgentId::new(id)].issue.clone();
+    assert_eq!(on(&host, "refiner-1"), Some(IssueId::new("ankh", "1")));
+    assert_eq!(on(&host, "refiner-2"), Some(IssueId::new("ankh", "2")));
+    let token = secret(&starts, "refiner-1");
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("assign-exit.sock");
+    let requests = socket::listen(&path).expect("listen");
+    let run = move |args: &[&str], agent: Option<&str>| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"));
+        command
+            .args(args)
+            .env("TEMET_WORK_SOCKET", &path)
+            .env_remove("TEMET_WORK_DAEMON");
+        match agent {
+            Some(secret) => command
+                .env("TEMET_WORK_AGENT", "refiner-1")
+                .env(SECRET_VAR, secret),
+            None => command
+                .env_remove("TEMET_WORK_AGENT")
+                .env_remove(SECRET_VAR),
+        };
+        command.output().expect("runs")
+    };
+    let client = std::thread::spawn(move || {
+        [
+            run(&["assign", "ankh#2", "refiner-1"], None),
+            run(&["assign", "ankh#1", "refiner-1"], Some(&token)),
+            run(&["unassign", "ankh#2", "refiner-1"], Some(&token)),
+            run(&["assign", "ankh#2", "author-9"], None),
+            run(&["unassign", "ankh#2", "refiner-1"], None),
+        ]
+    });
+    for n in 0..5 {
+        let pending = requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a request");
+        let reply = socket::answer(&mut host, 1, &pending.request, &pending.peer).expect("answer");
+        pending.answer(reply);
+        if n == 0 {
+            let w = host.world();
+            assert_eq!(on(&host, "refiner-1"), Some(IssueId::new("ankh", "2")));
+            assert!(
+                w.agents[&AgentId::new("refiner-1")].briefed,
+                "idle, so it heard at once"
+            );
+            assert!(w.agents[&AgentId::new("refiner-2")].unassigned);
+            assert_eq!(
+                w.running(
+                    &IssueId::new("ankh", "1"),
+                    temet_work_core::model::Role::Refiner
+                )
+                .map(|a| a.id.clone()),
+                Some(AgentId::new("refiner-3")),
+                "ankh#1 got a fresh refiner at once"
+            );
+        }
+    }
+    let [assigned, by_agent, unassigned_by_agent, unknown, unassigned] =
+        client.join().expect("client");
+    let out = |o: &std::process::Output| String::from_utf8_lossy(&o.stdout).trim().to_string();
+    let err = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).trim().to_string();
+    assert_eq!(assigned.status.code(), Some(0), "{}", err(&assigned));
+    assert_eq!(
+        out(&assigned),
+        "refiner-1 works on ankh#2 now, moved from ankh#1; it hears its brief for ankh#2 when its \
+         turn ends; refiner-2, its refiner until now, is unassigned and stopped; ankh#1 gets a \
+         fresh refiner"
+    );
+    for refused in [&by_agent, &unassigned_by_agent] {
+        assert_eq!(refused.status.code(), Some(1), "{}", out(refused));
+        assert!(
+            err(refused).contains("is a person's: refiner-1 is an agent, and only a person"),
+            "{}",
+            err(refused)
+        );
+    }
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(
+        err(&unknown).contains("author-9 is not an agent this daemon started"),
+        "{}",
+        err(&unknown)
+    );
+    assert_eq!(unassigned.status.code(), Some(0), "{}", err(&unassigned));
+    assert_eq!(
+        out(&unassigned),
+        "refiner-1 is unassigned from ankh#2 and its session is being stopped; once it has \
+         ended, ankh#2 gets a fresh refiner"
+    );
+    let w = host.world();
+    assert_eq!(
+        w.agents[&AgentId::new("refiner-1")].state,
+        temet_work_core::model::AgentState::Ended,
+        "the fake runner stopped it at once"
+    );
+}
+
 /// A plan of one check, as `temet-work plan` reads it.
 const ONE_CHECK: &str =
     "checks:\n  - done_when: the clock strikes on time\n    proven_by: listening at noon\n";

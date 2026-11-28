@@ -74,7 +74,8 @@
       "agents": [],
       "updated_ms": 1795000900000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "assignable": []
     },
     {
       "id": "watch#1",
@@ -91,7 +92,8 @@
       "agents": [],
       "updated_ms": 1795000480000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "assignable": []
     },
     {
       "id": "watch#2",
@@ -110,7 +112,8 @@
       ],
       "updated_ms": 1795000540000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "assignable": []
     },
     {
       "id": "watch#3",
@@ -129,7 +132,8 @@
       ],
       "updated_ms": 1795000600000,
       "checks": [],
-      "reviews": []
+      "reviews": [],
+      "assignable": []
     },
     {
       "id": "watch#4",
@@ -190,7 +194,8 @@
             }
           ]
         }
-      ]
+      ],
+      "assignable": []
     },
     {
       "id": "watch#5",
@@ -236,7 +241,8 @@
           "state": "failed"
         }
       ],
-      "reviews": []
+      "reviews": [],
+      "assignable": []
     }
   ],
   "done": 2,
@@ -252,7 +258,9 @@
       "state_text": "working: winding the clock",
       "started": 19,
       "runtime": "hex",
-      "model": "anthill"
+      "model": "anthill",
+      "assigned": false,
+      "unassigned": false
     },
     {
       "id": "author-4",
@@ -265,7 +273,9 @@
       "state_text": "error: usage limit reached",
       "started": 23,
       "runtime": "hex",
-      "model": "anthill"
+      "model": "anthill",
+      "assigned": false,
+      "unassigned": false
     },
     {
       "id": "author-5",
@@ -278,7 +288,9 @@
       "state_text": "ended",
       "started": 25,
       "runtime": null,
-      "model": null
+      "model": null,
+      "assigned": false,
+      "unassigned": false
     },
     {
       "id": "refiner-1",
@@ -291,7 +303,9 @@
       "state_text": "idle",
       "started": 17,
       "runtime": "hex",
-      "model": null
+      "model": null,
+      "assigned": false,
+      "unassigned": false
     },
     {
       "id": "reviewer-3",
@@ -304,7 +318,9 @@
       "state_text": "blocked: permission",
       "started": 21,
       "runtime": "hex",
-      "model": "anthill"
+      "model": "anthill",
+      "assigned": false,
+      "unassigned": false
     }
   ],
   "decisions": [

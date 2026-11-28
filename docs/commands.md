@@ -40,6 +40,8 @@ reports its step done.
 | `temet-work proposal RULE drop` | a person only: the rule moves to dropped and leaves status and every brief | the rule is proposed |
 | `temet-work hold` | a person only: until a person resumes the daemon, no issue is taken, no investigation starts, and an issue with nothing merged gets no new agent, fix, review round or merge; agents at work finish their turn (see "Holding the daemon") | no issue: while the daemon is not held |
 | `temet-work resume` | a person only: work starts again | no issue: while the daemon is held |
+| `temet-work assign ISSUE AGENT` | a person only: moves AGENT, a running refiner, reviewer or arbiter of the issue's group now on another issue of the same project, onto ISSUE; the agent of that role ISSUE had is unassigned and stopped, and the issue AGENT left gets a fresh one (see "Assigning an agent") | refining for a refiner, in review with no approval in for a reviewer, with the arbiter with no ruling in for an arbiter; not while paused |
+| `temet-work unassign ISSUE AGENT` | a person only: takes AGENT, of any role but the investigator, off ISSUE and stops its session at once; ISSUE gets a fresh agent of that role once it has ended, if its stage still needs one (see "Assigning an agent") | any, paused too |
 | `temet-work file PROJECT TITLE BODY [--milestone M]` | only the investigator of a group whose investigation is running, for a project or area its group takes issues from; `BODY` `-` reads it from standard input. The reply names the new issue and how a "Depends on" line names it | no issue: while the group's investigation runs. The milestone is the last in the group's list when none is named; one the group does not take is refused, and a group with no milestones files with none. A title an open issue of that project already has is refused, and so is the title of an issue a person closed in that project (one the loop did not close after verifying it, with none of its pull requests merged); the reply names the issue |
 | `temet-work investigated GROUP` | only the investigator of GROUP whose investigation is running: the investigation ends and the investigator's session is stopped | no issue: while GROUP's investigation runs |
 | `temet-work set TARGET [--role ROLE] KEY VALUE` | a person; a refiner for the task level of the issue it refines, except `runtime`, `runner`, `permission`, `review_rounds`, `ci`, `deploy`, `verify`, `run_in` and `investigate`, which only a person sets; a refiner's `model` is recorded for the author, and refused for another role. `--role` is for the settings that take a role (`docs/settings.md`, Roles) | any for a person; refining for a refiner |
@@ -70,8 +72,11 @@ issue's stage, so a wrong sender is told whose step it is, not what stage the is
 - `file` and `investigated` belong to a group's running investigator, which works for its
   group and on no issue. A person, another agent, or an investigator whose investigation
   has ended is refused with the reason; a person files issues in the tracker itself.
-- `hold` and `resume` are a person's alone, as `retry`, `overturn` and `proposal` are. An
-  agent is refused: it finishes its step.
+- `hold`, `resume`, `assign` and `unassign` are a person's alone, as `retry`, `overturn`
+  and `proposal` are. An agent is refused: it finishes its step.
+- An agent a person unassigned from an issue, or moved from it to another, is refused every
+  step on that issue from then on, with the reason. A moved agent runs the steps of its role
+  on its new issue; a moved reviewer judges once its brief has reached it.
 
 ## How the daemon knows who sent a command
 
@@ -103,8 +108,8 @@ itself is in no log, reply, status or issue text.
   `settings` still answer it. An agent's own `temet-work` stays alive and readable while
   it waits for the reply.
 - A command that names no agent is a person's. It may read from anywhere. A command that
-  changes something (`rule`, `overturn`, `retry`, `proposal`, `hold`, `resume`, `set` and
-  `unset`) is
+  changes something (`rule`, `overturn`, `retry`, `proposal`, `hold`, `resume`, `assign`,
+  `unassign`, `set` and `unset`) is
   refused when it carries an agent's secret; when, on Linux, the sending process or one of
   its parents holds a secret this daemon issued, which still holds after the agent unsets
   both variables with `env -u`; when the sending process cannot be read; or when it came
@@ -207,8 +212,8 @@ like any other.
 `temet-work mcp [--allow read|act]` serves the same views and commands as MCP tools over
 standard input and output, for an agent's MCP client. At `read`, the default, it offers
 `status`, `issue`, `screen` and `settings`; `act` adds `plan`, `ready`, `review`, `rule`,
-`choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `file`, `investigated`, `set`
-and `unset`.
+`choose`, `retry`, `overturn`, `proposal`, `hold`, `resume`, `assign`, `unassign`, `file`,
+`investigated`, `set` and `unset`.
 
 `temet-work parts` prints the version and the parts compiled in, without asking the
 daemon.
@@ -258,6 +263,84 @@ lifts it; `status --json` gives `held`, true or false, and `held_since`, the tim
 or `null`. A `hold` while the daemon is held, and a `resume` while it is not, are refused
 with the reason. On `resume` the loop takes issues and places authors at once, and the
 next round starts what each issue's stage needs.
+
+## Assigning an agent
+
+The loop picks which agent works on each issue. A person can move an agent onto another
+issue with `temet-work assign ISSUE AGENT`, and take one off its issue with `temet-work
+unassign ISSUE AGENT`; the window's issue pane offers both under its actions button. Both
+are a person's commands. An agent's is refused with `assign is a person's: AGENT is an
+agent, and only a person assigns an agent to an issue or unassigns one` (or `unassign is a
+person's: ...`). As for every command that changes something and names no agent, so is one
+that carries an agent's secret, comes from an agent's process tree or from a process that
+cannot be read, or comes through `temet-work relay`. Each accepted one is an event in the
+log, so a restart keeps who works on what.
+
+`assign ISSUE AGENT` moves AGENT onto ISSUE. AGENT is a running refiner, reviewer or
+arbiter of ISSUE's group that works on another issue of the same project. ISSUE's stage
+must need that role now: a refiner while it is being refined, a reviewer while it is in
+review with no approval in, an arbiter while it is with the arbiter with no ruling in. Then:
+
+- The agent of that role ISSUE had is unassigned and stopped, as `unassign` does (below).
+- AGENT works on ISSUE. Its step commands for ISSUE are taken, and those for the issue it
+  came from are refused, as in `review for watch#9 is no longer reviewer-4's: a person
+  moved reviewer-4 from it to watch#12; work on watch#12`.
+- AGENT is sent the brief a fresh agent of its role on ISSUE would start with, after a line
+  saying that a person moved it from its old issue to ISSUE and that its commands for the
+  old one are refused. The brief reaches it when its turn ends, as fixes and next-round
+  messages do. Until it has, the loop asks for it again each round, so a restart does not
+  lose it, and a moved reviewer's verdict is refused. A message still waiting for AGENT
+  about its old issue is dropped.
+- The issue AGENT came from gets a fresh agent of that role at once, when its stage needs
+  one now. It uses none of `starts`, since AGENT did not end there.
+- AGENT's terminal stays where it is, with the labels it started with. `status`,
+  `temet-work issue` and `status --json` say which issue it works on.
+
+Every other assign is refused with its reason, and nothing changes. The refusals are:
+
+- An author. It holds its issue's work folders and may be mid-edit in them, so moving one
+  would leave two authors in one folder. The reply says that unassigning the issue's author
+  starts a fresh one in its folders.
+- An investigator, which works for its group on no issue.
+- An agent that has ended, an id this daemon did not start, and an agent a person
+  unassigned that is still being stopped.
+- An agent already on ISSUE.
+- An agent of another group, or one that works on an issue of another project.
+- A role ISSUE's stage does not need now. The reply names the role it needs, as in
+  `watch#12 is in review, round 1, so it needs a reviewer now, not a refiner`, or says it
+  needs none, as for an issue in review whose approval is in.
+- A paused issue: the daemon is held, or the issue left its group's scope. A pause means no
+  work starts on it.
+- An issue the daemon does not know.
+
+`unassign ISSUE AGENT` takes AGENT, a running agent of any role but the investigator, off
+the issue it works on, and stops its session at once, mid-turn too, as a person's stop
+does. From then on:
+
+- Its step commands for ISSUE are refused, as in `ready for watch#12 is no longer
+  author-2's: a person unassigned author-2 from it, and its session is being stopped`. So
+  is a choice on it.
+- Nothing waits on it: it is not reminded, and its end does not count toward `starts`.
+- While its stop fails, the loop asks for it again each round and Problems lists `stop
+  AGENT`, as for any stop the loop asks for.
+- No fresh agent of its role starts on ISSUE while it runs, so two sessions never do one
+  step and an author's folder never has two writers. Once it has ended, ISSUE's stage gets
+  what it needs: a fresh agent of that role when the stage still needs one, and nothing when
+  it does not, as for a reviewer whose approval is in. A fresh author starts in the issue's
+  own folders, on its branch and pull requests.
+
+An unassign works on a paused issue too, since a stop starts no work. It is refused for an
+agent that is not on ISSUE (the reply names the issue it is on, if any), one already
+unassigned from it, one that has ended, an investigator, and an id this daemon did not
+start.
+
+The reply to an accepted assign names the agent ISSUE had and the issue that gets a fresh
+agent. The reply to an unassign says whether a fresh agent starts once AGENT has ended.
+`status` says who a person placed, as in `reviewer-4 on watch#12, assigned by a person`
+and `author-2 unassigned from watch#12 by a person, stopping`, and `temet-work issue`
+says the same on its agent lines. In `status --json` each agent carries `assigned` and
+`unassigned`, and each issue carries `assignable`: the agents a person may assign to it
+now, by the same rule `assign` checks.
 
 ## What a brief holds
 

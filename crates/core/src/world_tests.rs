@@ -3506,3 +3506,6 @@ mod scope;
 
 #[path = "world_hold_tests.rs"]
 mod hold;
+
+#[path = "world_assign_tests.rs"]
+mod assign;

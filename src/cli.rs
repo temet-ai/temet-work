@@ -41,6 +41,13 @@ temet-work hold                             a person's: hold the daemon, so no i
                                             gets no new agent, fix, review or merge; agents at
                                             work finish their turn
 temet-work resume                           a person's: lift the hold, so work starts again
+temet-work assign ISSUE AGENT               a person's: move a running refiner, reviewer or arbiter
+                                            onto an issue whose stage needs that role now; the
+                                            issue's agent of that role is stopped, and the issue
+                                            the moved one left gets a fresh one
+temet-work unassign ISSUE AGENT             a person's: take an agent off the issue it works on and
+                                            stop its session now; the issue gets a fresh agent of
+                                            that role once it has ended, if its stage needs one
 temet-work file PROJECT TITLE BODY [--milestone M]
                                             an investigator's: file an issue in a project or area its
                                             group takes; BODY - reads it from standard input; the
@@ -306,6 +313,14 @@ pub fn request(
         "retry" => Command::Retry { issue: issue()? },
         "hold" => Command::Hold,
         "resume" => Command::Resume,
+        "assign" => Command::Assign {
+            issue: issue()?,
+            agent: AgentId::new(arg(2, "AGENT")?),
+        },
+        "unassign" => Command::Unassign {
+            issue: issue()?,
+            agent: AgentId::new(arg(2, "AGENT")?),
+        },
         "rule" => Command::Rule {
             issue: issue()?,
             approve: match arg(2, "approve or fix")? {
@@ -397,6 +412,36 @@ pub(crate) mod tests {
         assert_eq!(read("resume"), Ok(Command::Resume));
         assert!(read("hold --json").is_err(), "--json goes with status only");
         assert!(USAGE.contains("temet-work hold ") && USAGE.contains("temet-work resume "));
+    }
+
+    #[test]
+    fn assign_and_unassign_read_an_issue_and_an_agent() {
+        let read = |line: &str| request(&args(line), None, no_files).map(|r| r.command);
+        assert_eq!(
+            read("assign watch#12 reviewer-4"),
+            Ok(Command::Assign {
+                issue: IssueId::new("watch", "12"),
+                agent: AgentId::new("reviewer-4"),
+            })
+        );
+        assert_eq!(
+            read("unassign watch#12 author-2"),
+            Ok(Command::Unassign {
+                issue: IssueId::new("watch", "12"),
+                agent: AgentId::new("author-2"),
+            })
+        );
+        let missing = read("assign watch#12").expect_err("no agent");
+        assert!(missing.starts_with("missing AGENT"), "{missing}");
+        assert!(
+            read("unassign reviewer-4 watch#12").is_err(),
+            "the issue comes first"
+        );
+        assert!(read("assign watch#12 reviewer-4 --json").is_err());
+        assert!(
+            USAGE.contains("temet-work assign ISSUE AGENT ")
+                && USAGE.contains("temet-work unassign ISSUE AGENT ")
+        );
     }
 
     #[test]
