@@ -591,7 +591,26 @@ const POINTS: (&str, &str) = ("point", "points");
 /// for an arbiter, then its latest review round; then the latest kept rules
 /// that fit, after a line counting the others and naming `temet-work status`;
 /// last, an arbiter's earlier review rounds.
+/// What every brief says, before its kept rules, about a person stopping the agent in its own
+/// terminal. Dawid agreed to this wording on 28 Nov 2026.
+pub const STOP: &str = "If a person types into this terminal and tells you to stop, stop: do no \
+more of the task, say where it stands, and wait until they tell you to go on. A message \
+temet-work types here, such as a reminder that the issue is still waiting on you, does not lift \
+the stop. A person who wants temet-work to start no more work runs temet-work hold in a shell \
+outside any agent's terminal.";
+
+/// The text of a brief before its [`STOP`] paragraph, for tests of how the task itself ends.
+/// Panics when the brief has no such paragraph.
+#[cfg(test)]
+pub(crate) fn before_stop(task: &str) -> &str {
+    task.split_once(&format!("\n\n{STOP}"))
+        .map(|(before, _)| before)
+        .unwrap_or_else(|| panic!("no stop paragraph in: {task}"))
+}
+
+/// The brief's parts laid out, ending with [`STOP`] and then the kept rules.
 fn with_rules(mut parts: Vec<Part>, rules: &[String]) -> String {
+    parts.push(Part::Whole(format!("\n\n{STOP}")));
     if !rules.is_empty() {
         parts.push(Part::Whole("\n\nRules from overturned decisions:\n".into()));
         let entries = rules
@@ -1380,7 +1399,7 @@ mod tests {
         let brief = lamp_task(Role::Reviewer, &issue);
         assert!(brief.contains(numbered), "{brief}");
         assert!(
-            brief.ends_with(&how.replace("<what is still wrong>", "<what to fix>")),
+            before_stop(&brief).ends_with(&how.replace("<what is still wrong>", "<what to fix>")),
             "{brief}"
         );
     }
@@ -1468,7 +1487,7 @@ mod tests {
             assert!(text.contains(&shared), "{text}");
         }
         assert!(
-            brief.ends_with(
+            before_stop(&brief).ends_with(
                 "Then run: temet-work rule watch#12 approve \"<why>\"\n\
                  or: temet-work rule watch#12 fix \"<what must change, and why>\""
             ),
@@ -1967,7 +1986,7 @@ mod tests {
     #[test]
     fn the_first_authors_brief_asks_for_a_new_pull_request() {
         assert_eq!(
-            author_task(&TWO_HELD[..1], &[]),
+            before_stop(&author_task(&TWO_HELD[..1], &[])),
             "Work on watch#31: A lamp with no oil: refuse it, or list it under Problems. It is issue \
              31 of ankh-morpork/watch in its tracker.\n\
              Read the issue's own text: run temet-work issue watch#31, which prints the issue's text \
@@ -1990,7 +2009,7 @@ mod tests {
              <pull request number>"
         );
         assert_eq!(
-            author_task(&TWO_HELD, &[]),
+            before_stop(&author_task(&TWO_HELD, &[])),
             "Work on watch#31: A lamp with no oil: refuse it, or list it under Problems. It is issue \
              31 of ankh-morpork/watch in its tracker.\n\
              Read the issue's own text: run temet-work issue watch#31, which prints the issue's text \
@@ -2037,7 +2056,7 @@ mod tests {
             assert!(!task.contains("open a pull request"), "{task}");
             assert!(!task.contains("<pull request number>"), "{task}");
             assert!(
-                task.ends_with(
+                before_stop(&task).ends_with(
                     "When your fixes are pushed and every check holds, run: temet-work ready watch#31"
                 ),
                 "{task}"
@@ -2067,7 +2086,7 @@ mod tests {
         assert!(!task.contains("open one pull request in each"), "{task}");
         assert!(!task.contains("open a pull request"), "{task}");
         assert!(!task.contains("<pull request number>"), "{task}");
-        assert!(task.ends_with("run: temet-work ready watch#31"), "{task}");
+        assert!(before_stop(&task).ends_with("run: temet-work ready watch#31"), "{task}");
 
         // Neither merged: it pushes to both and opens no other.
         let task = author_task(
@@ -2103,7 +2122,7 @@ mod tests {
         );
         assert!(!task.contains("open one pull request in each"), "{task}");
         assert!(
-            task.ends_with("run: temet-work ready watch#31 clacks=<pull request number>"),
+            before_stop(&task).ends_with("run: temet-work ready watch#31 clacks=<pull request number>"),
             "{task}"
         );
 
@@ -2132,7 +2151,7 @@ mod tests {
             "{task}"
         );
         assert!(!task.contains("open a pull request"), "{task}");
-        assert!(task.ends_with("run: temet-work ready watch#31"), "{task}");
+        assert!(before_stop(&task).ends_with("run: temet-work ready watch#31"), "{task}");
 
         // Being fixed with none: the first author's text, with the point to fix.
         for held in [&TWO_HELD[..1], &TWO_HELD[..]] {
@@ -2181,7 +2200,7 @@ mod tests {
             let at = |s: &str| task.find(s).unwrap_or_else(|| panic!("no {s:?} in {task}"));
             assert!(at("git fetch") < at("git switch watch-12-night-shift"));
             assert!(at("git switch watch-12-night-shift") < at("Push your fixes"));
-            assert!(task.ends_with("run: temet-work ready watch#31"), "{task}");
+            assert!(before_stop(&task).ends_with("run: temet-work ready watch#31"), "{task}");
         }
 
         // Several repositories: each branch is checked out in its own folder.
@@ -2228,7 +2247,7 @@ mod tests {
             assert!(!task.contains(not), "{not:?} in {task}");
         }
         assert!(
-            task.ends_with(
+            before_stop(&task).ends_with(
                 "When the pull request is open and every check holds, run: temet-work ready \
                  watch#31 <pull request number>"
             ),
@@ -2563,7 +2582,7 @@ mod tests {
             assert!(t.contains(line), "missing {line:?} in:\n{t}");
         }
         assert!(
-            t.ends_with(
+            before_stop(&t).ends_with(
                 "When you have filed every issue you found, run: temet-work investigated watch"
             ),
             "{t}"
@@ -3022,5 +3041,27 @@ mod tests {
             task.ends_with("- Which oil? Prefer: whale.\n  - Why: it burns clean\n"),
             "{task}"
         );
+    }
+    #[test]
+    fn every_brief_says_to_stop_when_a_person_says_so_before_the_kept_rules() {
+        let issue = lamp_issue();
+        for role in [Role::Refiner, Role::Author, Role::Reviewer, Role::Arbiter] {
+            let task = lamp_task(role, &issue);
+            assert!(task.ends_with(&format!("\n\n{STOP}")), "{role:?}: {task}");
+        }
+        let rules = ["Which oil? Prefer: whale.".to_string()];
+        let task = write(
+            Role::Author,
+            &issue,
+            None,
+            &[],
+            Workplace::default(),
+            &[],
+            &rules,
+        )
+        .task;
+        let stop = task.find(STOP).expect("the stop paragraph");
+        let kept = task.find("Rules from overturned decisions").expect("the kept rules");
+        assert!(stop < kept, "{task}");
     }
 }
