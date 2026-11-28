@@ -2,8 +2,10 @@
 //! compositor: GPUI's headless app context renders the frame through its wgpu renderer into
 //! memory. Run it with `cargo run --example shots --features shots -- DIR [NAME...]`.
 //!
-//! Each shot is the Project page on the sample data in one theme at one window size; the sample
-//! holds a selected row, a milestone with no issues, a group with no agents and long names.
+//! Each shot is the Project page in one theme at one window size. Most draw the sample data, which
+//! holds a selected row, a milestone with no issues, a group with no agents and long names. The
+//! `live-` shots draw the checked-in view fixture through `view_map`, as the window draws what
+//! the daemon sends, and the problem and stale states of a daemon that does not answer.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -12,8 +14,32 @@ use gpui::{AppContext, Font, FontWeight, HeadlessAppContext, font, px, size};
 use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
 use temet_work_app::composites::issue_pane::IssueTab;
+use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{Grouping, Project};
-use temet_work_app::{launch, sample, theme};
+use temet_work_app::{launch, sample, theme, view_map};
+use temet_work_core::View;
+
+/// The view fixture the live shots draw: Discworld data from the core's tests.
+const FIXTURE: &str = include_str!("../../crates/core/tests/fixtures/view.json");
+/// The fixture's latest change, 1795000900000 ms, and five minutes on: the clock the shots use.
+const NOW_MS: u64 = 1_795_001_200_000;
+const SOCKET: &str = "/run/user/1000/temet-work.sock";
+
+/// What a shot draws.
+#[derive(Clone, Copy, PartialEq)]
+enum Source {
+    Sample,
+    /// The fixture view, as a daemon sends it.
+    Live,
+    /// The fixture view, stale: the last ask got no answer.
+    Stale,
+    /// No view: nothing listens at the socket.
+    Down,
+    /// The view in the JSON file `SHOTS_VIEW` names, such as `temet-work status --json`
+    /// printed, with the first issue that has review rounds selected. These shots are skipped
+    /// when the variable is not set.
+    File,
+}
 
 /// One shot: its name, theme, window size, and the page's state.
 struct Shot {
@@ -26,6 +52,7 @@ struct Shot {
     needs: bool,
     selected: &'static str,
     overturn: Overturn,
+    source: Source,
 }
 
 /// How far the shot has gone with overturning WATCH-51's decision in Needs you.
@@ -49,6 +76,7 @@ const fn shot(name: &'static str, theme: &'static str, width: f32, height: f32) 
         needs: true,
         selected: "WATCH-44",
         overturn: Overturn::None,
+        source: Source::Sample,
     }
 }
 
@@ -113,6 +141,48 @@ const SHOTS: &[Shot] = &[
         overturn: Overturn::Done,
         ..shot("light-1440-overturn-done", "light", 1440., 900.)
     },
+    Shot {
+        source: Source::Live,
+        selected: "4",
+        ..shot("live-dark-1440", "dark", 1440., 900.)
+    },
+    Shot {
+        source: Source::Live,
+        selected: "4",
+        ..shot("live-light-1440", "light", 1440., 900.)
+    },
+    Shot {
+        source: Source::Live,
+        selected: "5",
+        ..shot("live-dark-1440-checks", "dark", 1440., 900.)
+    },
+    Shot {
+        source: Source::Live,
+        selected: "4",
+        tab: IssueTab::Review,
+        ..shot("live-dark-1440-review", "dark", 1440., 900.)
+    },
+    Shot {
+        source: Source::Stale,
+        selected: "4",
+        ..shot("live-stale-dark-1440", "dark", 1440., 900.)
+    },
+    Shot {
+        source: Source::File,
+        ..shot("real-dark-1440", "dark", 1440., 900.)
+    },
+    Shot {
+        source: Source::File,
+        ..shot("real-light-1440", "light", 1440., 900.)
+    },
+    Shot {
+        source: Source::Down,
+        ..shot("live-down-dark-1440", "dark", 1440., 900.)
+    },
+    Shot {
+        source: Source::Down,
+        ..shot("live-down-light-1440", "light", 1440., 900.)
+    },
 ];
 
 fn main() -> gpui::Result<()> {
@@ -154,14 +224,56 @@ fn main() -> gpui::Result<()> {
                 theme::text::code_family(cx)
             ))
         })?;
-        let view = if s.needs {
+        let sample_view = if s.needs {
             sample::project_view()
         } else {
             sample::without_needs(sample::project_view())
         };
+        let text = match s.source {
+            Source::File => match std::env::var("SHOTS_VIEW") {
+                Ok(path) => std::fs::read_to_string(path)?,
+                Err(_) => continue,
+            },
+            _ => FIXTURE.to_string(),
+        };
+        let mut fixture: View = serde_json::from_str(&text).expect("the view parses");
+        if s.source != Source::File {
+            // The window shows the first project, so the fixture's second is the only one.
+            fixture.projects.retain(|p| p.id.0 == "watch");
+        }
+        // A file's selected issue: the first with review rounds, else the first.
+        let chosen = fixture
+            .issues
+            .iter()
+            .find(|i| !i.reviews.is_empty())
+            .or(fixture.issues.first())
+            .map(|i| i.id.rsplit('#').next().unwrap_or_default().to_string());
+        let selected = match (s.source, chosen) {
+            (Source::File, Some(key)) => key,
+            _ => s.selected.to_string(),
+        };
+        let path = std::path::Path::new(SOCKET);
         let window = cx.open_window(size(px(s.width), px(s.height)), |window, cx| {
             let page = cx.new(|_| {
-                let mut page = Project::new(view, Some(s.selected.into()));
+                let mut page = match s.source {
+                    Source::Sample => Project::new(sample_view, Some(s.selected.into())),
+                    live => {
+                        let mut page = Project::blank(None);
+                        let view = (live != Source::Down).then_some(&fixture);
+                        let problem = match live {
+                            Source::Stale => Some(Problem::NoAnswer {
+                                within: std::time::Duration::from_secs(5),
+                            }),
+                            Source::Down => Some(Problem::NoSocket {
+                                path: path.to_path_buf(),
+                            }),
+                            _ => None,
+                        };
+                        view_map::show(&mut page, view, problem.as_ref(), path, NOW_MS);
+                        page.select(&selected.clone().into());
+                        page
+                    }
+                };
                 page.set_grouping(s.grouping);
                 page.set_tab(s.tab);
                 if s.overturn != Overturn::None {

@@ -1,6 +1,6 @@
-//! Sample data for the window until the daemon sends its view: one project with made-up
-//! Discworld names, already in the shape of the parts' props. This is the one place that maps
-//! data into props; the daemon's view will be mapped here too.
+//! Sample data for the window's `--sample` mode, the tests and the screenshot tool: one project
+//! with made-up Discworld names, already in the shape of the parts' props. The daemon's view is
+//! mapped into the same shape in `view_map.rs`.
 
 use std::collections::HashMap;
 
@@ -75,7 +75,7 @@ fn check(done_when: &str, proven_by: &str, status: Status) -> PlanCheck {
     PlanCheck {
         done_when: s(done_when),
         proven_by: s(proven_by),
-        status,
+        status: Some(status),
         status_text: None,
     }
 }
@@ -352,8 +352,8 @@ pub fn project_view() -> ProjectView {
     let watch_44 = IssueDetail {
         round: 2,
         plan: Some(IssuePlan {
-            folder: s("omit:~/work/watch-2"),
-            merge: s("squash after CI and one approval"),
+            folder: Some(s("omit:~/work/watch-2")),
+            merge: Some(s("squash after CI and one approval")),
             checks: vec![
                 check(
                     "Signing in stores a token in the system keyring",
@@ -374,12 +374,13 @@ pub fn project_view() -> ProjectView {
         }),
         pull: Some(IssuePullRequest {
             number: 212,
-            branch: s("watch-44-keyring-token"),
-            ci: Status::Passed,
+            repo: None,
+            merged: None,
+            branch: Some(s("watch-44-keyring-token")),
+            ci: Some(Status::Passed),
             ci_text: Some(s("CI passed in 3 m 12 s")),
-            additions: 184,
-            deletions: 37,
-            files: 6,
+            lines: Some((184, 37)),
+            files: Some(6),
         }),
         rounds: Some(vec![
             ReviewRound {
