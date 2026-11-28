@@ -335,7 +335,14 @@ function staticFonts(data) {
 /** Copies the static faces, their licences and source notes into app/assets/fonts/. */
 function copyFonts(ui, data) {
   const dist = path.join(ui, "dist", "fonts");
+  // NOTICE is temet-work's own account of the faces, not the design system's: keep it.
+  const notice = path.join(FONTS_OUT, "NOTICE");
+  const kept = fs.existsSync(notice) ? fs.readFileSync(notice) : null;
   fs.rmSync(FONTS_OUT, { recursive: true, force: true });
+  if (kept) {
+    fs.mkdirSync(FONTS_OUT, { recursive: true });
+    fs.writeFileSync(notice, kept);
+  }
   const dirs = new Set();
   for (const f of staticFonts(data)) {
     for (const p of [f.file, f.licence]) {
