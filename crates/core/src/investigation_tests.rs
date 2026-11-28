@@ -1,4 +1,5 @@
 use super::*;
+use crate::brief::LEAVING_THE_FOLDER;
 use crate::command::Command;
 use crate::event::{Event, Verdict};
 use crate::ids::{FolderId, MachineId};
@@ -130,14 +131,18 @@ fn next(w: &mut World, now_ms: u64) -> Launch {
     started.remove(0)
 }
 
-/// The line of an investigator's brief that names its pull request window.
+/// What step 3 of an investigator's brief says of its pull request window: the
+/// line up to where it says how to check out a merged commit.
 fn window_line(launch: &Launch) -> &str {
-    launch
+    let line = launch
         .brief
         .task
         .lines()
         .find(|l| l.starts_with("3. "))
-        .expect("line 3")
+        .expect("line 3");
+    line.split_once(" Check out a merged commit ")
+        .expect("how to check out a merged commit")
+        .0
 }
 
 #[test]
@@ -1044,7 +1049,12 @@ fn the_investigator_holds_no_folder() {
     );
     assert_eq!(launch.machine, MachineId::new("morpork"));
     assert_eq!(w.folders[&FolderId::new("f1")].holder, None);
-    // So an author still gets the folder.
+    // So an author still gets the folder, which is why the investigator was
+    // told to leave it alone.
+    for line in LEAVING_THE_FOLDER {
+        let task = &launch.brief.task;
+        assert!(task.contains(line), "missing {line:?} in:\n{task}");
+    }
     w.apply(&sync("1", Some("First")));
     let effects = w.apply(&Event::PlanWritten {
         issue: IssueId::new("ankh", "1"),
@@ -1059,6 +1069,35 @@ fn the_investigator_holds_no_folder() {
         }),
         "{effects:?}"
     );
+}
+
+#[test]
+fn the_investigator_is_told_to_leave_its_folder_alone_held_or_not() {
+    for held in [false, true] {
+        let mut w = short(Some(5));
+        if held {
+            w.apply(&sync("1", Some("First")));
+            w.apply(&Event::PlanWritten {
+                issue: IssueId::new("ankh", "1"),
+                plan: Plan::default(),
+            });
+        }
+        assert_eq!(w.folders[&FolderId::new("f1")].holder.is_some(), held);
+        let started = tick(&mut w, 0);
+        let brief = &started[0].brief;
+        assert_eq!(brief.folder, Some(std::path::PathBuf::from("/srv/ankh/f1")));
+        let task = &brief.task;
+        for line in LEAVING_THE_FOLDER {
+            assert!(
+                task.contains(line),
+                "held {held}: missing {line:?} in:\n{task}"
+            );
+        }
+        assert!(
+            !task.contains("Another issue's author is changing files in this folder"),
+            "held {held}:\n{task}"
+        );
+    }
 }
 
 #[test]

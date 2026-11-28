@@ -1523,7 +1523,6 @@ impl World {
         let n = self.agents.values().filter(|a| a.role == role).count() + 1;
         let place = self.folder_for(i, role, folder);
         let path = place.map(|f| std::path::PathBuf::from(&f.path));
-        let shared = folder.is_none() && place.is_some_and(|f| f.holder.is_some());
         // An author holding folders in several repositories is told each one.
         let held: Vec<brief::Held> = if role == Role::Author {
             i.folder
@@ -1557,11 +1556,7 @@ impl World {
                     i,
                     self.source_name(issue),
                     &self.area_repos(issue),
-                    brief::Workplace {
-                        folder: path,
-                        shared,
-                        held,
-                    },
+                    brief::Workplace { folder: path, held },
                     &self.pulled(i),
                     &self.kept_rules(),
                 )

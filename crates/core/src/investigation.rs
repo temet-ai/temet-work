@@ -307,7 +307,6 @@ impl World {
                     },
                     brief::Workplace {
                         folder: place.map(|f| PathBuf::from(&f.path)),
-                        shared: place.is_some_and(|f| f.holder.is_some()),
                         held: Vec::new(),
                     },
                     &self.kept_rules(),

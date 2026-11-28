@@ -29,10 +29,6 @@ pub struct Held {
 pub struct Workplace {
     /// The folder it runs in.
     pub folder: Option<PathBuf>,
-    /// Whether another issue's author holds that folder. An investigator is told
-    /// so; a refiner, reviewer or arbiter is told to leave its folder alone
-    /// either way.
-    pub shared: bool,
     /// An author's work folders, one per repository the plan names.
     pub held: Vec<Held>,
 }
@@ -106,14 +102,24 @@ fn switch_to(branch: &str) -> String {
     format!("git fetch, then git switch {branch}")
 }
 
-/// What a refiner, reviewer and arbiter are told about the folder they run in.
-/// They hold none, and an author may be given it while they work, so each hears
-/// this whether or not the folder was held at its start.
+/// What a refiner, reviewer, arbiter and investigator are told about the folder
+/// they run in. They hold none, and an author may be given it while they work, so
+/// each hears this whether or not the folder was held at its start.
 const LEAVE_THE_FOLDER: &str = "\
 This folder is not yours: an author may be changing files in it or be given it while you work, and \
 it may be on another issue's branch. Do not switch its branch or change any file in it. Read a \
 pull request's changes from its code host. To run checks, make a separate checkout of the pull \
 request (with none, of the commit you need) outside this folder, and remove it when you are done.";
+
+/// The sentences of [`LEAVE_THE_FOLDER`] a reader's brief is tested for.
+#[cfg(test)]
+pub(crate) const LEAVING_THE_FOLDER: [&str; 4] = [
+    "an author may be changing files in it or be given it while you work",
+    "Do not switch its branch or change any file in it.",
+    "Read a pull request's changes from its code host.",
+    "To run checks, make a separate checkout of the pull request (with none, of the commit you \
+     need) outside this folder, and remove it when you are done.",
+];
 
 /// What an author is told about making its change, and the end of its brief: the
 /// `ready` command for `issue`. An author on an issue with pull requests is given
@@ -545,7 +551,8 @@ pub fn write(
             parts
         }
         Role::Investigator => vec![Part::Command(format!(
-            "Answer questions about {id}: {title}. It is {source}. Change no file.",
+            "Answer questions about {id}: {title}. It is {source}. Change no file.\n\
+             {LEAVE_THE_FOLDER}",
             title = issue.title,
         ))],
     };
@@ -790,12 +797,6 @@ pub enum Since {
 /// or service: the investigator files issues through `temet-work file`.
 pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> Brief {
     let g = what.group;
-    let folder_note = if place.shared {
-        "Another issue's author is changing files in this folder: do not switch its branch or change \
-         anything here.\n"
-    } else {
-        ""
-    };
     let covered: String = what
         .covered
         .iter()
@@ -891,12 +892,14 @@ pub fn investigate(what: &Investigating, place: Workplace, rules: &[String]) -> 
         Part::Whole(format!(
             "Investigate for group {name} ({id}): its work queue is short. Find the work that should \
              come next and file an issue for each item.\n\
-             {folder_note}It takes issues from:\n{covered}{milestone}\
+             {LEAVE_THE_FOLDER}\nIt takes issues from:\n{covered}{milestone}\
              {docs_and_code}\n\
              Read, in this order:\n\
              1. Each project's docs at that head, for work they plan that is not built yet.\n\
              2. {read_open}\n\
-             3. The pull requests merged {since}, for defects you can show in that work.\n\
+             3. The pull requests merged {since}, for defects you can show in that work. Check out a \
+             merged commit only in that separate checkout, outside this folder and the checkouts named \
+             above.\n\
              Then file one issue for each planned item no open issue covers, and one for each defect \
              you can show in merged work:\n",
             name = g.name,
@@ -1215,26 +1218,18 @@ mod tests {
     #[test]
     fn a_reader_is_told_to_leave_its_folder_alone_held_or_not() {
         let issue = lamp_issue();
-        let told = [
-            "an author may be changing files in it or be given it while you work",
-            "Do not switch its branch or change any file in it.",
-            "Read a pull request's changes from its code host.",
-            "To run checks, make a separate checkout of the pull request (with none, of the commit \
-             you need) outside this folder, and remove it when you are done.",
-        ];
-        for role in [Role::Refiner, Role::Reviewer, Role::Arbiter] {
-            for shared in [false, true] {
-                let place = Workplace {
-                    shared,
-                    ..Workplace::default()
-                };
-                let task = write(role, &issue, None, &[], place, &[], &[]).task;
-                for line in told {
-                    assert!(
-                        task.contains(line),
-                        "{role:?}, shared {shared}: missing {line:?} in:\n{task}"
-                    );
-                }
+        for role in [
+            Role::Refiner,
+            Role::Reviewer,
+            Role::Arbiter,
+            Role::Investigator,
+        ] {
+            let task = lamp_task(role, &issue);
+            for line in LEAVING_THE_FOLDER {
+                assert!(
+                    task.contains(line),
+                    "{role:?}: missing {line:?} in:\n{task}"
+                );
             }
         }
         let reviewer = lamp_task(Role::Reviewer, &issue);
@@ -1244,7 +1239,7 @@ mod tests {
         );
         // A running reviewer hears it again on each later round.
         let again = next_round(&issue, 2, &[]);
-        for line in told {
+        for line in LEAVING_THE_FOLDER {
             assert!(again.contains(line), "missing {line:?} in:\n{again}");
         }
     }
@@ -2383,25 +2378,20 @@ mod tests {
                     folder.";
         let area = [ProjectId::new("ui"), ProjectId::new("docs")];
         for repos in [&area[..0], &area[..]] {
-            for shared in [false, true] {
-                let place = Workplace {
-                    shared,
-                    ..Workplace::default()
-                };
-                let task = write(Role::Refiner, &lamp_issue(), None, repos, place, &[], &[]).task;
-                let each = if repos.is_empty() { "" } else { each };
-                let told = format!("Read the issue. {code}{each} Change no file here.\n");
-                assert!(task.contains(&told), "shared {shared}:\n{task}");
-                // Nothing else in the brief sends it to read code.
-                let mut rest = reading(&task);
-                rest.retain(|s| !told.contains(s));
-                assert_eq!(
-                    rest,
-                    ["Read a pull request's changes from its code host."],
-                    "{task}"
-                );
-                assert!(!task.contains("touches in this folder"), "{task}");
-            }
+            let place = Workplace::default();
+            let task = write(Role::Refiner, &lamp_issue(), None, repos, place, &[], &[]).task;
+            let each = if repos.is_empty() { "" } else { each };
+            let told = format!("Read the issue. {code}{each} Change no file here.\n");
+            assert!(task.contains(&told), "{task}");
+            // Nothing else in the brief sends it to read code.
+            let mut rest = reading(&task);
+            rest.retain(|s| !told.contains(s));
+            assert_eq!(
+                rest,
+                ["Read a pull request's changes from its code host."],
+                "{task}"
+            );
+            assert!(!task.contains("touches in this folder"), "{task}");
         }
     }
 
@@ -2464,7 +2454,14 @@ mod tests {
             // Nothing else in the brief sends it to read docs or code.
             let mut rest = reading(&task);
             rest.retain(|s| !docs_and_code.contains(s));
-            assert_eq!(rest, ["Read, in this order:"], "held {held}:\n{task}");
+            assert_eq!(
+                rest,
+                [
+                    "Read a pull request's changes from its code host.",
+                    "Read, in this order:"
+                ],
+                "held {held}:\n{task}"
+            );
         }
     }
 
@@ -2554,7 +2551,9 @@ mod tests {
             "1. Each project's docs at that head, for work they plan that is not built yet.",
             "2. The open issues of each project, so you know what is covered already.",
             "3. The pull requests merged since 2026-11-27 13:05 UTC, when the group's last \
-             finished investigation started, for defects you can show in that work.",
+             finished investigation started, for defects you can show in that work. Check out a \
+             merged commit only in that separate checkout, outside this folder and the checkouts \
+             named above.\n",
             "Then file one issue for each planned item no open issue covers, and one for each \
              defect you can show in merged work:\ntemet-work file PROJECT \"<title>\" - <<'BODY'\n",
             "the Depends on line an issue that waits for it carries",
