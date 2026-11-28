@@ -10,6 +10,7 @@ use temet_work_app::assets::{self, Assets};
 use temet_work_app::daemon::Daemon;
 use temet_work_app::pages::project::Project;
 use temet_work_app::{install, launch, sample, theme, view_map};
+use temet_work_core::command::VIEW_PERIOD;
 
 /// The window's app id, which the compositor shows as its class.
 const APP_ID: &str = "temet-work";
@@ -39,8 +40,9 @@ fn answer(args: &[String]) -> Option<String> {
     }
 }
 
-/// How often the window reads the build installed where it was started from.
-const INSTALLED_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often the window reads the build installed where it was started from: sixty view
+/// periods, a minute.
+const INSTALLED_EVERY: std::time::Duration = VIEW_PERIOD.saturating_mul(60);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -115,9 +117,9 @@ fn main() {
                                     .background_executor()
                                     .spawn(async move { install::installed_build(&path) })
                                     .await;
-                                let update = installed.filter(|b| b != install::BUILD).map(|b| {
-                                    install::newer_build_notice(&b, install::BUILD)
-                                });
+                                let update = installed
+                                    .filter(|b| b != install::BUILD)
+                                    .map(|b| install::newer_build_notice(&b, install::BUILD));
                                 if shown
                                     .update(cx, |page, cx| {
                                         if page.newer_build() != update.as_ref() {
