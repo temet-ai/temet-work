@@ -2,7 +2,8 @@
 //! what the row is, `meta` adds muted detail, `end` holds its status or its one action.
 
 use gpui::{
-    AnyElement, App, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, Styled, Window, div, px,
+    AnyElement, App, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, Styled,
+    Window, div, px,
 };
 
 use super::{Class, ROW_GROUP, apply, baseline, box_of, to_baseline, type_of};

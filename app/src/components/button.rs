@@ -177,14 +177,26 @@ pub(crate) fn spinner(cx: &App) -> impl IntoElement {
             let top = point(centre.x, centre.y - radius);
             let mut ring = PathBuilder::stroke(width);
             ring.move_to(top);
-            ring.arc_to(radii, Pixels::ZERO, false, true, point(centre.x, centre.y + radius));
+            ring.arc_to(
+                radii,
+                Pixels::ZERO,
+                false,
+                true,
+                point(centre.x, centre.y + radius),
+            );
             ring.arc_to(radii, Pixels::ZERO, false, true, top);
             if let Ok(path) = ring.build() {
                 window.paint_path(path, track);
             }
             let mut arc = PathBuilder::stroke(width);
             arc.move_to(top);
-            arc.arc_to(radii, Pixels::ZERO, false, true, point(centre.x + radius, centre.y));
+            arc.arc_to(
+                radii,
+                Pixels::ZERO,
+                false,
+                true,
+                point(centre.x + radius, centre.y),
+            );
             if let Ok(path) = arc.build() {
                 window.paint_path(path, head);
             }
@@ -263,7 +275,14 @@ impl RenderOnce for Button {
             // `.bp6-button.bp6-loading > :not(.bp6-button-spinner) { visibility: hidden }`: the
             // text keeps the button's width under the spinner.
             button = button
-                .child(div().flex().gap(size::button_gap(cx)).invisible().children(icon).children(self.text))
+                .child(
+                    div()
+                        .flex()
+                        .gap(size::button_gap(cx))
+                        .invisible()
+                        .children(icon)
+                        .children(self.text),
+                )
                 .child(
                     div()
                         .absolute()

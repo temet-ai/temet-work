@@ -122,7 +122,11 @@ impl RenderOnce for CheckList {
                         });
                     });
                 // Shown on the row under the pointer, and while it is open.
-                reveal(key.clone(), open, cx).child(button)
+                if open {
+                    div().child(button)
+                } else {
+                    reveal(button)
+                }
             } else {
                 // Holds the button's place, so status tags line up whether a row opens or not.
                 div().child(
@@ -143,7 +147,6 @@ impl RenderOnce for CheckList {
                 .child(toggle);
             let row = div()
                 .id(key.clone())
-                .group(key.clone())
                 .child(ListRow::new(title).meta(meta).end(end));
             // A cut check opens with a click anywhere on its row.
             let row = if openable {

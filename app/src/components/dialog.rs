@@ -177,10 +177,7 @@ impl RenderOnce for Dialog {
         let corners = &mut head.style().corner_radii;
         corners.bottom_left = Some(Pixels::ZERO.into());
         corners.bottom_right = Some(Pixels::ZERO.into());
-        let body = div()
-            .flex_1()
-            .m(size::form_gap(cx))
-            .children(self.children);
+        let body = div().flex_1().m(size::form_gap(cx)).children(self.children);
         let foot = (!self.actions.is_empty()).then(|| {
             box_of(type_of(div(), &footer), &footer)
                 .flex()

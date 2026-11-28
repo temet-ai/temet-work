@@ -11,8 +11,8 @@
 //! design system measured for an element with that class.
 
 use gpui::{
-    App, Div, Font, InteractiveElement, IntoElement, ParentElement, Pixels, SharedString, Styled, StyledText, TextRun, Window, div,
-    font, px,
+    App, Div, Font, InteractiveElement, IntoElement, ParentElement, Pixels, SharedString, Styled,
+    StyledText, TextRun, Window, div, font, px,
 };
 
 use crate::theme::look::{self, Look, State};
@@ -441,17 +441,6 @@ pub fn check_lines(text: &SharedString, width: Pixels, window: &Window, cx: &App
         })
 }
 
-/// `.tm-reveal`: an action every row or card has, shown on the one under the pointer (the
-/// element with `group` as its group), and always while `shown` (`.tm-reveal-shown`, such as an
-/// open row's minus). It keeps its place while hidden, so nothing moves when it shows.
-pub fn reveal(group: impl Into<SharedString>, shown: bool, _cx: &App) -> Div {
-    let el = div();
-    if shown {
-        return el;
-    }
-    el.invisible().group_hover(group, |style| style.visible())
-}
-
 /// A plain element with a class, as the design system's composites write `<span
 /// className="...">`. Its children are added with `child`.
 pub fn classed(class: Class, cx: &App) -> Div {
@@ -620,9 +609,7 @@ pub(crate) fn apply<E: Styled>(el: E, class: Class, cx: &App) -> E {
             padded(type_of(el, &head), &head)
         }
         // Measured nowhere: `.tm-refine-none { padding: var(--tm-space-3) 0; color: muted }`.
-        Class::RefineNone => el
-            .text_color(colour::muted(cx))
-            .py(space::s3(cx)),
+        Class::RefineNone => el.text_color(colour::muted(cx)).py(space::s3(cx)),
         // Dialog sizes itself for `Refine`, from the window's width.
         Class::Issues
         | Class::GroupsEmpty

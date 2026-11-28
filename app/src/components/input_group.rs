@@ -6,7 +6,7 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Focusable, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    App, ElementId, Entity, Focusable, InteractiveElement, IntoElement, ParentElement, RenderOnce,
     SharedString, Styled, Window, div,
 };
 use gpui_component::input::{Input, InputState};

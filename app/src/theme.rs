@@ -459,7 +459,10 @@ pub mod colour {
     /// color-mix(in srgb, var(--bp-palette-gray-1) 20%, transparent) }`, the head at 80%.
     pub fn spinner(cx: &App) -> (Hsla, Hsla) {
         let t = active(cx);
-        (mixed(t.bp_palette_gray_1, 20.), mixed(t.bp_palette_gray_1, 80.))
+        (
+            mixed(t.bp_palette_gray_1, 20.),
+            mixed(t.bp_palette_gray_1, 80.),
+        )
     }
     /// Text that cannot be used, such as a disabled radio's label.
     pub fn disabled_text(cx: &App) -> Hsla {

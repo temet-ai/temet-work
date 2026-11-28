@@ -183,15 +183,14 @@ impl RenderOnce for PropertyList {
             } else {
                 row.items_start()
             };
-            row
-                .child(
-                    div()
-                        .flex_none()
-                        .w(label)
-                        .text_color(muted)
-                        .child(item.label),
-                )
-                .child(value)
+            row.child(
+                div()
+                    .flex_none()
+                    .w(label)
+                    .text_color(muted)
+                    .child(item.label),
+            )
+            .child(value)
         });
         div().flex().flex_col().gap(space::s3(cx)).children(rows)
     }

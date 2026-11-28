@@ -107,13 +107,7 @@ impl RenderOnce for Callout {
             .relative()
             .flex()
             .flex_col()
-            .children(icon.map(|icon| {
-                div()
-                    .absolute()
-                    .top(top)
-                    .left(left)
-                    .child(Icon::new(icon))
-            }))
+            .children(icon.map(|icon| div().absolute().top(top).left(left).child(Icon::new(icon))))
             .children(
                 self.title
                     .map(|title| div().font_weight(text::bold_weight(cx)).child(title)),

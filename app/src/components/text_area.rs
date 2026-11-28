@@ -5,8 +5,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Focusable, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, Styled, Subscription, Window, div, px,
+    App, AppContext, Context, ElementId, Entity, Focusable, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, SharedString, Styled, Subscription, Window, div, px,
 };
 use gpui_base::input::InputBaseState;
 use gpui_component::input::{InputEvent, InputModeKind, Textarea, TextareaState};
@@ -170,7 +170,9 @@ impl TextArea {
 impl RenderOnce for TextArea {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let auto = self.auto_resize;
-        let value = self.value.or(Some(self.default_value).filter(|v| !v.is_empty()));
+        let value = self
+            .value
+            .or(Some(self.default_value).filter(|v| !v.is_empty()));
         let input: Entity<TextareaState> = Field::keyed(
             self.id.clone(),
             value,

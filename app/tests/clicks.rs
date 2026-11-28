@@ -9,8 +9,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AppContext, Entity, InteractiveElement, IntoElement, Modifiers, ParentElement, ScrollDelta,
-    ScrollWheelEvent, Styled, TestAppContext, TestDispatcher, VisualTestContext, div, point, px,
+    AppContext, Entity, InteractiveElement, IntoElement, KeyUpEvent, Keystroke, Modifiers,
+    ParentElement, ScrollDelta, ScrollWheelEvent, Styled, TestAppContext, TestDispatcher,
+    VisualTestContext, div, point, px,
 };
 use gpui_component::Root;
 use temet_work_app::components::status_tag::Status;
@@ -168,7 +169,11 @@ fn a_click_or_enter_on_a_row_opens_its_issue_on_the_right_tab() {
     // opens it.
     vcx.update(|window, cx| window.focus_next(cx));
     draw(vcx);
+    // A real key press ends with its key up, which is when GPUI clicks the focused element.
     vcx.simulate_keystrokes("enter");
+    vcx.simulate_event(KeyUpEvent {
+        keystroke: Keystroke::parse("enter").expect("a key"),
+    });
     draw(vcx);
     let (selected, tab) = vcx.read_entity(&page, |p, _| (p.selected().cloned(), p.tab()));
     assert_eq!(selected.as_deref(), Some("clacks#210"));
@@ -420,7 +425,10 @@ fn overturn_asks_for_an_option_and_a_reason_then_hands_them_back() {
     draw(vcx);
     assert!(vcx.debug_bounds("overturn-d1-confirm").is_none());
     click(vcx, "overturn-d1");
-    assert!(vcx.debug_bounds("overturn-d1").is_none(), "the trigger gives way");
+    assert!(
+        vcx.debug_bounds("overturn-d1").is_none(),
+        "the trigger gives way"
+    );
     assert!(vcx.debug_bounds("overturn-d1-reason").is_some());
 
     // Disabled until an option and a reason are given.
@@ -430,8 +438,15 @@ fn overturn_asks_for_an_option_and_a_reason_then_hands_them_back() {
     assert!(choices.borrow().is_empty(), "an option alone is not enough");
     type_into(vcx, "overturn-d1-reason", "   ");
     click(vcx, "overturn-d1-confirm");
-    assert!(choices.borrow().is_empty(), "a blank reason is not a reason");
-    type_into(vcx, "overturn-d1-reason", "The \u{dc}berwald line has twelve.  ");
+    assert!(
+        choices.borrow().is_empty(),
+        "a blank reason is not a reason"
+    );
+    type_into(
+        vcx,
+        "overturn-d1-reason",
+        "The \u{dc}berwald line has twelve.  ",
+    );
     click(vcx, "overturn-d1-confirm");
     assert_eq!(
         choices.borrow().as_slice(),
@@ -457,8 +472,15 @@ fn overturn_asks_for_an_option_and_a_reason_then_hands_them_back() {
 
     // With one other option it starts chosen: a reason is all it asks for.
     click(vcx, "overturn-d2");
-    assert!(vcx.debug_bounds("overturn-d2-option-1").is_none(), "no radio");
-    type_into(vcx, "overturn-d2-reason", "A tower must be able to turn it off.");
+    assert!(
+        vcx.debug_bounds("overturn-d2-option-1").is_none(),
+        "no radio"
+    );
+    type_into(
+        vcx,
+        "overturn-d2-reason",
+        "A tower must be able to turn it off.",
+    );
     click(vcx, "overturn-d2-confirm");
     let last = choices.borrow().last().cloned();
     assert_eq!(
@@ -542,8 +564,16 @@ fn refine_edits_the_title_and_checks_and_hands_them_back() {
     type_into(vcx, "refine-title", "Night lamps follow the light  ");
     // Add a check and fill it in, add one left blank, then delete the first.
     click(vcx, "refine-add");
-    type_into(vcx, "refine-check-1-done-when", "Lamps light when the sensor reads dark.");
-    type_into(vcx, "refine-check-1-proven-by", "cargo nextest run -p clacks-lamps sensor");
+    type_into(
+        vcx,
+        "refine-check-1-done-when",
+        "Lamps light when the sensor reads dark.",
+    );
+    type_into(
+        vcx,
+        "refine-check-1-proven-by",
+        "cargo nextest run -p clacks-lamps sensor",
+    );
     click(vcx, "refine-add");
     assert!(vcx.debug_bounds("refine-check-2-done-when").is_some());
     click(vcx, "refine-check-0-delete");

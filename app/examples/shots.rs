@@ -26,14 +26,14 @@ use temet_work_app::assets::{self, Assets};
 use temet_work_app::components::Intent;
 use temet_work_app::components::app_shell::AppShell;
 use temet_work_app::components::cut_panel::CutPanel;
+use temet_work_app::components::form_group::FormGroup;
 use temet_work_app::components::icon::IconName;
+use temet_work_app::components::input_group::{InputGroup, Size as InputSize};
 use temet_work_app::components::property_list::PropertyItem;
+use temet_work_app::components::radio_group::{Radio, RadioGroup};
 use temet_work_app::components::stage_tag::{Stage, StageTag};
 use temet_work_app::components::status_tag::{Status, StatusTag};
 use temet_work_app::components::tag::Tag;
-use temet_work_app::components::form_group::FormGroup;
-use temet_work_app::components::input_group::{InputGroup, Size as InputSize};
-use temet_work_app::components::radio_group::{Radio, RadioGroup};
 use temet_work_app::components::text_area::TextArea;
 use temet_work_app::composites::check_list::{CheckList, PlanCheck};
 use temet_work_app::composites::decision_row::{
@@ -48,8 +48,8 @@ use temet_work_app::composites::meter_list::{MeterList, MeterListItem};
 use temet_work_app::composites::milestone_panel::MilestonePanel;
 use temet_work_app::composites::needs_you::{NeedsYou, NeedsYouDecision};
 use temet_work_app::composites::problem_list::{Problem as ListProblem, ProblemList};
-use temet_work_app::composites::review_rounds::{ReviewPoint, ReviewRound};
 use temet_work_app::composites::refine_dialog::{RefineCheck, RefineDialog};
+use temet_work_app::composites::review_rounds::{ReviewPoint, ReviewRound};
 use temet_work_app::composites::side_nav::{SideNav, SideNavArea, SideNavProject};
 use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{Grouping, Project, ViewMode};
@@ -1293,7 +1293,11 @@ const FORM_PARTS: &[(&str, Story, f32)] = &[
         Story::Form(Form::RefineDialogNoPlan),
         560.,
     ),
-    ("temet-decisionrow--short", Story::Form(Form::DecisionShort), 420.),
+    (
+        "temet-decisionrow--short",
+        Story::Form(Form::DecisionShort),
+        420.,
+    ),
     (
         "temet-decisionrow--overturn-ready",
         Story::Form(Form::DecisionOverturnReady),
@@ -1329,7 +1333,11 @@ const FORM_PARTS: &[(&str, Story, f32)] = &[
         Story::Form(Form::DecisionNotSent),
         520.,
     ),
-    ("temet-decisionrow--sent", Story::Form(Form::DecisionSent), 420.),
+    (
+        "temet-decisionrow--sent",
+        Story::Form(Form::DecisionSent),
+        420.,
+    ),
 ];
 
 /// A check as the RefineDialog stories write one.
@@ -1350,7 +1358,9 @@ fn decision(question: bool) -> Decision {
     };
     if question {
         Decision {
-            question: Some(s("How many towers should the end-to-end test send a message through?")),
+            question: Some(s(
+                "How many towers should the end-to-end test send a message through?",
+            )),
             took: s("8"),
             by: s("refiner-66"),
             issue: None,
@@ -1392,7 +1402,8 @@ fn decision(question: bool) -> Decision {
 }
 
 /// The reason the DecisionRow stories with the question type.
-const REASON: &str = "The \u{dc}berwald line has twelve towers from next month, so the test should cover it.";
+const REASON: &str =
+    "The \u{dc}berwald line has twelve towers from next month, so the test should cover it.";
 
 /// A form story's part, framed as the story frames it.
 fn form_part(form: Form, window: &mut Window, cx: &mut App) -> AnyElement {
