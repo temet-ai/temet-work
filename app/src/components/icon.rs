@@ -47,11 +47,14 @@ pub enum IconName {
     Desktop,
     Box,
     Search,
+    // A project in SideNav, and closing a pane.
+    GitRepo,
+    Cross,
 }
 
 impl IconName {
     /// Every icon the app embeds.
-    pub const ALL: [IconName; 32] = [
+    pub const ALL: [IconName; 34] = [
         Self::TickCircle,
         Self::Refresh,
         Self::Time,
@@ -84,6 +87,8 @@ impl IconName {
         Self::Desktop,
         Self::Box,
         Self::Search,
+        Self::GitRepo,
+        Self::Cross,
     ];
 
     /// Blueprint's name for the icon, such as `tick-circle`.
@@ -121,6 +126,8 @@ impl IconName {
             Self::Desktop => "desktop",
             Self::Box => "box",
             Self::Search => "search",
+            Self::GitRepo => "git-repo",
+            Self::Cross => "cross",
         }
     }
 
