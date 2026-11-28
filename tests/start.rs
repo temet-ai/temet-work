@@ -162,7 +162,11 @@ fn the_first_command_on_a_service_managers_socket_starts_the_daemon_and_is_answe
         .expect("systemd-socket-activate runs");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !socket.exists() {
-        assert!(Instant::now() < deadline, "no socket at {}", socket.display());
+        assert!(
+            Instant::now() < deadline,
+            "no socket at {}",
+            socket.display()
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     let status = Command::new(env!("CARGO_BIN_EXE_temet-work"))
