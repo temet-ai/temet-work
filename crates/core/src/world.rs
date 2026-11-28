@@ -1065,25 +1065,12 @@ impl World {
                     .get(group)
                     .is_some_and(Investigation::running);
                 if self.groups.contains_key(group) && !open {
-                    let last = self.investigations.get(group);
-                    // The window moves on only past an investigation that
-                    // finished: one that did not may have read nothing.
-                    let since_ms = last.and_then(|i| {
-                        if i.done {
-                            Some(i.started_ms)
-                        } else {
-                            i.since_ms
-                        }
-                    });
-                    let first_started_ms = last.map_or(*at_ms, |i| i.first_started_ms);
                     self.investigations.insert(
                         group.clone(),
                         Investigation {
                             group: group.clone(),
                             agent: agent.clone(),
                             started_ms: *at_ms,
-                            since_ms,
-                            first_started_ms,
                             ended_ms: None,
                             filed: Vec::new(),
                             done: false,

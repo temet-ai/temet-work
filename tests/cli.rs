@@ -2,12 +2,115 @@
 
 use std::process::Command;
 
-/// The built `temet-work` with the daemon's socket pointing at nothing.
+/// The built `temet-work` with the daemon's socket pointing at nothing, and no
+/// desktop, so `temet-work` alone lists the commands instead of opening a window.
 fn temet_work(args: &[&str]) -> Command {
     let socket = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("no-daemon.sock");
     let mut command = Command::new(env!("CARGO_BIN_EXE_temet-work"));
-    command.args(args).env("TEMET_WORK_SOCKET", socket);
     command
+        .args(args)
+        .env("TEMET_WORK_SOCKET", socket)
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("DISPLAY")
+        .env("SSH_CONNECTION", "192.0.2.1 22 192.0.2.2 22");
+    command
+}
+
+/// `temet-work` alone at a desktop, with `app` as the app's program, as a person.
+fn at_a_desktop(app: &std::path::Path) -> Command {
+    let mut command = temet_work(&[]);
+    command
+        .env("WAYLAND_DISPLAY", "wayland-1")
+        .env_remove("SSH_CONNECTION")
+        .env_remove("TEMET_WORK_AGENT")
+        .env("TEMET_WORK_APP", app);
+    command
+}
+
+/// A stand-in for the app that writes its own process group into `opened`.
+fn stand_in_app(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a folder");
+    let app = dir.join("app");
+    let opened = dir.join("opened");
+    std::fs::write(
+        &app,
+        format!(
+            "#!/bin/sh\nps -o pgid= -p $$ > {}.part && mv {0}.part {0}\n",
+            opened.display()
+        ),
+    )
+    .expect("the stand-in");
+    std::fs::set_permissions(&app, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("executable");
+    (app, opened)
+}
+
+/// What the stand-in wrote, once it has, within a few seconds.
+fn read_when_written(path: &std::path::Path) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            return text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the app was not opened"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn alone_at_a_desktop_it_opens_the_app_in_a_process_group_of_its_own() {
+    let (app, opened) = stand_in_app("cli-window");
+    let out = at_a_desktop(&app).output().expect("runs");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "opening the temet-work window; temet-work help lists the commands\n"
+    );
+    let group: u32 = read_when_written(&opened).trim().parse().expect("a group");
+    let own: u32 = String::from_utf8_lossy(
+        &Command::new("ps")
+            .args(["-o", "pgid=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps")
+            .stdout,
+    )
+    .trim()
+    .parse()
+    .expect("this test's group");
+    assert_ne!(group, own, "the app left in this terminal's process group");
+}
+
+#[test]
+fn alone_it_lists_the_commands_to_an_agent_and_without_a_desktop() {
+    let (app, opened) = stand_in_app("cli-no-window");
+    let agent = at_a_desktop(&app)
+        .env("TEMET_WORK_AGENT", "refiner-1")
+        .output()
+        .expect("runs");
+    let no_desktop = temet_work(&[])
+        .env("TEMET_WORK_APP", &app)
+        .output()
+        .expect("runs");
+    let usage = run("help").stdout;
+    for out in [agent, no_desktop] {
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(out.stdout, usage);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(!opened.exists(), "a window was opened");
+}
+
+#[test]
+fn alone_at_a_desktop_without_the_app_it_lists_the_commands() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli-no-app");
+    let out = at_a_desktop(&dir.join("nonesuch")).output().expect("runs");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(out.stdout, run("help").stdout);
 }
 
 fn run(arg: &str) -> std::process::Output {

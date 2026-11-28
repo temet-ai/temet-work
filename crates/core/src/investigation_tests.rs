@@ -130,16 +130,6 @@ fn next(w: &mut World, now_ms: u64) -> Launch {
     started.remove(0)
 }
 
-/// The line of an investigator's brief that names its pull request window.
-fn window_line(launch: &Launch) -> &str {
-    launch
-        .brief
-        .task
-        .lines()
-        .find(|l| l.starts_with("3. "))
-        .expect("line 3")
-}
-
 #[test]
 fn a_group_below_queue_low_starts_one_investigator() {
     let mut w = short(None);
@@ -1119,67 +1109,6 @@ fn one_starts_again_after_investigate_every_when_still_short() {
         ["investigator-2"]
     );
     assert_eq!(w.investigations[&watch()].started_ms, 130 * MINUTE);
-    assert_eq!(
-        w.investigations[&watch()].since_ms,
-        Some(0),
-        "the last one's start"
-    );
-}
-
-#[test]
-fn an_unfinished_investigation_keeps_the_window_of_the_last_finished_one() {
-    let mut w = short(None);
-    next(&mut w, 0);
-    investigated(&mut w);
-    end(&mut w, 10 * MINUTE);
-    next(&mut w, 130 * MINUTE);
-    end_session(&mut w, 140 * MINUTE, true);
-    let third = next(&mut w, 260 * MINUTE);
-    assert_eq!(third.agent, AgentId::new("investigator-3"));
-    assert_eq!(w.investigations[&watch()].since_ms, Some(0));
-    assert_eq!(
-        window_line(&third),
-        "3. The pull requests merged since 1970-01-01 00:00 UTC, when the group's last \
-         finished investigation started, for defects you can show in that work."
-    );
-}
-
-#[test]
-fn two_unfinished_investigations_in_a_row_do_not_move_the_window() {
-    let mut w = short(None);
-    next(&mut w, 0);
-    investigated(&mut w);
-    end(&mut w, 10 * MINUTE);
-    next(&mut w, 130 * MINUTE);
-    end_session(&mut w, 140 * MINUTE, true);
-    next(&mut w, 260 * MINUTE);
-    // Stopped, as an idle investigator is.
-    end_session(&mut w, 270 * MINUTE, false);
-    let fourth = next(&mut w, 390 * MINUTE);
-    assert_eq!(fourth.agent, AgentId::new("investigator-4"));
-    assert_eq!(w.investigations[&watch()].since_ms, Some(0));
-    assert_eq!(
-        window_line(&fourth),
-        "3. The pull requests merged since 1970-01-01 00:00 UTC, when the group's last \
-         finished investigation started, for defects you can show in that work."
-    );
-}
-
-#[test]
-fn an_unfinished_first_investigation_keeps_its_seven_days() {
-    // 2026-11-27 13:05 UTC.
-    let first = 1_795_784_700_000;
-    let line = "3. The pull requests merged since 2026-11-20 13:05 UTC, 7 days before the \
-                group's first investigation started, as none has finished yet, for defects you \
-                can show in that work.";
-    let mut w = short(None);
-    next(&mut w, first);
-    end(&mut w, first + 10 * MINUTE);
-    let second = next(&mut w, first + 130 * MINUTE);
-    assert_eq!(window_line(&second), line);
-    end(&mut w, first + 140 * MINUTE);
-    let third = next(&mut w, first + 260 * MINUTE);
-    assert_eq!(window_line(&third), line);
 }
 
 #[test]
@@ -1722,7 +1651,6 @@ fn a_person_closed_issue_stays_refused_in_later_investigations() {
         panic!("{started:?}");
     };
     assert_eq!(second.agent, AgentId::new("investigator-2"));
-    assert_eq!(w.investigations[&watch()].since_ms, Some(0));
     assert_eq!(
         closed_list(&second.brief.task),
         Some(vec!["- ankh#3 Wind the clock"])

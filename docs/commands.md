@@ -26,6 +26,11 @@ session_id:
 agents use the same commands; the brief each agent starts with names the one that
 reports its step done.
 
+`temet-work` alone, run by a person at a desktop, opens the desktop app, `temet-work-app`
+from beside it (or `TEMET_WORK_APP`, or `PATH`), in a process group of its own so closing
+the terminal leaves the window open. An agent, a session with no display, or a machine
+without the app gets the list of commands that `temet-work help` prints.
+
 | Command | Who runs it | Accepted when the issue is |
 |---|---|---|
 | `temet-work status [--json]` | anyone; `--json` prints the state as data (below). The text form prints each rule's text, and each decision's question, options, reason and overturn reason, with every control character dropped but the line feed and the tab, and each later line indented 4 spaces under its row | any |

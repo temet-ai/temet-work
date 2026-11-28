@@ -1,5 +1,6 @@
 //! `temet-work`, the command line: sends one command to the daemon and prints
-//! its reply. `temet-work help` lists the commands.
+//! its reply. `temet-work help` lists the commands. `temet-work` alone opens the
+//! desktop app, where there is a desktop to open it on ([`window`]).
 
 use std::process::ExitCode;
 
@@ -18,7 +19,8 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     match args.first().map(String::as_str) {
-        None | Some("help" | "-h" | "--help") => return output(cli::USAGE),
+        None => return window(),
+        Some("help" | "-h" | "--help") => return output(cli::USAGE),
         Some("mcp") => return mcp(&args[1..]),
         Some("relay") => return relay(&args[1..]),
         Some("trust-folder") => return trust_folder(&args[1..]),
@@ -120,6 +122,61 @@ fn output(text: &str) -> ExitCode {
             ExitCode::from(2)
         }
         _ => ExitCode::SUCCESS,
+    }
+}
+
+/// The desktop app's program, installed beside this one.
+const APP: &str = "temet-work-app";
+
+/// The variable that names the app's program instead: for a build kept elsewhere, and
+/// for a test that must not open a window.
+const APP_VAR: &str = "TEMET_WORK_APP";
+
+/// `temet-work` alone: opens the desktop app when a person runs it at a desktop, and
+/// lists the commands otherwise, as `help` does. An agent (`TEMET_WORK_AGENT`), a
+/// session with no display (`WAYLAND_DISPLAY` and `DISPLAY` unset, or SSH on macOS) and
+/// a machine without the app get the list. The app is `TEMET_WORK_APP`, or
+/// `temet-work-app` beside this program, or on `PATH`. It runs in a process group of
+/// its own, so closing the terminal leaves the window open; opening it starts the
+/// daemon too, where systemd holds its socket.
+fn window() -> ExitCode {
+    let set = |var: &str| std::env::var_os(var).is_some_and(|v| !v.is_empty());
+    let desktop = if cfg!(target_os = "macos") {
+        !set("SSH_CONNECTION")
+    } else {
+        set("WAYLAND_DISPLAY") || set("DISPLAY")
+    };
+    if set(cli::AGENT_VAR) || !desktop {
+        return output(cli::USAGE);
+    }
+    let program = std::env::var_os(APP_VAR)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|dir| dir.join(APP)))
+                .filter(|p| p.is_file())
+        })
+        .unwrap_or_else(|| APP.into());
+    let opened = std::os::unix::process::CommandExt::process_group(
+        std::process::Command::new(&program)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        0,
+    )
+    .spawn();
+    match opened {
+        Ok(_) => output("opening the temet-work window; temet-work help lists the commands"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => output(cli::USAGE),
+        Err(e) => {
+            eprintln!(
+                "cannot open the temet-work window, {}: {e}",
+                program.display()
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 
