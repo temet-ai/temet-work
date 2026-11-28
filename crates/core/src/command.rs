@@ -923,7 +923,9 @@ impl World {
                 at(issue)?;
                 return Ok(None);
             }
-            Command::Show { project, at: point, .. }
+            Command::Show {
+                project, at: point, ..
+            }
             | Command::Search {
                 project, at: point, ..
             } => {

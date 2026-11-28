@@ -8,11 +8,17 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use temet_work_core::ids::{IssueId, ProjectId};
 use temet_work_core::model::{Addresses, Issue, Stage};
-use temet_work_core::{Effect, Event, Outcome, Part, Polled, World};
+use temet_work_core::{Answer, At, Command, Effect, Event, Outcome, Part, Polled, World};
+
+pub mod copy;
+pub mod read;
+
+use copy::{Copies, Point};
 
 /// What a pull request's CI says about its latest commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -402,6 +408,22 @@ pub mod contract {
     }
 }
 
+/// An issue's pull requests on record, by repository, in the order they merge;
+/// one in a repository the plan no longer names comes after those.
+fn pulls_in_order(world: &World, issue: &Issue) -> Vec<(ProjectId, String)> {
+    let mut pulls: Vec<(ProjectId, String)> = world
+        .repos_of(issue)
+        .into_iter()
+        .filter_map(|r| issue.pulls.get(&r).map(|n| (r, n.clone())))
+        .collect();
+    for (r, n) in &issue.pulls {
+        if !pulls.iter().any(|(p, _)| p == r) {
+            pulls.push((r.clone(), n.clone()));
+        }
+    }
+    pulls
+}
+
 /// How long after a failed merge it is tried again.
 pub const MERGE_RETRY_AFTER: Duration = Duration::from_secs(60);
 
@@ -432,6 +454,9 @@ pub struct CodeHosts {
     /// When the main pipeline after a merge was last read, and what it said,
     /// by issue, repository and pull request.
     main_read: BTreeMap<(IssueId, ProjectId, String), (Instant, Wait)>,
+    /// The shared copies of the repositories that `change`, `show` and `search`
+    /// read; none when no folder for them was given.
+    copies: Option<Arc<Copies>>,
 }
 
 /// Why the next repository does not merge yet.
@@ -495,6 +520,192 @@ impl CodeHosts {
     pub fn every(mut self, ms: u64) -> Self {
         self.every_ms = Some(ms);
         self
+    }
+
+    /// Keeps the shared copies of the repositories under `root`, the folder
+    /// beside the daemon's event log.
+    pub fn copies(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.copies = Some(Arc::new(Copies::new(root)));
+        self
+    }
+
+    /// The shared copies, for a test that counts what git was asked.
+    pub fn copies_kept(&self) -> Option<Arc<Copies>> {
+        self.copies.clone()
+    }
+
+    /// The repository of `project` as a read needs it: its code host's names
+    /// for it and where git clones it from.
+    fn repo_for(&mut self, world: &World, project: &ProjectId) -> Result<read::Repo, String> {
+        let (host, name) = self.host_for(world, project)?;
+        let url = host.clone_address(&name).ok_or_else(|| {
+            format!(
+                "code host \"{}\" gives no address to clone {name} from",
+                host.id()
+            )
+        })?;
+        Ok(read::Repo {
+            project: project.clone(),
+            name,
+            host: host.id().to_string(),
+            url,
+        })
+    }
+
+    /// The copies, or why there are none.
+    fn shared_copies(&self) -> Result<Arc<Copies>, String> {
+        self.copies.clone().ok_or_else(|| {
+            "this daemon keeps no copies of repositories: it was started without a folder for \
+             them"
+                .into()
+        })
+    }
+
+    /// Where `at` points in `project`, and the point in words.
+    fn point(
+        &mut self,
+        world: &World,
+        project: &ProjectId,
+        at: Option<&At>,
+    ) -> Result<(Point, String), String> {
+        Ok(match at {
+            None => (Point::Default, "the default branch's head".into()),
+            Some(At::Commit(id)) => (Point::Commit(id.clone()), format!("commit {id}")),
+            Some(At::Issue(issue)) => {
+                let i = world
+                    .issues
+                    .get(issue)
+                    .ok_or_else(|| format!("there is no issue {issue}"))?;
+                let number = i
+                    .pulls
+                    .get(project)
+                    .ok_or_else(|| format!("{issue} has no pull request in {project} on record"))?;
+                let (host, _) = self.host_for(world, project)?;
+                (
+                    Point::Pull {
+                        number: number.clone(),
+                        head: host.pull_ref(number),
+                    },
+                    format!("the head of pull request {number} ({issue})"),
+                )
+            }
+        })
+    }
+
+    /// The answer to `change`, `show`, `search` or `ci`.
+    fn answer(&mut self, world: &World, command: &Command) -> Result<Answer, String> {
+        match command {
+            Command::Change {
+                issue,
+                project,
+                by_commit,
+            } => {
+                let i = world
+                    .issues
+                    .get(issue)
+                    .ok_or_else(|| format!("there is no issue {issue}"))?;
+                let open: Vec<(ProjectId, String)> = pulls_in_order(world, i)
+                    .into_iter()
+                    .filter(|(r, _)| !i.merged.contains(r))
+                    .collect();
+                if open.is_empty() {
+                    return Err(format!(
+                        "{issue} has no open pull request on record; its author names one with \
+                         ready"
+                    ));
+                }
+                let picked: Vec<(ProjectId, String)> = match project {
+                    None => open,
+                    Some(p) => {
+                        let names: Vec<String> = open.iter().map(|(r, _)| r.to_string()).collect();
+                        let one: Vec<_> = open.into_iter().filter(|(r, _)| r == p).collect();
+                        if one.is_empty() {
+                            return Err(format!(
+                                "{issue} has no open pull request in {p}; it has one in: {}",
+                                names.join(", ")
+                            ));
+                        }
+                        one
+                    }
+                };
+                let copies = self.shared_copies()?;
+                let mut pulls = Vec::new();
+                for (project, number) in picked {
+                    let repo = self.repo_for(world, &project)?;
+                    let (host, _) = self.host_for(world, &project)?;
+                    pulls.push(read::Pull {
+                        head: host.pull_ref(&number),
+                        repo,
+                        number,
+                    });
+                }
+                let by_commit = *by_commit;
+                Ok(Answer::Later(Box::new(move || {
+                    read::change(copies, pulls, by_commit)
+                })))
+            }
+            Command::Show { project, path, at } => {
+                let repo = self.repo_for(world, project)?;
+                let (point, words) = self.point(world, project, at.as_ref())?;
+                let copies = self.shared_copies()?;
+                let path = path.clone();
+                Ok(Answer::Later(Box::new(move || {
+                    read::show(copies, repo, path, point, words)
+                })))
+            }
+            Command::Search {
+                project,
+                pattern,
+                at,
+            } => {
+                let repo = self.repo_for(world, project)?;
+                let (point, words) = self.point(world, project, at.as_ref())?;
+                let copies = self.shared_copies()?;
+                let pattern = pattern.clone();
+                Ok(Answer::Later(Box::new(move || {
+                    read::search(copies, repo, pattern, point, words)
+                })))
+            }
+            Command::Ci { issue } => {
+                let i = world
+                    .issues
+                    .get(issue)
+                    .ok_or_else(|| format!("there is no issue {issue}"))?;
+                let pulls: Vec<(ProjectId, String, bool)> = pulls_in_order(world, i)
+                    .into_iter()
+                    .map(|(r, n)| {
+                        let merged = i.merged.contains(&r);
+                        (r, n, merged)
+                    })
+                    .collect();
+                if pulls.is_empty() {
+                    return Err(format!(
+                        "{issue} has no pull request on record; its author names one with ready"
+                    ));
+                }
+                let (mut parts, mut failed) = (Vec::new(), Vec::new());
+                for (project, number, merged) in pulls {
+                    let (host, name) = self.host_for(world, &project)?;
+                    let what = format!("{project} ({name})");
+                    match host.ci(&name, &number) {
+                        Ok(runs) => parts.push(read::ci(&what, &number, merged, &runs)),
+                        Err(e) => {
+                            let why = format!("{what}: pull request {number}: {e}");
+                            parts.push(format!("{why}\n"));
+                            failed.push(why);
+                        }
+                    }
+                }
+                if failed.len() == parts.len() {
+                    return Err(failed.join("; "));
+                }
+                Ok(Answer::Now(parts.join("\n")))
+            }
+            other => Err(format!(
+                "the code-host family does not answer {}",
+                other.name()
+            )),
+        }
     }
 
     /// The adapter and the code host's name for the repository of project `repo`.
@@ -843,6 +1054,12 @@ impl Part for CodeHosts {
             return Outcome::NotMine;
         };
         self.merge_next(world, issue)
+    }
+
+    /// A pull request's change, a file, a search, or CI's results. The first
+    /// three read the shared copy away from the daemon's loop.
+    fn read(&mut self, world: &World, command: &Command) -> Option<Result<Answer, String>> {
+        command.reads_code().then(|| self.answer(world, command))
     }
 
     /// Where each project's code is, from the code host it names.

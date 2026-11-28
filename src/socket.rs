@@ -536,16 +536,28 @@ pub fn send(path: &Path, request: &Request) -> Result<Reply, String> {
     serde_json::from_str(&reply).map_err(|e| format!("the daemon's reply is not readable: {e}"))
 }
 
-/// Answers one request against the host, from a sender the daemon learned
-/// `peer` about. The sender is checked first ([`temet_work_core::World::admit`]).
-/// The error stops the daemon: an event could not be logged.
-pub fn answer(
-    host: &mut Host,
-    now_ms: u64,
-    request: &Request,
-    peer: &Peer,
-) -> Result<Reply, String> {
-    let sender = temet_work_core::Sender {
+/// A reply, or the work that makes one away from the daemon's loop.
+pub enum Answered {
+    /// The reply, made now.
+    Now(Reply),
+    /// A read of code that may fetch from a code host: run it on a thread of
+    /// its own and send what it gives.
+    Later(Box<dyn FnOnce() -> Reply + Send>),
+}
+
+impl Answered {
+    /// The reply, making it now for [`Answered::Later`].
+    pub fn wait(self) -> Reply {
+        match self {
+            Self::Now(reply) => reply,
+            Self::Later(work) => work(),
+        }
+    }
+}
+
+/// Who sent `request`, from what the daemon learned about `peer`.
+fn sender_of(request: &Request, peer: &Peer) -> temet_work_core::Sender {
+    temet_work_core::Sender {
         by: request.by.clone(),
         proof: request
             .secret
@@ -554,7 +566,66 @@ pub fn answer(
             .map(crate::peer::digest),
         peer: peer.clone(),
         relayed: request.relayed,
-    };
+    }
+}
+
+/// Answers one request against the host, from a sender the daemon learned
+/// `peer` about, making a read of code now ([`answer_or_defer`] hands it back
+/// to run apart). The error stops the daemon: an event could not be logged.
+pub fn answer(
+    host: &mut Host,
+    now_ms: u64,
+    request: &Request,
+    peer: &Peer,
+) -> Result<Reply, String> {
+    answer_or_defer(host, now_ms, request, peer).map(Answered::wait)
+}
+
+/// Answers one request against the host, from a sender the daemon learned
+/// `peer` about. The sender is checked first ([`temet_work_core::World::admit`]).
+/// `change`, `show` and `search` come back as work to run away from the loop,
+/// since they may fetch from a code host. The error stops the daemon: an event
+/// could not be logged.
+pub fn answer_or_defer(
+    host: &mut Host,
+    now_ms: u64,
+    request: &Request,
+    peer: &Peer,
+) -> Result<Answered, String> {
+    let refused = |why| Ok(Answered::Now(Reply::Refused { why }));
+    if !request.command.reads_code() {
+        return answer_here(host, now_ms, request, peer).map(Answered::Now);
+    }
+    if let Err(why) = host
+        .world()
+        .admit(&sender_of(request, peer), &request.command)
+    {
+        return refused(why);
+    }
+    // The loop checks the issue or project is known before a part reads it.
+    if let Err(why) = host.world().events(request.by.as_ref(), &request.command) {
+        return refused(why);
+    }
+    Ok(match host.read(&request.command) {
+        Ok(temet_work_core::Answer::Now(text)) => Answered::Now(Reply::Done { text }),
+        Ok(temet_work_core::Answer::Later(work)) => {
+            Answered::Later(Box::new(move || match work() {
+                Ok(text) => Reply::Done { text },
+                Err(why) => Reply::Refused { why },
+            }))
+        }
+        Err(why) => Answered::Now(Reply::Refused { why }),
+    })
+}
+
+/// Answers a request that reads no code, now.
+fn answer_here(
+    host: &mut Host,
+    now_ms: u64,
+    request: &Request,
+    peer: &Peer,
+) -> Result<Reply, String> {
+    let sender = sender_of(request, peer);
     if let Err(why) = host.world().admit(&sender, &request.command) {
         return Ok(Reply::Refused { why });
     }

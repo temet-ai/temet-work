@@ -3617,3 +3617,311 @@ refining_at_once = 2
         );
     }
 }
+
+/// `change`, `show`, `search` and `ci` reach the daemon over its socket, as a
+/// JSON request and through the command line, and read a repository the test
+/// makes on disk as the code host's origin. The reads that use git come back as
+/// work the daemon runs on a thread of its own.
+mod reads {
+    use std::io::{BufRead, BufReader, Write};
+    use std::path::{Path, PathBuf};
+
+    use temet_work::socket::{self, Answered, Reply};
+    use temet_work_codehost::{
+        CheckRun, Checks, CodeHosts, FakeCodeHost, Pull, PullState, RunState,
+    };
+    use temet_work_core::host::Memory;
+    use temet_work_core::ids::{IssueId, ProjectId};
+    use temet_work_core::launch::SECRET_VAR;
+    use temet_work_core::model::Stage;
+    use temet_work_core::{Event, Host, World};
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Sam Vimes",
+                "-c",
+                "user.email=vimes@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare origin for city/ankh: main with a README, and pull request 57
+    /// adding a clock. Gives the origin and the first commit's id.
+    fn origin(dir: &Path) -> (PathBuf, String) {
+        let bare = dir.join("ankh.git");
+        let work = dir.join("ankh-work");
+        for d in [&bare, &work] {
+            std::fs::create_dir_all(d).expect("dir");
+        }
+        git(&bare, &["init", "--bare", "--quiet", "-b", "main"]);
+        git(&work, &["init", "--quiet", "-b", "main"]);
+        std::fs::write(work.join("README.md"), "Ankh-Morpork\n").expect("write");
+        git(&work, &["add", "README.md"]);
+        git(&work, &["commit", "--quiet", "-m", "The city"]);
+        let first = git(&work, &["rev-parse", "HEAD"]);
+        git(
+            &work,
+            &[
+                "push",
+                "--quiet",
+                &bare.to_string_lossy(),
+                "HEAD:refs/heads/main",
+            ],
+        );
+        std::fs::write(work.join("clock.rs"), "pub fn strike() -> u8 { 13 }\n").expect("write");
+        git(&work, &["add", "clock.rs"]);
+        git(&work, &["commit", "--quiet", "-m", "Mend the clock"]);
+        git(
+            &work,
+            &[
+                "push",
+                "--quiet",
+                &bare.to_string_lossy(),
+                "HEAD:refs/pull/57/head",
+            ],
+        );
+        (bare, first)
+    }
+
+    /// A host whose code-host family keeps its copies under `dir` and reads
+    /// city/ankh from `bare`, with ankh#1 in review on pull request 57, whose
+    /// rust check failed.
+    fn host(dir: &Path, bare: &Path) -> Host {
+        let mut w = World::default();
+        w.apply(&Event::ProjectAdded {
+            project: ProjectId::new("ankh"),
+            tracker: "fake".into(),
+            name: "city/ankh".into(),
+            code_host: None,
+            repo: None,
+        });
+        w.apply(&Event::IssueSynced {
+            issue: IssueId::new("ankh", "1"),
+            title: "Mend the clock".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        });
+        let i = w.issues.get_mut(&IssueId::new("ankh", "1")).expect("issue");
+        i.stage = Stage::InReview { round: 1 };
+        i.pulls.insert(ProjectId::new("ankh"), "57".into());
+        let mut fake = FakeCodeHost {
+            pulls: vec![(
+                "city/ankh".into(),
+                Pull {
+                    number: "57".into(),
+                    state: PullState::Open,
+                    checks: Checks::Failed {
+                        failing: vec!["rust".into()],
+                    },
+                    conflicting: false,
+                    draft: false,
+                    branch: "ankh-1-clock".into(),
+                },
+            )],
+            ..FakeCodeHost::default()
+        };
+        fake.clones
+            .insert("city/ankh".into(), bare.to_string_lossy().into_owned());
+        fake.runs.push((
+            "city/ankh".into(),
+            "57".into(),
+            vec![CheckRun {
+                name: "rust".into(),
+                state: RunState::Failed,
+                log: Some("test clock::strikes_twelve ... FAILED\n".into()),
+                summary: String::new(),
+                address: None,
+            }],
+        ));
+        let mut family = CodeHosts::default().copies(dir.join("copies"));
+        family.add(Box::new(fake));
+        Host::new(w, vec![Box::new(family)], Box::new(Memory::default()))
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("daemon-reads-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        dir
+    }
+
+    /// Answers `n` requests from `requests` as the daemon does: a read of code
+    /// on a thread of its own.
+    fn serve(host: &mut Host, requests: &std::sync::mpsc::Receiver<socket::Pending>, n: usize) {
+        let mut threads = Vec::new();
+        for _ in 0..n {
+            let pending = requests
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("a request");
+            match socket::answer_or_defer(host, 1, &pending.request, &pending.peer).expect("answer")
+            {
+                Answered::Now(reply) => pending.answer(reply),
+                Answered::Later(work) => {
+                    threads.push(std::thread::spawn(move || pending.answer(work())));
+                }
+            }
+        }
+        for t in threads {
+            t.join().expect("read thread");
+        }
+    }
+
+    #[test]
+    fn each_read_answers_a_json_request_on_the_socket() {
+        let dir = scratch("json");
+        let (bare, first) = origin(&dir);
+        let mut host = host(&dir, &bare);
+        let path = dir.join("daemon.sock");
+        let requests = socket::listen(&path).expect("listen");
+        let lines = [
+            r#"{"by":null,"command":{"command":"change","issue":{"project":"ankh","key":"1"}}}"#.to_string(),
+            r#"{"by":null,"command":{"command":"show","project":"ankh","path":"clock.rs","at":{"issue":{"project":"ankh","key":"1"}}}}"#.into(),
+            format!(
+                r#"{{"by":null,"command":{{"command":"search","project":"ankh","pattern":"Ankh","at":{{"commit":"{first}"}}}}}}"#
+            ),
+            r#"{"by":null,"command":{"command":"ci","issue":{"project":"ankh","key":"1"}}}"#.into(),
+            r#"{"by":null,"command":{"command":"show","project":"ankh","path":"clock.rs"}}"#.into(),
+        ];
+        let client = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                lines
+                    .iter()
+                    .map(|line| {
+                        let mut stream =
+                            std::os::unix::net::UnixStream::connect(&path).expect("connect");
+                        writeln!(stream, "{line}").expect("send");
+                        let mut reply = String::new();
+                        BufReader::new(stream).read_line(&mut reply).expect("reply");
+                        serde_json::from_str::<Reply>(&reply).expect("a reply")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        serve(&mut host, &requests, 5);
+        let replies = client.join().expect("client");
+        let done = |r: &Reply| match r {
+            Reply::Done { text } => text.clone(),
+            other => panic!("not done: {other:?}"),
+        };
+        let change = done(&replies[0]);
+        assert!(
+            change.starts_with("ankh (city/ankh): pull request 57, 1 commit from"),
+            "{change}"
+        );
+        assert!(change.contains("+pub fn strike() -> u8 { 13 }"), "{change}");
+        assert_eq!(done(&replies[1]), "pub fn strike() -> u8 { 13 }\n");
+        assert_eq!(done(&replies[2]), "README.md:1:Ankh-Morpork\n");
+        let ci = done(&replies[3]);
+        assert!(
+            ci.contains("  rust: failed\n") && ci.contains("strikes_twelve ... FAILED"),
+            "{ci}"
+        );
+        assert_eq!(
+            replies[4],
+            Reply::Refused {
+                why: "ankh (city/ankh) has no clock.rs at the default branch's head".into()
+            }
+        );
+        // The reads changed nothing: no event was logged.
+        assert_eq!(host.world().applied, 2);
+    }
+
+    #[test]
+    fn the_command_line_prints_each_read_and_exits_1_on_a_refusal() {
+        let dir = scratch("cli");
+        let (bare, _) = origin(&dir);
+        let mut host = host(&dir, &bare);
+        let path = dir.join("daemon.sock");
+        let requests = socket::listen(&path).expect("listen");
+        let cases: Vec<Vec<&str>> = vec![
+            vec!["change", "ankh#1", "--by-commit"],
+            vec!["show", "ankh", "", "--at", "ankh#1"],
+            vec!["search", "ankh", "strike|Ankh", "--at", "ankh#1"],
+            vec!["search", "ankh", "strike"],
+            vec!["ci", "ankh#1"],
+            vec!["show", "ankh", "clock.rs"],
+            vec!["show", "ankh", "README.md", "--at", "deadbeef"],
+            vec!["show", "lancre", "README.md"],
+            vec!["change", "ankh#2"],
+        ];
+        let n = cases.len();
+        let client = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                cases
+                    .into_iter()
+                    .map(|args| {
+                        std::process::Command::new(env!("CARGO_BIN_EXE_temet-work"))
+                            .args(&args)
+                            .env("TEMET_WORK_SOCKET", &path)
+                            .env_remove("TEMET_WORK_AGENT")
+                            .env_remove(SECRET_VAR)
+                            .env_remove("TEMET_WORK_DAEMON")
+                            .output()
+                            .expect("runs")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        serve(&mut host, &requests, n);
+        let out = client.join().expect("client");
+        let printed = |i: usize| {
+            assert_eq!(
+                out[i].status.code(),
+                Some(0),
+                "{i}: {}",
+                String::from_utf8_lossy(&out[i].stderr)
+            );
+            String::from_utf8_lossy(&out[i].stdout).into_owned()
+        };
+        let refused = |i: usize| {
+            assert_eq!(
+                out[i].status.code(),
+                Some(1),
+                "{i}: {}",
+                String::from_utf8_lossy(&out[i].stdout)
+            );
+            String::from_utf8_lossy(&out[i].stderr).into_owned()
+        };
+        let each = printed(0);
+        assert!(
+            each.contains("Mend the clock") && each.contains("each commit:"),
+            "{each}"
+        );
+        assert_eq!(printed(1), "README.md\nclock.rs\n");
+        assert_eq!(
+            printed(2),
+            "README.md:1:Ankh-Morpork\nclock.rs:1:pub fn strike() -> u8 { 13 }\n"
+        );
+        assert_eq!(
+            printed(3),
+            "no line matches strike in ankh (city/ankh) at the default branch's head\n"
+        );
+        assert!(printed(4).contains("The output of rust's failed steps:"));
+        assert!(
+            refused(5).contains("ankh (city/ankh) has no clock.rs at the default branch's head")
+        );
+        assert!(refused(6).contains("ankh (city/ankh) has no commit deadbeef"));
+        assert!(refused(7).contains("there is no project lancre"));
+        assert!(refused(8).contains("there is no issue ankh#2"));
+    }
+}
