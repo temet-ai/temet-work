@@ -600,6 +600,68 @@ fn commands_reach_the_daemon_over_its_socket() {
     );
 }
 
+#[test]
+fn a_persons_hold_starts_nothing_through_rounds_and_a_restart_until_a_resume() {
+    use temet_work::socket::{self, Reply};
+
+    let kept = Kept::default();
+    let (mut host, starts) = host_with(Box::new(kept.clone()));
+    let ask = |host: &mut Host, starts: &Starts, by: Option<&str>, command: Command| {
+        socket::answer(host, 1, &from(starts, by, command), &Peer::Unchecked).expect("answer")
+    };
+    let held = ask(&mut host, &starts, None, Command::Hold);
+    assert!(
+        matches!(&held, Reply::Done { text } if text.starts_with("held: no issue is taken")),
+        "{held:?}"
+    );
+    assert_eq!(host.tick(0), Ok(1), "the tracker still syncs");
+    host.tick(60_000).expect("tick");
+    let issue = IssueId::new("ankh", "1");
+    assert_eq!(host.world().issues[&issue].stage, Stage::New, "not taken");
+    assert!(starts.lock().expect("starts").is_empty(), "nothing started");
+    let status = ask(&mut host, &starts, None, Command::Status);
+    assert!(
+        matches!(&status, Reply::Done { text } if text.starts_with("Held since ")),
+        "{status:?}"
+    );
+    match ask(&mut host, &starts, None, Command::View) {
+        Reply::View { view } => assert!(view.held && view.held_since.is_some()),
+        other => panic!("{other:?}"),
+    }
+
+    // A restart replays the hold, and resuming starts the refiner.
+    let (mut again, starts) = host_from(
+        kept.replayed(host.world()),
+        Box::new(kept.clone()),
+        fake_runtimes(),
+        CONFIG,
+        None,
+        vec![tracked("city/ankh", "1", 1)],
+    );
+    assert!(again.world().held, "the log keeps the hold");
+    again.tick(120_000).expect("tick");
+    assert!(starts.lock().expect("starts").is_empty(), "still nothing");
+    let resumed = ask(&mut again, &starts, None, Command::Resume);
+    assert_eq!(
+        resumed,
+        Reply::Done {
+            text: "resumed: work starts again".into()
+        }
+    );
+    assert_eq!(again.world().issues[&issue].stage, Stage::Refining);
+    assert!(
+        again
+            .world()
+            .agents
+            .contains_key(&AgentId::new("refiner-1"))
+    );
+    // An agent may not hold the daemon, even with its own secret.
+    assert!(matches!(
+        ask(&mut again, &starts, Some("refiner-1"), Command::Hold),
+        Reply::Refused { why } if why.starts_with("hold is a person's: refiner-1 is an agent")
+    ));
+}
+
 /// A plan of one check, as `temet-work plan` reads it.
 const ONE_CHECK: &str =
     "checks:\n  - done_when: the clock strikes on time\n    proven_by: listening at noon\n";

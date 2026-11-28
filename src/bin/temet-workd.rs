@@ -4,12 +4,16 @@
 //! asks for.
 //!
 //! ```text
-//! temet-workd [--config FILE] [--log FILE] [--once]
+//! temet-workd [--config FILE] [--log FILE] [--hold] [--once]
 //! temet-workd --version | --build
 //! ```
 //!
 //! `--version` prints the version and the build id, `--build` the id alone: the
 //! commit it was built from, which a deploy that restarts the daemon compares.
+//!
+//! `--hold` starts the daemon held, as `temet-work hold` holds it: the hold is
+//! logged before the configuration's events and the first round, so the daemon
+//! comes back without starting anything. A log that is held already stays so.
 //!
 //! `--once` runs one round and prints the state as text. The configuration
 //! defaults to `$XDG_CONFIG_HOME/temet-work/config.toml` and the log to
@@ -50,6 +54,7 @@ fn run() -> Result<(), String> {
     let mut config_path = xdg("XDG_CONFIG_HOME", ".config", "config.toml");
     let mut log_path = xdg("XDG_STATE_HOME", ".local/state", "events.jsonl");
     let mut once = false;
+    let mut hold = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => {
@@ -60,6 +65,7 @@ fn run() -> Result<(), String> {
             }
             "--log" => log_path = args.next().map(PathBuf::from).ok_or("--log needs a file")?,
             "--once" => once = true,
+            "--hold" => hold = true,
             "--version" => {
                 println!(
                     "temet-workd {} ({})",
@@ -101,6 +107,10 @@ fn run() -> Result<(), String> {
         // A new log: its id labels the terminals its agents run in.
         let id = format!("{:x}{:x}", now_ms(), std::process::id());
         host.handle(now_ms(), Event::LogStarted { id })?;
+    }
+    // Before the configuration's events, since each of those places work.
+    if hold && !host.world().held {
+        host.handle(now_ms(), Event::Held)?;
     }
     // A setting that names a runtime or runner this build lacks stops the start,
     // before anything is logged.

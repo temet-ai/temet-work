@@ -5,9 +5,9 @@
 //! The server has two levels. At `read`, the default, it offers the views:
 //! `status`, `issue`, `screen` and `settings`. At `act` it also offers the commands
 //! that move work, record choices and change settings: `plan`, `ready`, `review`,
-//! `retry`, `rule`, `choose`, `overturn`, `proposal`, `file`, `investigated`, `set`
-//! and `unset`. A tool above the server's level is not listed, and calling it is
-//! refused.
+//! `retry`, `rule`, `choose`, `overturn`, `proposal`, `hold`, `resume`, `file`,
+//! `investigated`, `set` and `unset`. A tool above the server's level is not
+//! listed, and calling it is refused.
 
 use serde_json::{Value, json};
 use temet_work_core::ids::{AgentId, DecisionId, IssueId, ProjectId, RuleId};
@@ -173,6 +173,18 @@ fn tools() -> Vec<Tool> {
                 "rule": {"type": "integer", "description": "The rule's number, as status lists it under Rules."},
                 "action": {"type": "string", "enum": ["keep", "drop"]}
             }, "required": ["rule", "action"]}),
+        },
+        Tool {
+            name: "hold",
+            description: "A person's: hold the daemon. No issue is taken for refining and no agent or investigation starts; agents at work finish their turn, nothing is reminded, and an issue with a pull request merged still deploys and is verified. The hold is in the event log, so it outlasts a restart. Refused from an agent.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {}}),
+        },
+        Tool {
+            name: "resume",
+            description: "A person's: lift the hold, so work starts again. Refused from an agent.",
+            acts: true,
+            schema: json!({"type": "object", "properties": {}}),
         },
         Tool {
             name: "file",
@@ -434,6 +446,8 @@ fn command(name: &str, args: &Value) -> Result<Command, String> {
         "investigated" => Command::Investigated {
             group: temet_work_core::ids::GroupId::new(text(args, "group")?),
         },
+        "hold" => Command::Hold,
+        "resume" => Command::Resume,
         other => return Err(format!("no tool {other}")),
     })
 }
@@ -569,7 +583,7 @@ mod tests {
             names(Level::Read),
             ["status", "issue", "screen", "settings"]
         );
-        assert_eq!(names(Level::Act).len(), 16);
+        assert_eq!(names(Level::Act).len(), 18);
     }
 
     #[test]
@@ -674,6 +688,19 @@ mod tests {
         );
         assert!(names(Level::Act).contains(&"overturn".to_string()));
         assert!(!names(Level::Read).contains(&"proposal".to_string()));
+    }
+
+    #[test]
+    fn hold_and_resume_are_offered_at_act_only_and_become_the_command_lines() {
+        let mut sent = Vec::new();
+        call(Level::Act, "hold", json!({}), &mut sent);
+        call(Level::Act, "resume", json!({}), &mut sent);
+        let commands: Vec<_> = sent.iter().map(|r| r.command.clone()).collect();
+        assert_eq!(commands, [Command::Hold, Command::Resume]);
+        for name in ["hold", "resume"] {
+            assert!(names(Level::Act).contains(&name.to_string()));
+            assert!(!names(Level::Read).contains(&name.to_string()));
+        }
     }
 
     #[test]

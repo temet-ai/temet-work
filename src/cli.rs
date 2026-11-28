@@ -36,6 +36,10 @@ temet-work overturn DECISION OPTION REASON
                                             a person's: choose another option of a decision, as
                                             `status` numbers them; REASON is required
 temet-work proposal RULE keep|drop          a person's: keep or drop a rule proposed from an overturn
+temet-work hold                             a person's: hold the daemon, so no issue is taken and no
+                                            agent or investigation starts; agents at work finish
+                                            their turn, and merged changes still deploy
+temet-work resume                           a person's: lift the hold, so work starts again
 temet-work file PROJECT TITLE BODY [--milestone M]
                                             an investigator's: file an issue in a project or area its
                                             group takes; BODY - reads it from standard input; the
@@ -299,6 +303,8 @@ pub fn request(
             }
         }
         "retry" => Command::Retry { issue: issue()? },
+        "hold" => Command::Hold,
+        "resume" => Command::Resume,
         "rule" => Command::Rule {
             issue: issue()?,
             approve: match arg(2, "approve or fix")? {
@@ -381,6 +387,15 @@ pub(crate) mod tests {
 
     fn no_files(_: &Path) -> Result<String, String> {
         Err("no files in this test".into())
+    }
+
+    #[test]
+    fn hold_and_resume_are_read_with_no_arguments() {
+        let read = |line: &str| request(&args(line), None, no_files).map(|r| r.command);
+        assert_eq!(read("hold"), Ok(Command::Hold));
+        assert_eq!(read("resume"), Ok(Command::Resume));
+        assert!(read("hold --json").is_err(), "--json goes with status only");
+        assert!(USAGE.contains("temet-work hold ") && USAGE.contains("temet-work resume "));
     }
 
     #[test]

@@ -12,6 +12,7 @@ session_id:
   - fc025b57-8c0b-49dd-916e-cbc98c3f9cf3
   - ba3664be-ec7f-4b51-af6a-b1c20c80634d
   - 4fdc790b-4921-4d0a-9032-f3a83dbaf0ef
+  - 3ee4a4e0-4c22-4ed9-ad8f-7d0dd362241c
 ---
 
 # temet-work architecture
@@ -226,6 +227,15 @@ An issue with a pull request merged still merges the rest, deploys and is verifi
 between repositories would leave main branches that do not match, and a merged change has to
 deploy to match main. When the issue is covered again, `World::missing` starts or tells the
 agent its stage needs, or asks for the merge.
+
+A person can hold the daemon (`temet-work hold`, or `temet-workd --hold` at start) and
+resume it (`docs/commands.md`, "Holding the daemon"). The hold is an event, so a restart
+keeps it. While it holds, `World::place` takes no issue and places no author, no
+investigation starts, every issue is paused as one out of scope is (`World::paused`), and
+nothing waits on an agent (`World::waiting_on`): no reminder is typed into its terminal
+and no idle session is stopped, since the person may be talking to it there. Agents at
+work finish their turn, for the reason above, and an issue with a pull request merged
+still merges, deploys and is verified.
 
 When a group's work queue runs short, the daemon starts one investigator for it, which holds
 no folder, reads the group's projects and files the next issues through `temet-work file`

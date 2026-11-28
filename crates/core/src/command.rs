@@ -181,6 +181,11 @@ pub enum Command {
         /// The group.
         group: GroupId,
     },
+    /// A person holds the daemon: nothing new starts, and agents at work finish
+    /// their turn ([`World::held`]).
+    Hold,
+    /// A person lifts the hold, so work starts again.
+    Resume,
 }
 
 /// How long a front end waits after one [`Command::View`] ends, answered or failed,
@@ -207,7 +212,9 @@ impl Command {
             | Self::Overturn { .. }
             | Self::Proposal { .. }
             | Self::File { .. }
-            | Self::Investigated { .. } => None,
+            | Self::Investigated { .. }
+            | Self::Hold
+            | Self::Resume => None,
             Self::Issue { issue } => Some(issue),
             Self::Plan { issue, .. }
             | Self::Ready { issue, .. }
@@ -1113,6 +1120,34 @@ impl World {
                     },
                     now => return refuse(issue, now, "deploying or verifying"),
                 }
+            }
+            Command::Hold => {
+                if let Some(by) = by {
+                    return Err(format!(
+                        "hold is a person's: {by} is an agent; an agent finishes its step, and a \
+                         person holds the daemon from a shell outside any agent's terminal"
+                    ));
+                }
+                if self.held {
+                    return Err(format!(
+                        "the daemon is already held{}; temet-work resume lifts the hold",
+                        self.held_since
+                            .map(|at| format!(", since {}", crate::investigation::utc(at)))
+                            .unwrap_or_default()
+                    ));
+                }
+                Event::Held
+            }
+            Command::Resume => {
+                if let Some(by) = by {
+                    return Err(format!(
+                        "resume is a person's: {by} is an agent, and only a person lifts a hold"
+                    ));
+                }
+                if !self.held {
+                    return Err("the daemon is not held; temet-work hold holds it".into());
+                }
+                Event::Resumed
             }
             // A choice moves no work: its agent carries on at once.
             Command::Choose { .. } => Event::DecisionMade {
@@ -2987,6 +3022,42 @@ mod plan_settings {
             w.check(None, &unset)
                 .is_err_and(|e| e.contains("nothing to unset"))
         );
+    }
+
+    #[test]
+    fn hold_and_resume_are_a_persons_and_each_is_refused_when_it_would_change_nothing() {
+        let mut w = refining();
+        let agent = AgentId::new("author-1");
+        let why =
+            |w: &World, by: Option<&AgentId>, c: &Command| w.events(by, c).expect_err("refused");
+        assert!(
+            why(&w, Some(&agent), &Command::Hold)
+                .starts_with("hold is a person's: author-1 is an agent"),
+            "{}",
+            why(&w, Some(&agent), &Command::Hold)
+        );
+        assert_eq!(
+            why(&w, None, &Command::Resume),
+            "the daemon is not held; temet-work hold holds it"
+        );
+        assert_eq!(w.events(None, &Command::Hold), Ok(vec![Event::Held]));
+        let at = 1_795_000_000_000;
+        w.apply_at(at, &Event::Held);
+        assert_eq!(
+            why(&w, None, &Command::Hold),
+            format!(
+                "the daemon is already held, since {}; temet-work resume lifts the hold",
+                crate::investigation::utc(at)
+            )
+        );
+        assert!(
+            why(&w, Some(&agent), &Command::Resume)
+                .starts_with("resume is a person's: author-1 is an agent")
+        );
+        assert_eq!(w.events(None, &Command::Resume), Ok(vec![Event::Resumed]));
+        // Agents finishing their step are still heard while the daemon is held.
+        let refiner = AgentId::new("refiner-1");
+        assert!(w.events(Some(&refiner), &plan(&[])).is_ok());
     }
 
     #[test]

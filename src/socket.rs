@@ -618,6 +618,19 @@ pub fn answer(
                         text: format!("rule {} is {state}", rule.0),
                     });
                 }
+                temet_work_core::Command::Hold => {
+                    return Ok(Reply::Done {
+                        text: "held: no issue is taken and no agent or investigation starts; \
+                               agents at work finish their turn, and merged changes still deploy. \
+                               temet-work resume lifts it"
+                            .into(),
+                    });
+                }
+                temet_work_core::Command::Resume => {
+                    return Ok(Reply::Done {
+                        text: "resumed: work starts again".into(),
+                    });
+                }
                 temet_work_core::Command::Investigated { group } => {
                     let filed = host
                         .world()

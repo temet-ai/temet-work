@@ -1,5 +1,5 @@
 //! The daemon does not start with a setting in its file that names a runtime or
-//! runner this build lacks, and says which ones it has.
+//! runner this build lacks, and says which ones it has. `--hold` starts it held.
 
 #![cfg(all(
     feature = "runtime-claude",
@@ -10,6 +10,12 @@
 use std::process::Command;
 
 fn start(name: &str, config: &str) -> std::process::Output {
+    start_with(name, config, &[])
+}
+
+/// One round of the daemon with `flags`, on the configuration `config` and the
+/// log in the folder `name`, which a later call with the same name reuses.
+fn start_with(name: &str, config: &str, flags: &[&str]) -> std::process::Output {
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     std::fs::create_dir_all(&dir).expect("a folder");
     let file = dir.join("config.toml");
@@ -19,9 +25,24 @@ fn start(name: &str, config: &str) -> std::process::Output {
         .arg(&file)
         .arg("--log")
         .arg(dir.join("events.jsonl"))
+        .args(flags)
         .env("TEMET_WORK_SANDBOX", "1")
         .output()
         .expect("runs")
+}
+
+#[test]
+fn hold_starts_the_daemon_held_and_its_log_keeps_one_hold_through_restarts() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("start-hold");
+    let _ = std::fs::remove_dir_all(&dir);
+    for flags in [&["--hold"][..], &[], &["--hold"]] {
+        let out = start_with("start-hold", "", flags);
+        assert!(out.status.success(), "{out:?}");
+        let status = String::from_utf8_lossy(&out.stdout);
+        assert!(status.starts_with("Held since "), "{flags:?}: {status}");
+    }
+    let log = std::fs::read_to_string(dir.join("events.jsonl")).expect("the log");
+    assert_eq!(log.matches(r#""event":"Held""#).count(), 1, "{log}");
 }
 
 #[test]
