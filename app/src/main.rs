@@ -72,7 +72,12 @@ fn main() {
                     let daemon = cx.new(Daemon::new);
                     page.update(cx, |page, cx| view_map::sync(page, daemon.read(cx)));
                     let shown = page.clone();
+                    // The observer holds the reader for as long as the window lives. An entity
+                    // nobody holds is dropped, and its loop of asks with it, so the page would
+                    // wait for the daemon for good.
+                    let reader = daemon.clone();
                     cx.observe(&daemon, move |daemon, cx| {
+                        let _ = &reader;
                         shown.update(cx, |page, cx| {
                             view_map::sync(page, daemon.read(cx));
                             cx.notify();
