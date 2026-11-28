@@ -49,9 +49,27 @@ pub fn agent_state(state: &AgentState) -> String {
     }
 }
 
+/// The line that says the daemon is held, and since when; none while it is not.
+pub fn held(world: &World) -> Option<String> {
+    world.held.then(|| {
+        let since = world
+            .held_since
+            .map(|at| format!(" since {}", crate::investigation::utc(at)))
+            .unwrap_or_default();
+        format!(
+            "Held{since}: no issue is taken and no investigation starts; an issue with nothing \
+             merged gets no new agent, fix, review or merge, and agents at work finish their turn. \
+             temet-work resume lifts it."
+        )
+    })
+}
+
 /// The whole state, with what is wrong now. Done issues are counted, not listed.
 pub fn text(world: &World, problems: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
+    if let Some(line) = held(world) {
+        let _ = writeln!(out, "{line}");
+    }
     let _ = writeln!(out, "Projects");
     let project = |out: &mut String, p: &crate::model::Project, indent: &str| {
         let from = if p.tracker.is_empty() {

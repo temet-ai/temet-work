@@ -128,10 +128,10 @@ impl World {
 
     /// What the clock makes due at `now_ms`, as events: the end of each running
     /// investigation whose investigator said it is done or whose session ended,
-    /// and, when `start`, the start of one for each group whose queue is below
-    /// its `queue_low`, that runs none, and whose last investigation ended at
-    /// least `investigate_every` minutes ago. A group never investigated may
-    /// start at once.
+    /// and, when `start` and the daemon is not held, the start of one for each
+    /// group whose queue is below its `queue_low`, that runs none, and whose last
+    /// investigation ended at least `investigate_every` minutes ago. A group
+    /// never investigated may start at once.
     pub fn investigation_events(&self, now_ms: u64, start: bool) -> Vec<Event> {
         let mut out = Vec::new();
         for i in self.investigations.values().filter(|i| i.running()) {
@@ -147,7 +147,7 @@ impl World {
                 });
             }
         }
-        if !start {
+        if !start || self.held {
             return out;
         }
         let used: BTreeSet<&str> = self
@@ -195,10 +195,12 @@ impl World {
     }
 
     /// The investigations whose investigator has not started, such as one whose
-    /// start failed or was lost to a restart: each needs its investigator.
+    /// start failed or was lost to a restart: each needs its investigator, which
+    /// starts once the daemon is not held.
     pub(crate) fn missing_investigators(&self) -> Vec<Effect> {
         self.investigations
             .values()
+            .filter(|_| !self.held)
             .filter(|i| i.running() && !i.done && !self.agents.contains_key(&i.agent))
             .map(|i| Effect::Investigate {
                 group: i.group.clone(),

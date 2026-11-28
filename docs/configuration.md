@@ -4,6 +4,7 @@ session_id:
   - 3f18e0c3-9e38-42e7-8d05-5740c115b38d
   - 48c80237-558e-4a4a-a82d-bd96b37f1f46
   - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
+  - 3ee4a4e0-4c22-4ed9-ad8f-7d0dd362241c
 ---
 
 # Configuring temet-workd
@@ -17,7 +18,11 @@ on, the work folders agents use, and the groups of agents.
 | Event log | `$XDG_STATE_HOME/temet-work/events.jsonl` (`~/.local/state/temet-work/events.jsonl`), or `--log FILE` |
 
 The daemon works in rounds, one every two seconds, and prints each new problem to
-stderr. `--once` stops after the first round and prints the state as text.
+stderr. `--once` stops after the first round and prints the state as text. `--hold` starts
+the daemon held, as `temet-work hold` holds it (`docs/commands.md`, "Holding the daemon"):
+the hold is logged before the configuration is applied and before the first round, so the
+daemon comes back without starting anything, and `temet-work resume` lifts it. A log that
+is held already stays held, with or without the flag.
 
 ## Jira
 

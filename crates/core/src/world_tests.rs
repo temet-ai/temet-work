@@ -3494,3 +3494,6 @@ fn readers_in_every_free_folder_do_not_keep_a_ready_issue_from_its_author() {
 
 #[path = "world_scope_tests.rs"]
 mod scope;
+
+#[path = "world_hold_tests.rs"]
+mod hold;

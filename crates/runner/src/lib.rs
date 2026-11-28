@@ -736,7 +736,8 @@ impl Runners {
         self.deliver(world, seen)
     }
 
-    /// Sends what is waiting and keeps what the agent cannot take yet. Returns a
+    /// Sends what is waiting and keeps what the agent cannot take yet, and what
+    /// is about a paused issue ([`World::paused`]). Returns a
     /// `Told` event for each issue whose message arrived. `seen` holds the states
     /// this poll has seen that `world` does not have yet.
     fn deliver(&mut self, world: &World, seen: &BTreeMap<AgentId, AgentState>) -> Vec<Event> {
@@ -747,6 +748,17 @@ impl Runners {
                 keep.push(m);
                 continue;
             };
+            // A message about a paused issue, as while the daemon is held, waits
+            // until the issue is no longer paused: the loop sends no fix or
+            // round to one, and one queued before the pause waits the same.
+            if m.issue
+                .as_ref()
+                .and_then(|i| world.issues.get(i))
+                .is_some_and(|i| world.paused(i))
+            {
+                keep.push(m);
+                continue;
+            }
             // A send to a session that waits on its limit is lost to the error;
             // it goes after continue.
             if world
@@ -3637,6 +3649,55 @@ mod tests {
             }]
         );
         assert_eq!(continues(&fake), 2);
+    }
+
+    #[test]
+    fn a_held_daemon_types_nothing_into_an_agent_of_a_paused_issue_until_the_resume() {
+        let issue = IssueId::new("ankh", "1");
+        let mut w = world();
+        at_stage(&mut w, temet_work_core::model::Stage::Fixing { round: 1 });
+        let (mut part, handle) = shared();
+        let terminals = handle.fake;
+        run(&mut part, &mut w, &[fake::PROMPT_PROGRAM]);
+        w.issues.get_mut(&issue).expect("there").told = false;
+        let fix = Effect::RequestFix {
+            issue: issue.clone(),
+            points: vec!["no test for a stopped clock".into()],
+        };
+        part.carry_out(&fix, &w);
+        assert_eq!(
+            part.waiting(),
+            1,
+            "it waits while the author is at a prompt"
+        );
+        w.apply(&Event::Held);
+        terminals
+            .lock()
+            .expect("lock")
+            .unblock(&TerminalId("t1".into()));
+        // Between turns for over half an hour: no fix, no reminder and no stop.
+        for minutes in [0, 11, 21, 31] {
+            let polled = step(&mut part, &mut w, minutes * 60_000);
+            assert!(
+                !polled.iter().any(|e| matches!(
+                    e,
+                    Event::Told { .. }
+                        | Event::AgentChanged {
+                            state: AgentState::Ended,
+                            ..
+                        }
+                )),
+                "{polled:?}"
+            );
+        }
+        let screen = screen_of(&terminals);
+        assert!(!screen.contains("stopped clock"), "{screen}");
+        assert!(!screen.contains("still waiting on you"), "{screen}");
+        assert_eq!(part.waiting(), 1);
+        w.apply(&Event::Resumed);
+        let polled = step(&mut part, &mut w, 32 * 60_000);
+        assert!(polled.contains(&Event::Told { issue }), "{polled:?}");
+        assert!(screen_of(&terminals).contains("- no test for a stopped clock"));
     }
 
     #[test]

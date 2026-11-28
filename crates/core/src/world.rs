@@ -86,6 +86,18 @@ pub struct World {
     pub addresses: BTreeMap<ProjectId, Addresses>,
     /// When each issue last changed, from the times events were applied at.
     pub updated: Updated,
+    /// Whether a person has held the daemon (`temet-work hold`, or
+    /// `temet-workd --hold`) and not resumed it. While held, no issue is taken
+    /// for refining, no author is placed, no investigation starts, every issue is
+    /// paused ([`World::paused`]) and nothing waits on an investigator or an
+    /// agent of a paused issue ([`World::waiting_on`]). Agents at work finish
+    /// their turn, and an issue with a pull request merged still merges the rest,
+    /// deploys and is verified.
+    pub held: bool,
+    /// When the hold began, in milliseconds since 1970: the time its event was
+    /// applied at ([`World::apply_at`]). None while the daemon is not held, and
+    /// in a world replayed without times.
+    pub held_since: Option<u64>,
     /// How many events have been applied.
     pub applied: u64,
 }
@@ -208,10 +220,13 @@ impl World {
     /// Applies one event that happened at `at_ms`, in milliseconds since 1970,
     /// and returns what the daemon must do. Each issue whose record it changed
     /// last changed at `at_ms`; an event that changes no issue leaves the times
-    /// alone.
+    /// alone. A hold applied at `at_ms` began then ([`World::held_since`]).
     pub fn apply_at(&mut self, at_ms: u64, event: &Event) -> Vec<Effect> {
         let out = self.change(event);
         self.updated.note(&self.issues, Some(at_ms));
+        if *event == Event::Held && self.held_since.is_none() {
+            self.held_since = Some(at_ms);
+        }
         out
     }
 
@@ -1061,6 +1076,11 @@ impl World {
                     out.extend(self.stop_agent(&agent));
                 }
             }
+            Event::Held => self.held = true,
+            Event::Resumed => {
+                self.held = false;
+                self.held_since = None;
+            }
             Event::Retried { issue } => {
                 if self
                     .issues
@@ -1240,7 +1260,23 @@ impl World {
     /// Nothing waits on an agent whose step is over for good
     /// ([`Self::over_for_good`]), such as an old author whose issue works again
     /// in another folder: it is not reminded, and its stop is asked for again.
+    /// While the daemon is held ([`World::held`]), nothing waits on an
+    /// investigator or on an agent of a paused issue.
     pub fn waiting_on(&self, agent: &Agent) -> bool {
+        // A held daemon pushes no agent of a paused issue, nor an investigator:
+        // one at work finishes its turn, and none is reminded into another or
+        // stopped for sitting idle, since a person may be talking to it in its
+        // terminal. An issue with a pull request merged is not paused, and its
+        // agents are waited on as ever, so its arbiter is not stopped mid-ruling.
+        if self.held
+            && agent
+                .issue
+                .as_ref()
+                .and_then(|id| self.issues.get(id))
+                .is_none_or(|i| self.paused(i))
+        {
+            return false;
+        }
         if self.investigates(agent) {
             return true;
         }
@@ -1290,9 +1326,9 @@ impl World {
     /// ended while one issue waited on them it gives up, and says so. Agents whose programs were
     /// lost do not count toward `starts`; after [`LOST_PER_START`] times `starts` of them it gives
     /// up too, with a line of its own. A paused
-    /// issue gets nothing until it is back in its group's scope, and then what its
-    /// stage needs. A running investigation whose investigator never started gets
-    /// one.
+    /// issue gets nothing until it is back in its group's scope and the daemon is
+    /// not held, and then what its stage needs. A running investigation whose
+    /// investigator never started gets one, once the daemon is not held.
     pub fn missing(&self) -> Missing {
         let mut out = Missing {
             start: self.stops_again(),
@@ -1746,18 +1782,22 @@ impl World {
                 .is_some_and(|g| !self.in_scope(g, issue))
     }
 
-    /// Whether nothing new starts on `issue` because it left its group's scope
-    /// before any of its pull requests merged. One with a pull request merged, or
-    /// deploying or verifying, is past the agents and finishes.
+    /// Whether nothing new starts on `issue` because it left its group's scope,
+    /// or the daemon is held ([`World::held`]), before any of its pull requests
+    /// merged. One with a pull request merged, or deploying or verifying, is past
+    /// the agents and finishes, and a done one has nothing left to start.
     pub fn paused(&self, issue: &Issue) -> bool {
-        self.out_of_scope(issue)
+        (self.held || self.out_of_scope(issue))
             && issue.merged.is_empty()
-            && !matches!(issue.stage, Stage::Deploying | Stage::Verifying)
+            && !matches!(
+                issue.stage,
+                Stage::Deploying | Stage::Verifying | Stage::Done
+            )
     }
 
     /// Whether `effect` starts or tells an agent, or asks for a merge, on a paused
     /// issue. The loop drops it; [`World::missing`] asks again once the issue is
-    /// back in scope.
+    /// back in scope and the daemon is not held.
     fn waits_for_scope(&self, effect: &Effect) -> bool {
         match effect {
             Effect::StartAgent { issue, .. }
@@ -1874,9 +1914,13 @@ impl World {
             .collect()
     }
 
-    /// Takes new issues for refining and starts authors on ready ones.
+    /// Takes new issues for refining and starts authors on ready ones; none
+    /// while the daemon is held.
     fn place(&mut self) -> Vec<Effect> {
         let mut out = Vec::new();
+        if self.held {
+            return out;
+        }
         let groups: Vec<Group> = self.groups.values().cloned().collect();
         for group in &groups {
             let refining = self

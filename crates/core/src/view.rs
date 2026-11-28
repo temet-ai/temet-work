@@ -4,7 +4,8 @@
 //! plan's checks with each one's state, its review rounds with the author's
 //! reply to each point and whether the next round resolved it, each agent's
 //! runtime and model, milestones with their progress and due dates, what
-//! overturning a decision costs, and where each project's issues and code are.
+//! overturning a decision costs, where each project's issues and code are, and
+//! whether a person has held the daemon.
 //! A state the log does not hold, as in a log from before states were kept, is
 //! null: the window then draws no status tag, and no word stands in for it.
 //! Times are in milliseconds since 1970 and dates are `YYYY-MM-DD`; the window
@@ -60,6 +61,16 @@ pub struct View {
     pub decisions: Vec<Decision>,
     /// What is wrong now, by where it came from.
     pub problems: BTreeMap<String, String>,
+    /// Whether a person has held the daemon: no issue is taken, no investigation
+    /// starts, and an issue with nothing merged gets no new agent, fix, review or
+    /// merge until a person resumes it. False in a view from a daemon that has no
+    /// hold.
+    #[serde(default)]
+    pub held: bool,
+    /// When the hold began, in milliseconds since 1970; null while the daemon is
+    /// not held, or when its log does not say.
+    #[serde(default)]
+    pub held_since: Option<u64>,
 }
 
 /// A project.
@@ -450,6 +461,8 @@ impl View {
                 .map(|d| decision(world, d))
                 .collect(),
             problems: shown(world, problems),
+            held: world.held,
+            held_since: world.held_since,
         }
     }
 }
@@ -1144,6 +1157,8 @@ mod tests {
         for old in [BEFORE_130, BEFORE_161, AT_156] {
             let view = parsed(old);
             assert!(!view.issues.is_empty(), "{old}");
+            // A daemon from before the hold sends neither field: not held.
+            assert_eq!((view.held, view.held_since), (false, None));
         }
     }
 

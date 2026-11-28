@@ -213,6 +213,8 @@ impl Command {
             Self::Proposal { .. } => "proposal",
             Self::File { .. } => "file",
             Self::Investigated { .. } => "investigated",
+            Self::Hold => "hold",
+            Self::Resume => "resume",
         }
     }
 

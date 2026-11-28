@@ -335,6 +335,12 @@ pub enum Event {
         /// The issue.
         issue: IssueId,
     },
+    /// A person held the daemon, with `temet-work hold` or by starting it with
+    /// `temet-workd --hold`: nothing new starts until a person resumes it
+    /// ([`crate::World::held`]). The time is the log entry's.
+    Held,
+    /// A person lifted the hold with `temet-work resume`.
+    Resumed,
     /// The code host reports that the pull request under review conflicts with the
     /// branch it merges into. It goes back to its author at once.
     PullConflicts {

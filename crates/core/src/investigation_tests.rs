@@ -1819,3 +1819,39 @@ fn utc_writes_a_date_and_time() {
     assert_eq!(utc(1_795_784_700_000), "2026-11-27 13:05 UTC");
     assert_eq!(utc(951_825_600_000), "2000-02-29 12:00 UTC");
 }
+
+#[test]
+fn no_investigation_or_investigator_starts_while_the_daemon_is_held() {
+    let mut w = short(None);
+    w.apply(&Event::Held);
+    assert_eq!(w.investigation_events(0, true), [], "none starts");
+    assert!(tick(&mut w, 0).is_empty());
+
+    // One running when the hold came finishes: nothing reminds its
+    // investigator, and it still ends.
+    w.apply(&Event::Resumed);
+    let launch = next(&mut w, 0);
+    w.apply(&Event::Held);
+    assert!(!w.waiting_on(&w.agents[&launch.agent]));
+    investigated(&mut w);
+    assert!(
+        matches!(
+            w.investigation_events(1, true).as_slice(),
+            [Event::InvestigationEnded { filed: 0, .. }]
+        ),
+        "it ends"
+    );
+
+    // An investigation whose investigator never started gets one only once
+    // the daemon is resumed.
+    let mut w = short(None);
+    for event in w.investigation_events(0, true) {
+        // Its start is lost: the Investigate effect is not carried out.
+        w.apply(&event);
+    }
+    w.apply(&Event::Held);
+    let investigate = Effect::Investigate { group: watch() };
+    assert!(!w.missing().start.contains(&investigate));
+    w.apply(&Event::Resumed);
+    assert!(w.missing().start.contains(&investigate));
+}
