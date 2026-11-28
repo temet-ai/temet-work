@@ -308,27 +308,43 @@ pub fn settings(
     Ok(format!("{head}\n{}", lines(world, &scope, role)))
 }
 
-/// The settings in effect, as lines indented two spaces.
+/// The longest value listed in the value column.
+const VALUE_COLUMN: usize = 40;
+
+/// The settings in effect, as lines indented two spaces. A value of several lines,
+/// or of more than [`VALUE_COLUMN`] characters, leaves the value column empty and
+/// is printed below its key, indented further than the keys so that none of it
+/// reads as one.
 fn lines(
     world: &World,
     scope: &crate::settings::Scope,
     role: Option<crate::model::Role>,
 ) -> String {
-    let rows = world.in_effect(scope, role);
-    let key = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let rows: Vec<_> = world
+        .in_effect(scope, role)
+        .into_iter()
+        .map(|(k, r)| (k, r.value.to_string(), r.source()))
+        .collect();
+    let in_column = |v: &str| !v.contains('\n') && v.chars().count() <= VALUE_COLUMN;
+    let key = rows.iter().map(|(k, ..)| k.len()).max().unwrap_or(0);
     let value = rows
         .iter()
-        .map(|(_, r)| r.value.to_string().len())
+        .filter(|(_, v, _)| in_column(v))
+        .map(|(_, v, _)| v.chars().count())
         .max()
         .unwrap_or(0);
     let mut out = String::new();
-    for (k, r) in rows {
-        let _ = writeln!(
-            out,
-            "  {k:key$}  {:value$}  {}",
-            r.value.to_string(),
-            r.source()
-        );
+    for (k, v, source) in rows {
+        let (here, below) = if in_column(&v) {
+            (v.as_str(), None)
+        } else {
+            ("", Some(v.as_str()))
+        };
+        let _ = writeln!(out, "  {k:key$}  {here:value$}  {source}");
+        for line in below.into_iter().flat_map(str::lines) {
+            let line = format!("      {line}");
+            let _ = writeln!(out, "{}", line.trim_end());
+        }
     }
     out
 }
@@ -879,6 +895,115 @@ Problems
             status.contains("  global: model.alpha = sonnet, set by person\n"),
             "{status}"
         );
+    }
+
+    /// Both listings of `w`'s issue: `temet-work settings`, then `temet-work issue`.
+    fn listings(w: &World) -> [String; 2] {
+        let id = IssueId::new("radar", "44");
+        [
+            settings(w, &Target::Issue(id.clone()), Some(Role::Author)).expect("a known issue"),
+            issue(w, &id, &unread()).expect("a known issue"),
+        ]
+    }
+
+    /// The test world with `key` set to `value` for its project, by a person.
+    fn with_setting(key: &str, value: &str) -> World {
+        let mut w = world();
+        let radar = Scope::Project(ProjectId::new("radar"));
+        w.put(&radar, None, key, &text_of(value), "person");
+        w
+    }
+
+    /// `listing` taken apart at the row of `key`: that row, the lines printed below
+    /// it with their indent removed, and every other line as it was.
+    fn take_row<'a>(listing: &'a str, key: &str) -> (&'a str, Vec<&'a str>, String) {
+        let start = format!("  {key} ");
+        let (mut row, mut below, mut others) = ("", Vec::new(), String::new());
+        for line in listing.split_inclusive('\n') {
+            let bare = line.trim_end_matches('\n');
+            if line.starts_with(&start) {
+                row = bare;
+            } else if !row.is_empty() && (bare.is_empty() || bare.starts_with("      ")) {
+                below.push(bare.strip_prefix("      ").unwrap_or(bare));
+            } else {
+                others.push_str(line);
+            }
+        }
+        (row, below, others)
+    }
+
+    #[test]
+    fn a_multi_line_deploy_is_printed_below_its_key_and_widens_no_row() {
+        let command = "git pull --ff-only &&\n  make install &&\n  make smoke &&\n  make restart";
+        let without = listings(&world());
+        // The key column is `review_rounds`, the value column `squash`.
+        let widest_gap = " ".repeat("review_rounds".len() + "squash".len() + 4);
+        for (before, after) in without
+            .iter()
+            .zip(listings(&with_setting("deploy", command)))
+        {
+            let (row, below, others) = take_row(&after, "deploy");
+            assert_eq!(
+                row, "  deploy                 project, set by person",
+                "{after}"
+            );
+            assert_eq!(below.join("\n"), command, "{after}");
+            assert_eq!(&others, before);
+            for line in after.lines() {
+                assert!(!line.ends_with(' '), "{line:?} in {after}");
+                assert!(
+                    !line.contains(&format!("{widest_gap} ")),
+                    "{line:?} in {after}"
+                );
+            }
+        }
+        // A line break at the end adds no line, and a blank line gets no indent.
+        for (value, want) in [
+            ("make deploy\n", vec!["make deploy"]),
+            (
+                "make build  \r\n\r\nmake deploy",
+                vec!["make build", "", "make deploy"],
+            ),
+        ] {
+            for after in listings(&with_setting("deploy", value)) {
+                let (row, below, _) = take_row(&after, "deploy");
+                assert!(row.ends_with("  project, set by person"), "{after}");
+                assert_eq!(below, want, "{after}");
+                assert!(!after.lines().any(|l| l.ends_with(' ')), "{after}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_value_over_the_limit_is_printed_below_its_key() {
+        let long = format!("/srv/{}", "r".repeat(36));
+        assert_eq!(long.chars().count(), 41);
+        let without = listings(&world());
+        for (before, after) in without.iter().zip(listings(&with_setting("run_in", &long))) {
+            let (row, below, others) = take_row(&after, "run_in");
+            assert_eq!(
+                row, "  run_in                 project, set by person",
+                "{after}"
+            );
+            assert_eq!(below, [long.as_str()], "{after}");
+            assert_eq!(&others, before);
+        }
+        // The limit counts characters, so the two bytes of the u-umlaut are one.
+        let fits = format!("/srv/\u{fc}berwald/{}", "r".repeat(26));
+        assert_eq!(fits.chars().count(), 40);
+        for after in listings(&with_setting("run_in", &fits)) {
+            let (row, below, _) = take_row(&after, "run_in");
+            assert_eq!(
+                row,
+                format!("  run_in         {fits}  project, set by person"),
+                "{after}"
+            );
+            assert!(below.is_empty(), "{after}");
+            assert!(
+                after.contains(&format!("  merge          {:40}  built in\n", "squash")),
+                "{after}"
+            );
+        }
     }
 
     /// What a build that reads no issue text gives the view.

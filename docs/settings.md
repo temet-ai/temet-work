@@ -5,6 +5,7 @@ session_id:
   - 7d9306de-2941-41bd-8a60-efad6ed38f2a
   - 48c80237-558e-4a4a-a82d-bd96b37f1f46
   - 198d20e8-7c5c-4a63-b1e6-5f43be8c6607
+  - 1ddbabed-a03f-4560-9f72-5277d14034c6
 ---
 
 # Settings: defaults at every level
@@ -352,6 +353,23 @@ The listing says "set by" for everything except a value from the file, which rea
 its level alone. `temet-work issue` shows the same for the role at work on the issue.
 The MCP server offers `settings` at the read level and `set` and `unset` at the act
 level. `temet-work status` lists every value with the level it is set at and who set it.
+
+In both listings the value column is as wide as the longest value in it. A value of several
+lines, or of more than 40 characters, stays out of it and widens no row: its key's line
+keeps the source and leaves the column empty, and the whole value follows, line by line,
+indented six spaces:
+
+```
+radar#44, author
+  runtime     claude      global
+  deploy                  project, set by person
+      git pull --ff-only &&
+      make install &&
+      systemctl --user restart radar
+  run_in      /srv/radar  project
+```
+
+Spaces at the end of such a line are not printed.
 
 ## In the code
 
