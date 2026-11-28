@@ -149,6 +149,11 @@ fn parse_pull(json: &str) -> Result<Pull, CodeHostError> {
         checks: checks_of(rollup),
         conflicting: v.get("mergeable").and_then(Value::as_str) == Some("CONFLICTING"),
         draft: v.get("isDraft").and_then(Value::as_bool) == Some(true),
+        branch: v
+            .get("headRefName")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -192,7 +197,7 @@ impl CodeHost for GitHub {
             "-R",
             repo,
             "--json",
-            "number,state,statusCheckRollup,mergeable,isDraft",
+            "number,state,statusCheckRollup,mergeable,isDraft,headRefName",
         ])?;
         parse_pull(&out)
     }
@@ -345,6 +350,30 @@ mod tests {
             .nth(1)
             .expect("a --json field list");
         assert!(fields.split(',').any(|f| f == "isDraft"), "{fields}");
+    }
+
+    #[test]
+    fn reads_a_pull_requests_branch() {
+        let pull = GitHub::with(Box::new(Recorded))
+            .pull("temet-ai/radar", "46")
+            .expect("recorded");
+        assert_eq!(pull.branch, "docs/installation-and-guide-audit");
+        let json = json!({"number": 1, "state": "OPEN", "headRefName": "watch-12-night-shift"});
+        assert_eq!(
+            parse_pull(&json.to_string()).expect("parses").branch,
+            "watch-12-night-shift"
+        );
+        let none = json!({"number": 1, "state": "OPEN"}).to_string();
+        assert_eq!(parse_pull(&none).expect("parses").branch, "");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _ = GitHub::with(Box::new(Spy(seen.clone()))).pull("temet-ai/radar", "46");
+        let ran = seen.lock().expect("lock").clone();
+        let fields = ran[0]
+            .iter()
+            .skip_while(|a| *a != "--json")
+            .nth(1)
+            .expect("a --json field list");
+        assert!(fields.split(',').any(|f| f == "headRefName"), "{fields}");
     }
 
     #[test]

@@ -826,6 +826,466 @@ fn an_author_replacing_one_after_a_block_replies_and_names_no_pull_request() {
     assert_eq!(w.issues[&issue("1")].pulls[&ProjectId::new("ankh")], "57");
 }
 
+fn watch_12() -> IssueId {
+    IssueId::new("watch", "12")
+}
+
+fn on_watch_12(event: Event) -> Event {
+    match event {
+        Event::AgentStarted {
+            agent,
+            group,
+            role,
+            machine,
+            folder,
+            secret_digest,
+            runtime,
+            model,
+            ..
+        } => Event::AgentStarted {
+            agent,
+            group,
+            role,
+            issue: Some(watch_12()),
+            machine,
+            folder,
+            secret_digest,
+            runtime,
+            model,
+        },
+        other => other,
+    }
+}
+
+/// A world where author-1 works on watch#12, in folder w1 of the project watch,
+/// whose code is ankh-morpork/watch.
+fn watch_12_working() -> World {
+    let mut w = World::default();
+    for event in [
+        Event::ProjectAdded {
+            project: pid("watch"),
+            tracker: "fake".into(),
+            name: "ankh-morpork/watch".into(),
+            code_host: Some("fake".into()),
+            repo: None,
+        },
+        Event::GroupCreated {
+            group: GroupId::new("watch"),
+            name: "Night watch".into(),
+            projects: vec![pid("watch")],
+            areas: Vec::new(),
+            milestones: Vec::new(),
+            refining_at_once: 1,
+            model: None,
+            queue_low: None,
+            investigate_every: None,
+        },
+        Event::FolderAdded {
+            folder: FolderId::new("w1"),
+            project: pid("watch"),
+            machine: MachineId::new("morpork"),
+            path: "/srv/watch/w1".into(),
+        },
+        Event::IssueSynced {
+            issue: watch_12(),
+            title: "A night shift rota".into(),
+            milestone: None,
+            depends_on: vec![],
+            order: 1,
+            closed: false,
+        },
+        Event::PlanWritten {
+            issue: watch_12(),
+            plan: Plan::default(),
+        },
+        on_watch_12(started("author-1", Role::Author, "12")),
+    ] {
+        w.apply(&event);
+    }
+    assert_eq!(w.issues[&watch_12()].stage, Stage::Working);
+    w
+}
+
+/// `temet-work ready` on watch#12 as `agent`, naming `pull` when there is one.
+fn ready_12(w: &World, agent: &str, pull: Option<&str>) -> Result<Vec<Event>, String> {
+    let ready = Command::Ready {
+        issue: watch_12(),
+        pull: pull.map(Into::into),
+        pulls: Default::default(),
+        replies: Vec::new(),
+    };
+    w.events(Some(&AgentId::new(agent)), &ready)
+}
+
+fn apply_all(w: &mut World, events: &[Event]) -> Vec<Effect> {
+    events.iter().flat_map(|e| w.apply(e)).collect()
+}
+
+/// Approves round `round` of watch#12 and passes its checks.
+fn approve_12(w: &mut World, round: u8) -> Vec<Effect> {
+    let mut effects = w.apply(&Event::ReviewFinished {
+        issue: watch_12(),
+        round,
+        verdict: Verdict::Approve,
+        failed: None,
+        open: None,
+    });
+    effects.extend(w.apply(&Event::ChecksFinished {
+        issue: watch_12(),
+        passed: true,
+        failing: vec![],
+    }));
+    effects
+}
+
+/// Ends `agent` on watch#12 and returns the task of the author started in its
+/// place, `next`.
+fn next_author_12(w: &mut World, agent: &str, next: &str) -> String {
+    w.apply(&ended(agent));
+    let start = Effect::StartAgent {
+        group: GroupId::new("watch"),
+        role: Role::Author,
+        issue: watch_12(),
+        folder: Some(FolderId::new("w1")),
+    };
+    assert_eq!(w.missing().start, vec![start]);
+    let launch = w
+        .launch(
+            &GroupId::new("watch"),
+            Role::Author,
+            &watch_12(),
+            Some(&FolderId::new("w1")),
+        )
+        .expect("launch");
+    assert_eq!(launch.agent, AgentId::new(next));
+    w.apply(&on_watch_12(started(next, Role::Author, "12")));
+    launch.brief.task
+}
+
+/// watch#12 merging pull request 57, on branch watch-12-night-shift, which
+/// review approved and whose checks passed.
+fn watch_12_merging_57() -> World {
+    let mut w = watch_12_working();
+    let ready = ready_12(&w, "author-1", Some("57")).expect("ready 57");
+    apply_all(&mut w, &ready);
+    w.apply(&Event::PullBranch {
+        issue: watch_12(),
+        repo: pid("watch"),
+        number: "57".into(),
+        branch: "watch-12-night-shift".into(),
+    });
+    let effects = approve_12(&mut w, 1);
+    assert!(effects.contains(&Effect::Merge { issue: watch_12() }));
+    w
+}
+
+fn closed_57() -> Event {
+    Event::PullClosed {
+        issue: watch_12(),
+        repo: pid("watch"),
+        number: "57".into(),
+    }
+}
+
+#[test]
+fn a_pull_request_a_person_closed_is_dropped_and_the_next_author_opens_another() {
+    let mut w = watch_12_merging_57();
+    w.apply(&closed_57());
+    let i = &w.issues[&watch_12()];
+    assert_eq!(i.stage, Stage::Fixing { round: 1 });
+    assert_eq!(
+        i.fix,
+        ["pull request 57 was closed without merging: reopen it or open a new one"]
+    );
+    assert!(i.pulls.is_empty(), "57 is dropped: {:?}", i.pulls);
+
+    let task = next_author_12(&mut w, "author-1", "author-2");
+    for line in [
+        "- watch (ankh-morpork/watch): pull request 57, branch watch-12-night-shift (closed \
+         without merging)\n",
+        "Pull request 57 was closed without merging: reopen it, or open a new pull request. A new \
+         one can start from its branch, watch-12-night-shift: git fetch, then git switch \
+         watch-12-night-shift.\n",
+        "- pull request 57 was closed without merging: reopen it or open a new one\n",
+    ] {
+        assert!(task.contains(line), "missing {line:?} in:\n{task}");
+    }
+    for not in [
+        "Push your fixes to that pull request's branch",
+        "Do not open another pull request",
+    ] {
+        assert!(!task.contains(not), "{not:?} in:\n{task}");
+    }
+    assert!(
+        task.ends_with("temet-work ready watch#12 <pull request number>"),
+        "{task}"
+    );
+
+    // 57 is not on record: a ready must name the one that replaces it.
+    assert!(
+        ready_12(&w, "author-2", None)
+            .is_err_and(|e| e.contains("say which pull request: temet-work ready watch#12")),
+    );
+    let ready = ready_12(&w, "author-2", Some("58")).expect("ready 58");
+    apply_all(&mut w, &ready);
+    let i = &w.issues[&watch_12()];
+    assert_eq!(i.stage, Stage::InReview { round: 1 });
+    assert_eq!(i.pulls, [(pid("watch"), "58".to_string())].into());
+    assert!(i.closed.is_empty() && i.branches.is_empty(), "{i:?}");
+    let view = crate::view::View::new(&w, &BTreeMap::new());
+    let pulls: Vec<&str> = view.issues[0]
+        .pulls
+        .iter()
+        .map(|p| p.number.as_str())
+        .collect();
+    assert_eq!(pulls, ["58"]);
+
+    // The loop follows 58: approved and passing, it merges.
+    let effects = approve_12(&mut w, 1);
+    assert!(
+        effects.contains(&Effect::Merge { issue: watch_12() }),
+        "{effects:?}"
+    );
+    assert_eq!(w.issues[&watch_12()].stage, Stage::Merging);
+
+    // A later author is given 58 and its branch, and never hears of 57.
+    w.apply(&Event::PullBranch {
+        issue: watch_12(),
+        repo: pid("watch"),
+        number: "58".into(),
+        branch: "watch-12-rota".into(),
+    });
+    w.apply(&Event::MergeRefused {
+        issue: watch_12(),
+        reason: "pull request 58 is not mergeable: the base branch moved".into(),
+    });
+    let task = next_author_12(&mut w, "author-2", "author-3");
+    assert!(
+        task.contains(
+            "- watch (ankh-morpork/watch): pull request 58, branch watch-12-rota\n\
+             Check out its branch first: git fetch, then git switch watch-12-rota. Push your fixes \
+             to that pull request's branch. Do not open another pull request.\n"
+        ),
+        "{task}"
+    );
+    assert!(!task.contains("57"), "{task}");
+    assert!(task.ends_with("run: temet-work ready watch#12"), "{task}");
+}
+
+#[test]
+fn an_author_told_of_a_closed_pull_request_is_asked_for_a_number() {
+    let mut w = watch_12_merging_57();
+    let effects = w.apply(&closed_57());
+    let fixes: Vec<&Vec<String>> = effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::RequestFix { issue, points } if *issue == watch_12() => Some(points),
+            _ => None,
+        })
+        .collect();
+    let [points] = fixes.as_slice() else {
+        panic!("{effects:?}");
+    };
+    let i = &w.issues[&watch_12()];
+    let told = crate::brief::fixes(i, &w.repos_of(i), points);
+    assert_eq!(
+        told,
+        "Fix these, from the review or the checks:\n\
+         - pull request 57 was closed without merging: reopen it or open a new one\n\
+         Then push and run: temet-work ready watch#12 <pull request number>"
+    );
+    // A closed pull request that is not the one on record changes nothing.
+    let mut w = watch_12_merging_57();
+    let before = w.issues[&watch_12()].clone();
+    w.apply(&Event::PullClosed {
+        issue: watch_12(),
+        repo: pid("watch"),
+        number: "56".into(),
+    });
+    assert_eq!(w.issues[&watch_12()], before);
+}
+
+#[test]
+fn a_pull_requests_branch_is_kept_by_repository() {
+    let mut w = merging_two();
+    let branch = |w: &mut World, repo: &str, number: &str, branch: &str| {
+        w.apply(&Event::PullBranch {
+            issue: gld(),
+            repo: pid(repo),
+            number: number.into(),
+            branch: branch.into(),
+        });
+    };
+    branch(&mut w, "ui", "12", "gld-12-locks");
+    branch(&mut w, "api", "34", "gld-12-keys");
+    // One for a pull request not on record is history.
+    branch(&mut w, "api", "33", "gld-12-old");
+    let i = &w.issues[&gld()];
+    assert_eq!(
+        i.branches,
+        [
+            (pid("ui"), "gld-12-locks".to_string()),
+            (pid("api"), "gld-12-keys".to_string()),
+        ]
+        .into()
+    );
+    // A later read that finds another branch replaces it.
+    branch(&mut w, "api", "34", "gld-12-keys-2");
+    assert_eq!(w.issues[&gld()].branches[&pid("api")], "gld-12-keys-2");
+
+    // An issue from an older log has neither branches nor closed pull requests.
+    let mut old = serde_json::to_value(&w.issues[&gld()]).expect("serializes");
+    let fields = old.as_object_mut().expect("an object");
+    fields.remove("branches");
+    fields.remove("closed");
+    let read: crate::model::Issue = serde_json::from_value(old).expect("reads as before");
+    assert!(read.branches.is_empty() && read.closed.is_empty());
+    assert_eq!(read.pulls, w.issues[&gld()].pulls);
+}
+
+#[test]
+fn a_conflict_names_the_branch_to_push() {
+    let mut w = watch_12_working();
+    let ready = ready_12(&w, "author-1", Some("57")).expect("ready 57");
+    apply_all(&mut w, &ready);
+    w.apply(&Event::PullBranch {
+        issue: watch_12(),
+        repo: pid("watch"),
+        number: "57".into(),
+        branch: "watch-12-night-shift".into(),
+    });
+    for repo in [Some(pid("watch")), None] {
+        let mut w = w.clone();
+        w.apply(&Event::PullConflicts {
+            issue: watch_12(),
+            repo,
+        });
+        assert_eq!(
+            w.issues[&watch_12()].fix,
+            [
+                "the pull request conflicts with the branch it merges into: rebase onto that \
+                 branch, then push watch-12-night-shift with `git push --force-with-lease`"
+            ]
+        );
+    }
+}
+
+#[test]
+fn a_closed_pull_request_in_one_repository_is_reopened_or_replaced_there() {
+    let mut w = merging_two();
+    for (repo, number) in [("ui", "12"), ("api", "34")] {
+        w.apply(&Event::PullBranch {
+            issue: gld(),
+            repo: pid(repo),
+            number: number.into(),
+            branch: "gld-12-locks".into(),
+        });
+    }
+    merged(&mut w, "ui");
+    w.apply(&Event::PullClosed {
+        issue: gld(),
+        repo: pid("api"),
+        number: "34".into(),
+    });
+    let i = &w.issues[&gld()];
+    assert!(matches!(i.stage, Stage::Fixing { .. }));
+    assert_eq!(
+        i.pulls,
+        [(pid("ui"), "12".to_string())].into(),
+        "only api dropped"
+    );
+    assert!(i.merged.contains(&pid("ui")), "ui stays merged");
+    assert_eq!(
+        i.fix,
+        [
+            "ui is merged; pull request 34 in api was closed without merging: reopen it or open a \
+          new one there"
+        ]
+    );
+
+    w.apply(&Event::AgentStarted {
+        agent: AgentId::new("author-1"),
+        group: GroupId::new("watch"),
+        role: Role::Author,
+        issue: Some(gld()),
+        machine: MachineId::new("morpork"),
+        folder: None,
+        secret_digest: None,
+        runtime: None,
+        model: None,
+    });
+    let task = w
+        .launch(
+            &GroupId::new("watch"),
+            Role::Author,
+            &gld(),
+            Some(&FolderId::new("ui-1")),
+        )
+        .expect("launch")
+        .brief
+        .task;
+    assert!(
+        task.contains(
+            "- ui (group/ui): pull request 12, branch gld-12-locks (merged already)\n\
+             - api (group/api): pull request 34, branch gld-12-locks (closed without merging)\n\
+             Do not open another pull request in ui.\n\
+             Pull request 34 in api was closed without merging: reopen it, or open a new pull \
+             request in api. A new one can start from its branch, gld-12-locks: in the folder of \
+             api, git fetch, then git switch gld-12-locks.\n"
+        ),
+        "{task}"
+    );
+    assert!(!task.contains("Push your fixes"), "{task}");
+    assert!(
+        task.ends_with("run: temet-work ready guild#GLD-12 api=<pull request number>"),
+        "{task}"
+    );
+
+    // A ready with no number for api is refused; one with a number is followed.
+    let ready = |pulls: &[(&str, &str)]| Command::Ready {
+        issue: gld(),
+        pull: None,
+        pulls: pulls.iter().map(|(r, n)| (pid(r), n.to_string())).collect(),
+        replies: Vec::new(),
+    };
+    let author = AgentId::new("author-1");
+    for refused in [ready(&[]), ready(&[("ui", "12")])] {
+        assert!(
+            w.events(Some(&author), &refused)
+                .is_err_and(|e| e.contains("temet-work ready guild#GLD-12 api=<number>")),
+        );
+    }
+    let events = w
+        .events(Some(&author), &ready(&[("api", "35")]))
+        .expect("ready");
+    apply_all(&mut w, &events);
+    let effects = w.apply(&Event::ReviewFinished {
+        issue: gld(),
+        round: 1,
+        verdict: Verdict::Approve,
+        failed: None,
+        open: None,
+    });
+    assert!(effects.is_empty(), "{effects:?}");
+    let effects = w.apply(&Event::ChecksFinished {
+        issue: gld(),
+        passed: true,
+        failing: vec![],
+    });
+    assert_eq!(effects, vec![Effect::Merge { issue: gld() }]);
+    let i = &w.issues[&gld()];
+    assert_eq!(i.stage, Stage::Merging, "api is not skipped");
+    assert_eq!(i.pulls[&pid("api")], "35");
+    assert!(i.merged.contains(&pid("ui")) && !i.merged.contains(&pid("api")));
+    // Deploying only once api's new pull request merged.
+    let effects = merged(&mut w, "api");
+    assert!(
+        effects.contains(&Effect::Deploy { issue: gld() }),
+        "{effects:?}"
+    );
+    assert_eq!(w.issues[&gld()].stage, Stage::Deploying);
+}
+
 #[test]
 fn an_issue_missing_its_agent_gets_one_until_three_have_ended() {
     let (mut w, _) = World::replay(&[group(&["m1"], 1), sync("1", "m1", 1, &[])]);
@@ -1114,7 +1574,8 @@ fn a_conflict_fix_names_the_rebase_the_push_and_ready_in_that_order() {
     let [Effect::RequestFix { points, .. }] = effects.as_slice() else {
         panic!("{effects:?}");
     };
-    let told = crate::brief::fixes(&w.issues[&issue("1")], points);
+    let i = &w.issues[&issue("1")];
+    let told = crate::brief::fixes(i, &w.repos_of(i), points);
     let steps = [
         "rebase onto that branch",
         "git push --force-with-lease",

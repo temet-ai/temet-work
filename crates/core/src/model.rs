@@ -139,6 +139,14 @@ pub struct Issue {
     pub pulls: std::collections::BTreeMap<ProjectId, String>,
     /// The repositories whose pull request has merged.
     pub merged: std::collections::BTreeSet<ProjectId>,
+    /// The branch of its pull request in each repository, as the code host
+    /// reported it; none for one whose branch was never read, and in older logs.
+    #[serde(default)]
+    pub branches: std::collections::BTreeMap<ProjectId, String>,
+    /// The pull request a person closed without merging, in each repository
+    /// where no ready has named another since. Empty in older logs.
+    #[serde(default)]
+    pub closed: std::collections::BTreeMap<ProjectId, ClosedPull>,
     /// What its author is to fix, while it is being fixed.
     pub fix: Vec<String>,
     /// Whether the agent its stage needs has heard what to do: the author what
@@ -174,6 +182,16 @@ pub struct Issue {
     /// Its review rounds, in the order they finished.
     #[serde(default)]
     pub reviews: Vec<Review>,
+}
+
+/// A pull request a person closed without merging: the merge found it so.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ClosedPull {
+    /// Its number.
+    pub number: String,
+    /// Its branch, when the code host had reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// One finished review round of an issue.
