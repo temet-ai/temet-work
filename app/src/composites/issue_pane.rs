@@ -1,6 +1,6 @@
 //! IssuePane (`temet-issuepane`): the right column: the selected issue's title, key and stage,
-//! its facts, then its plan, pull request, review rounds and decisions as tabs. A tab shows only
-//! when its data is given.
+//! with its actions menu behind a button at the right; its facts; then its plan, pull request,
+//! review rounds and decisions as tabs. A tab shows only when its data is given.
 
 use std::rc::Rc;
 
@@ -8,10 +8,14 @@ use gpui::{App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Wi
 
 use super::check_list::{CheckList, PlanCheck};
 use super::decision_row::{Decision, DecisionRow};
+use super::issue_actions::IssueActions;
 use super::review_rounds::{ReviewRound, ReviewRounds};
+use crate::components::button::{Button, Size, Variant};
 use crate::components::cut_panel::CutPanel;
 use crate::components::heading::{Heading, HeadingSize};
+use crate::components::icon::IconName;
 use crate::components::list_row::ListRow;
+use crate::components::popover::{Placement, Popover};
 use crate::components::property_list::{PropertyItem, PropertyList};
 use crate::components::stage_tag::{Stage, StageTag};
 use crate::components::status_tag::{Status, StatusTag};
@@ -98,6 +102,7 @@ pub struct IssuePane {
     tab: Option<IssueTab>,
     on_tab_change: Option<OnTabChange>,
     on_overturn: Option<OnOverturn>,
+    actions: Option<IssueActions>,
 }
 
 impl IssuePane {
@@ -119,7 +124,14 @@ impl IssuePane {
             tab: None,
             on_tab_change: None,
             on_overturn: None,
+            actions: None,
         }
+    }
+
+    /// The issue's actions menu, behind a button at the top right.
+    pub fn actions(mut self, actions: IssueActions) -> Self {
+        self.actions = Some(actions);
+        self
     }
 
     /// The review round, shown with the stage as the daemon writes it ("fixing, round 1").
@@ -200,16 +212,39 @@ impl RenderOnce for IssuePane {
             self.rounds.is_some(),
             self.decisions.is_some(),
         );
+        // `tm-issue-head`: the title and its key line at the left, the buttons at the right.
+        let buttons = self.actions.map(|actions| {
+            let popover = Popover::new(SharedString::from(format!("actions-{}", self.issue_key)))
+                .placement(Placement::BottomEnd)
+                .content(actions)
+                .child(
+                    Button::new("issue-actions")
+                        .size(Size::Small)
+                        .variant(Variant::Minimal)
+                        .icon(IconName::More),
+                );
+            div().flex().flex_none().gap(space::s1(cx)).child(popover)
+        });
         let head = div()
-            .child(Heading::new(self.title).size(HeadingSize::Pane))
+            .flex()
+            .justify_between()
+            .items_start()
+            .gap(space::s4(cx))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(space::s4(cx))
-                    .child(classed(Class::Mono, cx).child(self.issue_key.clone()))
-                    .child(StageTag::new(self.stage).round(self.round)),
-            );
+                    .flex_1()
+                    .min_w_0()
+                    .child(Heading::new(self.title).size(HeadingSize::Pane))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(space::s4(cx))
+                            .child(classed(Class::Mono, cx).child(self.issue_key.clone()))
+                            .child(StageTag::new(self.stage).round(self.round)),
+                    ),
+            )
+            .children(buttons);
         let facts = self.facts.map(|facts| {
             let items = facts
                 .into_iter()

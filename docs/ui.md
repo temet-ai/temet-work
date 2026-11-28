@@ -123,7 +123,9 @@ GroupList `tm-groups-head`; a class with no measured look follows its rule in `t
 
 Where the radar page and a part's own stories draw a part differently, the window follows the
 radar page, because the page is the screen the window reproduces. Its Alert asks with the primary
-intent and no icon, and its Toast has the Notifications icon and no intent. The page closes the
+intent and no icon, and its Toast has the Notifications icon and no intent. A person's request the
+daemon refuses, or that gets no reply, shows in a Toast with the danger intent and the WarningSign
+icon, naming the action and the agent. The page closes the
 toast after 5000 ms; no motion token holds that duration yet, so the window's toast stays until it
 is closed.
 
@@ -149,9 +151,9 @@ is closed.
 | Checkbox | `blueprint-checkbox` | | `checkbox` |
 | SegmentedControl | `blueprint-segmentedcontrol` | `intent` primary; `size` small | `button` (ToggleGroup) |
 | Tabs, Tab | `blueprint-tabs` | `renderActiveTabPanelOnly` | `tab` |
-| Menu, MenuItem, MenuDivider | `blueprint-menu` | | `menu` |
+| Menu, MenuItem, MenuDivider | `blueprint-menu` | MenuItem `icon`, `label`, children as a submenu (story: With Submenu), opened by a click; the item with its submenu open is drawn active | |
 | Navbar, NavbarGroup, NavbarHeading, NavbarDivider | `blueprint-navbar` | NavbarGroup `align` right | `title_bar` |
-| Popover | `blueprint-popover` | | `popover` |
+| Popover | `blueprint-popover` | `placement` bottom-start, bottom-end; `isOpen` (story: Opened); no arrow | `popover` (gpui-base) |
 | ContextMenu | `blueprint-contextmenu` | | `menu` |
 | Alert | `blueprint-alert` | `intent` primary; `cancelButtonText`, `confirmButtonText` | `dialog` |
 | Dialog | `blueprint-dialog` | | `dialog` |
@@ -184,7 +186,8 @@ is closed.
 | DecisionRow | one agent decision: who, when, what it took, the cost to undo, what it weighed and why, the deadline and Overturn | ListRow, Tag, PropertyList, AttentionText, AttentionButton | `temet-decisionrow` |
 | MilestonePanel | one milestone: name, done of total, due date, progress, and its issues | CutPanel, Section, ProgressBar, IssueTable | `temet-milestonepanel` |
 | IssueTable | issues as rows: key, title, stage, agent, updated; optional group rows; one set of column widths in every panel | HTMLTable, TableRow, StageTag | `temet-issuetable` |
-| IssuePane | the side pane for an issue: title, key, stage, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
+| IssuePane | the side pane for an issue: title, key, stage, its actions menu behind a button, and tabs for its plan, pull request, review rounds and decisions | Heading, StageTag, Popover, Button, IssueActions, Tabs, PropertyList, CheckList, ReviewRounds, DecisionRow, StatusTag | `temet-issuepane` |
+| IssueActions | what a person can do to an issue, as one menu; the window gives Assign and Unassign, each a submenu of agents with the issue each is on now. Stories: Default, In Pane, No Agents | Menu, MenuItem, Icon | `temet-issueactions` |
 | CheckList | a plan's checks: a line counting them by status, then for each what is done when, what proves it and its status, if it has run. A done-when over three lines and a proven-by over two show their first lines, and plus opens the row whole, minus closes it. Stories: Default, Failed And Timed, No Checks, Not Run Yet, Long Checks | ListRow, StatusTag, Button | `temet-checklist` |
 | ReviewRounds | the review rounds of a pull request: each round's reviewer and verdict, its points, the author's reply and each point's status | Disclosure, ListRow, StatusTag | `temet-reviewrounds` |
 | AgentPane | the side pane for an agent: its role, state, terminal and decisions | Heading, StatusTag, TerminalView, DecisionRow | gap |
@@ -193,7 +196,7 @@ is closed.
 
 | Page | What it shows | Built from | Design system |
 |---|---|---|---|
-| Project | one project: the nav bar, groups, machines and limits on the left (a list the view has no data for is left out); the project's milestones and issues in the middle; the selected issue or agent on the right (`docs/objects.md`) | AppShell, SideNav, GroupList, MeterList, PageHeader, NeedsYou, MilestonePanel, IssueTable, IssuePane, AgentPane, Callout, Alert, Toast | `pages-temet-work-radar` (RadarScreen) |
+| Project | one project: the nav bar, groups, machines and limits on the left (a list the view has no data for is left out); the project's milestones and issues in the middle; the selected issue or agent on the right, with the issue's actions menu (`docs/objects.md`) | AppShell, SideNav, GroupList, MeterList, PageHeader, NeedsYou, MilestonePanel, IssueTable, IssuePane, IssueActions, AgentPane, Callout, Alert, Toast | `pages-temet-work-radar` (RadarScreen) |
 | Area | one area: its projects' milestones as a list, its tracker and code-host groups in the page header (`docs/areas.md`) | AppShell, SideNav, PageHeader, MilestonePanel | gap |
 | Settings | the settings chain, global down to one task (`docs/settings.md`) | not defined yet | gap |
 | Rules | rules with where they came from, their state and what measures them (`docs/objects.md`) | not defined yet | gap |

@@ -25,6 +25,7 @@ use crate::components::status_tag::Status;
 use crate::composites::check_list::PlanCheck;
 use crate::composites::decision_row::{Decision as RowDecision, UndoCost};
 use crate::composites::group_list::{GroupListAgent, GroupListGroup};
+use crate::composites::issue_actions::IssueActionsAgent;
 use crate::composites::issue_pane::{IssueDecision, IssuePlan, IssuePullRequest};
 use crate::composites::issue_table::IssueSummary;
 use crate::composites::needs_you::NeedsYouDecision;
@@ -271,8 +272,48 @@ fn summary(view: &View, issue: &Issue, now_ms: u64) -> IssueSummary {
     }
 }
 
-/// An issue's pane: what the view holds about its plan, pull request, reviews and decisions. A
-/// tab whose data is empty is `None`, so the pane does not show it.
+/// An agent as IssueActions lists it: its id, and the issue it is on now, or "free" when it is
+/// on none. An agent the view does not list has its id alone.
+fn actions_agent(view: &View, id: &str) -> IssueActionsAgent {
+    let on = view
+        .agents
+        .iter()
+        .find(|a| a.id.0 == id)
+        .map(|a| match &a.issue {
+            Some(issue) => s(issue.clone()),
+            None => s("free"),
+        });
+    IssueActionsAgent {
+        id: s(id),
+        label: s(id),
+        detail: on,
+    }
+}
+
+/// The agents a person may assign to `issue` now, as the daemon's rule gives them.
+pub fn assignable(view: &View, issue: &Issue) -> Vec<IssueActionsAgent> {
+    issue
+        .assignable
+        .iter()
+        .map(|id| actions_agent(view, &id.0))
+        .collect()
+}
+
+/// The agents on `issue` now, which a person may unassign: those whose issue it is, that have
+/// not ended and that no person has taken off it already. An investigator answers questions for
+/// the others and is on no issue's work, so it is not listed.
+pub fn assigned(view: &View, issue: &Issue) -> Vec<IssueActionsAgent> {
+    view.agents
+        .iter()
+        .filter(|a| a.issue.as_deref() == Some(issue.id.as_str()))
+        .filter(|a| a.state != StateWord::Ended && !a.unassigned && a.role != "investigator")
+        .map(|a| actions_agent(view, &a.id.0))
+        .collect()
+}
+
+/// An issue's pane: what the view holds about its plan, pull request, reviews and decisions, and
+/// the agents its actions menu lists. A tab whose data is empty is `None`, so the pane does not
+/// show it.
 fn detail(view: &View, issue: &Issue) -> IssueDetail {
     let folder = current_agent(view, issue).and_then(|a| {
         a.folder
@@ -349,6 +390,9 @@ fn detail(view: &View, issue: &Issue) -> IssueDetail {
         })
         .collect();
     IssueDetail {
+        id: s(issue.id.clone()),
+        assignable: assignable(view, issue),
+        assigned: assigned(view, issue),
         round: usize::from(issue.round),
         plan,
         pull,
@@ -555,8 +599,10 @@ pub fn show(
     }
 }
 
-/// [`show`] for the daemon entity's current state, at the clock's time.
+/// [`show`] for the daemon entity's current state, at the clock's time. A person's request from
+/// the page goes to the socket the view is read from.
 pub fn sync(page: &mut Project, daemon: &Daemon) {
+    page.set_socket(Some(daemon.path().to_path_buf()));
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));

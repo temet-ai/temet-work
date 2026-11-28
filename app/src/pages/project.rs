@@ -1,10 +1,14 @@
 //! Project (`pages-temet-work-radar`): one project: the areas, projects, agent groups, machines
 //! and limits on the left; what needs the person and the project's issues in the middle; the
-//! selected issue on the right.
+//! selected issue on the right, with its actions menu. Assign and Unassign in that menu send the
+//! command to the daemon as a person's request, and a refusal shows in a danger toast.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use gpui::{App, Context, IntoElement, ParentElement, Render, SharedString, Window};
+use temet_work_core::Command;
+use temet_work_core::ids::{AgentId, IssueId};
 
 use crate::components::Intent;
 use crate::components::alert::Alert;
@@ -14,6 +18,7 @@ use crate::components::icon::IconName;
 use crate::components::segmented_control::{SegmentedControl, SegmentedControlOption};
 use crate::components::toast::{OverlayToaster, Toast};
 use crate::composites::group_list::{GroupList, GroupListGroup};
+use crate::composites::issue_actions::{IssueActions, IssueActionsAgent};
 use crate::composites::issue_pane::{
     IssueDecision, IssuePane, IssuePlan, IssuePullRequest, IssueTab,
 };
@@ -24,6 +29,7 @@ use crate::composites::needs_you::{NeedsYou, NeedsYouDecision};
 use crate::composites::page_header::{PageFact, PageHeader};
 use crate::composites::review_rounds::ReviewRound;
 use crate::composites::side_nav::{SideNav, SideNavArea};
+use crate::daemon::{self, Problem};
 
 /// What the Project page shows, in the shape of its parts' props.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -73,9 +79,16 @@ pub struct Milestone {
     pub issues: Vec<IssueSummary>,
 }
 
-/// What an issue has beyond its row: its review round, and the parts of its pane it has so far.
+/// What an issue has beyond its row: its id, its review round, the agents a person may assign
+/// to it or take off it, and the parts of its pane it has so far.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct IssueDetail {
+    /// The issue's id as the daemon names it, `project#key`, which a command names it by.
+    pub id: SharedString,
+    /// The agents a person may assign to it now, each with the issue it is on now.
+    pub assignable: Vec<IssueActionsAgent>,
+    /// The agents on it now, which a person may unassign.
+    pub assigned: Vec<IssueActionsAgent>,
     /// The review round it is in; 0 before its first review.
     pub round: usize,
     pub plan: Option<IssuePlan>,
@@ -225,6 +238,59 @@ impl Ask {
 /// The note that replaces an overturned decision's action.
 pub const OVERTURNED: &str = "Overturned just now";
 
+/// What a person asks the daemon to do to an issue from its actions menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verb {
+    Assign,
+    Unassign,
+}
+
+/// A person's request from the actions menu: the verb, the issue's id and the agent's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersonAction {
+    pub verb: Verb,
+    /// The issue's id, `project#key`.
+    pub issue: SharedString,
+    pub agent: SharedString,
+}
+
+impl PersonAction {
+    /// The command it sends; none when the issue's id is not of the form `project#key`.
+    pub fn command(&self) -> Option<Command> {
+        let issue = IssueId::parse(&self.issue)?;
+        let agent = AgentId::new(self.agent.to_string());
+        Some(match self.verb {
+            Verb::Assign => Command::Assign { issue, agent },
+            Verb::Unassign => Command::Unassign { issue, agent },
+        })
+    }
+
+    /// What it asked, naming the action and the agent: "Assign reviewer-4 to watch#12".
+    pub fn asked(&self) -> String {
+        match self.verb {
+            Verb::Assign => format!("Assign {} to {}", self.agent, self.issue),
+            Verb::Unassign => format!("Unassign {} from {}", self.agent, self.issue),
+        }
+    }
+
+    /// The toast when it fails, with the daemon's reply word for word, or what went wrong on the
+    /// way: "Assign reviewer-4 to watch#12: reviewer-4 is not a reviewer".
+    pub fn failed(&self, problem: &Problem) -> String {
+        let why = match problem {
+            Problem::Refused { why } => why.clone(),
+            other => other.to_string(),
+        };
+        format!("{}: {why}", self.asked())
+    }
+}
+
+/// The toast on show: its message and its intent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shown {
+    pub message: SharedString,
+    pub intent: Intent,
+}
+
 /// The Project page: a window's view, holding what it shows and what the person has chosen.
 pub struct Project {
     view: ProjectView,
@@ -244,7 +310,9 @@ pub struct Project {
     /// The decisions in issues' panes that are overturned, by issue key and id.
     overturned_decisions: HashSet<(SharedString, SharedString)>,
     /// The toast on show.
-    toast: Option<SharedString>,
+    toast: Option<Shown>,
+    /// The daemon's socket, which a person's request goes to; none for the sample data.
+    socket: Option<PathBuf>,
 }
 
 impl Project {
@@ -261,7 +329,56 @@ impl Project {
             overturned_needs: HashSet::new(),
             overturned_decisions: HashSet::new(),
             toast: None,
+            socket: None,
         }
+    }
+
+    /// Sets the daemon's socket, which the view is read from and a person's request goes to.
+    pub fn set_socket(&mut self, socket: Option<PathBuf>) {
+        self.socket = socket;
+    }
+
+    /// Sends `action` to the daemon off the window's thread. A done reply needs no word: the next
+    /// view shows the change. A refusal, or a request that never got a reply, shows in a danger
+    /// toast with the daemon's reply.
+    pub fn send(&mut self, action: PersonAction, cx: &mut Context<Self>) {
+        let (Some(path), Some(command)) = (self.socket.clone(), action.command()) else {
+            let why = if self.socket.is_none() {
+                "the window shows sample data and has no daemon to send to".to_string()
+            } else {
+                format!(
+                    "{} is not an issue id of the form project#key",
+                    action.issue
+                )
+            };
+            self.fail(format!("{}: {why}", action.asked()));
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |page, cx| {
+            let executor = cx.background_executor().clone();
+            let reply = daemon::send(path, command, &executor).await;
+            page.update(cx, |page, cx| {
+                page.took(&action, reply);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Takes the daemon's reply to `action`.
+    pub fn took(&mut self, action: &PersonAction, reply: Result<String, Problem>) {
+        if let Err(problem) = reply {
+            self.fail(action.failed(&problem));
+        }
+    }
+
+    fn fail(&mut self, message: String) {
+        self.toast = Some(Shown {
+            message: message.into(),
+            intent: Intent::Danger,
+        });
     }
 
     /// A page with no view yet: it draws `notice` alone until [`Project::set_view`] gives it one.
@@ -369,7 +486,10 @@ impl Project {
         if let Some(decision) = &ask.decision {
             self.overturned_decisions.insert(decision.clone());
         }
-        self.toast = Some(ask.done().into());
+        self.toast = Some(Shown {
+            message: ask.done().into(),
+            intent: Intent::None,
+        });
     }
 
     pub fn cancel(&mut self) {
@@ -380,9 +500,14 @@ impl Project {
         self.toast = None;
     }
 
-    /// The toast on show.
+    /// The message of the toast on show.
     pub fn toast(&self) -> Option<&SharedString> {
-        self.toast.as_ref()
+        self.toast.as_ref().map(|t| &t.message)
+    }
+
+    /// The intent of the toast on show.
+    pub fn toast_intent(&self) -> Option<Intent> {
+        self.toast.as_ref().map(|t| t.intent)
     }
 
     /// The decisions in Needs you that are not overturned, in order.
@@ -620,7 +745,24 @@ impl Render for Project {
         });
         if let Some((milestone, issue)) = found {
             let detail = view.details.get(&issue.key).cloned().unwrap_or_default();
-            let pane = IssuePane::new(issue.key.clone(), issue.title.clone(), issue.stage)
+            let person = |verb: Verb| {
+                let page = page.clone();
+                let issue = detail.id.clone();
+                move |agent: &SharedString, _: &mut Window, cx: &mut App| {
+                    let action = PersonAction {
+                        verb,
+                        issue: issue.clone(),
+                        agent: agent.clone(),
+                    };
+                    page.update(cx, |p, cx| p.send(action, cx)).ok();
+                }
+            };
+            let actions = IssueActions::new()
+                .assignable(detail.assignable.clone())
+                .on_assign(person(Verb::Assign))
+                .assigned(detail.assigned.clone())
+                .on_unassign(person(Verb::Unassign));
+            let mut pane = IssuePane::new(issue.key.clone(), issue.title.clone(), issue.stage)
                 .round(Some(detail.round))
                 .facts(issue_facts(milestone, issue, Some(&detail)))
                 .plan(detail.plan)
@@ -640,6 +782,10 @@ impl Render for Project {
                         .ok();
                     }
                 });
+            // The actions button shows only when its menu lists something.
+            if actions.has_items() {
+                pane = pane.actions(actions);
+            }
             shell = shell.side(pane);
         }
 
@@ -653,10 +799,16 @@ impl Render for Project {
             .on_confirm(update(Project::confirm))
             .children(self.asking.as_ref().map(|ask| ask.question()));
         let mut toaster = OverlayToaster::new();
-        if let Some(message) = &self.toast {
+        if let Some(shown) = &self.toast {
+            // The overturn toast as the radar page draws it; a failed request in danger.
+            let icon = match shown.intent {
+                Intent::Danger => IconName::WarningSign,
+                _ => IconName::Notifications,
+            };
             toaster = toaster.child(
-                Toast::new(message.clone())
-                    .icon(IconName::Notifications)
+                Toast::new(shown.message.clone())
+                    .icon(icon)
+                    .intent(shown.intent)
                     .on_dismiss(update(Project::dismiss_toast)),
             );
         }

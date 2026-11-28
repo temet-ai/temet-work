@@ -10,23 +10,30 @@
 //! The `part-` shots draw one part as one of the design system's stories draws it, named after
 //! the story's id, such as `part-temet-stagetag--all-stages-dark`: the part on the page ground,
 //! inset as Storybook insets a story, 1440 px wide.
+//!
+//! The `menu-open-` shots draw the issue pane's actions button with IssueActions open under it,
+//! as the pane draws them, and a click on Assign that opens its submenu.
 
 use std::io::Write;
 use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AppContext, Context, Font, FontWeight, HeadlessAppContext, IntoElement,
-    ParentElement, Render, Styled, Window, div, font, px, size,
+    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    PlatformInput, Render, Styled, Window, div, font, point, px, size,
 };
 use gpui_component::Root;
 use temet_work_app::assets::{self, Assets};
 use temet_work_app::components::Intent;
+use temet_work_app::components::button::{Button, Size, Variant};
 use temet_work_app::components::cut_panel::CutPanel;
 use temet_work_app::components::icon::IconName;
+use temet_work_app::components::popover::{Placement, Popover};
 use temet_work_app::components::stage_tag::{Stage, StageTag};
 use temet_work_app::components::status_tag::{Status, StatusTag};
 use temet_work_app::components::tag::Tag;
 use temet_work_app::composites::check_list::{CheckList, PlanCheck};
+use temet_work_app::composites::issue_actions::{IssueActions, IssueActionsAgent};
 use temet_work_app::composites::issue_pane::IssueTab;
 use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{Grouping, Project};
@@ -295,8 +302,65 @@ fn main() -> gpui::Result<()> {
             capture(&mut cx, window.into(), dir, &name, &faces)?;
         }
     }
+    for theme_name in ["dark", "light"] {
+        let name = format!("menu-open-{theme_name}");
+        if !only.is_empty() && !only.contains(&name) {
+            continue;
+        }
+        let (mut cx, faces) = headless(theme_name)?;
+        let window = cx.open_window(size(px(1440.), px(300.)), |window, cx| {
+            let gallery = cx.new(|_| Gallery {
+                story: Story::IssueActionsOpen,
+            });
+            cx.new(|cx| Root::new(gallery, window, cx))
+        })?;
+        let window: gpui::AnyWindowHandle = window.into();
+        cx.simulate_window_scale_factor_change(window, 1.);
+        cx.run_until_parked();
+        cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx))?;
+        // Assign, the menu's first item: the button's right edge is at MENU_RIGHT, the menu
+        // opens under it, and its first item's middle is half an item below the menu's top.
+        let at = point(px(MENU_RIGHT - 24.), px(ASSIGN_MIDDLE));
+        cx.update_window(window, |_, window, cx| {
+            let modifiers = Modifiers::none();
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: at,
+                    pressed_button: None,
+                    modifiers,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers,
+                    click_count: 1,
+                }),
+                cx,
+            );
+        })?;
+        capture(&mut cx, window, dir, &name, &faces)?;
+    }
     Ok(())
 }
+
+/// Where the `menu-open-` shots put the actions button's right edge, and the middle of the
+/// menu's first item under it: the inset, the small button, the popover's offset, the menu's
+/// padding and half a 30 px item.
+const MENU_RIGHT: f32 = 16. + 400.;
+const ASSIGN_MIDDLE: f32 = 16. + 24. + 4. + 4. + 15.;
 
 /// A headless app with the faces registered and `theme_name` in force; also says which faces
 /// it found.
@@ -368,6 +432,8 @@ enum Story {
     CutPanelHere,
     CutPanelHereWithAttention,
     CutPanelMachinesWithOneHere,
+    IssueActionsInPane,
+    IssueActionsOpen,
 }
 
 /// Each part shot: the story's id, the story, and the frame's height, the same as the story
@@ -406,7 +472,29 @@ const PARTS: &[(&str, Story, f32)] = &[
         Story::CutPanelMachinesWithOneHere,
         220.,
     ),
+    (
+        "temet-issueactions--in-pane",
+        Story::IssueActionsInPane,
+        200.,
+    ),
 ];
+
+/// The IssueActions stories' agents: two to assign, one on the issue.
+fn issue_actions() -> IssueActions {
+    let agent = |id: &str, detail: &str| IssueActionsAgent {
+        id: id.to_string().into(),
+        label: id.to_string().into(),
+        detail: Some(detail.to_string().into()),
+    };
+    IssueActions::new()
+        .assignable(vec![
+            agent("author-69", "clacks#215"),
+            agent("refiner-82", "free"),
+        ])
+        .on_assign(|_, _, _| {})
+        .assigned(vec![agent("author-71", "clacks#219")])
+        .on_unassign(|_, _, _| {})
+}
 
 /// A check as the CheckList stories write one.
 fn check(done_when: &str, proven_by: &str, status: Option<Status>) -> PlanCheck {
@@ -563,6 +651,28 @@ impl Render for Gallery {
             Story::CutPanelAttention => panel(true, false, cx).into_any_element(),
             Story::CutPanelHere => panel(false, true, cx).into_any_element(),
             Story::CutPanelHereWithAttention => panel(true, true, cx).into_any_element(),
+            // The story's decorator frames the menu 220 px wide.
+            Story::IssueActionsInPane => {
+                div().w(px(220.)).child(issue_actions()).into_any_element()
+            }
+            // The pane's actions button, at the right of a 400 px head, with its menu held open.
+            Story::IssueActionsOpen => div()
+                .w(px(MENU_RIGHT - 16.))
+                .flex()
+                .justify_end()
+                .child(
+                    Popover::new("actions")
+                        .placement(Placement::BottomEnd)
+                        .is_open(true)
+                        .content(issue_actions())
+                        .child(
+                            Button::new("issue-actions")
+                                .size(Size::Small)
+                                .variant(Variant::Minimal)
+                                .icon(IconName::More),
+                        ),
+                )
+                .into_any_element(),
             Story::CutPanelMachinesWithOneHere => div()
                 .flex()
                 .flex_col()

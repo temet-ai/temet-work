@@ -8,6 +8,7 @@ use temet_work_app::components::Intent;
 use temet_work_app::components::stage_tag::Stage;
 use temet_work_app::components::status_tag::Status;
 use temet_work_app::composites::decision_row::UndoCost;
+use temet_work_app::composites::issue_actions::IssueActionsAgent;
 use temet_work_app::daemon::Problem;
 use temet_work_app::pages::project::{Grouping, Project, ProjectView};
 use temet_work_app::view_map::{self, ago, due, notice, project_view, show};
@@ -559,4 +560,100 @@ fn a_view_with_no_projects_says_so() {
     let mut page = Project::blank(None);
     show(&mut page, Some(&view), None, path, NOW);
     assert!(page.is_blank());
+}
+
+/// The current fixture with what a daemon that assigns sends: watch#4 in review with two
+/// reviewers a person may assign to it, one on watch#5 and one free; on watch#4 its own reviewer,
+/// which a person assigned, an investigator, a reviewer a person has unassigned that is still
+/// being stopped, and an author that has ended.
+fn with_assignments() -> View {
+    let mut view: serde_json::Value = serde_json::from_str(CURRENT).expect("json");
+    let agents = view["agents"].as_array_mut().expect("agents");
+    let reviewer = agents
+        .iter()
+        .find(|a| a["id"] == "reviewer-3")
+        .expect("reviewer-3")
+        .clone();
+    let agent = |id: &str, role: &str, issue: Option<&str>, started: u64| {
+        let mut a = reviewer.clone();
+        a["id"] = id.into();
+        a["role"] = role.into();
+        a["issue"] = issue.into();
+        a["state"] = "working".into();
+        a["started"] = started.into();
+        a
+    };
+    for a in agents.iter_mut().filter(|a| a["id"] == "reviewer-3") {
+        a["assigned"] = true.into();
+    }
+    agents.push(agent("reviewer-6", "reviewer", Some("watch#5"), 6));
+    agents.push(agent("reviewer-7", "reviewer", None, 7));
+    agents.push(agent("investigator-8", "investigator", Some("watch#4"), 8));
+    let mut gone = agent("reviewer-9", "reviewer", Some("watch#4"), 9);
+    gone["unassigned"] = true.into();
+    agents.push(gone);
+    let mut ended = agent("author-10", "author", Some("watch#4"), 10);
+    ended["state"] = "ended".into();
+    agents.push(ended);
+    for issue in view["issues"].as_array_mut().expect("issues") {
+        if issue["id"] == "watch#4" {
+            issue["assignable"] = serde_json::json!(["reviewer-6", "reviewer-7"]);
+        }
+    }
+    serde_json::from_value(view).expect("a view")
+}
+
+/// An issue's Assign or Unassign list as (agent, detail) pairs.
+fn listed(agents: &[IssueActionsAgent]) -> Vec<(String, String)> {
+    agents
+        .iter()
+        .map(|a| {
+            assert_eq!(a.label, a.id, "the list names an agent by its id");
+            (
+                a.id.to_string(),
+                a.detail
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn assign_lists_the_assignable_agents_with_the_issue_each_is_on() {
+    let page = watch(&with_assignments());
+    let detail = &page.details["4"];
+    assert_eq!(detail.id.as_ref(), "watch#4");
+    assert_eq!(
+        listed(&detail.assignable),
+        [
+            ("reviewer-6".to_string(), "watch#5".to_string()),
+            ("reviewer-7".to_string(), "free".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn unassign_lists_the_agents_on_the_issue_but_not_one_taken_off_ended_or_an_investigator() {
+    let page = watch(&with_assignments());
+    assert_eq!(
+        listed(&page.details["4"].assigned),
+        [("reviewer-3".to_string(), "watch#4".to_string())]
+    );
+    // watch#1 is new: nobody is on it.
+    assert!(page.details["1"].assigned.is_empty());
+}
+
+#[test]
+fn a_view_without_assignments_lists_no_agent_to_assign() {
+    for text in [CURRENT, BEFORE_COSTS, BEFORE_STATES] {
+        let page = watch(&parse(text));
+        assert!(page.details.values().all(|d| d.assignable.is_empty()));
+    }
+    let page = watch(&parse(CURRENT));
+    assert_eq!(
+        listed(&page.details["3"].assigned),
+        [("author-2".to_string(), "watch#3".to_string())]
+    );
 }

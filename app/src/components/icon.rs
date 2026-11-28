@@ -47,11 +47,17 @@ pub enum IconName {
     Desktop,
     Box,
     Search,
+    // IssuePane's actions button and IssueActions' Assign and Unassign.
+    More,
+    Person,
+    Cross,
+    // A MenuItem that opens a submenu, from Blueprint's newer icon set.
+    CaretRight,
 }
 
 impl IconName {
     /// Every icon the app embeds.
-    pub const ALL: [IconName; 32] = [
+    pub const ALL: [IconName; 36] = [
         Self::TickCircle,
         Self::Refresh,
         Self::Time,
@@ -84,6 +90,10 @@ impl IconName {
         Self::Desktop,
         Self::Box,
         Self::Search,
+        Self::More,
+        Self::Person,
+        Self::Cross,
+        Self::CaretRight,
     ];
 
     /// Blueprint's name for the icon, such as `tick-circle`.
@@ -121,6 +131,10 @@ impl IconName {
             Self::Desktop => "desktop",
             Self::Box => "box",
             Self::Search => "search",
+            Self::More => "more",
+            Self::Person => "person",
+            Self::Cross => "cross",
+            Self::CaretRight => "caret-right",
         }
     }
 
